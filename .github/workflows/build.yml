@@ -1,0 +1,97 @@
+name: build
+
+# Purpose-built CI for this fork: build mss32.dll (the mod) and its bundled
+# dependency libs. mss32 is a 32-bit MSVC DLL (naked __asm exports, Microsoft
+# Detours, links static SLikeNet + ScenarioGenerator) — it can ONLY be built
+# with MSVC on Windows. So the cheap pre-checks run on Ubuntu and the single
+# expensive Windows job does the native build.
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Cheap Ubuntu gate: confirm the checkout + submodules are intact before we
+  # spin up a (costly) Windows runner. Fails fast and free if anything is wrong.
+  prepare:
+    name: Pre-checks (submodules)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (recursive submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Verify required submodules are populated
+        run: |
+          set -e
+          missing=0
+          for d in D2RSG SLikeNet Detours fmt lua sol2 spdlog GSL; do
+            if [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ]; then
+              echo "ok   : $d"
+            else
+              echo "MISS : $d"
+              missing=1
+            fi
+          done
+          exit $missing
+
+  # Native build — Windows is mandatory here (MSVC x86 toolchain).
+  build-mss32:
+    name: Build mss32.dll (Windows / MSVC x86)
+    needs: prepare
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: cmd
+    steps:
+      - name: Checkout (recursive submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up MSVC x86 developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Build Microsoft Detours (x86 static lib)
+        run: |
+          pushd Detours\src
+          nmake
+          popd
+          if not exist Detours\lib.X86\detours.lib (echo ERROR: detours.lib not produced & exit /b 1)
+          if not exist mss32\Lib mkdir mss32\Lib
+          copy /Y Detours\lib.X86\detours.* mss32\Lib\
+
+      - name: Build solution (Debug ^| x86, v143)
+        run: |
+          set "DISCIPLES2_PATH=%GITHUB_WORKSPACE%\out\"
+          if not exist "%DISCIPLES2_PATH%" mkdir "%DISCIPLES2_PATH%"
+          msbuild mss32\mss32.sln /t:Build /p:Configuration=Debug /p:Platform=x86 /p:PlatformToolset=v143 /m /nologo /clp:Summary /verbosity:minimal > build.log 2>&1
+          set RC=%ERRORLEVEL%
+          type build.log
+          exit /b %RC%
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mss32-build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Upload mss32.dll
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mss32-debug-x86
+          path: |
+            out/mss32.dll
+            out/mss32.pdb
+          if-no-files-found: warn
