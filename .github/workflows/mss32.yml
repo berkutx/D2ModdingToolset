@@ -77,7 +77,12 @@ jobs:
           rem dependency projects (LibStatic / ScenarioGenerator) are NOT rebuilt —
           rem their libs come from the deps artifact. SolutionDir makes
           rem $(SolutionDir)Lib resolve to the fetched mss32\Lib.
-          set "_CL_=/WX-"
+          rem /WX-            : the runner's newer MSVC flags warnings the pinned toolset
+          rem                   doesn't; don't treat them as errors.
+          rem _SILENCE_...    : fmt v7 uses stdext::checked_array_iterator, deprecated
+          rem                   (STL4043 -> C4996) on the runner's MSVC and elevated to an
+          rem                   error by the project's /sdl, which /WX- can't undo.
+          set "_CL_=/WX- /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS"
           set "DISCIPLES2_PATH=%GITHUB_WORKSPACE%\out\"
           if not exist "%DISCIPLES2_PATH%" mkdir "%DISCIPLES2_PATH%"
           msbuild mss32\mss32.vcxproj /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 /p:SolutionDir=%GITHUB_WORKSPACE%\mss32\ /m /nologo /clp:Summary /verbosity:minimal > build.log 2>&1
