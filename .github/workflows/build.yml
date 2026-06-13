@@ -73,10 +73,13 @@ jobs:
         run: |
           set "DISCIPLES2_PATH=%GITHUB_WORKSPACE%\out\"
           if not exist "%DISCIPLES2_PATH%" mkdir "%DISCIPLES2_PATH%"
-          rem TreatWarningAsError=false: the runner's MSVC is newer than the pinned
-          rem toolset and flags new warnings; SLikeNet/ScenarioGenerator build with /WX.
+          rem The runner's MSVC is newer than the pinned toolset and flags new
+          rem warnings; SLikeNet/ScenarioGenerator force /WX via raw compiler options,
+          rem which /p:TreatWarningAsError doesn't override. cl appends _CL_ AFTER the
+          rem project options, so /WX- here wins and disables warnings-as-errors.
           rem Hard errors (C2039/C3668 etc.) still fail the build.
-          msbuild mss32\mss32.sln /t:Build /p:Configuration=Debug /p:Platform=x86 /p:PlatformToolset=v143 /p:TreatWarningAsError=false /m /nologo /clp:Summary /verbosity:minimal > build.log 2>&1
+          set "_CL_=/WX-"
+          msbuild mss32\mss32.sln /t:Build /p:Configuration=Debug /p:Platform=x86 /p:PlatformToolset=v143 /m /nologo /clp:Summary /verbosity:minimal > build.log 2>&1
           set RC=%ERRORLEVEL%
           type build.log
           exit /b %RC%
