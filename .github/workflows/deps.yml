@@ -11,11 +11,7 @@ name: deps
 # so manual dispatch is the primary trigger.
 
 on:
-  workflow_dispatch:
-  push:
-    paths:
-      - ".gitmodules"
-      - ".github/workflows/deps.yml"
+  workflow_dispatch: # manual only — deps rarely change; rebuild on demand
 
 permissions:
   contents: read
