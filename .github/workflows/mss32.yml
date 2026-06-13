@@ -156,3 +156,5 @@ jobs:
           # The .pdb dominates this artifact and barely compresses; level 0
           # stores it as-is so no runner CPU is spent zipping it.
           compression-level: 0
+
+# warm-cache run (no-op): measure PCH+sccache hit rate
