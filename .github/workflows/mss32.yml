@@ -17,6 +17,18 @@ permissions:
   contents: read
   actions: read # to download the deps-libs artifact from the deps workflow
 
+# A new push to the same branch supersedes the previous one: cancel the
+# in-flight run instead of burning a second Windows runner on stale code.
+concurrency:
+  group: mss32-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # ilammy/msvc-dev-cmd is still a Node 20 action; the checkout/upload actions
+  # below are already Node 24. Forcing Node 24 for all JS actions clears the
+  # "Node.js 20 actions are deprecated" warning without waiting on upstream.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   # Cheap Ubuntu gate: verify the checkout + submodules before the Windows runner.
   prepare:
@@ -25,7 +37,7 @@ jobs:
     runs-on: ubuntu-slim
     steps:
       - name: Checkout (superproject only — no submodule content)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: false
           fetch-depth: 1
@@ -44,7 +56,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout (recursive submodules)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 1
@@ -85,31 +97,39 @@ jobs:
           rem                   error by the project's /sdl, which /WX- can't undo.
           rem /MP via MultiProcessorCompilation: the project has ~400 TUs + fmt/lua/
           rem SLikeNet-Lobby2 compiled serially by default; /MP parallelizes across the
-          rem runner's cores (the single biggest build-time win). /FS lets parallel cl
-          rem share one PDB.
-          set "_CL_=/WX- /FS /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS"
+          rem runner's cores (the single biggest build-time win).
+          rem DebugInformationFormat=OldStyle (/Z7): embed debug info in each .obj
+          rem instead of /Zi's shared mss32.pdb. /Zi forces every parallel cl to
+          rem serialize through a single mspdbsrv.exe, which throttles /MP; /Z7 has
+          rem no such bottleneck. The linker still emits mss32.pdb from the objs, so
+          rem the published symbols are unchanged. (/FS is only needed for /Zi, dropped.)
+          set "_CL_=/WX- /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS"
           set "DISCIPLES2_PATH=%GITHUB_WORKSPACE%\out\"
           if not exist "%DISCIPLES2_PATH%" mkdir "%DISCIPLES2_PATH%"
           echo runner cores: %NUMBER_OF_PROCESSORS%
-          msbuild mss32\mss32.vcxproj /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 /p:SolutionDir=%GITHUB_WORKSPACE%\mss32\ /p:MultiProcessorCompilation=true /p:MinimalRebuild=false /m /nologo /clp:Summary /verbosity:minimal > build.log 2>&1
+          msbuild mss32\mss32.vcxproj /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 /p:SolutionDir=%GITHUB_WORKSPACE%\mss32\ /p:MultiProcessorCompilation=true /p:MinimalRebuild=false /p:DebugInformationFormat=OldStyle /m /nologo /clp:Summary /verbosity:minimal > build.log 2>&1
           set RC=%ERRORLEVEL%
           type build.log
           exit /b %RC%
 
       - name: Upload build log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mss32-build-log
           path: build.log
           if-no-files-found: ignore
+          compression-level: 0 # tiny text file — skip the zip CPU
 
       - name: Upload mss32.dll
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mss32-debug-x86
           path: |
             out/mss32.dll
             out/mss32.pdb
           if-no-files-found: warn
+          # The .pdb dominates this artifact and barely compresses; level 0
+          # stores it as-is so no runner CPU is spent zipping it.
+          compression-level: 0

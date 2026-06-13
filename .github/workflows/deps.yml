@@ -16,6 +16,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Clears the "Node.js 20 actions are deprecated" warning for the third-party
+  # ilammy/msvc-dev-cmd (still Node 20); checkout/upload below are Node 24.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build-deps:
     name: Build dependency libs (Windows / MSVC x86)
@@ -25,7 +30,7 @@ jobs:
         shell: cmd
     steps:
       - name: Checkout (recursive submodules)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 1
@@ -54,7 +59,7 @@ jobs:
           dir mss32\Lib
 
       - name: Upload dependency libs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: deps-libs
           path: mss32/Lib/
