@@ -23,18 +23,11 @@ concurrency:
   group: mss32-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # ilammy/msvc-dev-cmd is still a Node 20 action; the checkout/upload actions
-  # below are already Node 24. Forcing Node 24 for all JS actions clears the
-  # "Node.js 20 actions are deprecated" warning without waiting on upstream.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 jobs:
   # Cheap Ubuntu gate: verify the checkout + submodules before the Windows runner.
   prepare:
     name: Pre-checks (submodules)
-    # 1-vCPU container runner (GA 2026-01-22) — ideal for this lightweight gate.
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-slim # 1-vCPU container runner — ideal for this light gate
     steps:
       - name: Checkout (superproject only — no submodule content)
         uses: actions/checkout@v5
@@ -42,10 +35,10 @@ jobs:
           submodules: false
           fetch-depth: 1
       - name: Verify submodule wiring (no content download)
+        shell: bash # ubuntu-slim ships bash, not pwsh; this is just a POSIX check
         run: |
           set -e
           test -f .gitmodules
-          git submodule status
           n=$(git submodule status | wc -l)
           echo "submodules wired: $n"
           [ "$n" -ge 7 ] || { echo "::error::expected >=7 submodules, found $n"; exit 1; }
@@ -54,6 +47,9 @@ jobs:
     name: Build mss32.dll (Windows / MSVC x86)
     needs: prepare
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - name: Checkout (recursive submodules)
         uses: actions/checkout@v5
@@ -62,49 +58,48 @@ jobs:
           fetch-depth: 1
 
       - name: Fetch dependency libs from the latest 'deps' run
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -e
-          rid=$(gh run list --workflow deps.yml --status success --limit 1 \
-                  --json databaseId --jq '.[0].databaseId' || true)
-          if [ -z "$rid" ]; then
-            echo "::error::No successful 'deps' run found. Run the 'deps' workflow once to publish the deps-libs artifact, then re-run this."
+          $rid = (gh run list --workflow deps.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId').Trim()
+          if (-not $rid) {
+            Write-Error "No successful 'deps' run found. Run the 'deps' workflow once to publish the deps-libs artifact, then re-run this."
             exit 1
-          fi
-          echo "Using deps-libs from deps run $rid"
-          mkdir -p mss32/Lib
-          gh run download "$rid" -n deps-libs -D mss32/Lib
-          ls -la mss32/Lib
+          }
+          "Using deps-libs from deps run $rid"
+          New-Item -ItemType Directory -Force -Path mss32/Lib | Out-Null
+          gh run download $rid -n deps-libs -D mss32/Lib
+          Get-ChildItem mss32/Lib
 
-      - name: Set up MSVC x86 developer environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x86
-
-      - name: Build mss32 (PCH + /Z7, parallel per-file tasks)
-        shell: cmd
+      - name: Build mss32.dll (PCH + /Z7, parallel per-file tasks)
         run: |
-          rem Build only mss32 (its deps come from the deps artifact; see above).
-          rem
-          rem Speed comes from a precompiled header (mss32/include/pch.h, built once
-          rem and force-included into every C++ TU) plus:
-          rem  - /Z7 (DebugInformationFormat=OldStyle in the vcxproj): debug info is
-          rem    embedded per-.obj instead of /Zi's single shared mss32.pdb, so the
-          rem    parallel cl processes don't serialize through one mspdbsrv.exe.
-          rem  - UseMultiToolTask=true (with /MP off): MSBuild runs one cl task per
-          rem    file in parallel; each process loads the PCH once. /m parallelizes.
-          rem The linker still emits mss32.pdb. _CL_ adds /WX- and silences the
-          rem fmt v7 STL4043/C4996 the runner's newer MSVC would otherwise error on.
-          set "_CL_=/WX- /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS"
-          set "DISCIPLES2_PATH=%GITHUB_WORKSPACE%\out\"
-          if not exist "%DISCIPLES2_PATH%" mkdir "%DISCIPLES2_PATH%"
-          echo runner cores: %NUMBER_OF_PROCESSORS%
-          msbuild mss32\mss32.vcxproj /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 /p:SolutionDir=%GITHUB_WORKSPACE%\mss32\ /p:MultiProcessorCompilation=false /p:UseMultiToolTask=true /p:EnforceProcessCountAcrossBuilds=true /p:MinimalRebuild=false /m /nologo /clp:Summary /verbosity:minimal > build.log 2>&1
-          set RC=%ERRORLEVEL%
-          type build.log
-          exit /b %RC%
+          # Load the MSVC x86 dev environment natively — no third-party action.
+          # vswhere finds VS 2022; Enter-VsDevShell puts cl/msbuild for the x86
+          # target on PATH for this step. (Replaces ilammy/msvc-dev-cmd, which
+          # was the only Node 20 action and triggered the deprecation warning.)
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
+
+          # cl reads _CL_ and appends it to every invocation: /WX- keeps the
+          # newer MSVC's extra warnings non-fatal, and the _SILENCE define quiets
+          # fmt v7's deprecated stdext::checked_array_iterator (STL4043 -> C4996).
+          $env:_CL_ = '/WX- /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS'
+          $env:DISCIPLES2_PATH = "$env:GITHUB_WORKSPACE\out\"
+          New-Item -ItemType Directory -Force -Path $env:DISCIPLES2_PATH | Out-Null
+          "runner cores: $env:NUMBER_OF_PROCESSORS"
+
+          # Speed: a precompiled header (force-included into every C++ TU) plus
+          # /Z7 (per-.obj debug info, no shared vc143.pdb/mspdbsrv bottleneck) and
+          # UseMultiToolTask (one cl per file, in parallel). The PCH and /Z7 live
+          # in mss32.vcxproj; the deps libs come from the fetched mss32\Lib.
+          msbuild mss32\mss32.vcxproj `
+            /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 `
+            /p:SolutionDir=$env:GITHUB_WORKSPACE\mss32\ `
+            /p:MultiProcessorCompilation=false /p:UseMultiToolTask=true `
+            /p:EnforceProcessCountAcrossBuilds=true /p:MinimalRebuild=false `
+            /m /nologo /clp:Summary /verbosity:minimal 2>&1 | Tee-Object build.log
+          exit $LASTEXITCODE
 
       - name: Upload build log
         if: always()

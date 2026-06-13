@@ -16,18 +16,13 @@ on:
 permissions:
   contents: read
 
-env:
-  # Clears the "Node.js 20 actions are deprecated" warning for the third-party
-  # ilammy/msvc-dev-cmd (still Node 20); checkout/upload below are Node 24.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 jobs:
   build-deps:
     name: Build dependency libs (Windows / MSVC x86)
     runs-on: windows-latest
     defaults:
       run:
-        shell: cmd
+        shell: pwsh
     steps:
       - name: Checkout (recursive submodules)
         uses: actions/checkout@v5
@@ -35,28 +30,32 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Set up MSVC x86 developer environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x86
-
-      - name: Build Microsoft Detours (x86 static lib)
+      - name: Build dependency libs (Detours, SLikeNet, ScenarioGenerator)
         run: |
-          pushd Detours\src
+          # Load the MSVC x86 dev environment natively (no third-party action).
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
+
+          # Microsoft Detours (x86 static lib) via nmake, copied into mss32\Lib.
+          Push-Location Detours\src
           nmake
-          popd
-          if not exist Detours\lib.X86\detours.lib (echo ERROR: detours.lib not produced & exit /b 1)
-          if not exist mss32\Lib mkdir mss32\Lib
-          copy /Y Detours\lib.X86\detours.* mss32\Lib\
+          Pop-Location
+          if (-not (Test-Path Detours\lib.X86\detours.lib)) { Write-Error 'detours.lib not produced'; exit 1 }
+          New-Item -ItemType Directory -Force -Path mss32\Lib | Out-Null
+          Copy-Item Detours\lib.X86\detours.* mss32\Lib\ -Force
 
-      - name: Build SLikeNet + ScenarioGenerator (Debug + Release)
-        run: |
-          rem cl appends _CL_ AFTER project options, so /WX- disables the
-          rem warnings-as-errors the runner's newer MSVC would otherwise hit.
-          set "_CL_=/WX- /FS"
-          msbuild mss32\mss32.sln /t:LibStatic;ScenarioGenerator /p:Configuration=Debug /p:Platform=x86 /p:PlatformToolset=v143 /p:MultiProcessorCompilation=true /p:MinimalRebuild=false /m /nologo /verbosity:minimal || exit /b 1
-          msbuild mss32\mss32.sln /t:LibStatic;ScenarioGenerator /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v143 /p:MultiProcessorCompilation=true /p:MinimalRebuild=false /m /nologo /verbosity:minimal || exit /b 1
-          dir mss32\Lib
+          # SLikeNet LibStatic + ScenarioGenerator, Debug and Release.
+          # _CL_: /WX- keeps the newer MSVC's warnings non-fatal; /FS lets the
+          # parallel cl processes share one PDB (these still build with /Zi).
+          $env:_CL_ = '/WX- /FS'
+          foreach ($cfg in 'Debug', 'Release') {
+            msbuild mss32\mss32.sln '/t:LibStatic;ScenarioGenerator' `
+              /p:Configuration=$cfg /p:Platform=x86 /p:PlatformToolset=v143 `
+              /p:MultiProcessorCompilation=true /p:MinimalRebuild=false /m /nologo /verbosity:minimal
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          Get-ChildItem mss32\Lib
 
       - name: Upload dependency libs
         uses: actions/upload-artifact@v7
