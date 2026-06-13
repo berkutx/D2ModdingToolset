@@ -82,10 +82,14 @@ jobs:
           rem _SILENCE_...    : fmt v7 uses stdext::checked_array_iterator, deprecated
           rem                   (STL4043 -> C4996) on the runner's MSVC and elevated to an
           rem                   error by the project's /sdl, which /WX- can't undo.
-          set "_CL_=/WX- /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS"
+          rem /MP via MultiProcessorCompilation: the project has ~400 TUs + fmt/lua/
+          rem SLikeNet-Lobby2 compiled serially by default; /MP parallelizes across the
+          rem runner's cores (the single biggest build-time win). /FS lets parallel cl
+          rem share one PDB.
+          set "_CL_=/WX- /FS /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS"
           set "DISCIPLES2_PATH=%GITHUB_WORKSPACE%\out\"
           if not exist "%DISCIPLES2_PATH%" mkdir "%DISCIPLES2_PATH%"
-          msbuild mss32\mss32.vcxproj /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 /p:SolutionDir=%GITHUB_WORKSPACE%\mss32\ /m /nologo /clp:Summary /verbosity:minimal > build.log 2>&1
+          msbuild mss32\mss32.vcxproj /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 /p:SolutionDir=%GITHUB_WORKSPACE%\mss32\ /p:MultiProcessorCompilation=true /p:MinimalRebuild=false /m /nologo /clp:Summary /verbosity:minimal > build.log 2>&1
           set RC=%ERRORLEVEL%
           type build.log
           exit /b %RC%

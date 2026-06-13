@@ -48,9 +48,9 @@ jobs:
         run: |
           rem cl appends _CL_ AFTER project options, so /WX- disables the
           rem warnings-as-errors the runner's newer MSVC would otherwise hit.
-          set "_CL_=/WX-"
-          msbuild mss32\mss32.sln /t:LibStatic;ScenarioGenerator /p:Configuration=Debug /p:Platform=x86 /p:PlatformToolset=v143 /m /nologo /verbosity:minimal || exit /b 1
-          msbuild mss32\mss32.sln /t:LibStatic;ScenarioGenerator /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v143 /m /nologo /verbosity:minimal || exit /b 1
+          set "_CL_=/WX- /FS"
+          msbuild mss32\mss32.sln /t:LibStatic;ScenarioGenerator /p:Configuration=Debug /p:Platform=x86 /p:PlatformToolset=v143 /p:MultiProcessorCompilation=true /p:MinimalRebuild=false /m /nologo /verbosity:minimal || exit /b 1
+          msbuild mss32\mss32.sln /t:LibStatic;ScenarioGenerator /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v143 /p:MultiProcessorCompilation=true /p:MinimalRebuild=false /m /nologo /verbosity:minimal || exit /b 1
           dir mss32\Lib
 
       - name: Upload dependency libs
