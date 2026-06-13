@@ -1,0 +1,16 @@
+<Project>
+  <!--
+    Imported automatically by MSBuild AFTER the project body, so this wins over
+    the C++ targets' defaults. Forces parallel (/MP) compilation of mss32's many
+    translation units (it also compiles fmt + lua + SLikeNet-Lobby2 sources), the
+    single biggest build-time lever. A global /p:MultiProcessorCompilation=true is
+    overridden by the Cpp targets when building the .vcxproj directly; setting the
+    item metadata here makes it stick. /MP needs MinimalRebuild off.
+  -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <MinimalRebuild>false</MinimalRebuild>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>
