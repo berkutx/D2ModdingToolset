@@ -1,0 +1,104 @@
+name: mss32
+
+# Builds mss32.dll (the mod). The heavy dependency libs are NOT rebuilt here —
+# they are pulled from the latest successful "deps" workflow run as the
+# "deps-libs" artifact. Only mss32 itself is compiled, so this is fast and runs
+# on every push (feature branches included). If no deps artifact exists yet,
+# run the "deps" workflow once first.
+
+on:
+  push:
+    paths:
+      - "mss32/**"
+      - ".github/workflows/mss32.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read # to download the deps-libs artifact from the deps workflow
+
+jobs:
+  # Cheap Ubuntu gate: verify the checkout + submodules before the Windows runner.
+  prepare:
+    name: Pre-checks (submodules)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (recursive submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+      - name: Verify required submodules are populated
+        run: |
+          set -e
+          missing=0
+          for d in D2RSG SLikeNet fmt lua sol2 spdlog GSL; do
+            if [ -n "$(ls -A "$d" 2>/dev/null)" ]; then echo "ok   : $d"; else echo "MISS : $d"; missing=1; fi
+          done
+          exit $missing
+
+  build:
+    name: Build mss32.dll (Windows / MSVC x86)
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - name: Checkout (recursive submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Fetch dependency libs from the latest 'deps' run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          rid=$(gh run list --workflow deps.yml --status success --limit 1 \
+                  --json databaseId --jq '.[0].databaseId' || true)
+          if [ -z "$rid" ]; then
+            echo "::error::No successful 'deps' run found. Run the 'deps' workflow once to publish the deps-libs artifact, then re-run this."
+            exit 1
+          fi
+          echo "Using deps-libs from deps run $rid"
+          mkdir -p mss32/Lib
+          gh run download "$rid" -n deps-libs -D mss32/Lib
+          ls -la mss32/Lib
+
+      - name: Set up MSVC x86 developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Build mss32 (only mss32; links the fetched libs)
+        shell: cmd
+        run: |
+          rem Build the mss32 project directly (not the solution) so the solution
+          rem dependency projects (LibStatic / ScenarioGenerator) are NOT rebuilt —
+          rem their libs come from the deps artifact. SolutionDir makes
+          rem $(SolutionDir)Lib resolve to the fetched mss32\Lib.
+          set "_CL_=/WX-"
+          set "DISCIPLES2_PATH=%GITHUB_WORKSPACE%\out\"
+          if not exist "%DISCIPLES2_PATH%" mkdir "%DISCIPLES2_PATH%"
+          msbuild mss32\mss32.vcxproj /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 /p:SolutionDir=%GITHUB_WORKSPACE%\mss32\ /m /nologo /clp:Summary /verbosity:minimal > build.log 2>&1
+          set RC=%ERRORLEVEL%
+          type build.log
+          exit /b %RC%
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mss32-build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Upload mss32.dll
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mss32-debug-x86
+          path: |
+            out/mss32.dll
+            out/mss32.pdb
+          if-no-files-found: warn

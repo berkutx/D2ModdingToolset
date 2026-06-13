@@ -1,0 +1,66 @@
+name: deps
+
+# Builds the heavy, near-static dependency libraries (Microsoft Detours,
+# SLikeNet LibStatic, ScenarioGenerator from D2RSG) and publishes them as a
+# build artifact ("deps-libs") that the mss32 workflow downloads. These rarely
+# change, so this runs on demand:
+#   - manually via "Run workflow" (pick any branch) when a dependency submodule
+#     was bumped, or
+#   - when the artifact's 90-day retention lapses — just dispatch it again.
+# Submodule bumps can't reliably path-trigger (their files live in another repo),
+# so manual dispatch is the primary trigger.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".gitmodules"
+      - ".github/workflows/deps.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-deps:
+    name: Build dependency libs (Windows / MSVC x86)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: cmd
+    steps:
+      - name: Checkout (recursive submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up MSVC x86 developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Build Microsoft Detours (x86 static lib)
+        run: |
+          pushd Detours\src
+          nmake
+          popd
+          if not exist Detours\lib.X86\detours.lib (echo ERROR: detours.lib not produced & exit /b 1)
+          if not exist mss32\Lib mkdir mss32\Lib
+          copy /Y Detours\lib.X86\detours.* mss32\Lib\
+
+      - name: Build SLikeNet + ScenarioGenerator (Debug + Release)
+        run: |
+          rem cl appends _CL_ AFTER project options, so /WX- disables the
+          rem warnings-as-errors the runner's newer MSVC would otherwise hit.
+          set "_CL_=/WX-"
+          msbuild mss32\mss32.sln /t:LibStatic;ScenarioGenerator /p:Configuration=Debug /p:Platform=x86 /p:PlatformToolset=v143 /m /nologo /verbosity:minimal || exit /b 1
+          msbuild mss32\mss32.sln /t:LibStatic;ScenarioGenerator /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v143 /m /nologo /verbosity:minimal || exit /b 1
+          dir mss32\Lib
+
+      - name: Upload dependency libs
+        uses: actions/upload-artifact@v4
+        with:
+          name: deps-libs
+          path: mss32/Lib/
+          retention-days: 90
+          if-no-files-found: error
