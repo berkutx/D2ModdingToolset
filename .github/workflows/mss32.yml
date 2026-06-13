@@ -21,21 +21,22 @@ jobs:
   # Cheap Ubuntu gate: verify the checkout + submodules before the Windows runner.
   prepare:
     name: Pre-checks (submodules)
-    runs-on: ubuntu-latest
+    # 1-vCPU container runner (GA 2026-01-22) — ideal for this lightweight gate.
+    runs-on: ubuntu-slim
     steps:
-      - name: Checkout (recursive submodules)
+      - name: Checkout (superproject only — no submodule content)
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
           fetch-depth: 1
-      - name: Verify required submodules are populated
+      - name: Verify submodule wiring (no content download)
         run: |
           set -e
-          missing=0
-          for d in D2RSG SLikeNet fmt lua sol2 spdlog GSL; do
-            if [ -n "$(ls -A "$d" 2>/dev/null)" ]; then echo "ok   : $d"; else echo "MISS : $d"; missing=1; fi
-          done
-          exit $missing
+          test -f .gitmodules
+          git submodule status
+          n=$(git submodule status | wc -l)
+          echo "submodules wired: $n"
+          [ "$n" -ge 7 ] || { echo "::error::expected >=7 submodules, found $n"; exit 1; }
 
   build:
     name: Build mss32.dll (Windows / MSVC x86)
