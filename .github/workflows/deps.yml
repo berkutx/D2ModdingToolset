@@ -1,53 +1,47 @@
 name: deps
 
-# Builds the heavy, near-static dependency libraries (Microsoft Detours,
-# SLikeNet LibStatic, ScenarioGenerator from D2RSG) and publishes them as a
-# build artifact ("deps-libs") that the mss32 workflow downloads. These rarely
-# change, so this runs on demand:
-#   - manually via "Run workflow" (pick any branch) when a dependency submodule
-#     was bumped, or
-#   - when the artifact's 90-day retention lapses — just dispatch it again.
-# Submodule bumps can't reliably path-trigger (their files live in another repo),
-# so manual dispatch is the primary trigger.
+# Builds the rarely-changing dependency libs (Detours, SLikeNet LibStatic,
+# ScenarioGenerator) and publishes them as the "deps-libs" artifact that mss32
+# downloads. Manual dispatch: a dep submodule was bumped, or the 90-day artifact
+# lapsed.
 
 on:
-  workflow_dispatch: # manual only — deps rarely change; rebuild on demand
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build-deps:
-    name: Build dependency libs (Windows / MSVC x86)
-    runs-on: windows-latest
+    name: Build dependency libs (MSVC x86)
+    runs-on: windows-2025-vs2026
     defaults:
       run:
         shell: pwsh
     steps:
-      - name: Checkout (recursive submodules)
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Build dependency libs (Detours, SLikeNet, ScenarioGenerator)
+      - name: Build Detours + SLikeNet + ScenarioGenerator
         run: |
-          # Load the MSVC x86 dev environment natively (no third-party action).
+          # Load the MSVC x86 env natively (vswhere + Enter-VsDevShell, no third-party action).
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
 
-          # Microsoft Detours (x86 static lib) via nmake, copied into mss32\Lib.
-          Push-Location Detours\src
-          nmake
-          Pop-Location
+          # Detours (x86 static lib) -> mss32\Lib. DETOURS_TARGET_PROCESSOR pins the
+          # output to lib.X86; without it Detours' nmake keys off the x64 host and
+          # writes lib.X64 (we cross-compile x86 from an x64 host).
+          $env:DETOURS_TARGET_PROCESSOR = 'X86'
+          Push-Location Detours\src; nmake; Pop-Location
           if (-not (Test-Path Detours\lib.X86\detours.lib)) { Write-Error 'detours.lib not produced'; exit 1 }
           New-Item -ItemType Directory -Force -Path mss32\Lib | Out-Null
           Copy-Item Detours\lib.X86\detours.* mss32\Lib\ -Force
 
-          # SLikeNet LibStatic + ScenarioGenerator, Debug and Release.
-          # _CL_: /WX- keeps the newer MSVC's warnings non-fatal; /FS lets the
-          # parallel cl processes share one PDB (these still build with /Zi).
+          # SLikeNet LibStatic + ScenarioGenerator, Debug + Release.
+          # /WX- keeps warnings non-fatal; /FS lets parallel cl share one PDB (these use /Zi).
           $env:_CL_ = '/WX- /FS'
           foreach ($cfg in 'Debug', 'Release') {
             msbuild mss32\mss32.sln '/t:LibStatic;ScenarioGenerator' `
@@ -60,7 +54,7 @@ jobs:
       - name: Upload dependency libs
         uses: actions/upload-artifact@v7
         with:
-          name: deps-libs
+          name: deps-libs # multiple .lib files -> keep the (default) archive; also downloaded every mss32 run
           path: mss32/Lib/
           retention-days: 90
           if-no-files-found: error
