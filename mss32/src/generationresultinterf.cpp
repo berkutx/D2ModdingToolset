@@ -208,7 +208,9 @@ static CImage2Memory* createPreviewImage(CMenuRandomScenario* menu)
     }
 
     for (const auto& [id, zone] : generator->zones) {
-        char label = zone->getLabel();
+        // STUB: rsg::TemplateZone::getLabel() needs newer D2RSG; use a blank
+        // label until the submodule is updated (restore zone->getLabel() then).
+        char label = ' ';
         rsg::Position topLeft(zone->getPosition().x - 3, zone->getPosition().y - 4);
         drawChar(label, topLeft, width, height, tileColoring);
     }
@@ -293,9 +295,11 @@ CGenerationResultInterf* createGenerationResultInterf(CMenuRandomScenario* menu,
         CImage2Memory* preview = createPreviewImage(menu);
         popup->previewImage = preview;
 
-        std::vector<uint8_t> pngData;
-        hooks::writeImageToMemory(preview, pngData);
-        menu->scenario->setPreviewImage(pngData);
+        // STUB: rsg::Map::setPreviewImage() needs newer D2RSG. Skip storing the
+        // PNG preview in the scenario until the submodule is updated.
+        // std::vector<uint8_t> pngData;
+        // hooks::writeImageToMemory(preview, pngData);
+        // menu->scenario->setPreviewImage(pngData);
 
         CMultiLayerImg* image{(CMultiLayerImg*)allocateMemory(sizeof(CMultiLayerImg))};
 
