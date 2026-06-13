@@ -83,56 +83,27 @@ jobs:
         with:
           arch: x86
 
-      # Compiler cache. Caches each compiled .obj keyed on the preprocessed
-      # source + flags (content-based), stored in the GitHub Actions cache. A
-      # push usually changes a handful of .cpp, so the other ~390 TUs + lua are
-      # cache hits on the next run -> the compile collapses to near-link time.
-      # The first run on a branch is a cold miss (populates the cache); the win
-      # shows from the second run onward.
-      - name: Set up sccache (GitHub Actions cache backend)
-        uses: Mozilla-Actions/sccache-action@v0.0.10
-
-      - name: Build mss32 via sccache (cl wrapped, per-file tasks)
+      - name: Build mss32 (PCH + /Z7, parallel per-file tasks)
         shell: cmd
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-          # A cache I/O hiccup should fall back to a normal compile, not fail CI.
-          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
         run: |
           rem Build only mss32 (its deps come from the deps artifact; see above).
           rem
-          rem How sccache is wired in (differs from the plain /MP build):
-          rem  - sccache caches one cl.exe invocation at a time. /MP makes a single
-          rem    cl compile many files in-process (uncacheable), so we turn /MP OFF
-          rem    and use UseMultiToolTask=true: MSBuild launches one cl task per file,
-          rem    in parallel, each individually cached by sccache.
-          rem  - cl wrapper: MSBuild's CL task runs $(CLToolPath)\$(CLToolExe). We point
-          rem    it at a copy of sccache renamed cl.exe; sccache forwards to the real
-          rem    cl on PATH (set by msvc-dev-cmd). The wrapper dir is NOT on PATH, so
-          rem    there is no recursion.
-          rem  - The project builds with /Z7 (DebugInformationFormat=OldStyle in the
-          rem    vcxproj). sccache cannot cache a compile that writes a shared
-          rem    vc143.pdb (/Zi); /Z7 embeds debug info per-.obj and the linker still
-          rem    emits mss32.pdb. Without this sccache fails with
-          rem    "failed to zip up compiler outputs ... vc143.pdb".
-          rem
-          rem A push usually changes a few .cpp, so the rest (~480 TUs + lua) are
-          rem cache hits -> the compile collapses (a warm run is ~3x faster than the
-          rem plain /MP build). The first run on a fresh cache is a cold miss that
-          rem populates it. 'sccache --show-stats' prints the hit rate.
-          set "SCCDIR=%GITHUB_WORKSPACE%\.sccwrap"
-          if not exist "%SCCDIR%" mkdir "%SCCDIR%"
-          for /f "delims=" %%i in ('where sccache') do copy /Y "%%i" "%SCCDIR%\cl.exe" >nul
+          rem Speed comes from a precompiled header (mss32/include/pch.h, built once
+          rem and force-included into every C++ TU) plus:
+          rem  - /Z7 (DebugInformationFormat=OldStyle in the vcxproj): debug info is
+          rem    embedded per-.obj instead of /Zi's single shared mss32.pdb, so the
+          rem    parallel cl processes don't serialize through one mspdbsrv.exe.
+          rem  - UseMultiToolTask=true (with /MP off): MSBuild runs one cl task per
+          rem    file in parallel; each process loads the PCH once. /m parallelizes.
+          rem The linker still emits mss32.pdb. _CL_ adds /WX- and silences the
+          rem fmt v7 STL4043/C4996 the runner's newer MSVC would otherwise error on.
           set "_CL_=/WX- /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS"
           set "DISCIPLES2_PATH=%GITHUB_WORKSPACE%\out\"
           if not exist "%DISCIPLES2_PATH%" mkdir "%DISCIPLES2_PATH%"
           echo runner cores: %NUMBER_OF_PROCESSORS%
-          sccache --zero-stats
-          msbuild mss32\mss32.vcxproj /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 /p:SolutionDir=%GITHUB_WORKSPACE%\mss32\ /p:MultiProcessorCompilation=false /p:UseMultiToolTask=true /p:EnforceProcessCountAcrossBuilds=true /p:CLToolExe=cl.exe /p:CLToolPath=%SCCDIR% /p:MinimalRebuild=false /m /nologo /clp:Summary /verbosity:minimal > build.log 2>&1
+          msbuild mss32\mss32.vcxproj /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 /p:SolutionDir=%GITHUB_WORKSPACE%\mss32\ /p:MultiProcessorCompilation=false /p:UseMultiToolTask=true /p:EnforceProcessCountAcrossBuilds=true /p:MinimalRebuild=false /m /nologo /clp:Summary /verbosity:minimal > build.log 2>&1
           set RC=%ERRORLEVEL%
           type build.log
-          echo ===== sccache stats =====
-          sccache --show-stats
           exit /b %RC%
 
       - name: Upload build log
@@ -156,5 +127,3 @@ jobs:
           # The .pdb dominates this artifact and barely compresses; level 0
           # stores it as-is so no runner CPU is spent zipping it.
           compression-level: 0
-
-# warm-cache run (no-op): measure PCH+sccache hit rate
