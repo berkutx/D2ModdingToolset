@@ -97,17 +97,13 @@ jobs:
           rem                   error by the project's /sdl, which /WX- can't undo.
           rem /MP via MultiProcessorCompilation: the project has ~400 TUs + fmt/lua/
           rem SLikeNet-Lobby2 compiled serially by default; /MP parallelizes across the
-          rem runner's cores (the single biggest build-time win).
-          rem DebugInformationFormat=OldStyle (/Z7): embed debug info in each .obj
-          rem instead of /Zi's shared mss32.pdb. /Zi forces every parallel cl to
-          rem serialize through a single mspdbsrv.exe, which throttles /MP; /Z7 has
-          rem no such bottleneck. The linker still emits mss32.pdb from the objs, so
-          rem the published symbols are unchanged. (/FS is only needed for /Zi, dropped.)
-          set "_CL_=/WX- /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS"
+          rem runner's cores (the single biggest build-time win). /FS lets parallel cl
+          rem share one PDB.
+          set "_CL_=/WX- /FS /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS"
           set "DISCIPLES2_PATH=%GITHUB_WORKSPACE%\out\"
           if not exist "%DISCIPLES2_PATH%" mkdir "%DISCIPLES2_PATH%"
           echo runner cores: %NUMBER_OF_PROCESSORS%
-          msbuild mss32\mss32.vcxproj /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 /p:SolutionDir=%GITHUB_WORKSPACE%\mss32\ /p:MultiProcessorCompilation=true /p:MinimalRebuild=false /p:DebugInformationFormat=OldStyle /m /nologo /clp:Summary /verbosity:minimal > build.log 2>&1
+          msbuild mss32\mss32.vcxproj /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 /p:SolutionDir=%GITHUB_WORKSPACE%\mss32\ /p:MultiProcessorCompilation=true /p:MinimalRebuild=false /m /nologo /clp:Summary /verbosity:minimal > build.log 2>&1
           set RC=%ERRORLEVEL%
           type build.log
           exit /b %RC%
