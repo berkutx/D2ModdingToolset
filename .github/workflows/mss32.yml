@@ -98,34 +98,44 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           # A cache I/O hiccup should fall back to a normal compile, not fail CI.
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          # Diagnostics: make the sccache server log every decision/error.
+          SCCACHE_LOG: "debug"
+          SCCACHE_ERROR_LOG: ${{ github.workspace }}\sccache_server.log
         run: |
-          rem Build only mss32 (its deps come from the deps artifact; see above).
-          rem
-          rem Why this differs from the plain /MP build:
-          rem  - sccache caches one cl.exe invocation at a time. /MP makes a single
-          rem    cl compile many files in-process (uncacheable), so we turn /MP OFF
-          rem    and use UseMultiToolTask=true: MSBuild then launches one cl task per
-          rem    source file, in parallel -> each is individually cached by sccache.
-          rem  - /Z7 (embedded debug info) replaces /Zi: sccache can't cache the
-          rem    shared-mss32.pdb output /Zi produces. Passed via _CL_ so it wins over
-          rem    the project's /Zi. The linker still writes mss32.pdb from the objs.
-          rem  - cl wrapper: MSBuild's CL task runs $(CLToolPath)\$(CLToolExe). We point
-          rem    it at a copy of sccache named cl.exe; sccache then forwards to the real
-          rem    cl.exe on PATH (set by msvc-dev-cmd). The wrapper dir is NOT on PATH,
-          rem    so there is no recursion.
           set "SCCDIR=%GITHUB_WORKSPACE%\.sccwrap"
           if not exist "%SCCDIR%" mkdir "%SCCDIR%"
           for /f "delims=" %%i in ('where sccache') do copy /Y "%%i" "%SCCDIR%\cl.exe" >nul
+
+          echo ===== diagnostics: which cl does the build see? =====
+          where cl
+          echo --- real cl version ---
+          cl 2>&1 | findstr /i "Microsoft Optimizing Compiler Version"
+          echo --- wrapper dir contents ---
+          dir "%SCCDIR%"
+
+          echo ===== restart sccache server so it picks up SCCACHE_LOG/ERROR_LOG =====
+          sccache --stop-server 2>nul
+          sccache --start-server
+          sccache --zero-stats
+
+          echo ===== isolate: compile a trivial TU through the cl wrapper =====
+          echo int scc_probe(){ return 0; }> "%TEMP%\sccprobe.cpp"
+          "%SCCDIR%\cl.exe" /nologo /c "%TEMP%\sccprobe.cpp" /Fo"%TEMP%\sccprobe.obj"
+          echo wrapper-cl exit code: %ERRORLEVEL%
+          sccache --show-stats
+
+          echo ===== full build =====
           set "_CL_=/WX- /Z7 /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS"
           set "DISCIPLES2_PATH=%GITHUB_WORKSPACE%\out\"
           if not exist "%DISCIPLES2_PATH%" mkdir "%DISCIPLES2_PATH%"
           echo runner cores: %NUMBER_OF_PROCESSORS%
-          sccache --zero-stats
           msbuild mss32\mss32.vcxproj /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 /p:SolutionDir=%GITHUB_WORKSPACE%\mss32\ /p:MultiProcessorCompilation=false /p:UseMultiToolTask=true /p:EnforceProcessCountAcrossBuilds=true /p:CLToolExe=cl.exe /p:CLToolPath=%SCCDIR% /p:MinimalRebuild=false /m /nologo /clp:Summary /verbosity:minimal > build.log 2>&1
           set RC=%ERRORLEVEL%
           type build.log
           echo ===== sccache stats =====
           sccache --show-stats
+          echo ===== sccache server log (the actual per-call errors) =====
+          if exist "%GITHUB_WORKSPACE%\sccache_server.log" type "%GITHUB_WORKSPACE%\sccache_server.log"
           exit /b %RC%
 
       - name: Upload build log
