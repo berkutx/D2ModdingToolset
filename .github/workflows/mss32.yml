@@ -1,10 +1,7 @@
 name: mss32
 
-# Builds mss32.dll (the mod). The heavy dependency libs are NOT rebuilt here —
-# they are pulled from the latest successful "deps" workflow run as the
-# "deps-libs" artifact. Only mss32 itself is compiled, so this is fast and runs
-# on every push (feature branches included). If no deps artifact exists yet,
-# run the "deps" workflow once first.
+# Builds mss32.dll. The heavy deps are not rebuilt here — they come from the
+# latest successful "deps" run as the "deps-libs" artifact (run "deps" once first).
 
 on:
   push:
@@ -15,84 +12,64 @@ on:
 
 permissions:
   contents: read
-  actions: read # to download the deps-libs artifact from the deps workflow
+  actions: read # to download the deps-libs artifact
 
-# A new push to the same branch supersedes the previous one: cancel the
-# in-flight run instead of burning a second Windows runner on stale code.
 concurrency:
   group: mss32-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # Cheap Ubuntu gate: verify the checkout + submodules before the Windows runner.
   prepare:
     name: Pre-checks (submodules)
-    runs-on: ubuntu-slim # 1-vCPU container runner — ideal for this light gate
+    runs-on: ubuntu-slim
     steps:
-      - name: Checkout (superproject only — no submodule content)
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
           submodules: false
           fetch-depth: 1
-      - name: Verify submodule wiring (no content download)
-        shell: bash # ubuntu-slim ships bash, not pwsh; this is just a POSIX check
+      - name: Verify submodule wiring
+        shell: bash # ubuntu-slim has no pwsh
         run: |
           set -e
-          test -f .gitmodules
           n=$(git submodule status | wc -l)
           echo "submodules wired: $n"
           [ "$n" -ge 7 ] || { echo "::error::expected >=7 submodules, found $n"; exit 1; }
 
   build:
-    name: Build mss32.dll (Windows / MSVC x86)
+    name: Build mss32.dll (MSVC x86)
     needs: prepare
-    runs-on: windows-latest
+    runs-on: windows-2025-vs2026
     defaults:
       run:
         shell: pwsh
     steps:
-      - name: Checkout (recursive submodules)
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Fetch dependency libs from the latest 'deps' run
+      - name: Fetch deps-libs from the latest 'deps' run
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $rid = (gh run list --workflow deps.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId').Trim()
-          if (-not $rid) {
-            Write-Error "No successful 'deps' run found. Run the 'deps' workflow once to publish the deps-libs artifact, then re-run this."
-            exit 1
-          }
-          "Using deps-libs from deps run $rid"
-          New-Item -ItemType Directory -Force -Path mss32/Lib | Out-Null
+          if (-not $rid) { Write-Error "No successful 'deps' run found; run the 'deps' workflow once."; exit 1 }
           gh run download $rid -n deps-libs -D mss32/Lib
           Get-ChildItem mss32/Lib
 
-      - name: Build mss32.dll (PCH + /Z7, parallel per-file tasks)
+      - name: Build mss32.dll
         run: |
-          # Load the MSVC x86 dev environment natively — no third-party action.
-          # vswhere finds VS 2022; Enter-VsDevShell puts cl/msbuild for the x86
-          # target on PATH for this step. (Replaces ilammy/msvc-dev-cmd, which
-          # was the only Node 20 action and triggered the deprecation warning.)
+          # Load the MSVC x86 env natively (vswhere + Enter-VsDevShell, no third-party action).
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
 
-          # cl reads _CL_ and appends it to every invocation: /WX- keeps the
-          # newer MSVC's extra warnings non-fatal, and the _SILENCE define quiets
-          # fmt v7's deprecated stdext::checked_array_iterator (STL4043 -> C4996).
+          # /WX- keeps newer-MSVC warnings non-fatal; the define quiets fmt v7's C4996.
           $env:_CL_ = '/WX- /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS'
           $env:DISCIPLES2_PATH = "$env:GITHUB_WORKSPACE\out\"
           New-Item -ItemType Directory -Force -Path $env:DISCIPLES2_PATH | Out-Null
-          "runner cores: $env:NUMBER_OF_PROCESSORS"
 
-          # Speed: a precompiled header (force-included into every C++ TU) plus
-          # /Z7 (per-.obj debug info, no shared vc143.pdb/mspdbsrv bottleneck) and
-          # UseMultiToolTask (one cl per file, in parallel). The PCH and /Z7 live
-          # in mss32.vcxproj; the deps libs come from the fetched mss32\Lib.
+          # Speed comes from the PCH + /Z7 + per-file parallel tasks (set in mss32.vcxproj).
           msbuild mss32\mss32.vcxproj `
             /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 `
             /p:SolutionDir=$env:GITHUB_WORKSPACE\mss32\ `
@@ -101,24 +78,31 @@ jobs:
             /m /nologo /clp:Summary /verbosity:minimal 2>&1 | Tee-Object build.log
           exit $LASTEXITCODE
 
+      # archive: false uploads the file as-is (no zip). It only supports a single
+      # file, so the build outputs go up as separate artifacts.
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: mss32-build-log
+          name: build.log
           path: build.log
           if-no-files-found: ignore
-          compression-level: 0 # tiny text file — skip the zip CPU
+          archive: false
 
       - name: Upload mss32.dll
         if: success()
         uses: actions/upload-artifact@v7
         with:
-          name: mss32-debug-x86
-          path: |
-            out/mss32.dll
-            out/mss32.pdb
+          name: mss32.dll
+          path: out/mss32.dll
           if-no-files-found: warn
-          # The .pdb dominates this artifact and barely compresses; level 0
-          # stores it as-is so no runner CPU is spent zipping it.
-          compression-level: 0
+          archive: false
+
+      - name: Upload mss32.pdb
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mss32.pdb
+          path: out/mss32.pdb
+          if-no-files-found: warn
+          archive: false
