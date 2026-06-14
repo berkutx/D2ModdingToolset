@@ -147,5 +147,14 @@ jobs:
       - name: Host + joiner -> both reach the strategic map
         run: ./tools/test/pair-mp.ps1 -Game "$env:GAME_DIR" -TimeoutSec 150 -Kill
 
+      - name: Dump per-instance logs on failure
+        if: failure()
+        run: |
+          Get-ChildItem "$env:GAME_DIR" -Filter "mss32_*.log" | Sort-Object Name | ForEach-Object {
+            Write-Host "===================== $($_.Name) ====================="
+            (Get-Content $_.FullName) -match '\[testdrv\]|\[nettrace\]' | Select-Object -Last 80
+          }
+        shell: pwsh
+
   # Future tests go here as more jobs — each: download the DLL artifact, restore the
   # game cache, deploy, run a script.
