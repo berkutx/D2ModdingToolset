@@ -1,0 +1,79 @@
+name: rdp-probe
+
+# Standalone diagnostic: can a GitHub-HOSTED windows runner be made to host an
+# interactive desktop session by RDP-ing into itself (localhost)? If yes, GUI apps
+# launched into that session get a real message pump (which session 0 lacks), which
+# is what the headless MP test needs. Fast, no build, no game. Iterate by editing
+# this file (push-triggered) until `query session` shows a new Active session.
+
+on:
+  push:
+    paths:
+      - ".github/workflows/rdp-probe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe self-RDP interactive session
+    runs-on: windows-latest # standard runner = free for public repos
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Set up RDP + self-connect + report sessions
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $me = $env:USERNAME
+          Write-Host "whoami=$(whoami)  USERNAME=$me  admin=$([bool](([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)))"
+
+          Write-Host "`n=== sessions BEFORE ==="
+          (query session) 2>&1 | Out-String | Write-Host
+
+          # 1. give the current user a known password (RDP needs creds)
+          $pw = 'Aa1!' + [guid]::NewGuid().ToString('N').Substring(0,16)
+          net user $me "$pw" | Out-Null
+          Write-Host "set password for $me (exit=$LASTEXITCODE)"
+
+          # 2. enable the Remote Desktop service + firewall
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -ErrorAction Continue
+          Set-Service TermService -StartupType Automatic -ErrorAction Continue
+          Start-Service TermService -ErrorAction Continue
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction Continue
+          Write-Host "TermService status: $((Get-Service TermService).Status)"
+
+          # 3. store creds + an .rdp profile that skips NLA/cert prompts, then connect
+          cmdkey /generic:"127.0.0.1" /user:"$me" /pass:"$pw" | Out-Null
+          $rdp = @(
+            'full address:s:127.0.0.1'
+            "username:s:$me"
+            'prompt for credentials:i:0'
+            'authentication level:i:0'
+            'enablecredsspsupport:i:0'
+            'screen mode id:i:1'
+            'desktopwidth:i:1024'
+            'desktopheight:i:768'
+          )
+          $rdpPath = Join-Path $env:TEMP 'self.rdp'
+          $rdp | Set-Content -Path $rdpPath -Encoding ASCII
+          Start-Process mstsc -ArgumentList "`"$rdpPath`""
+          Write-Host "launched mstsc -> 127.0.0.1, waiting for the session..."
+          Start-Sleep -Seconds 25
+
+          Write-Host "`n=== sessions AFTER ==="
+          (query session) 2>&1 | Out-String | Write-Host
+          Write-Host "=== quser ==="
+          (quser) 2>&1 | Out-String | Write-Host
+          Write-Host "=== mstsc process ==="
+          (Get-Process mstsc -ErrorAction SilentlyContinue | Select-Object Id,StartTime | Out-String) | Write-Host
+
+          # Verdict: did a non-services interactive session appear (state Active, id>0)?
+          $sessions = (query session) 2>&1
+          $active = $sessions | Select-String -Pattern '\bActive\b'
+          if ($active) {
+            Write-Host "RESULT: an Active session is present:`n$($active -join "`n")"
+          } else {
+            Write-Host "RESULT: no Active interactive session detected"
+          }
