@@ -48,10 +48,11 @@ jobs:
           $probe = Join-Path $env:TEMP 'whichsession.ps1'
           $out = Join-Path $env:TEMP 'session_result.txt'
           Remove-Item $out -ErrorAction SilentlyContinue
-          @'
-$s = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-"ran in SessionId=$s as $(whoami)" | Set-Content -Path "$env:TEMP\session_result.txt"
-'@ | Set-Content -Path $probe -Encoding ASCII
+          $probeLines = @(
+            '$s = [System.Diagnostics.Process]::GetCurrentProcess().SessionId'
+            '"ran in SessionId=$s as $(whoami)" | Set-Content -Path "$env:TEMP\session_result.txt"'
+          )
+          $probeLines | Set-Content -Path $probe -Encoding ASCII
 
           Write-Host "`n=== PsExec -i 2 (launch into the interactive console) ==="
           & $ps -accepteula -nobanner -i 2 -w $env:TEMP pwsh -NoProfile -File $probe 2>&1 | Out-String | Write-Host
