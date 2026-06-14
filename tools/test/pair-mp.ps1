@@ -41,6 +41,7 @@ function Launch([string]$Role) {
     $psi.UseShellExecute = $false
     $psi.EnvironmentVariables["D2TESTDRV_SKIP_INTRO"] = "1"
     $psi.EnvironmentVariables["D2TESTDRV_BOOT"] = "1"
+    $psi.EnvironmentVariables["D2TESTDRV_ACTIVATE"] = "1" # fake foreground so the headless pump dispatches
     $psi.EnvironmentVariables["D2TESTDRV_UI"] = "1"
     $psi.EnvironmentVariables["D2TESTDRV_ROLE"] = $Role
     $psi.EnvironmentVariables["D2TESTDRV_SCENARIO_INDEX"] = "$Scenario"

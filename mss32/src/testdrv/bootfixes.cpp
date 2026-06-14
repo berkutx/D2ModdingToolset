@@ -85,6 +85,70 @@ void patchFgFlag()
     }
 }
 
+// --- forced activation (D2TESTDRV_ACTIVATE) ---------------------------------
+// Headless (session 0) the game never receives the activation the OS normally
+// delivers, so message-pump / menu paths gated on "am I the active window" stay
+// off — neither WM_TIMER nor posted/sent messages reach a WndProc. We synthesize
+// activation: grab foreground via the AttachThreadInput trick (an API call, not a
+// message — on a runner with no competing foreground it can actually take) and
+// post the activation notifications, repeatedly for the first seconds.
+struct ActCtx
+{
+    DWORD pid;
+    HWND found;
+};
+BOOL CALLBACK findActWnd(HWND h, LPARAM lp)
+{
+    auto* c = reinterpret_cast<ActCtx*>(lp);
+    DWORD wpid = 0;
+    GetWindowThreadProcessId(h, &wpid);
+    if (wpid == c->pid) {
+        char t[8]{};
+        GetWindowTextA(h, t, sizeof(t));
+        if (t[0] && IsWindowVisible(h)) {
+            c->found = h;
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+void activateOnce(HWND h)
+{
+    const HWND fg = GetForegroundWindow();
+    const DWORD fgTid = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
+    const DWORD myTid = GetWindowThreadProcessId(h, nullptr);
+    const bool attached = (fgTid && fgTid != myTid && AttachThreadInput(myTid, fgTid, TRUE));
+    ShowWindow(h, SW_SHOW);
+    BringWindowToTop(h);
+    SetForegroundWindow(h);
+    SetActiveWindow(h);
+    SetFocus(h);
+    if (attached)
+        AttachThreadInput(myTid, fgTid, FALSE);
+    // Synthesize the activation notifications the WndProc would normally receive.
+    SendMessageTimeoutA(h, WM_ACTIVATEAPP, TRUE, 0, SMTO_ABORTIFHUNG, 100, nullptr);
+    SendMessageTimeoutA(h, WM_NCACTIVATE, TRUE, 0, SMTO_ABORTIFHUNG, 100, nullptr);
+    SendMessageTimeoutA(h, WM_ACTIVATE, WA_ACTIVE, 0, SMTO_ABORTIFHUNG, 100, nullptr);
+    SendMessageTimeoutA(h, WM_SETFOCUS, 0, 0, SMTO_ABORTIFHUNG, 100, nullptr);
+}
+DWORD WINAPI activateThread(LPVOID)
+{
+    HWND last = nullptr;
+    for (int i = 0; i < 100; ++i) { // ~20s at 200ms
+        ActCtx c{GetCurrentProcessId(), nullptr};
+        EnumWindows(&findActWnd, reinterpret_cast<LPARAM>(&c));
+        if (c.found) {
+            activateOnce(c.found);
+            if (c.found != last) {
+                spdlog::info("[testdrv] activation: window {:p} (foreground forced)", (void*)c.found);
+                last = c.found;
+            }
+        }
+        Sleep(200);
+    }
+    return 0;
+}
+
 } // namespace
 
 void installEarly()
@@ -95,6 +159,20 @@ void installEarly()
         patchSkipIntro();
     if (testenv::on("D2TESTDRV_BOOT"))
         patchFgFlag();
+}
+
+// Spawn the forced-activation thread (post-DllMain; the window does not exist yet
+// at installEarly time). Gated by D2TESTDRV_ACTIVATE.
+void startActivation()
+{
+    if (!executableIsGame() || gameVersion() != GameVersion::Russobit)
+        return;
+    if (!testenv::on("D2TESTDRV_ACTIVATE"))
+        return;
+    HANDLE th = CreateThread(nullptr, 0, &activateThread, nullptr, 0, nullptr);
+    if (th)
+        CloseHandle(th);
+    spdlog::info("[testdrv] activation thread started");
 }
 
 } // namespace bootfixes
