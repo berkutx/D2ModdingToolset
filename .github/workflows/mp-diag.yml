@@ -120,9 +120,11 @@ jobs:
 
           # --- full stack dump of the (stuck) game: procdump capture + cdb stacks ---
           $dmp = Join-Path $env:TEMP 'game.dmp'
-          $pd  = Join-Path $env:TEMP 'procdump64.exe'
+          $pd  = Join-Path $env:TEMP 'procdump.exe'
           try {
-            Invoke-WebRequest 'https://live.sysinternals.com/procdump64.exe' -OutFile $pd -UseBasicParsing
+            # 32-bit procdump captures the x86 thread context (so cdb shows the game's
+            # 32-bit stacks, not the wow64 wrapper frames)
+            Invoke-WebRequest 'https://live.sysinternals.com/procdump.exe' -OutFile $pd -UseBasicParsing
             & $pd -accepteula -ma $p.Id $dmp 2>&1 | Select-Object -Last 3 | Out-String | Write-Host
           } catch { Write-Host "procdump failed: $_" }
           $cdb = @(
