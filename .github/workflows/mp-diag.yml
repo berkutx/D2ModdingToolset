@@ -126,14 +126,15 @@ jobs:
             & $pd -accepteula -ma $p.Id $dmp 2>&1 | Select-Object -Last 3 | Out-String | Write-Host
           } catch { Write-Host "procdump failed: $_" }
           $cdb = @(
-            "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe",
             "C:\Program Files (x86)\Windows Kits\10\Debuggers\x86\cdb.exe",
-            "C:\Program Files\Windows Kits\10\Debuggers\x64\cdb.exe"
+            "C:\Program Files\Windows Kits\10\Debuggers\x86\cdb.exe",
+            "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
           Write-Host "cdb: $cdb"
           if ($cdb -and (Test-Path $dmp)) {
             $sym = "srv*$env:TEMP\sym*https://msdl.microsoft.com/download/symbols"
-            & $cdb -z $dmp -y $sym -c ".reload /f; ~*kb 30; lmf; q" 2>&1 |
+            # .effmach x86 forces the 32-bit (WOW64) call stacks instead of the x64 wrapper frames
+            & $cdb -z $dmp -y $sym -c ".reload /f; .effmach x86; ~*kb 40; lmf; q" 2>&1 |
               Out-File "$env:GITHUB_WORKSPACE\out\stacks.txt"
             Write-Host "=== stacks.txt ($((Get-Item "$env:GITHUB_WORKSPACE\out\stacks.txt").Length) bytes), tail: ==="
             Get-Content "$env:GITHUB_WORKSPACE\out\stacks.txt" -Tail 70 | Write-Host
