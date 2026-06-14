@@ -133,8 +133,8 @@ jobs:
           Write-Host "cdb: $cdb"
           if ($cdb -and (Test-Path $dmp)) {
             $sym = "srv*$env:TEMP\sym*https://msdl.microsoft.com/download/symbols"
-            # .effmach x86 forces the 32-bit (WOW64) call stacks instead of the x64 wrapper frames
-            & $cdb -z $dmp -y $sym -c ".reload /f; .effmach x86; ~*kb 40; lmf; q" 2>&1 |
+            # the x86 cdb shows native 32-bit stacks (.effmach does not chain with ';')
+            & $cdb -z $dmp -y $sym -c ".reload /f; ~*kb 40; lmf; q" 2>&1 |
               Out-File "$env:GITHUB_WORKSPACE\out\stacks.txt"
             Write-Host "=== stacks.txt ($((Get-Item "$env:GITHUB_WORKSPACE\out\stacks.txt").Length) bytes), tail: ==="
             Get-Content "$env:GITHUB_WORKSPACE\out\stacks.txt" -Tail 70 | Write-Host
