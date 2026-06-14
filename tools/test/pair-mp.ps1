@@ -41,8 +41,6 @@ function Launch([string]$Role) {
     $psi.UseShellExecute = $false
     $psi.EnvironmentVariables["D2TESTDRV_SKIP_INTRO"] = "1"
     $psi.EnvironmentVariables["D2TESTDRV_BOOT"] = "1"
-    $psi.EnvironmentVariables["D2TESTDRV_PUMP"] = "1"     # force the msg pump to run while render-paused (headless)
-    $psi.EnvironmentVariables["D2TESTDRV_ACTIVATE"] = "1" # fake foreground (belt-and-suspenders)
     $psi.EnvironmentVariables["D2TESTDRV_UI"] = "1"
     $psi.EnvironmentVariables["D2TESTDRV_ROLE"] = $Role
     $psi.EnvironmentVariables["D2TESTDRV_SCENARIO_INDEX"] = "$Scenario"

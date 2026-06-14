@@ -35,7 +35,6 @@ void install(HMODULE self)
     uistatereporter::install(); // D2TESTDRV_UI (+ arms auto-nav if D2TESTDRV_ROLE;
                                 // host/join roles also install nettracehooks for RX gates)
     windowtag::start();         // [HOST]/[CLIENT] caption tag for host/join roles
-    bootfixes::startActivation(); // D2TESTDRV_ACTIVATE: fake foreground so the pump runs headless
 
     if (testenv::on("D2TESTDRV_NET")) {
         nettracehooks::install();

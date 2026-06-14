@@ -26,10 +26,6 @@ namespace bootfixes {
  * D2TESTDRV_SKIP_INTRO, fg-flag if D2TESTDRV_BOOT. No-op on a non-Russobit image. */
 void installEarly();
 
-/** Spawn the forced-activation thread (D2TESTDRV_ACTIVATE) that fakes window
- * activation/foreground so message-gated paths run headless. Call post-DllMain. */
-void startActivation();
-
 } // namespace bootfixes
 } // namespace testdrv
 } // namespace hooks
