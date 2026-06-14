@@ -67,18 +67,40 @@ jobs:
           if ($it -and $it.IsReadOnly) { $it.IsReadOnly = $false; Write-Host "cleared read-only" }
           if (Test-Path $ini) {
             $c = Get-Content $ini -Raw
-            if ($c -match '(?m)^Renderer=')      { $c = $c -replace '(?m)^Renderer=\d+','Renderer=4' }
-            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nRenderer=4" }
-            else                                  { $c += "`r`n[Wrapper]`r`nRenderer=4`r`n" }
+            # OpenGL renderer (3) via Mesa llvmpipe (deployed below) + ColdCPU frame
+            # limiter so the render thread SLEEPS between frames and the message pump
+            # finally gets CPU time (the GDI path had no cap and starved it).
+            if ($c -match '(?m)^Renderer=')      { $c = $c -replace '(?m)^Renderer=\d+','Renderer=3' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nRenderer=3" }
+            else                                  { $c += "`r`n[Wrapper]`r`nRenderer=3`r`n" }
+            if ($c -match '(?m)^ColdCPU=')       { $c = $c -replace '(?m)^ColdCPU=\d+','ColdCPU=1' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nColdCPU=1" }
             if ($c -match '(?m)^ImageVSync=')     { $c = $c -replace '(?m)^ImageVSync=\d+','ImageVSync=0' }
-            # lighten the software render so the per-frame cost stops starving the pump
             if ($c -match '(?m)^HD=')            { $c = $c -replace '(?m)^HD=\d+','HD=0' }
-            if ($c -match '(?m)^Interpolation=') { $c = $c -replace '(?m)^Interpolation=\d+','Interpolation=0' }
             Set-Content -Path $ini -Value $c -Encoding ASCII -NoNewline
-            Write-Host "after edit -> $((Get-Content $ini | Select-String '^Renderer=|^ImageVSync=|^HD=|^Interpolation=') -join ' | ')"
+            Write-Host "after edit -> $((Get-Content $ini | Select-String '^Renderer=|^ColdCPU=|^ImageVSync=|^HD=') -join ' | ')"
           }
           Write-Host "=== any other *.ini in the game dir ==="
           Get-ChildItem $dir -Filter *.ini -Force | ForEach-Object { Write-Host $_.Name }
+
+      - name: Deploy Mesa3D software OpenGL (llvmpipe) next to the game
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $dir = $env:GAME_DIR
+          $rel = gh api repos/pal1000/mesa-dist-win/releases/latest | ConvertFrom-Json
+          $asset = $rel.assets | Where-Object { $_.name -match 'release-msvc\.7z$' } | Select-Object -First 1
+          Write-Host "mesa asset: $($asset.name)"
+          $z = Join-Path $env:TEMP 'mesa.7z'
+          Invoke-WebRequest $asset.browser_download_url -OutFile $z -UseBasicParsing
+          $ex = Join-Path $env:TEMP 'mesa'
+          $sevenzip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
+          & $sevenzip x $z "-o$ex" -y "x86" | Out-Null
+          Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
+          $gl = Get-Item (Join-Path $dir 'opengl32.dll') -ErrorAction SilentlyContinue
+          Write-Host "deployed Mesa GL: opengl32.dll = $($gl.Length) bytes; GL dlls in game dir:"
+          Get-ChildItem $dir -Filter '*.dll' | Where-Object { $_.Name -match 'opengl|gallium|osmesa|libgl|swrast|vulkan|dxil|spirv|graw' } | ForEach-Object { Write-Host "  $($_.Name) $($_.Length)" }
 
       - name: Launch host, let it load, screenshot + thread states
         run: |
@@ -91,6 +113,7 @@ jobs:
           $psi.EnvironmentVariables["D2TESTDRV_BOOT"] = "1"
           $psi.EnvironmentVariables["D2TESTDRV_UI"] = "1"
           $psi.EnvironmentVariables["D2TESTDRV_ROLE"] = "host"
+          $psi.EnvironmentVariables["GALLIUM_DRIVER"] = "llvmpipe"  # force Mesa software GL
           $p = [System.Diagnostics.Process]::Start($psi)
           Write-Host "host pid=$($p.Id); waiting 30s to load..."
           Start-Sleep -Seconds 30
