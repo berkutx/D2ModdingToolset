@@ -79,13 +79,16 @@ jobs:
             if (-not $txt.Contains($m)) { Write-Error "missing test/logging marker: $m"; exit 1 }
           }
           Write-Host "test/logging system present"
+          # archive:false names the artifact by the file basename, so give the file
+          # the distinct name the smoke job downloads (avoids clashing with mss32.yml).
+          Copy-Item out\mss32.dll out\mss32-debugtest.dll -Force
 
       - name: Upload mss32.dll (DebugTest)
         if: success()
         uses: actions/upload-artifact@v7
         with:
           name: mss32-debugtest.dll
-          path: out/mss32.dll
+          path: out/mss32-debugtest.dll
           archive: false
           if-no-files-found: warn
 
@@ -138,7 +141,7 @@ jobs:
           $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
           if (-not (Test-Path "$dir\Discipl2.exe")) { Write-Error "Discipl2.exe missing in extracted game"; exit 1 }
           if (-not (Test-Path "$dir\Mss23.dll"))   { Write-Error "Mss23.dll (renamed Miles) missing"; exit 1 }
-          Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
+          Copy-Item dll\mss32-debugtest.dll "$dir\mss32.dll" -Force
           "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "deployed -> $dir"
 
