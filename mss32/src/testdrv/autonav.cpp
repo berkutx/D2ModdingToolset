@@ -345,26 +345,33 @@ DWORD WINAPI navDriverThread(LPVOID)
     return 0;
 }
 
-// EnumWindows picker: the process's main visible, titled window (the one whose
-// thread runs the message pump) — same heuristic nettracehooks uses.
-struct FindMainWndCtx
+// Window scan: log every top-level window of the process and choose the tick
+// target. Prefer a window owned by the UI thread (the one that binds dialogs, i.e.
+// the one that pumps), since a SendMessage'd tick is delivered to that thread's
+// WndProc when it next checks its queue; fall back to the main visible titled one.
+struct WndScan
 {
     DWORD pid;
-    HWND found;
+    DWORD uiTid;
+    HWND onUiThread;
+    HWND titled;
 };
-BOOL CALLBACK pick_main_window(HWND h, LPARAM lp)
+BOOL CALLBACK scan_windows(HWND h, LPARAM lp)
 {
-    auto* ctx = reinterpret_cast<FindMainWndCtx*>(lp);
+    auto* s = reinterpret_cast<WndScan*>(lp);
     DWORD wpid = 0;
-    GetWindowThreadProcessId(h, &wpid);
-    if (wpid == ctx->pid) {
-        char title[64]{};
-        GetWindowTextA(h, title, sizeof(title));
-        if (title[0] && IsWindowVisible(h)) {
-            ctx->found = h;
-            return FALSE;
-        }
-    }
+    const DWORD wtid = GetWindowThreadProcessId(h, &wpid);
+    if (wpid != s->pid)
+        return TRUE;
+    char title[48]{};
+    GetWindowTextA(h, title, sizeof(title));
+    const bool vis = IsWindowVisible(h) != 0;
+    spdlog::info("[testdrv] window scan: hwnd={:p} tid={} vis={} title='{}'", (void*)h, wtid, vis,
+                 title);
+    if (wtid == s->uiTid && !s->onUiThread)
+        s->onUiThread = h;
+    if (title[0] && vis && !s->titled)
+        s->titled = h;
     return TRUE;
 }
 
@@ -491,22 +498,24 @@ void onDialogBound()
     g_navArmed = true;
     g_stepStart = GetTickCount();
 
-    // Subclass the game's main window and pace ticks out-of-band from a background
+    // Subclass a UI-thread window and pace ticks out-of-band from a background
     // thread. This survives a headless runner where WM_TIMER never fires and the
     // pump drops posted messages.
-    FindMainWndCtx ctx{GetCurrentProcessId(), nullptr};
-    EnumWindows(&pick_main_window, reinterpret_cast<LPARAM>(&ctx));
-    if (ctx.found) {
+    WndScan scan{GetCurrentProcessId(), GetCurrentThreadId(), nullptr, nullptr};
+    EnumWindows(&scan_windows, reinterpret_cast<LPARAM>(&scan));
+    HWND hwnd = scan.onUiThread ? scan.onUiThread : scan.titled;
+    if (hwnd) {
         WNDPROC prev = reinterpret_cast<WNDPROC>(
-            SetWindowLongPtrA(ctx.found, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&navWndProc)));
+            SetWindowLongPtrA(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&navWndProc)));
         g_navOrigWndProc.store(prev, std::memory_order_release);
-        g_navHwnd.store(ctx.found);
+        g_navHwnd.store(hwnd);
         g_navDriverStop.store(false);
         HANDLE th = CreateThread(nullptr, 0, &navDriverThread, nullptr, 0, nullptr);
         if (th)
             CloseHandle(th);
-        spdlog::info("[testdrv] nav driver armed ({:d} steps, window {:p}, out-of-band tick)",
-                     g_navLen, (void*)ctx.found);
+        spdlog::info("[testdrv] nav driver armed ({:d} steps, window {:p}, uiTid={}, on-ui={}, "
+                     "out-of-band tick)",
+                     g_navLen, (void*)hwnd, GetCurrentThreadId(), scan.onUiThread != nullptr);
     } else {
         g_navTimer = SetTimer(nullptr, 0, 250, navTimerProc); // WM_TIMER fallback
         spdlog::info("[testdrv] nav driver armed ({:d} steps, WM_TIMER fallback)", g_navLen);
