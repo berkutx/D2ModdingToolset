@@ -70,8 +70,10 @@ jobs:
             if ($c -match '(?m)^Renderer=')      { $c = $c -replace '(?m)^Renderer=\d+','Renderer=3' }
             elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nRenderer=3" }
             else                                  { $c += "`r`n[Wrapper]`r`nRenderer=3`r`n" }
-            if ($c -match '(?m)^ColdCPU=')       { $c = $c -replace '(?m)^ColdCPU=\d+','ColdCPU=1' }
-            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nColdCPU=1" }
+            # TEST: ColdCPU OFF (no per-frame sleep) — Mesa llvmpipe is fast, let the
+            # loop spin flat-out so it pumps the queue more often.
+            if ($c -match '(?m)^ColdCPU=')       { $c = $c -replace '(?m)^ColdCPU=\d+','ColdCPU=0' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nColdCPU=0" }
             if ($c -match '(?m)^ImageVSync=')     { $c = $c -replace '(?m)^ImageVSync=\d+','ImageVSync=0' }
             if ($c -match '(?m)^HD=')            { $c = $c -replace '(?m)^HD=\d+','HD=0' }
             Set-Content -Path $ini -Value $c -Encoding ASCII -NoNewline
