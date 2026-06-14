@@ -36,6 +36,17 @@ const std::uint8_t kSkipIntroPatch[6] = {0x83, 0xC4, 0x08, 0x33, 0xC0, 0x90};
 // always so a headless launch (no foreground) still advances past the black screen.
 const std::uint8_t kFgFlagPatch[10] = {0xC6, 0x47, 0x18, 0x01, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
 
+// pump-gate: the screen message loop sub_56288A starts with
+//   call sub_5678AB ; test al,al ; jz loc_5628A6 (74 07) ; xor eax,eax ; jmp end
+// where sub_5678AB returns the render-pause flag (the GL-wrapper sets it when the
+// window is not drawable, e.g. headless). When paused, the loop is skipped -> no
+// DispatchMessage -> no WndProc -> neither auto-nav nor the PostMessage-based RX
+// reception runs. Force the conditional jump unconditional (74 -> EB) so the pump
+// (and thus message dispatch + RX) always runs regardless of the pause flag.
+constexpr uintptr_t kPumpGateVA = 0x56289D;
+const std::uint8_t kPumpGateExpected[2] = {0x74, 0x07}; // jz short loc_5628A6
+const std::uint8_t kPumpGatePatch[2] = {0xEB, 0x07};    // jmp short loc_5628A6
+
 bool writeBytes(uintptr_t va, const std::uint8_t* bytes, size_t len)
 {
     void* site = reinterpret_cast<void*>(va);
@@ -83,6 +94,26 @@ void patchFgFlag()
     } else {
         spdlog::error("[testdrv] fg-flag: VirtualProtect/write failed");
     }
+}
+
+void patchPumpGate()
+{
+    const std::uint8_t* site = reinterpret_cast<const std::uint8_t*>(kPumpGateVA);
+    if (memcmp(site, kPumpGatePatch, 2) == 0) {
+        spdlog::info("[testdrv] pump-gate already patched");
+        return;
+    }
+    if (memcmp(site, kPumpGateExpected, 2) != 0) {
+        spdlog::error("[testdrv] pump-gate: bytes at {:#x} don't match expected; refusing",
+                      kPumpGateVA);
+        return;
+    }
+    if (writeBytes(kPumpGateVA, kPumpGatePatch, 2))
+        spdlog::info("[testdrv] pump-gate forced ({:#x}: jz->jmp; message pump runs while "
+                     "render-paused)",
+                     kPumpGateVA);
+    else
+        spdlog::error("[testdrv] pump-gate: VirtualProtect/write failed");
 }
 
 // --- forced activation (D2TESTDRV_ACTIVATE) ---------------------------------
@@ -159,6 +190,8 @@ void installEarly()
         patchSkipIntro();
     if (testenv::on("D2TESTDRV_BOOT"))
         patchFgFlag();
+    if (testenv::on("D2TESTDRV_PUMP"))
+        patchPumpGate();
 }
 
 // Spawn the forced-activation thread (post-DllMain; the window does not exist yet
