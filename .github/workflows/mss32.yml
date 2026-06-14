@@ -1,18 +1,24 @@
 name: mss32
 
-# Builds mss32.dll. The heavy deps are not rebuilt here — they come from the
-# latest successful "deps" run as the "deps-libs" artifact (run "deps" once first).
+# Build orchestrator. Builds all three configs in parallel:
+#   - Debug, Release  : compile checks only (do the sources still build?).
+#   - DebugTest       : the publishable D2_TESTDRV test/logging system; its DLL is
+#                       uploaded and then handed to the separate 'tests' workflow.
+# The heavy deps are not rebuilt here — they come from the latest successful "deps"
+# run as the "deps-libs" artifact (run "deps" once first).
 
 on:
   push:
     paths:
       - "mss32/**"
+      - "tools/**"
       - ".github/workflows/mss32.yml"
+      - ".github/workflows/tests.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-  actions: read # to download the deps-libs artifact
+  actions: read # download the deps-libs artifact
 
 concurrency:
   group: mss32-${{ github.ref }}
@@ -35,8 +41,49 @@ jobs:
           echo "submodules wired: $n"
           [ "$n" -ge 7 ] || { echo "::error::expected >=7 submodules, found $n"; exit 1; }
 
-  build:
-    name: Build mss32.dll (MSVC x86)
+  # Debug + Release: just prove the sources compile (no artifact, no tests).
+  compile:
+    name: Compile ${{ matrix.configuration }}
+    needs: prepare
+    runs-on: windows-2025-vs2026
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 1
+      - name: Fetch deps-libs from the latest 'deps' run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $rid = (gh run list --workflow deps.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId').Trim()
+          if (-not $rid) { Write-Error "No successful 'deps' run found; run the 'deps' workflow once."; exit 1 }
+          gh run download $rid -n deps-libs -D mss32/Lib
+      - name: Build ${{ matrix.configuration }} (compile check)
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
+          $env:_CL_ = '/WX- /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS'
+          $env:DISCIPLES2_PATH = "$env:GITHUB_WORKSPACE\out\"
+          New-Item -ItemType Directory -Force -Path $env:DISCIPLES2_PATH | Out-Null
+          msbuild mss32\mss32.vcxproj `
+            /t:Build /p:Configuration=${{ matrix.configuration }} /p:Platform=Win32 /p:PlatformToolset=v143 `
+            /p:SolutionDir=$env:GITHUB_WORKSPACE\mss32\ `
+            /p:MultiProcessorCompilation=false /p:UseMultiToolTask=true `
+            /p:EnforceProcessCountAcrossBuilds=true /p:MinimalRebuild=false `
+            /m /nologo /clp:Summary /verbosity:minimal
+          exit $LASTEXITCODE
+
+  # DebugTest: build the test/logging system and publish the DLL for the tests.
+  build-debugtest:
+    name: Build DebugTest
     needs: prepare
     runs-on: windows-2025-vs2026
     defaults:
@@ -47,7 +94,6 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 1
-
       - name: Fetch deps-libs from the latest 'deps' run
         env:
           GH_TOKEN: ${{ github.token }}
@@ -55,54 +101,41 @@ jobs:
           $rid = (gh run list --workflow deps.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId').Trim()
           if (-not $rid) { Write-Error "No successful 'deps' run found; run the 'deps' workflow once."; exit 1 }
           gh run download $rid -n deps-libs -D mss32/Lib
-          Get-ChildItem mss32/Lib
-
-      - name: Build mss32.dll
+      - name: Build DebugTest (D2_TESTDRV)
         run: |
-          # Load the MSVC x86 env natively (vswhere + Enter-VsDevShell, no third-party action).
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
-
-          # /WX- keeps newer-MSVC warnings non-fatal; the define quiets fmt v7's C4996.
           $env:_CL_ = '/WX- /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS'
           $env:DISCIPLES2_PATH = "$env:GITHUB_WORKSPACE\out\"
           New-Item -ItemType Directory -Force -Path $env:DISCIPLES2_PATH | Out-Null
-
-          # Speed comes from the PCH + /Z7 + per-file parallel tasks (set in mss32.vcxproj).
           msbuild mss32\mss32.vcxproj `
-            /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 `
+            /t:Build /p:Configuration=DebugTest /p:Platform=Win32 /p:PlatformToolset=v143 `
             /p:SolutionDir=$env:GITHUB_WORKSPACE\mss32\ `
             /p:MultiProcessorCompilation=false /p:UseMultiToolTask=true `
             /p:EnforceProcessCountAcrossBuilds=true /p:MinimalRebuild=false `
-            /m /nologo /clp:Summary /verbosity:minimal 2>&1 | Tee-Object build.log
+            /m /nologo /clp:Summary /verbosity:minimal
           exit $LASTEXITCODE
-
-      # archive: false uploads the file as-is (no zip). It only supports a single
-      # file, so the build outputs go up as separate artifacts.
-      - name: Upload build log
-        if: always()
+      - name: Verify the test/logging system is present + stage artifact
+        run: |
+          $txt = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes("out\mss32.dll"))
+          foreach ($m in '[testdrv]', '[nettrace]', 'skip-intro') {
+            if (-not $txt.Contains($m)) { Write-Error "missing test/logging marker: $m"; exit 1 }
+          }
+          # archive:false names the artifact by the file basename — give it the name
+          # the tests workflow downloads.
+          Copy-Item out\mss32.dll out\mss32-debugtest.dll -Force
+      - name: Upload DebugTest DLL
         uses: actions/upload-artifact@v7
         with:
-          name: build.log
-          path: build.log
-          if-no-files-found: ignore
+          name: mss32-debugtest.dll
+          path: out/mss32-debugtest.dll
           archive: false
-
-      - name: Upload mss32.dll
-        if: success()
-        uses: actions/upload-artifact@v7
-        with:
-          name: mss32.dll
-          path: out/mss32.dll
           if-no-files-found: warn
-          archive: false
 
-      - name: Upload mss32.pdb
-        if: success()
-        uses: actions/upload-artifact@v7
-        with:
-          name: mss32.pdb
-          path: out/mss32.pdb
-          if-no-files-found: warn
-          archive: false
+  # Separate test suite — runs after the DebugTest build, consuming its DLL.
+  tests:
+    name: Tests
+    needs: build-debugtest
+    uses: ./.github/workflows/tests.yml
+    secrets: inherit
