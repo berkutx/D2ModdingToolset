@@ -2,8 +2,10 @@
  * Publishable test/logging system for the Disciples 2 modding toolset.
  * Auto-nav driver — see testdrv/autonav.h.
  *
- * Drives the menu chain hands-free on the UI thread by invoking buttons' functors
- * directly (no synthetic input), ticked by a WM_TIMER. Roles (D2TESTDRV_ROLE):
+ * Drives the menu chain hands-free by invoking buttons' onClicked functors directly
+ * (no synthetic input), ticked from a background driver thread (no message pump, so
+ * it works even where the game's window/loop are split across threads, e.g. the
+ * DisciplesGL wrapper on a headless runner). Roles (D2TESTDRV_ROLE):
  *   probe — main menu -> Multiplayer -> TCP/IP -> Continue (stops at host/join screen)
  *   exit  — reach the menu, then quit (boot-reliability harness)
  *   host  — create a TCP/IP session, wait for the joiner, start the game
@@ -184,7 +186,7 @@ int g_navLen = 0;
 int g_navIdx = 0;
 DWORD g_stepStart = 0;
 bool g_navArmed = false;
-UINT_PTR g_navTimer = 0;
+std::atomic<bool> g_navStop{false};
 int g_scenarioIdx = 0;
 constexpr DWORD kStepTimeoutMs = 15000; // menu transitions
 constexpr DWORD kGateTimeoutMs = 60000; // RX gates (peer/host) — generous for a real pairing
@@ -271,7 +273,11 @@ void resetAutoDismiss()
     g_adLastClickedDlg[0] = 0;
 }
 
-void CALLBACK navTimerProc(HWND, UINT, UINT_PTR, DWORD)
+// One nav step. Driven directly on a background thread (no window, no message
+// pump): invokeButton calls the button's onClicked functor via the dialog registry,
+// and D2 has no strict UI-thread affinity, so the menu advances regardless of which
+// thread owns the window or runs the message loop.
+void navStep()
 {
     if (!g_navScript || g_navIdx >= g_navLen)
         return;
@@ -286,11 +292,7 @@ void CALLBACK navTimerProc(HWND, UINT, UINT_PTR, DWORD)
     bool advance = false;
     switch (s.action) {
     case NavAction::Done:
-        if (g_navTimer) {
-            KillTimer(nullptr, g_navTimer);
-            g_navTimer = 0;
-        }
-        g_navScript = nullptr;
+        g_navScript = nullptr; // stops the driver thread loop
         spdlog::info("[testdrv] nav script complete");
         return;
     case NavAction::WaitDialog:
@@ -342,6 +344,17 @@ void CALLBACK navTimerProc(HWND, UINT, UINT_PTR, DWORD)
     }
 }
 
+// Background driver: tick the nav directly ~every 120ms, no message pump involved.
+// Stops when the script completes (g_navScript cleared) or on teardown.
+DWORD WINAPI navDriverThread(LPVOID)
+{
+    while (!g_navStop.load() && g_navScript) {
+        navStep();
+        Sleep(120);
+    }
+    return 0;
+}
+
 } // namespace
 
 void onUiReady()
@@ -389,8 +402,11 @@ void onDialogBound()
         return;
     g_navArmed = true;
     g_stepStart = GetTickCount();
-    g_navTimer = SetTimer(nullptr, 0, 250, navTimerProc); // ticks on this (UI) thread
-    spdlog::info("[testdrv] nav driver armed ({:d} steps)", g_navLen);
+    g_navStop.store(false);
+    HANDLE th = CreateThread(nullptr, 0, &navDriverThread, nullptr, 0, nullptr);
+    if (th)
+        CloseHandle(th);
+    spdlog::info("[testdrv] nav driver armed ({:d} steps, direct-thread tick)", g_navLen);
 }
 
 } // namespace autonav
