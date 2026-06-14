@@ -1,0 +1,147 @@
+name: tests
+
+# Builds the DebugTest mss32.dll (the publishable test/logging system, D2_TESTDRV)
+# and runs a HEADLESS BOOT SMOKE against the minimal standalone game.
+#
+# Inputs it consumes (run these first):
+#   - deps-libs  : from the latest successful "deps" run (same as mss32.yml).
+#   - game cache : warmed once by the "cache-game" workflow (the ~1.95 GB minimal
+#                  game lives in the Actions cache, not re-downloaded every run).
+#
+# The smoke job validates the open question: does the game reach DLG_MAIN_MENU on a
+# headless GitHub windows runner? If green, we expand to reliability + the two-
+# instance MP test. Only the publishable D2_TESTDRV system is built here.
+
+on:
+  push:
+    branches: [feature/test-harness]
+    paths:
+      - "mss32/src/testdrv/**"
+      - "mss32/include/testdrv/**"
+      - "tools/relay/**"
+      - "tools/test/**"
+      - "mss32/mss32.vcxproj"
+      - ".github/workflows/tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read # download the deps-libs artifact
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build mss32.dll (DebugTest)
+    runs-on: windows-2025-vs2026
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Fetch deps-libs from the latest 'deps' run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $rid = (gh run list --workflow deps.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId').Trim()
+          if (-not $rid) { Write-Error "No successful 'deps' run found; run the 'deps' workflow once."; exit 1 }
+          gh run download $rid -n deps-libs -D mss32/Lib
+          Get-ChildItem mss32/Lib
+
+      - name: Build DebugTest (D2_TESTDRV)
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
+
+          $env:_CL_ = '/WX- /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS'
+          $env:DISCIPLES2_PATH = "$env:GITHUB_WORKSPACE\out\"
+          New-Item -ItemType Directory -Force -Path $env:DISCIPLES2_PATH | Out-Null
+
+          msbuild mss32\mss32.vcxproj `
+            /t:Build /p:Configuration=DebugTest /p:Platform=Win32 /p:PlatformToolset=v143 `
+            /p:SolutionDir=$env:GITHUB_WORKSPACE\mss32\ `
+            /p:MultiProcessorCompilation=false /p:UseMultiToolTask=true `
+            /p:EnforceProcessCountAcrossBuilds=true /p:MinimalRebuild=false `
+            /m /nologo /clp:Summary /verbosity:minimal 2>&1 | Tee-Object build.log
+          exit $LASTEXITCODE
+
+      - name: Verify the test/logging system is present
+        run: |
+          $txt = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes("out\mss32.dll"))
+          foreach ($m in '[testdrv]', '[nettrace]', 'skip-intro') {
+            if (-not $txt.Contains($m)) { Write-Error "missing test/logging marker: $m"; exit 1 }
+          }
+          Write-Host "test/logging system present"
+
+      - name: Upload mss32.dll (DebugTest)
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mss32-debugtest.dll
+          path: out/mss32.dll
+          archive: false
+          if-no-files-found: warn
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tests-build.log
+          path: build.log
+          archive: false
+          if-no-files-found: ignore
+
+  smoke:
+    name: Headless boot smoke
+    needs: build
+    runs-on: windows-2025-vs2026
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Download the DebugTest mss32.dll
+        uses: actions/download-artifact@v5
+        with:
+          name: mss32-debugtest.dll
+          path: dll
+
+      - name: Restore the minimal game from cache
+        id: gamecache
+        uses: actions/cache/restore@v4
+        with:
+          path: game.tar.gz
+          key: slasher-min-v1
+          enableCrossOsArchive: true
+
+      - name: Require a warm game cache
+        if: steps.gamecache.outputs.cache-hit != 'true'
+        run: |
+          Write-Error "No 'slasher-min-v1' game cache. Dispatch the 'cache-game' workflow once (warms it on the default branch so all branches can restore it)."
+          exit 1
+
+      - name: Unpack game + deploy DebugTest mss32.dll
+        run: |
+          New-Item -ItemType Directory -Force -Path game | Out-Null
+          tar -xzf game.tar.gz -C game
+          $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
+          if (-not (Test-Path "$dir\Discipl2.exe")) { Write-Error "Discipl2.exe missing in extracted game"; exit 1 }
+          if (-not (Test-Path "$dir\Mss23.dll"))   { Write-Error "Mss23.dll (renamed Miles) missing"; exit 1 }
+          Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
+          "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "deployed -> $dir"
+
+      - name: Smoke — headless boot to DLG_MAIN_MENU
+        run: |
+          ./tools/test/reliability_test.ps1 -N 1 -Boot 1 -TimeoutSec 60 -Game "$env:GAME_DIR"
