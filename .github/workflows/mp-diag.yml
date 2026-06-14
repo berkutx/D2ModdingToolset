@@ -118,6 +118,30 @@ jobs:
               Format-Table -AutoSize | Out-String | Write-Host
           } catch { Write-Host "thread query failed: $_" }
 
+          # --- full stack dump of the (stuck) game: procdump capture + cdb stacks ---
+          $dmp = Join-Path $env:TEMP 'game.dmp'
+          $pd  = Join-Path $env:TEMP 'procdump64.exe'
+          try {
+            Invoke-WebRequest 'https://live.sysinternals.com/procdump64.exe' -OutFile $pd -UseBasicParsing
+            & $pd -accepteula -ma $p.Id $dmp 2>&1 | Select-Object -Last 3 | Out-String | Write-Host
+          } catch { Write-Host "procdump failed: $_" }
+          $cdb = @(
+            "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe",
+            "C:\Program Files (x86)\Windows Kits\10\Debuggers\x86\cdb.exe",
+            "C:\Program Files\Windows Kits\10\Debuggers\x64\cdb.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          Write-Host "cdb: $cdb"
+          if ($cdb -and (Test-Path $dmp)) {
+            $sym = "srv*$env:TEMP\sym*https://msdl.microsoft.com/download/symbols"
+            & $cdb -z $dmp -y $sym -c ".reload /f; ~*kb 30; lmf; q" 2>&1 |
+              Out-File "$env:GITHUB_WORKSPACE\out\stacks.txt"
+            Write-Host "=== stacks.txt ($((Get-Item "$env:GITHUB_WORKSPACE\out\stacks.txt").Length) bytes), tail: ==="
+            Get-Content "$env:GITHUB_WORKSPACE\out\stacks.txt" -Tail 70 | Write-Host
+          } elseif (Test-Path $dmp) {
+            Write-Host "cdb not found - uploading the raw dump for offline analysis"
+            Move-Item $dmp "$env:GITHUB_WORKSPACE\out\game.dmp" -Force
+          }
+
           # collect every log + ini + a dir listing
           Get-ChildItem $dir -Filter '*.log' -Recurse -Force -ErrorAction SilentlyContinue | Copy-Item -Destination "$env:GITHUB_WORKSPACE\out" -Force -ErrorAction SilentlyContinue
           Get-ChildItem $dir -Filter '*.ini' -Force -ErrorAction SilentlyContinue | Copy-Item -Destination "$env:GITHUB_WORKSPACE\out" -Force -ErrorAction SilentlyContinue
