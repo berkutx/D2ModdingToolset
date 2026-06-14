@@ -3,7 +3,9 @@
  * Auto-nav driver — see testdrv/autonav.h.
  *
  * Drives the menu chain hands-free on the UI thread by invoking buttons' functors
- * directly (no synthetic input), ticked by a WM_TIMER. Roles (D2TESTDRV_ROLE):
+ * directly (no synthetic input). Ticked by a posted message via a game-window
+ * subclass (so it works headless, where WM_TIMER is starved), with a SetTimer
+ * fallback for an interactive desktop. Roles (D2TESTDRV_ROLE):
  *   probe — main menu -> Multiplayer -> TCP/IP -> Continue (stops at host/join screen)
  *   exit  — reach the menu, then quit (boot-reliability harness)
  *   host  — create a TCP/IP session, wait for the joiner, start the game
@@ -189,6 +191,18 @@ int g_scenarioIdx = 0;
 constexpr DWORD kStepTimeoutMs = 15000; // menu transitions
 constexpr DWORD kGateTimeoutMs = 60000; // RX gates (peer/host) — generous for a real pairing
 
+// Nav-tick delivery. A SetTimer(NULL,...) callback rides WM_TIMER, which is a
+// synthesized post-when-the-queue-is-idle message; on a headless/session-0 runner
+// (e.g. CI) it is starved and never fires, so the nav stalls at the first screen.
+// A PostMessage'd custom message is a real queued message the game's pump always
+// dispatches (boot reaching the menu proves the pump runs), so we subclass the
+// game window and drive ticks from a background pacer. WM_USER+0x4E is distinct
+// from nettrace's deferred-packet message (WM_USER+0x46).
+constexpr UINT WM_D2_NAV_TICK = WM_USER + 0x4E;
+std::atomic<HWND> g_navHwnd{nullptr};
+std::atomic<WNDPROC> g_navOrigWndProc{nullptr};
+std::atomic<bool> g_navDriverStop{false};
+
 // AutoDismiss per-step state.
 bool g_adSeenAny = false;
 DWORD g_adLastPopupMs = 0;
@@ -271,7 +285,61 @@ void resetAutoDismiss()
     g_adLastClickedDlg[0] = 0;
 }
 
-void CALLBACK navTimerProc(HWND, UINT, UINT_PTR, DWORD)
+// Tear down the nav driver: kill the fallback timer, restore the window's WndProc
+// (subclass path), and stop the background pacer. Runs on the UI thread.
+void navTeardown()
+{
+    if (g_navTimer) {
+        KillTimer(nullptr, g_navTimer);
+        g_navTimer = 0;
+    }
+    HWND h = g_navHwnd.exchange(nullptr);
+    WNDPROC orig = g_navOrigWndProc.exchange(nullptr);
+    if (h && orig)
+        SetWindowLongPtrA(h, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(orig));
+    g_navDriverStop.store(true);
+}
+
+void navStep(); // one nav tick — runs on the UI thread
+
+// Window subclass: a posted WM_D2_NAV_TICK drives one nav step. A posted message
+// is never starved (unlike a synthesized WM_TIMER), so the nav advances on a
+// headless runner too. Other messages pass through to the original WndProc.
+LRESULT CALLBACK navWndProc(HWND h, UINT msg, WPARAM w, LPARAM l)
+{
+    if (msg == WM_D2_NAV_TICK) {
+        navStep();
+        return 0;
+    }
+    WNDPROC orig = g_navOrigWndProc.load(std::memory_order_acquire);
+    return orig ? CallWindowProcA(orig, h, msg, w, l) : DefWindowProcA(h, msg, w, l);
+}
+
+// Background pacer: post a tick ~every 120ms until the script finishes or the
+// window goes away. Does no UI work itself — that happens in navWndProc.
+DWORD WINAPI navDriverThread(LPVOID)
+{
+    while (!g_navDriverStop.load()) {
+        HWND h = g_navHwnd.load();
+        if (!h || !IsWindow(h))
+            break;
+        PostMessageA(h, WM_D2_NAV_TICK, 0, 0);
+        Sleep(120);
+    }
+    return 0;
+}
+
+// EnumThreadWindows picker: first top-level, unowned window of the calling thread.
+BOOL CALLBACK pick_thread_toplevel(HWND h, LPARAM lp)
+{
+    if (GetParent(h) == nullptr && GetWindow(h, GW_OWNER) == nullptr) {
+        *reinterpret_cast<HWND*>(lp) = h;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+void navStep()
 {
     if (!g_navScript || g_navIdx >= g_navLen)
         return;
@@ -286,10 +354,7 @@ void CALLBACK navTimerProc(HWND, UINT, UINT_PTR, DWORD)
     bool advance = false;
     switch (s.action) {
     case NavAction::Done:
-        if (g_navTimer) {
-            KillTimer(nullptr, g_navTimer);
-            g_navTimer = 0;
-        }
+        navTeardown();
         g_navScript = nullptr;
         spdlog::info("[testdrv] nav script complete");
         return;
@@ -342,6 +407,13 @@ void CALLBACK navTimerProc(HWND, UINT, UINT_PTR, DWORD)
     }
 }
 
+// Fallback path (interactive desktop, where WM_TIMER is delivered): tick the same
+// step function from a thread timer.
+void CALLBACK navTimerProc(HWND, UINT, UINT_PTR, DWORD)
+{
+    navStep();
+}
+
 } // namespace
 
 void onUiReady()
@@ -389,8 +461,28 @@ void onDialogBound()
         return;
     g_navArmed = true;
     g_stepStart = GetTickCount();
-    g_navTimer = SetTimer(nullptr, 0, 250, navTimerProc); // ticks on this (UI) thread
-    spdlog::info("[testdrv] nav driver armed ({:d} steps)", g_navLen);
+
+    // We're on the UI thread that owns the game window — find that top-level window
+    // and subclass it, then pace ticks via PostMessage from a background thread.
+    // This survives a headless runner where WM_TIMER never fires.
+    HWND hwnd = nullptr;
+    EnumThreadWindows(GetCurrentThreadId(), &pick_thread_toplevel,
+                      reinterpret_cast<LPARAM>(&hwnd));
+    if (hwnd) {
+        WNDPROC prev = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrA(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&navWndProc)));
+        g_navOrigWndProc.store(prev, std::memory_order_release);
+        g_navHwnd.store(hwnd);
+        g_navDriverStop.store(false);
+        HANDLE th = CreateThread(nullptr, 0, &navDriverThread, nullptr, 0, nullptr);
+        if (th)
+            CloseHandle(th);
+        spdlog::info("[testdrv] nav driver armed ({:d} steps, window {:p}, posted tick)",
+                     g_navLen, (void*)hwnd);
+    } else {
+        g_navTimer = SetTimer(nullptr, 0, 250, navTimerProc); // WM_TIMER fallback
+        spdlog::info("[testdrv] nav driver armed ({:d} steps, WM_TIMER fallback)", g_navLen);
+    }
 }
 
 } // namespace autonav
