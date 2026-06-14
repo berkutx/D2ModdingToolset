@@ -62,7 +62,7 @@ Write-Host "[pair] host pid=$($h.Id) log=$hostLog"
 $t0 = Get-Date
 while ((((Get-Date) - $t0).TotalSeconds) -lt $HostSessionWaitSec) {
     if (LogReady $hostLog "CreateSession") { Write-Host "[pair] host created session" -ForegroundColor Green; break }
-    if ($h.HasExited) { Write-Host "[pair] HOST exited before creating a session" -ForegroundColor Red; return }
+    if ($h.HasExited) { Write-Host "[pair] HOST exited before creating a session" -ForegroundColor Red; exit 1 }
     Start-Sleep -Milliseconds 500
 }
 
@@ -95,4 +95,10 @@ if ($Kill) {
     Show-GameWindow -Proc $h
     Write-Host "[pair] instances left running ([HOST] pid=$($h.Id), [CLIENT] pid=$($j.Id)) — poke away." -ForegroundColor Yellow
     Write-Host "[pair] close with: Stop-Process -Name Discipl2"
+}
+
+# Gate CI on the result: both instances must reach the strategic map.
+if (-not ($hostOk -and $joinOk)) {
+    Write-Error "MP pairing did not reach the strategic map (host=$hostOk join=$joinOk)"
+    exit 1
 }
