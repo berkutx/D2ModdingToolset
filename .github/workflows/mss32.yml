@@ -116,21 +116,20 @@ jobs:
             /p:EnforceProcessCountAcrossBuilds=true /p:MinimalRebuild=false `
             /m /nologo /clp:Summary /verbosity:minimal
           exit $LASTEXITCODE
-      - name: Verify the test/logging system is present + stage artifact
+      - name: Verify the test/logging system is present
         run: |
           $txt = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes("out\mss32.dll"))
           foreach ($m in '[testdrv]', '[nettrace]', 'skip-intro') {
             if (-not $txt.Contains($m)) { Write-Error "missing test/logging marker: $m"; exit 1 }
           }
-          # archive:false names the artifact by the file basename — give it the name
-          # the tests workflow downloads.
-          Copy-Item out\mss32.dll out\mss32-debugtest.dll -Force
+          Write-Host "test/logging system present"
       - name: Upload DebugTest DLL
+        # Default archiving (zip) — download-artifact extracts it in the tests job.
+        # (archive:false yields a raw artifact that download-artifact cannot extract.)
         uses: actions/upload-artifact@v7
         with:
-          name: mss32-debugtest.dll
-          path: out/mss32-debugtest.dll
-          archive: false
+          name: mss32-debugtest
+          path: out/mss32.dll
           if-no-files-found: warn
 
   # Separate test suite — runs after the DebugTest build, consuming its DLL.

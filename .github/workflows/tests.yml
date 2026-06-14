@@ -63,7 +63,7 @@ jobs:
         with: { submodules: false, fetch-depth: 1 }
       - name: Get DebugTest DLL (same-run artifact)
         uses: actions/download-artifact@v5
-        with: { name: mss32-debugtest.dll, path: dll }
+        with: { name: mss32-debugtest, path: dll }
       - name: Restore game from cache
         uses: actions/cache/restore@v4
         with:
@@ -78,7 +78,7 @@ jobs:
           $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
           if (-not (Test-Path "$dir\Discipl2.exe")) { Write-Error "Discipl2.exe missing"; exit 1 }
           if (-not (Test-Path "$dir\Mss23.dll"))   { Write-Error "Mss23.dll (renamed Miles) missing"; exit 1 }
-          Copy-Item dll\mss32-debugtest.dll "$dir\mss32.dll" -Force
+          Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
           "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Boot once -> DLG_MAIN_MENU
         run: ./tools/test/reliability_test.ps1 -N 1 -Boot 1 -TimeoutSec 60 -Game "$env:GAME_DIR"
@@ -95,7 +95,7 @@ jobs:
         with: { submodules: false, fetch-depth: 1 }
       - name: Get DebugTest DLL (same-run artifact)
         uses: actions/download-artifact@v5
-        with: { name: mss32-debugtest.dll, path: dll }
+        with: { name: mss32-debugtest, path: dll }
       - name: Restore game from cache
         uses: actions/cache/restore@v4
         with:
@@ -108,7 +108,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path game | Out-Null
           tar -xzf game.tar.gz -C game
           $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
-          Copy-Item dll\mss32-debugtest.dll "$dir\mss32.dll" -Force
+          Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
           "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Boot 5x -> DLG_MAIN_MENU
         run: ./tools/test/reliability_test.ps1 -N 5 -Boot 1 -TimeoutSec 60 -Game "$env:GAME_DIR"
