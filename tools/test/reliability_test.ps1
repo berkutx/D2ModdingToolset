@@ -46,3 +46,5 @@ $ok = ($results | Where-Object { $_.Menu }).Count
 Write-Output ("==== Boot='{0}' Activate='{1}' : {2}/{3} reached the menu ====" -f $Boot, $Activate, $ok, $N)
 $succ = $results | Where-Object { $_.Menu }
 if ($succ) { Write-Output ("avg time-to-menu: {0}s" -f [math]::Round(($succ | Measure-Object -Property Secs -Average).Average, 1)) }
+# Gate CI on the result: fail unless every launch reached the menu.
+if ($ok -lt $N) { Write-Error ("only {0}/{1} reached the menu" -f $ok, $N); exit 1 }
