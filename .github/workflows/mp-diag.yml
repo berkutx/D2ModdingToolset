@@ -1,0 +1,137 @@
+name: mp-diag
+
+# Heavy diagnostic for the headless MP failure: deploy the game + DebugTest DLL,
+# force the DisciplesGL GDI renderer (and VERIFY the edit took), launch one host
+# instance, let it load, then capture: a desktop screenshot of the interactive
+# session, the game process thread states, every log file, and a full directory
+# listing — all uploaded as an artifact. Fast, single instance. Push-triggered.
+
+on:
+  push:
+    paths:
+      - ".github/workflows/mp-diag.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  diag:
+    name: Diagnose headless render/pump
+    runs-on: windows-2025-vs2026
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+        with: { submodules: false, fetch-depth: 1 }
+
+      - name: Get the latest DebugTest DLL
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $rid = $null
+          foreach ($r in (gh run list --workflow mss32.yml -L 10 --json databaseId,status --jq '.[] | select(.status=="completed") | .databaseId')) {
+            $names = (gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$r/artifacts" --jq '.artifacts[].name' 2>$null)
+            if ($names -match 'mss32-debugtest') { $rid = $r; break }
+          }
+          if (-not $rid) { Write-Error "no completed mss32 run has the mss32-debugtest artifact"; exit 1 }
+          Write-Host "downloading mss32-debugtest from run $rid"
+          gh run download $rid -n mss32-debugtest -D dll
+
+      - name: Restore game from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: game.tar.gz
+          key: slasher-min-v1
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Unpack + deploy + force GDI + verify
+        run: |
+          $jobSess = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+          Write-Host "job session=$jobSess  cwd=$(Get-Location)"
+          New-Item -ItemType Directory -Force -Path game | Out-Null
+          tar -xzf game.tar.gz -C game
+          $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
+          Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
+          "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          Write-Host "=== full game dir listing ==="
+          Get-ChildItem $dir -Force | Select-Object Mode, Length, Name | Sort-Object Name | Format-Table -AutoSize | Out-String | Write-Host
+
+          $ini = Join-Path $dir 'Disciple.ini'
+          $it = Get-Item $ini -ErrorAction SilentlyContinue
+          Write-Host "Disciple.ini: exists=$(Test-Path $ini) readonly=$($it.IsReadOnly) path=$ini"
+          if ($it -and $it.IsReadOnly) { $it.IsReadOnly = $false; Write-Host "cleared read-only" }
+          if (Test-Path $ini) {
+            $c = Get-Content $ini -Raw
+            if ($c -match '(?m)^Renderer=')      { $c = $c -replace '(?m)^Renderer=\d+','Renderer=4' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nRenderer=4" }
+            else                                  { $c += "`r`n[Wrapper]`r`nRenderer=4`r`n" }
+            if ($c -match '(?m)^ImageVSync=')     { $c = $c -replace '(?m)^ImageVSync=\d+','ImageVSync=0' }
+            Set-Content -Path $ini -Value $c -Encoding ASCII -NoNewline
+            Write-Host "after edit -> $((Get-Content $ini | Select-String '^Renderer=|^ImageVSync=|^\[Wrapper\]') -join ' | ')"
+          }
+          Write-Host "=== any other *.ini in the game dir ==="
+          Get-ChildItem $dir -Filter *.ini -Force | ForEach-Object { Write-Host $_.Name }
+
+      - name: Launch host, let it load, screenshot + thread states
+        run: |
+          $dir = $env:GAME_DIR
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = "$dir\Discipl2.exe"
+          $psi.WorkingDirectory = $dir
+          $psi.UseShellExecute = $false
+          $psi.EnvironmentVariables["D2TESTDRV_SKIP_INTRO"] = "1"
+          $psi.EnvironmentVariables["D2TESTDRV_BOOT"] = "1"
+          $psi.EnvironmentVariables["D2TESTDRV_UI"] = "1"
+          $psi.EnvironmentVariables["D2TESTDRV_ROLE"] = "host"
+          $p = [System.Diagnostics.Process]::Start($psi)
+          Write-Host "host pid=$($p.Id); waiting 30s to load..."
+          Start-Sleep -Seconds 30
+          $p.Refresh()
+          Write-Host "exited=$($p.HasExited) mainWindow=$($p.MainWindowHandle) title='$($p.MainWindowTitle)' cpu=$($p.TotalProcessorTime)"
+
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\out" | Out-Null
+
+          # desktop screenshot of the interactive session
+          try {
+            Add-Type -AssemblyName System.Windows.Forms
+            Add-Type -AssemblyName System.Drawing
+            $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            Write-Host "primary screen bounds: $($b.Width)x$($b.Height)"
+            $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($b.X, $b.Y, 0, 0, $b.Size)
+            $bmp.Save("$env:GITHUB_WORKSPACE\out\desktop.png")
+            $g.Dispose(); $bmp.Dispose()
+            Write-Host "desktop.png saved"
+          } catch { Write-Host "screenshot failed: $_" }
+
+          # thread states of the game process
+          Write-Host "=== Discipl2 threads (state/waitreason) ==="
+          try {
+            Get-CimInstance Win32_Thread -Filter "ProcessHandle='$($p.Id)'" |
+              Select-Object Handle, ThreadState, ThreadWaitReason, PriorityCurrent |
+              Format-Table -AutoSize | Out-String | Write-Host
+          } catch { Write-Host "thread query failed: $_" }
+
+          # collect every log + ini + a dir listing
+          Get-ChildItem $dir -Filter '*.log' -Recurse -Force -ErrorAction SilentlyContinue | Copy-Item -Destination "$env:GITHUB_WORKSPACE\out" -Force -ErrorAction SilentlyContinue
+          Get-ChildItem $dir -Filter '*.ini' -Force -ErrorAction SilentlyContinue | Copy-Item -Destination "$env:GITHUB_WORKSPACE\out" -Force -ErrorAction SilentlyContinue
+          Get-ChildItem $dir -Recurse -Force | Select-Object FullName, Length, LastWriteTime |
+            Out-File "$env:GITHUB_WORKSPACE\out\_dir_listing.txt"
+          Write-Host "=== collected files ==="
+          Get-ChildItem "$env:GITHUB_WORKSPACE\out" | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
+
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Stop-Process -Name dplaysvr -Force -ErrorAction SilentlyContinue
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mp-diag
+          path: out/
+          if-no-files-found: warn
