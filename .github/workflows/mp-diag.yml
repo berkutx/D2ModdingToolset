@@ -71,8 +71,11 @@ jobs:
             elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nRenderer=4" }
             else                                  { $c += "`r`n[Wrapper]`r`nRenderer=4`r`n" }
             if ($c -match '(?m)^ImageVSync=')     { $c = $c -replace '(?m)^ImageVSync=\d+','ImageVSync=0' }
+            # lighten the software render so the per-frame cost stops starving the pump
+            if ($c -match '(?m)^HD=')            { $c = $c -replace '(?m)^HD=\d+','HD=0' }
+            if ($c -match '(?m)^Interpolation=') { $c = $c -replace '(?m)^Interpolation=\d+','Interpolation=0' }
             Set-Content -Path $ini -Value $c -Encoding ASCII -NoNewline
-            Write-Host "after edit -> $((Get-Content $ini | Select-String '^Renderer=|^ImageVSync=|^\[Wrapper\]') -join ' | ')"
+            Write-Host "after edit -> $((Get-Content $ini | Select-String '^Renderer=|^ImageVSync=|^HD=|^Interpolation=') -join ' | ')"
           }
           Write-Host "=== any other *.ini in the game dir ==="
           Get-ChildItem $dir -Filter *.ini -Force | ForEach-Object { Write-Host $_.Name }
@@ -152,6 +155,10 @@ jobs:
             Out-File "$env:GITHUB_WORKSPACE\out\_dir_listing.txt"
           Write-Host "=== collected files ==="
           Get-ChildItem "$env:GITHUB_WORKSPACE\out" | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
+
+          Write-Host "=== host log [testdrv] tail — did nav advance past DLG_MAIN_MENU? ==="
+          $hl = Get-ChildItem $dir -Filter 'mss32_*.log' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($hl) { ((Get-Content $hl.FullName) -match '\[testdrv\]') | Select-Object -Last 25 | ForEach-Object { Write-Host $_ } }
 
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           Stop-Process -Name dplaysvr -Force -ErrorAction SilentlyContinue
