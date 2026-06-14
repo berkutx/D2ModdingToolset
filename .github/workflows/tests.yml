@@ -143,6 +143,22 @@ jobs:
           tar -xzf game.tar.gz -C game
           $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
           Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
+          # Force the DisciplesGL wrapper (C4dll-R.dll) to render via Windows GDI
+          # (software) instead of OpenGL: a hosted runner has no GPU, so the default
+          # auto/OpenGL renderer can't init and the game's UI thread stalls in the
+          # wrapper with no message pump (no nav, no RX). GDI needs no GPU.
+          $ini = Join-Path $dir 'Disciple.ini'
+          if (Test-Path $ini) {
+            $c = Get-Content $ini -Raw
+            if ($c -match '(?m)^Renderer=')      { $c = $c -replace '(?m)^Renderer=\d+','Renderer=4' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nRenderer=4" }
+            else                                  { $c += "`r`n[Wrapper]`r`nRenderer=4`r`n" }
+            if ($c -match '(?m)^ImageVSync=')     { $c = $c -replace '(?m)^ImageVSync=\d+','ImageVSync=0' }
+            Set-Content -Path $ini -Value $c -Encoding ASCII -NoNewline
+            Write-Host "DisciplesGL renderer forced to GDI (Renderer=4, ImageVSync=0)"
+          } else {
+            Write-Host "::warning::Disciple.ini not found - cannot force GDI renderer"
+          }
           "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Host + joiner -> both reach the strategic map
         run: ./tools/test/pair-mp.ps1 -Game "$env:GAME_DIR" -TimeoutSec 150 -Kill
