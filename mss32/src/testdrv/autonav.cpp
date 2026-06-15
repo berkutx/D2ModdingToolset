@@ -354,13 +354,18 @@ void navStep()
     }
 
     // Timeouts: gates wait long; menu steps short; Delay/AutoDismiss self-complete.
+    // WaitHostReady NEVER times out: skipping it would press OK before the host has
+    // finished loading and reintroduce the very race it exists to prevent. The host
+    // can take well over a minute to fully enter strategic on a slow runner; the
+    // joiner must wait however long that takes. The orchestrator's outer test timeout
+    // (pair-mp.ps1) bounds a genuinely-stuck host.
     const bool isGate = (s.action == NavAction::WaitPeer || s.action == NavAction::WaitHostBriefing
-                         || s.action == NavAction::WaitHostStrategic
-                         || s.action == NavAction::WaitHostReady);
+                         || s.action == NavAction::WaitHostStrategic);
     const DWORD timeout = isGate                              ? kGateTimeoutMs
                           : (s.action == NavAction::SetSelection) ? 4000 // best-effort; don't stall
                                                                   : kStepTimeoutMs;
     if (s.action != NavAction::Delay && s.action != NavAction::AutoDismiss
+        && s.action != NavAction::WaitHostReady
         && (GetTickCount() - g_stepStart) >= timeout) {
         spdlog::warn("[testdrv] nav step {:d} ({} {}::{}) timed out — skipping", g_navIdx,
                      isGate ? "gate" : "ui", s.dlg, s.widget);
