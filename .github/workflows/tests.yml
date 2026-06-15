@@ -172,19 +172,19 @@ jobs:
           tar -xzf game.tar.gz -C game
           $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
           Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
-          # DisciplesGL renders via OpenGL (Renderer=3) on Mesa llvmpipe (deployed next)
-          # + ColdCPU=1 (its frame limiter: sleeps between frames so the UI thread's
-          # screen loop yields and the per-frame auto-nav tick + the PostMessage RX both
-          # get CPU). A hosted runner has no GPU -> software GL; the GDI path monopolised
-          # the thread and starved everything.
+          # DisciplesGL renders via OpenGL (Renderer=3) on Mesa llvmpipe (deployed next).
+          # ColdCPU=0 (frame limiter OFF): the strategic-map render hung with the limiter
+          # on — a snapshot caught the UI thread parked in DisciplesGL's per-frame
+          # Sleep(v36) at C4dll_R+0xcb7a inside the map's display-list render loop
+          # (sub_5642E1), never returning to the message pump. Try without the limiter.
           $ini = Join-Path $dir 'Disciple.ini'
           if (Test-Path $ini) {
             $c = Get-Content $ini -Raw
             if ($c -match '(?m)^Renderer=')      { $c = $c -replace '(?m)^Renderer=\d+','Renderer=3' }
             elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nRenderer=3" }
             else                                  { $c += "`r`n[Wrapper]`r`nRenderer=3`r`n" }
-            if ($c -match '(?m)^ColdCPU=')       { $c = $c -replace '(?m)^ColdCPU=\d+','ColdCPU=1' }
-            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nColdCPU=1" }
+            if ($c -match '(?m)^ColdCPU=')       { $c = $c -replace '(?m)^ColdCPU=\d+','ColdCPU=0' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nColdCPU=0" }
             if ($c -match '(?m)^ImageVSync=')     { $c = $c -replace '(?m)^ImageVSync=\d+','ImageVSync=0' }
             if ($c -match '(?m)^HD=')            { $c = $c -replace '(?m)^HD=\d+','HD=0' }
             Set-Content -Path $ini -Value $c -Encoding ASCII -NoNewline
