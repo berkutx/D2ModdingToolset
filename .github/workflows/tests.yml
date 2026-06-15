@@ -132,6 +132,33 @@ jobs:
       - name: Get DebugTest DLL (same-run artifact)
         uses: actions/download-artifact@v5
         with: { name: mss32-debugtest, path: dll }
+      - name: Enable DirectPlay (native TCP/IP service provider for D2 multiplayer)
+        run: |
+          # The minimal game uses native DirectPlay TCP/IP for MP. A clean Windows
+          # Server runner ships the DirectPlay legacy feature DISABLED, so D2's
+          # protocol list collapses to Hotseat only (TLBOX_PROTOCOL total=1) and
+          # TCP/IP (index 2) is absent — the host falls through to DLG_HOTSEAT and MP
+          # never starts. Enabling it registers dplayx/dpwsockx + the DirectPlay
+          # Service Providers (incl. "Internet TCP/IP Connection For DirectPlay"),
+          # machine-wide, so both the host and joiner instances see TCP/IP.
+          $sp = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\DirectPlay\Service Providers'
+          try {
+            $st = (Get-WindowsOptionalFeature -Online -FeatureName DirectPlay).State
+            Write-Host "DirectPlay feature before: $st"
+            if ($st -ne 'Enabled') {
+              Enable-WindowsOptionalFeature -Online -FeatureName DirectPlay -All -NoRestart -ErrorAction Stop | Out-Null
+              Write-Host "DirectPlay feature after: $((Get-WindowsOptionalFeature -Online -FeatureName DirectPlay).State)"
+            }
+          } catch {
+            Write-Host "::warning::Enable-WindowsOptionalFeature DirectPlay failed: $($_.Exception.Message)"
+          }
+          if (Test-Path $sp) {
+            Write-Host "DirectPlay service providers registered:"
+            (Get-ChildItem $sp).PSChildName | ForEach-Object { Write-Host "  - $_" }
+          } else {
+            Write-Host "::error::DirectPlay SP registry key absent after enable — TCP/IP will be missing"
+          }
+          Write-Host "dpwsockx (SysWOW64): $(Test-Path "$env:SystemRoot\SysWOW64\dpwsockx.dll")"
       - name: Restore game from cache
         uses: actions/cache/restore@v4
         with:
@@ -183,7 +210,7 @@ jobs:
           Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
           Write-Host "Mesa opengl32.dll = $((Get-Item (Join-Path $dir 'opengl32.dll')).Length) bytes"
       - name: Host + joiner -> both reach the strategic map
-        run: ./tools/test/pair-mp.ps1 -Game "$env:GAME_DIR" -TimeoutSec 150 -Kill
+        run: ./tools/test/pair-mp.ps1 -Game "$env:GAME_DIR" -TimeoutSec 240 -Kill
 
       - name: Dump per-instance logs on failure
         if: failure()
