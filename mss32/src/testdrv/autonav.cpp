@@ -154,8 +154,16 @@ const NavStep g_joinScript[] = {
     {NavAction::Invoke, "DLG_SESSION", "BTN_JOIN_GAME", 0},
     {NavAction::WaitHostBriefing, "", "", 0},
     {NavAction::WaitHostStrategic, "", "", 0},
-    {NavAction::Delay, "settle/T-2s", "", 1000},
-    {NavAction::Delay, "settle/T-1s", "", 1000},
+    // The WaitHostStrategic gate (host's CCmdBeginTurnMsg) fires while the host is
+    // still ENTERING the strategic map — the host broadcasts begin-turn as part of
+    // starting, before its scenario has finished loading. On a slow software-render
+    // runner the host needs several more seconds to be ready; locally (GPU) it is
+    // ready almost immediately, which is why this only bites on the runner. If the
+    // joiner presses OK and pulls the host's scenario snapshot before the host has
+    // finished loading, the replication burst is inconsistent and the joiner
+    // hard-crashes mid-load. Wait generously so the (possibly very slow) host is
+    // genuinely ready to serve a consistent snapshot before we request the start.
+    {NavAction::Delay, "settle/host-finishes-strategic", "", 10000},
     {NavAction::Invoke, "DLG_LOBBY", "BTN_OK", 0},
     {NavAction::Delay, "async-load", "", 500},
     {NavAction::AutoDismiss, "join-entry-popups", "", 20000},
