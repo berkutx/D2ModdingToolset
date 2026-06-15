@@ -217,9 +217,7 @@ jobs:
         run: |
           Get-ChildItem "$env:GAME_DIR" -Filter "mss32_*.log" | Sort-Object Name | ForEach-Object {
             Write-Host "===================== $($_.Name) ====================="
-            # exclude the per-frame heartbeat (it floods) so the nav + nettrace flow shows
-            (Get-Content $_.FullName) -match '\[testdrv\]|\[nettrace\]' |
-              Where-Object { $_ -notmatch 'frame-tick' } | Select-Object -Last 120
+            (Get-Content $_.FullName) -match '\[testdrv\]|\[nettrace\]' | Select-Object -Last 120
           }
         shell: pwsh
       - name: Upload full per-instance logs on failure

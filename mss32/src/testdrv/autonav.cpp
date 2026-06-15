@@ -3,16 +3,18 @@
  * Auto-nav driver — see testdrv/autonav.h.
  *
  * Drives the menu chain hands-free by invoking buttons' onClicked functors directly
- * (no synthetic input), ticked from a background driver thread (no message pump, so
- * it works even where the game's window/loop are split across threads, e.g. the
- * DisciplesGL wrapper on a headless runner). Roles (D2TESTDRV_ROLE):
+ * (no synthetic input). Ticked once per screen-loop iteration from a Detour of
+ * sub_5629CA (the per-frame cursor helper), so it runs on the UI/dialog thread —
+ * required, since invoking a functor must happen on the thread that owns the dialogs —
+ * with no dependency on the message pump being serviced (which it isn't under the
+ * DisciplesGL software-render path on a GPU-less runner). Roles (D2TESTDRV_ROLE):
  *   probe — main menu -> Multiplayer -> TCP/IP -> Continue (stops at host/join screen)
  *   exit  — reach the menu, then quit (boot-reliability harness)
  *   host  — create a TCP/IP session, wait for the joiner, start the game
  *   join  — join the host's TCP/IP session, follow it into the started game
- * The host/join scripts sequence via DLL-side RX gates (the joiner connecting, the
- * host entering the game) detected from the network stream. Compile-gated by
- * D2_TESTDRV.
+ * The host waits for the joiner via a DLL-side RX gate (CConnectMsg); the joiner waits
+ * for the host to be FULLY in the strategic map via WaitHostReady (an orchestrator
+ * file signal — see pair-mp.ps1) before requesting start. Compile-gated by D2_TESTDRV.
  */
 
 #ifdef D2_TESTDRV
@@ -293,10 +295,9 @@ bool hostReady()
     return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
 }
 
-// One nav step. Driven directly on a background thread (no window, no message
-// pump): invokeButton calls the button's onClicked functor via the dialog registry,
-// and D2 has no strict UI-thread affinity, so the menu advances regardless of which
-// thread owns the window or runs the message loop.
+// One nav step. Ticked once per screen-loop iteration from the sub_5629CA frame hook
+// (so it runs on the UI/dialog thread): invokeButton calls the target button's
+// onClicked functor via the dialog registry, advancing the script one action per call.
 void navStep()
 {
     if (!g_navScript || g_navIdx >= g_navLen)
@@ -379,13 +380,9 @@ void navStep()
 // construction either way (called from the loop, not from assignFunctor).
 using Sub5629CA_t = LONG(__stdcall*)(HWND, LPPOINT, LONG*);
 Sub5629CA_t g_orig5629CA = reinterpret_cast<Sub5629CA_t>(0x5629CA);
-std::atomic<std::uint32_t> g_frameCount{0};
 
 LONG __stdcall hook5629CA(HWND hWnd, LPPOINT lpPoint, LONG* a3)
 {
-    const std::uint32_t n = g_frameCount.fetch_add(1) + 1;
-    if (n == 1 || (n & 0xFFF) == 0)
-        spdlog::info("[testdrv] nav frame-tick #{} (sub_5629CA)", n); // heartbeat: is the loop iterating?
     tick();
     return g_orig5629CA(hWnd, lpPoint, a3);
 }
@@ -454,13 +451,12 @@ void onDialogBound()
         return;
     g_navArmed = true;
     g_stepStart = GetTickCount();
-    spdlog::info("[testdrv] nav driver armed ({:d} steps, bind-hook tick)", g_navLen);
+    spdlog::info("[testdrv] nav driver armed ({:d} steps)", g_navLen);
 }
 
-// Ticked from the UI-state reporter's assignFunctor hook — i.e. on the exact thread
-// that owns the dialogs, so invoking a button functor is safe (no cross-thread crash)
-// and needs no message pump. Reentrancy-guarded: a functor invoke can re-enter the
-// bind hook. The game re-binds functors frequently enough to drive the script.
+// Ticked once per screen-loop iteration from the sub_5629CA frame hook — i.e. on the
+// thread that owns the dialogs, so invoking a button functor is safe (no cross-thread
+// crash) and needs no message pump. Reentrancy-guarded as a belt-and-braces measure.
 void tick()
 {
     if (!g_navArmed)
