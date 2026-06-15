@@ -25,6 +25,7 @@
 #include "button.h"
 #include "dialoginterf.h"
 #include "listbox.h"
+#include "midcommandqueue2.h"
 #include "smartptr.h"
 #include <atomic>
 #include <cstdint>
@@ -460,6 +461,65 @@ void installRenderDiag()
     }
 }
 
+// --- command-queue diagnostic ------------------------------------------------
+// The begin-turn command's local update completes via a message-pump-driven chain:
+// notify1 -> processCommands posts MQ_COMMANDQUEUE2 -> the pump dispatches it ->
+// commandQueueMessageCallback advances the notify chain -> applyCommandUpdate ->
+// notify2 (pendingLocalUpdates--). On the runner notify2 never fires; trace the chain
+// to find the lost step (e.g. the posted MQ_COMMANDQUEUE2 is never dispatched because
+// the host's spin loop doesn't pump it).
+using CqMethod_t = void(__fastcall*)(game::CMidCommandQueue2*, void*);
+using CqCallback_t = void(__fastcall*)(game::CMidCommandQueue2*, void*, unsigned int, long);
+CqMethod_t g_origProcessCommands = nullptr;
+CqMethod_t g_origApplyCommandUpdate = nullptr;
+CqCallback_t g_origCqCallback = nullptr;
+
+void __fastcall hookProcessCommands(game::CMidCommandQueue2* q, void* edx)
+{
+    if (q)
+        spdlog::info("[cq] processCommands ENTER (processing={}, updateApplied={}, started={})",
+                     (int)q->processingCommand, (int)q->commandUpdateApplied, (int)q->started);
+    g_origProcessCommands(q, edx);
+}
+
+void __fastcall hookApplyCommandUpdate(game::CMidCommandQueue2* q, void* edx)
+{
+    spdlog::info("[cq] applyCommandUpdate (processing={})", q ? (int)q->processingCommand : -1);
+    g_origApplyCommandUpdate(q, edx);
+}
+
+void __fastcall hookCqCallback(game::CMidCommandQueue2* q, void* edx, unsigned int wParam, long lParam)
+{
+    spdlog::info("[cq] MQ_COMMANDQUEUE2 dispatched (wParam={})", wParam);
+    g_origCqCallback(q, edx, wParam, lParam);
+}
+
+bool g_cqDiagInstalled = false;
+void installCommandQueueDiag()
+{
+    if (g_cqDiagInstalled)
+        return;
+    auto& api = game::CMidCommandQueue2Api::get();
+    g_origProcessCommands = reinterpret_cast<CqMethod_t>(api.processCommands);
+    g_origApplyCommandUpdate = reinterpret_cast<CqMethod_t>(api.applyCommandUpdate);
+    g_origCqCallback = reinterpret_cast<CqCallback_t>(api.commandQueueMessageCallback);
+    if (!g_origProcessCommands || !g_origApplyCommandUpdate || !g_origCqCallback) {
+        spdlog::warn("[cq] command-queue API unresolved — diag skipped");
+        return;
+    }
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(&reinterpret_cast<PVOID&>(g_origProcessCommands), hookProcessCommands);
+    DetourAttach(&reinterpret_cast<PVOID&>(g_origApplyCommandUpdate), hookApplyCommandUpdate);
+    DetourAttach(&reinterpret_cast<PVOID&>(g_origCqCallback), hookCqCallback);
+    if (DetourTransactionCommit() == NO_ERROR) {
+        g_cqDiagInstalled = true;
+        spdlog::info("[cq] command-queue diag installed");
+    } else {
+        spdlog::error("[cq] command-queue diag: commit failed");
+    }
+}
+
 } // namespace
 
 void onUiReady()
@@ -497,8 +557,9 @@ void onUiReady()
         nettracehooks::install();
         nettracehooks::addRxObserver(&onRxGate);
     }
-    installFrameHook();   // per-frame tick from the screen loop (sub_5629CA)
-    installRenderDiag();  // diagnostic: detect a non-returning sub_5642E1 render pass
+    installFrameHook();        // per-frame tick from the screen loop (sub_5629CA)
+    installRenderDiag();       // diagnostic: detect a non-returning sub_5642E1 render pass
+    installCommandQueueDiag(); // diagnostic: trace the begin-turn command/update chain
     spdlog::info("[testdrv] nav role='{}' -> {:d} steps (gates={}, scenario={})", role, g_navLen,
                  wantsGates, g_scenarioIdx);
 }

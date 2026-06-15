@@ -226,7 +226,7 @@ jobs:
         run: |
           Get-ChildItem "$env:GAME_DIR" -Filter "mss32_*.log" | Sort-Object Name | ForEach-Object {
             Write-Host "===================== $($_.Name) ====================="
-            (Get-Content $_.FullName) -match '\[testdrv\]|\[nettrace\]|\[render\]' | Select-Object -Last 120
+            (Get-Content $_.FullName) -match '\[testdrv\]|\[nettrace\]|\[render\]|\[cq\]|midObjectLock' | Select-Object -Last 140
           }
         shell: pwsh
       - name: Upload full per-instance logs on failure
