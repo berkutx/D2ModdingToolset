@@ -360,7 +360,7 @@ std::atomic<std::uint32_t> g_frameCount{0};
 LONG __stdcall hook5629CA(HWND hWnd, LPPOINT lpPoint, LONG* a3)
 {
     const std::uint32_t n = g_frameCount.fetch_add(1) + 1;
-    if (n == 1 || (n & 0xFF) == 0)
+    if (n == 1 || (n & 0xFFF) == 0)
         spdlog::info("[testdrv] nav frame-tick #{} (sub_5629CA)", n); // heartbeat: is the loop iterating?
     tick();
     return g_orig5629CA(hWnd, lpPoint, a3);
