@@ -236,11 +236,11 @@ jobs:
           name: mp-pair-logs
           path: ${{ env.GAME_DIR }}/mss32_*.log
           if-no-files-found: warn
-      - name: Analyze crash dumps (cdb stacks)
+      - name: Analyze hung-instance snapshots (cdb stacks)
         if: failure()
         run: |
           $dumps = Get-ChildItem "$env:DUMPDIR" -Filter *.dmp -ErrorAction SilentlyContinue
-          if (-not $dumps) { Write-Host "no crash dumps captured (green, or a hang rather than a crash)"; exit 0 }
+          if (-not $dumps) { Write-Host "no snapshots captured (green, or an instance exited before snapshot)"; exit 0 }
           $cdb = @(
             "C:\Program Files (x86)\Windows Kits\10\Debuggers\x86\cdb.exe",
             "C:\Program Files\Windows Kits\10\Debuggers\x86\cdb.exe"
@@ -248,11 +248,13 @@ jobs:
           Write-Host "cdb: $cdb"
           $sym = "srv*$env:TEMP\sym*https://msdl.microsoft.com/download/symbols"
           foreach ($d in $dumps) {
-            Write-Host "===================== $($d.Name) ====================="
+            Write-Host "===================== $($d.Name) (all-thread stacks) ====================="
             if ($cdb) {
               $txt = Join-Path $env:DUMPDIR "$($d.BaseName).stacks.txt"
-              & $cdb -z $d.FullName -y $sym -c ".ecxr; r; kb 40; lmf; q" 2>&1 | Out-File $txt
-              Get-Content $txt -Tail 55 | ForEach-Object { Write-Host $_ }
+              # hang snapshot (no exception) -> dump every thread's stack + modules; the
+              # stuck UI/dialog thread (in the Mesa software render) is among them.
+              & $cdb -z $d.FullName -y $sym -c ".reload /f; ~*kb 40; lmf; q" 2>&1 | Out-File $txt
+              Get-Content $txt -Tail 60 | ForEach-Object { Write-Host $_ }
             } else { Write-Host "x86 cdb not found" }
           }
       - name: Upload crash dumps + stacks

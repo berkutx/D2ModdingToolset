@@ -66,23 +66,23 @@ function LogReady([string]$log, [string]$pattern) {
     return [bool](Select-String -Path $log -Pattern $pattern -ErrorAction SilentlyContinue -Quiet)
 }
 
-# Diagnostic: attach procdump as a debugger so a hard crash (entering the strategic map
-# on software Mesa) is captured with a full dump. With a debugger attached the game's
-# own unhandled-exception filter is bypassed, so the access violation reaches procdump.
-function AttachProcDump([System.Diagnostics.Process]$Proc, [string]$Role) {
+# Diagnostic: one-shot full dump of a (hung) instance so we can see where its screen
+# loop is stuck — entering the strategic map on software Mesa is not a crash (no
+# exception is raised, procdump -e caught nothing) but a hang, so we snapshot the live
+# process at the end and cdb its threads.
+function SnapshotInstance([System.Diagnostics.Process]$Proc, [string]$Role) {
     if (-not $ProcDump -or -not $DumpDir) { return }
+    if (-not $Proc -or $Proc.HasExited) { Write-Host "[pair] $Role already exited — nothing to snapshot"; return }
     New-Item -ItemType Directory -Force -Path $DumpDir | Out-Null
     $out = Join-Path $DumpDir "$Role`_$($Proc.Id).dmp"
-    Start-Process -FilePath $ProcDump -ArgumentList @('-accepteula', '-e', '-ma', "$($Proc.Id)", $out) -WindowStyle Hidden
-    Write-Host "[pair] procdump -e attached to $Role pid=$($Proc.Id) -> $out"
-    Start-Sleep -Milliseconds 1000  # let procdump attach before the game gets far
+    Write-Host "[pair] procdump -ma snapshot of hung $Role pid=$($Proc.Id) -> $out"
+    & $ProcDump -accepteula -ma $Proc.Id $out 2>&1 | Select-Object -Last 2 | ForEach-Object { Write-Host "[pair][procdump] $_" }
 }
 
 Write-Host "[pair] launching HOST..." -ForegroundColor Cyan
 $h = Launch "host"
 $hostLog = "$Game\mss32_$($h.Id).log"
 Write-Host "[pair] host pid=$($h.Id) log=$hostLog"
-AttachProcDump $h "host"
 
 # Wait until the host has actually created the DPlay session before the joiner enumerates.
 $t0 = Get-Date
@@ -96,7 +96,6 @@ Write-Host "[pair] launching JOINER..." -ForegroundColor Cyan
 $j = Launch "join"
 $joinLog = "$Game\mss32_$($j.Id).log"
 Write-Host "[pair] joiner pid=$($j.Id) log=$joinLog"
-AttachProcDump $j "join"
 
 $t0 = Get-Date
 $hostOk = $false; $joinOk = $false; $released = $false
@@ -118,6 +117,12 @@ Write-Host ""
 Write-Host "==== RESULT: host-started=$hostOk  joiner-started=$joinOk ====" -ForegroundColor $(if ($hostOk -and $joinOk) { 'Green' } else { 'Yellow' })
 Write-Host "host  log: $hostLog"
 Write-Host "join  log: $joinLog"
+
+# Diagnostic: snapshot any still-running instance on failure so its stuck stack is captured.
+if (-not ($hostOk -and $joinOk)) {
+    SnapshotInstance $h "host"
+    SnapshotInstance $j "join"
+}
 
 if ($Kill) {
     Stop-Process -Id $h.Id, $j.Id -Force -ErrorAction SilentlyContinue
