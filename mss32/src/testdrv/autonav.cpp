@@ -345,18 +345,25 @@ void navStep()
 }
 
 // --- per-frame hook -----------------------------------------------------------
-// sub_5629CA is the cursor helper the screen message loop (sub_56288A) calls once
-// per iteration on the UI/dialog thread. Detour it so the nav ticks once per frame
-// on the correct thread, between frames (not reentrant with dialog construction)
-// and with no dependency on the message pump being serviced.
+// sub_5629CA is the per-iteration helper the screen message loop (sub_56288A) calls
+// on the UI/dialog thread; it leads into the DisciplesGL frame render. Detour it so
+// the nav ticks once per iteration on the correct thread, with no dependency on the
+// message pump being serviced. Tick BEFORE the original: the render is the slow part
+// (software GL on a GPU-less runner can take a long time per frame), and the nav must
+// advance per loop iteration regardless of how long the frame itself takes. Ticking
+// after would starve the nav if a frame blocks. Not reentrant with dialog
+// construction either way (called from the loop, not from assignFunctor).
 using Sub5629CA_t = LONG(__stdcall*)(HWND, LPPOINT, LONG*);
 Sub5629CA_t g_orig5629CA = reinterpret_cast<Sub5629CA_t>(0x5629CA);
+std::atomic<std::uint32_t> g_frameCount{0};
 
 LONG __stdcall hook5629CA(HWND hWnd, LPPOINT lpPoint, LONG* a3)
 {
-    LONG r = g_orig5629CA(hWnd, lpPoint, a3);
+    const std::uint32_t n = g_frameCount.fetch_add(1) + 1;
+    if (n == 1 || (n & 0xFF) == 0)
+        spdlog::info("[testdrv] nav frame-tick #{} (sub_5629CA)", n); // heartbeat: is the loop iterating?
     tick();
-    return r;
+    return g_orig5629CA(hWnd, lpPoint, a3);
 }
 
 bool g_frameHookInstalled = false;
