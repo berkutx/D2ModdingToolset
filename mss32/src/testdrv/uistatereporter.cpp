@@ -77,11 +77,9 @@ game::CButtonInterf* __stdcall hookAssignFunctor(game::CDialogInterf* dialog, co
                                                  int hotkey)
 {
     recordBind(dialog, dialogName, buttonName);
-    autonav::onDialogBound(); // arm the nav once the UI exists
-    game::CButtonInterf* r = g_origAssignFunctor(dialog, buttonName, dialogName, functor, hotkey);
-    autonav::tick(); // advance the nav here — this runs on the dialog-owning thread,
-                     // so invoking a button functor is safe and needs no message pump
-    return r;
+    autonav::onDialogBound(); // arm the nav once the UI exists (ticking is done from the
+                              // per-frame hook, not here — invoking here is reentrant)
+    return g_origAssignFunctor(dialog, buttonName, dialogName, functor, hotkey);
 }
 
 } // namespace

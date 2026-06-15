@@ -31,6 +31,7 @@
 #include <spdlog/spdlog.h>
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+#include <detours.h>
 
 namespace hooks {
 namespace testdrv {
@@ -343,6 +344,37 @@ void navStep()
     }
 }
 
+// --- per-frame hook -----------------------------------------------------------
+// sub_5629CA is the cursor helper the screen message loop (sub_56288A) calls once
+// per iteration on the UI/dialog thread. Detour it so the nav ticks once per frame
+// on the correct thread, between frames (not reentrant with dialog construction)
+// and with no dependency on the message pump being serviced.
+using Sub5629CA_t = LONG(__stdcall*)(HWND, LPPOINT, LONG*);
+Sub5629CA_t g_orig5629CA = reinterpret_cast<Sub5629CA_t>(0x5629CA);
+
+LONG __stdcall hook5629CA(HWND hWnd, LPPOINT lpPoint, LONG* a3)
+{
+    LONG r = g_orig5629CA(hWnd, lpPoint, a3);
+    tick();
+    return r;
+}
+
+bool g_frameHookInstalled = false;
+void installFrameHook()
+{
+    if (g_frameHookInstalled)
+        return;
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(&reinterpret_cast<PVOID&>(g_orig5629CA), hook5629CA);
+    if (DetourTransactionCommit() == NO_ERROR) {
+        g_frameHookInstalled = true;
+        spdlog::info("[testdrv] nav frame-hook installed (sub_5629CA per-frame tick)");
+    } else {
+        spdlog::error("[testdrv] nav frame-hook: DetourTransactionCommit failed");
+    }
+}
+
 } // namespace
 
 void onUiReady()
@@ -380,6 +412,7 @@ void onUiReady()
         nettracehooks::install();
         nettracehooks::addRxObserver(&onRxGate);
     }
+    installFrameHook(); // per-frame tick from the screen loop (sub_5629CA)
     spdlog::info("[testdrv] nav role='{}' -> {:d} steps (gates={}, scenario={})", role, g_navLen,
                  wantsGates, g_scenarioIdx);
 }
