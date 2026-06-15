@@ -93,6 +93,30 @@ function SnapshotInstance([System.Diagnostics.Process]$Proc, [string]$Role) {
     & $ProcDump -accepteula -ma $Proc.Id $out 2>&1 | Select-Object -Last 2 | ForEach-Object { Write-Host "[pair][procdump] $_" }
 }
 
+# Diagnostic: bring an instance's window to the front and screenshot the desktop, to
+# see the last frame the (hung) game presented. The game windows are full-screen
+# 1024x768, so the primary-screen capture IS the window. Works even on a hung app —
+# z-order/restore is handled by the window manager, and the last presented frame stays.
+function CaptureWindow([System.Diagnostics.Process]$Proc, [string]$Role) {
+    if (-not $DumpDir) { return }
+    if (-not $Proc -or $Proc.HasExited) { Write-Host "[pair] $Role exited — no screenshot"; return }
+    try { Show-GameWindow -Proc $Proc } catch { Write-Host "[pair] $Role Show-GameWindow: $($_.Exception.Message)" }
+    Start-Sleep -Milliseconds 900
+    $Proc.Refresh()
+    Write-Host "[pair] $Role window: hwnd=$($Proc.MainWindowHandle) title='$($Proc.MainWindowTitle)'"
+    try {
+        Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+        $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+        $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen($b.X, $b.Y, 0, 0, $b.Size)
+        $png = Join-Path $DumpDir "$Role`_screen.png"
+        $bmp.Save($png, [System.Drawing.Imaging.ImageFormat]::Png)
+        $g.Dispose(); $bmp.Dispose()
+        Write-Host "[pair] $Role screenshot -> $png ($([math]::Round((Get-Item $png).Length / 1kb))KB)"
+    } catch { Write-Host "[pair] $Role screenshot failed: $($_.Exception.Message)" }
+}
+
 Write-Host "[pair] launching HOST..." -ForegroundColor Cyan
 $h = Launch "host"
 $hostLog = "$Game\mss32_$($h.Id).log"
@@ -134,6 +158,8 @@ Write-Host "join  log: $joinLog"
 
 # Diagnostic: snapshot any still-running instance on failure so its stuck stack is captured.
 if (-not ($hostOk -and $joinOk)) {
+    CaptureWindow $h "host"   # screenshot first (windows still up), host then joiner
+    CaptureWindow $j "join"
     try {
         $sys = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 2 -ErrorAction Stop).CounterSamples[-1].CookedValue
         Write-Host ("[pair] system CPU = {0:N0}% across {1} cores" -f $sys, [System.Environment]::ProcessorCount)
