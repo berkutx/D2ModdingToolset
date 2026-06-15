@@ -186,7 +186,6 @@ int g_navLen = 0;
 int g_navIdx = 0;
 DWORD g_stepStart = 0;
 bool g_navArmed = false;
-std::atomic<bool> g_navStop{false};
 int g_scenarioIdx = 0;
 constexpr DWORD kStepTimeoutMs = 15000; // menu transitions
 constexpr DWORD kGateTimeoutMs = 60000; // RX gates (peer/host) — generous for a real pairing
@@ -344,17 +343,6 @@ void navStep()
     }
 }
 
-// Background driver: tick the nav directly ~every 120ms, no message pump involved.
-// Stops when the script completes (g_navScript cleared) or on teardown.
-DWORD WINAPI navDriverThread(LPVOID)
-{
-    while (!g_navStop.load() && g_navScript) {
-        navStep();
-        Sleep(120);
-    }
-    return 0;
-}
-
 } // namespace
 
 void onUiReady()
@@ -402,11 +390,23 @@ void onDialogBound()
         return;
     g_navArmed = true;
     g_stepStart = GetTickCount();
-    g_navStop.store(false);
-    HANDLE th = CreateThread(nullptr, 0, &navDriverThread, nullptr, 0, nullptr);
-    if (th)
-        CloseHandle(th);
-    spdlog::info("[testdrv] nav driver armed ({:d} steps, direct-thread tick)", g_navLen);
+    spdlog::info("[testdrv] nav driver armed ({:d} steps, bind-hook tick)", g_navLen);
+}
+
+// Ticked from the UI-state reporter's assignFunctor hook — i.e. on the exact thread
+// that owns the dialogs, so invoking a button functor is safe (no cross-thread crash)
+// and needs no message pump. Reentrancy-guarded: a functor invoke can re-enter the
+// bind hook. The game re-binds functors frequently enough to drive the script.
+void tick()
+{
+    if (!g_navArmed)
+        return;
+    static bool s_inTick = false;
+    if (s_inTick)
+        return;
+    s_inTick = true;
+    navStep();
+    s_inTick = false;
 }
 
 } // namespace autonav

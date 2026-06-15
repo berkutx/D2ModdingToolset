@@ -126,6 +126,13 @@ jobs:
           Start-Sleep -Seconds 30
           $p.Refresh()
           Write-Host "exited=$($p.HasExited) mainWindow=$($p.MainWindowHandle) title='$($p.MainWindowTitle)' cpu=$($p.TotalProcessorTime)"
+          try {
+            $sig = '[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr h, out uint pid);'
+            $w = Add-Type -MemberDefinition $sig -Name Wtid -Namespace Diag -PassThru
+            $wpid = 0
+            $wtid = $w::GetWindowThreadProcessId($p.MainWindowHandle, [ref]$wpid)
+            Write-Host "main-window owner: tid=$wtid (hex 0x$('{0:x}' -f $wtid)) pid=$wpid  -- find this tid in stacks.txt = the dialog thread's loop"
+          } catch { Write-Host "wtid lookup failed: $_" }
 
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\out" | Out-Null
 

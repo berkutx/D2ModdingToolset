@@ -20,9 +20,13 @@ namespace autonav {
  * D2TESTDRV_ROLE (no-op if unset). */
 void onUiReady();
 
-/** Called from the bind hook (UI thread) whenever a dialog binds: arm the nav
- * timer the first time the UI exists. */
+/** Called from the bind hook (UI thread) whenever a dialog binds: arm the nav the
+ * first time the UI exists. */
 void onDialogBound();
+
+/** Advance the nav by one step. Called from the assignFunctor hook so it runs on
+ * the dialog-owning thread (safe to invoke functors there). No-op until armed. */
+void tick();
 
 } // namespace autonav
 } // namespace testdrv
