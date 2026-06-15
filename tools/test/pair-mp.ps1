@@ -73,6 +73,20 @@ function LogReady([string]$log, [string]$pattern) {
 function SnapshotInstance([System.Diagnostics.Process]$Proc, [string]$Role) {
     if (-not $ProcDump -or -not $DumpDir) { return }
     if (-not $Proc -or $Proc.HasExited) { Write-Host "[pair] $Role already exited — nothing to snapshot"; return }
+    # CPU load of this instance over a 2s window (in cores-worth: 1.00 = one core pegged).
+    $cores = [System.Environment]::ProcessorCount
+    $Proc.Refresh(); $t0 = $Proc.TotalProcessorTime; $w0 = Get-Date
+    Start-Sleep -Seconds 2
+    $Proc.Refresh(); $t1 = $Proc.TotalProcessorTime; $w1 = Get-Date
+    $usedCores = ($t1 - $t0).TotalMilliseconds / ($w1 - $w0).TotalMilliseconds
+    Write-Host ("[pair] {0} pid={1}: CPU={2:N2} cores of {3} ({4:P0} of one core), threads={5}, totalCPU={6:N1}s" -f `
+        $Role, $Proc.Id, $usedCores, $cores, $usedCores, $Proc.Threads.Count, $t1.TotalSeconds)
+    # thread states: how many are Running (busy) vs Wait (idle).
+    try {
+        Get-CimInstance Win32_Thread -Filter "ProcessHandle='$($Proc.Id)'" -ErrorAction Stop |
+            Group-Object ThreadState | Sort-Object Name |
+            ForEach-Object { Write-Host "[pair]   $Role threadState=$($_.Name): $($_.Count)" }
+    } catch { Write-Host "[pair]   $Role thread-state query failed: $($_.Exception.Message)" }
     New-Item -ItemType Directory -Force -Path $DumpDir | Out-Null
     $out = Join-Path $DumpDir "$Role`_$($Proc.Id).dmp"
     Write-Host "[pair] procdump -ma snapshot of hung $Role pid=$($Proc.Id) -> $out"
@@ -120,6 +134,10 @@ Write-Host "join  log: $joinLog"
 
 # Diagnostic: snapshot any still-running instance on failure so its stuck stack is captured.
 if (-not ($hostOk -and $joinOk)) {
+    try {
+        $sys = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 2 -ErrorAction Stop).CounterSamples[-1].CookedValue
+        Write-Host ("[pair] system CPU = {0:N0}% across {1} cores" -f $sys, [System.Environment]::ProcessorCount)
+    } catch { Write-Host "[pair] system CPU query failed: $($_.Exception.Message)" }
     SnapshotInstance $h "host"
     SnapshotInstance $j "join"
 }

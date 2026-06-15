@@ -257,14 +257,12 @@ jobs:
               Get-Content $txt -Tail 60 | ForEach-Object { Write-Host $_ }
             } else { Write-Host "x86 cdb not found" }
           }
-      - name: Upload crash dumps + stacks
+      - name: Upload crash stacks
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: mp-pair-crashdumps
-          path: |
-            ${{ env.DUMPDIR }}/*.dmp
-            ${{ env.DUMPDIR }}/*.stacks.txt
+          name: mp-pair-stacks
+          path: ${{ env.DUMPDIR }}/*.stacks.txt
           if-no-files-found: ignore
 
   # Future tests go here as more jobs — each: download the DLL artifact, restore the
