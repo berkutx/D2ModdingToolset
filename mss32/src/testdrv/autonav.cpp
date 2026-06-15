@@ -408,6 +408,58 @@ void installFrameHook()
     }
 }
 
+// --- render watchdog (diagnostic) --------------------------------------------
+// sub_5642E1 is the display-list render pass (called once per screen-loop iteration
+// for the strategic map / lobby). On a GPU-less runner the host's nav freezes here.
+// This proves whether a SINGLE sub_5642E1 call stops returning (the render genuinely
+// not completing) vs the loop cycling normally: the wrapper times each call, and a 2s
+// watchdog logs while a call is still in flight.
+using Sub5642E1_t = int(__fastcall*)(void*, void*);
+Sub5642E1_t g_origSub5642E1 = reinterpret_cast<Sub5642E1_t>(0x5642E1);
+std::atomic<DWORD> g_rdStart{0}; // tick when the current call entered (0 = not in a call)
+std::atomic<int> g_rdId{0};
+
+int __fastcall hookSub5642E1(void* ecx, void* edx)
+{
+    const int id = ++g_rdId;
+    const DWORD t0 = GetTickCount();
+    g_rdStart = t0;
+    const int r = g_origSub5642E1(ecx, edx);
+    g_rdStart = 0;
+    const DWORD dt = GetTickCount() - t0;
+    if (dt >= 200)
+        spdlog::warn("[render] sub_5642E1 #{} returned after {}ms", id, dt);
+    return r;
+}
+
+DWORD WINAPI renderWatchdog(LPVOID)
+{
+    for (;;) {
+        Sleep(2000);
+        const DWORD s = g_rdStart.load();
+        if (s && (GetTickCount() - s) >= 2000)
+            spdlog::warn("[render] sub_5642E1 #{} STILL RUNNING {}ms — not returning to the screen loop",
+                         g_rdId.load(), GetTickCount() - s);
+    }
+}
+
+bool g_renderDiagInstalled = false;
+void installRenderDiag()
+{
+    if (g_renderDiagInstalled)
+        return;
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(&reinterpret_cast<PVOID&>(g_origSub5642E1), hookSub5642E1);
+    if (DetourTransactionCommit() == NO_ERROR) {
+        g_renderDiagInstalled = true;
+        CreateThread(nullptr, 0, renderWatchdog, nullptr, 0, nullptr);
+        spdlog::info("[render] render watchdog installed (sub_5642E1 timing + 2s stuck check)");
+    } else {
+        spdlog::error("[render] render watchdog: DetourAttach failed");
+    }
+}
+
 } // namespace
 
 void onUiReady()
@@ -445,7 +497,8 @@ void onUiReady()
         nettracehooks::install();
         nettracehooks::addRxObserver(&onRxGate);
     }
-    installFrameHook(); // per-frame tick from the screen loop (sub_5629CA)
+    installFrameHook();   // per-frame tick from the screen loop (sub_5629CA)
+    installRenderDiag();  // diagnostic: detect a non-returning sub_5642E1 render pass
     spdlog::info("[testdrv] nav role='{}' -> {:d} steps (gates={}, scenario={})", role, g_navLen,
                  wantsGates, g_scenarioIdx);
 }
