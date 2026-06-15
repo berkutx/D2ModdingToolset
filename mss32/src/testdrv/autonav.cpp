@@ -48,6 +48,7 @@ enum class NavAction
     WaitPeer,          // wait until the joiner has connected (host script)
     WaitHostBriefing,  // wait until the host has entered the game (join script)
     WaitHostStrategic, // wait until the host reached the strategic map (join script)
+    WaitHostReady,     // wait until the host has FULLY entered strategic (orchestrator signal, join script)
     AutoDismiss,       // dismiss any known first-turn popup until quiet, up to <param> ms
     Done
 };
@@ -152,18 +153,16 @@ const NavStep g_joinScript[] = {
     {NavAction::Invoke, "DLG_LOAD_NEW_MULTI", "BTN_JOIN", 0},
     {NavAction::Delay, "session-enum-settle", "", 2000},
     {NavAction::Invoke, "DLG_SESSION", "BTN_JOIN_GAME", 0},
-    {NavAction::WaitHostBriefing, "", "", 0},
-    {NavAction::WaitHostStrategic, "", "", 0},
-    // The WaitHostStrategic gate (host's CCmdBeginTurnMsg) fires while the host is
-    // still ENTERING the strategic map — the host broadcasts begin-turn as part of
-    // starting, before its scenario has finished loading. On a slow software-render
-    // runner the host needs several more seconds to be ready; locally (GPU) it is
-    // ready almost immediately, which is why this only bites on the runner. If the
-    // joiner presses OK and pulls the host's scenario snapshot before the host has
-    // finished loading, the replication burst is inconsistent and the joiner
-    // hard-crashes mid-load. Wait generously so the (possibly very slow) host is
-    // genuinely ready to serve a consistent snapshot before we request the start.
-    {NavAction::Delay, "settle/host-finishes-strategic", "", 10000},
+    {NavAction::WaitDialog, "DLG_LOBBY", "", 0}, // sit in the multiplayer lobby...
+    // ...and wait until the HOST has FULLY entered the strategic map before pressing
+    // OK. The joiner's OK sends CMenusReqStartGameMsg, to which the host responds by
+    // immediately serving its CURRENT scenario snapshot; if the host is still loading
+    // (it is much slower on a GPU-less software-render runner) that snapshot is
+    // inconsistent and the joiner dies applying it. The correct entry order is
+    // host-fully-in-strategic THEN joiner: gate the OK on the host's actual readiness,
+    // which the orchestrator observes from the host log and signals via the file named
+    // by D2TESTDRV_HOST_READY_FILE (no timing guesses, no defensive masking).
+    {NavAction::WaitHostReady, "", "", 0},
     {NavAction::Invoke, "DLG_LOBBY", "BTN_OK", 0},
     {NavAction::Delay, "async-load", "", 500},
     {NavAction::AutoDismiss, "join-entry-popups", "", 20000},
@@ -281,6 +280,19 @@ void resetAutoDismiss()
     g_adLastClickedDlg[0] = 0;
 }
 
+// True once the orchestrator has signalled that the HOST has FULLY entered the
+// strategic map — it observes the host log and creates the file named by
+// D2TESTDRV_HOST_READY_FILE. The joiner waits on this before requesting start, so the
+// host only ever serves a fully-loaded, consistent scenario snapshot. With no file
+// configured (e.g. a standalone run) the gate is inert and passes immediately.
+bool hostReady()
+{
+    char path[MAX_PATH]{};
+    if (GetEnvironmentVariableA("D2TESTDRV_HOST_READY_FILE", path, sizeof(path)) == 0)
+        return true; // not orchestrated -> nothing to wait for
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+}
+
 // One nav step. Driven directly on a background thread (no window, no message
 // pump): invokeButton calls the button's onClicked functor via the dialog registry,
 // and D2 has no strict UI-thread affinity, so the menu advances regardless of which
@@ -326,6 +338,9 @@ void navStep()
     case NavAction::WaitHostStrategic:
         advance = g_hostInStrategic.load();
         break;
+    case NavAction::WaitHostReady:
+        advance = hostReady();
+        break;
     case NavAction::AutoDismiss:
         advance = tickAutoDismiss(s.param);
         break;
@@ -339,7 +354,8 @@ void navStep()
 
     // Timeouts: gates wait long; menu steps short; Delay/AutoDismiss self-complete.
     const bool isGate = (s.action == NavAction::WaitPeer || s.action == NavAction::WaitHostBriefing
-                         || s.action == NavAction::WaitHostStrategic);
+                         || s.action == NavAction::WaitHostStrategic
+                         || s.action == NavAction::WaitHostReady);
     const DWORD timeout = isGate                              ? kGateTimeoutMs
                           : (s.action == NavAction::SetSelection) ? 4000 // best-effort; don't stall
                                                                   : kStepTimeoutMs;

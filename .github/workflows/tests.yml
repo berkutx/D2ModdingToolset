@@ -209,23 +209,6 @@ jobs:
           & $sevenzip x $z "-o$ex" -y "x86" | Out-Null
           Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
           Write-Host "Mesa opengl32.dll = $((Get-Item (Join-Path $dir 'opengl32.dll')).Length) bytes"
-      - name: Arm WER crash dumps for Discipl2.exe (diagnose the joiner crash)
-        run: |
-          # The joiner reaches the lobby, presses OK and starts receiving the host's
-          # scenario replication, then HARD-crashes mid-load (its log cuts off
-          # mid-write, no [E]). Capture a full user-mode dump of any Discipl2.exe
-          # crash so we can see the faulting module (our mss32.dll hook vs Mesa
-          # opengl32.dll vs the game) + stack. Temporary diagnostic scaffolding.
-          $dumpDir = Join-Path $env:GITHUB_WORKSPACE 'crashdumps'
-          New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
-          $k = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\Discipl2.exe'
-          New-Item -Path $k -Force | Out-Null
-          New-ItemProperty -Path $k -Name DumpFolder -Value $dumpDir -PropertyType ExpandString -Force | Out-Null
-          New-ItemProperty -Path $k -Name DumpType   -Value 2 -PropertyType DWord -Force | Out-Null
-          New-ItemProperty -Path $k -Name DumpCount  -Value 10 -PropertyType DWord -Force | Out-Null
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting' -Name Disabled -Value 0 -Force -ErrorAction SilentlyContinue
-          Write-Host "WER LocalDumps (full) -> $dumpDir"
-          "WER_DUMP_DIR=$dumpDir" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Host + joiner -> both reach the strategic map
         run: ./tools/test/pair-mp.ps1 -Game "$env:GAME_DIR" -TimeoutSec 240 -Kill
 
@@ -246,13 +229,6 @@ jobs:
           name: mp-pair-logs
           path: ${{ env.GAME_DIR }}/mss32_*.log
           if-no-files-found: warn
-      - name: Upload crash dumps (diagnostic)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: mp-pair-crashdumps
-          path: ${{ env.WER_DUMP_DIR }}/*.dmp
-          if-no-files-found: ignore
 
   # Future tests go here as more jobs — each: download the DLL artifact, restore the
   # game cache, deploy, run a script.

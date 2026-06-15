@@ -172,25 +172,6 @@ void drain_one_deferred_packet()
     }
 }
 
-// Fan out an inbound envelope to the RX observers under SEH. `payload_size` is the
-// message's self-declared length (hdr[1]); an observer that reads class-name bytes
-// at fixed offsets trusts it, but an inconsistent/short replication snapshot (e.g.
-// the host serving state before it has finished loading) can make that read run
-// past the readable buffer. A malformed inbound message must never turn an
-// observer's bounded read into a process-killing AV. __try-clean (no C++ locals
-// whose lifetime spans the __try), mirroring call_orig_recv_guarded.
-void dispatch_rx_observers_guarded(void* self, int sender, const std::uint8_t* payload,
-                                   std::uint32_t payload_size)
-{
-    const int rxn = g_rx_observer_count.load(std::memory_order_acquire);
-    __try {
-        for (int i = 0; i < rxn; ++i)
-            g_rx_observers[i](self, sender, payload, payload_size);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        spdlog::warn("[nettrace] RX observer SEH-escaped on a malformed inbound message");
-    }
-}
-
 int __fastcall hook_recv_dispatch(void* self, void* edx, int packet, int size, int sender)
 {
     std::uint32_t* hdr = (std::uint32_t*)(uintptr_t)packet;
@@ -203,7 +184,9 @@ int __fastcall hook_recv_dispatch(void* self, void* edx, int packet, int size, i
         // notification messages too — the relay decodes class names.
         spdlog::debug("[nettrace] RX '{:.31s}' from {:d} ({:d} B)", (const char*)payload, sender,
                       payload_size);
-        dispatch_rx_observers_guarded(self, sender, payload, payload_size);
+        const int rxn = g_rx_observer_count.load(std::memory_order_acquire);
+        for (int i = 0; i < rxn; ++i)
+            g_rx_observers[i](self, sender, payload, payload_size);
 
         // Gate: a registered consumer (e.g. a relay-driven test, or another module)
         // may pass / drop / defer this inbound packet. None registered -> just pass.

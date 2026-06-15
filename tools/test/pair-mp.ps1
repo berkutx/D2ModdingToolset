@@ -34,6 +34,14 @@ Start-Sleep -Milliseconds 1500
 # clear stale per-pid logs
 Get-ChildItem $Game -Filter "mss32_*.log" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
+# Host-ready handshake: the joiner sits in the lobby and does NOT request start until
+# this file appears. We create it only once the HOST has FULLY entered the strategic
+# map (its "nav script complete"), so the host always serves a consistent scenario
+# snapshot. This enforces the correct entry order (host fully in, THEN joiner) instead
+# of letting the joiner pull a half-loaded snapshot.
+$readyFlag = "$Game\host-ready.flag"
+Remove-Item $readyFlag -Force -ErrorAction SilentlyContinue
+
 function Launch([string]$Role) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $exe
@@ -44,6 +52,9 @@ function Launch([string]$Role) {
     $psi.EnvironmentVariables["D2TESTDRV_UI"] = "1"
     $psi.EnvironmentVariables["D2TESTDRV_ROLE"] = $Role
     $psi.EnvironmentVariables["D2TESTDRV_SCENARIO_INDEX"] = "$Scenario"
+    # The joiner waits for this file before requesting start (host-ready handshake);
+    # harmless for the host, whose script has no WaitHostReady step.
+    $psi.EnvironmentVariables["D2TESTDRV_HOST_READY_FILE"] = $readyFlag
     if ($Net) { $psi.EnvironmentVariables["D2TESTDRV_NET"] = "1" }
     return [System.Diagnostics.Process]::Start($psi)
 }
@@ -72,8 +83,14 @@ $joinLog = "$Game\mss32_$($j.Id).log"
 Write-Host "[pair] joiner pid=$($j.Id) log=$joinLog"
 
 $t0 = Get-Date
-$hostOk = $false; $joinOk = $false
+$hostOk = $false; $joinOk = $false; $released = $false
 while ((((Get-Date) - $t0).TotalSeconds) -lt $TimeoutSec) {
+    # Release the joiner only once the host has FULLY entered strategic (nav complete).
+    if (-not $released -and (LogReady $hostLog "nav script complete")) {
+        New-Item -ItemType File -Path $readyFlag -Force | Out-Null
+        $released = $true
+        Write-Host "[pair] HOST fully entered strategic (nav complete) -> releasing JOINER" -ForegroundColor Green
+    }
     if (-not $hostOk -and (LogReady $hostLog "DLG_STRATEGIC")) { $hostOk = $true; Write-Host "[pair] HOST reached strategic map" -ForegroundColor Green }
     if (-not $joinOk -and (LogReady $joinLog "DLG_STRATEGIC|DLG_ISO_PAL")) { $joinOk = $true; Write-Host "[pair] JOINER reached strategic map" -ForegroundColor Green }
     if ($hostOk -and $joinOk) { break }
