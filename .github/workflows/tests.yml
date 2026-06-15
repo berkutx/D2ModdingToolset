@@ -121,6 +121,8 @@ jobs:
     name: Two-instance MP -> strategic map
     needs: prep-game
     runs-on: windows-2025-vs2026
+    env:
+      GALLIUM_DRIVER: llvmpipe # Mesa software GL (deployed below) selects llvmpipe
     defaults:
       run:
         shell: pwsh
@@ -137,29 +139,49 @@ jobs:
           key: slasher-min-v1
           enableCrossOsArchive: true
           fail-on-cache-miss: true
-      - name: Unpack game + deploy DebugTest mss32.dll
+      - name: Unpack game + deploy DebugTest mss32.dll + force OpenGL/ColdCPU
         run: |
           New-Item -ItemType Directory -Force -Path game | Out-Null
           tar -xzf game.tar.gz -C game
           $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
           Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
-          # Force the DisciplesGL wrapper (C4dll-R.dll) to render via Windows GDI
-          # (software) instead of OpenGL: a hosted runner has no GPU, so the default
-          # auto/OpenGL renderer can't init and the game's UI thread stalls in the
-          # wrapper with no message pump (no nav, no RX). GDI needs no GPU.
+          # DisciplesGL renders via OpenGL (Renderer=3) on Mesa llvmpipe (deployed next)
+          # + ColdCPU=1 (its frame limiter: sleeps between frames so the UI thread's
+          # screen loop yields and the per-frame auto-nav tick + the PostMessage RX both
+          # get CPU). A hosted runner has no GPU -> software GL; the GDI path monopolised
+          # the thread and starved everything.
           $ini = Join-Path $dir 'Disciple.ini'
           if (Test-Path $ini) {
             $c = Get-Content $ini -Raw
-            if ($c -match '(?m)^Renderer=')      { $c = $c -replace '(?m)^Renderer=\d+','Renderer=4' }
-            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nRenderer=4" }
-            else                                  { $c += "`r`n[Wrapper]`r`nRenderer=4`r`n" }
+            if ($c -match '(?m)^Renderer=')      { $c = $c -replace '(?m)^Renderer=\d+','Renderer=3' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nRenderer=3" }
+            else                                  { $c += "`r`n[Wrapper]`r`nRenderer=3`r`n" }
+            if ($c -match '(?m)^ColdCPU=')       { $c = $c -replace '(?m)^ColdCPU=\d+','ColdCPU=1' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nColdCPU=1" }
             if ($c -match '(?m)^ImageVSync=')     { $c = $c -replace '(?m)^ImageVSync=\d+','ImageVSync=0' }
+            if ($c -match '(?m)^HD=')            { $c = $c -replace '(?m)^HD=\d+','HD=0' }
             Set-Content -Path $ini -Value $c -Encoding ASCII -NoNewline
-            Write-Host "DisciplesGL renderer forced to GDI (Renderer=4, ImageVSync=0)"
+            Write-Host "DisciplesGL: $((Get-Content $ini | Select-String '^Renderer=|^ColdCPU=|^ImageVSync=|^HD=') -join ' | ')"
           } else {
-            Write-Host "::warning::Disciple.ini not found - cannot force GDI renderer"
+            Write-Host "::warning::Disciple.ini not found"
           }
           "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Deploy Mesa3D software OpenGL (llvmpipe) next to the game
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $dir = $env:GAME_DIR
+          $rel = gh api repos/pal1000/mesa-dist-win/releases/latest | ConvertFrom-Json
+          $asset = $rel.assets | Where-Object { $_.name -match 'release-msvc\.7z$' } | Select-Object -First 1
+          Write-Host "mesa asset: $($asset.name)"
+          $z = Join-Path $env:TEMP 'mesa.7z'
+          Invoke-WebRequest $asset.browser_download_url -OutFile $z -UseBasicParsing
+          $ex = Join-Path $env:TEMP 'mesa'
+          $sevenzip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
+          & $sevenzip x $z "-o$ex" -y "x86" | Out-Null
+          Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
+          Write-Host "Mesa opengl32.dll = $((Get-Item (Join-Path $dir 'opengl32.dll')).Length) bytes"
       - name: Host + joiner -> both reach the strategic map
         run: ./tools/test/pair-mp.ps1 -Game "$env:GAME_DIR" -TimeoutSec 150 -Kill
 
