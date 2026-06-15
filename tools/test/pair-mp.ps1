@@ -23,7 +23,9 @@ param(
     [int]$Scenario = 0,
     [switch]$Net,
     [switch]$Kill,
-    [string]$Game = "C:\GOG Games\slasher_mns_2_4"
+    [string]$Game = "C:\GOG Games\slasher_mns_2_4",
+    [string]$ProcDump = "",   # diagnostic: path to (32-bit) procdump.exe to attach for a crash dump
+    [string]$DumpDir = ""      # diagnostic: where attached procdump writes <role>_<pid>.dmp
 )
 
 . "$PSScriptRoot\_show-window.ps1"
@@ -64,10 +66,23 @@ function LogReady([string]$log, [string]$pattern) {
     return [bool](Select-String -Path $log -Pattern $pattern -ErrorAction SilentlyContinue -Quiet)
 }
 
+# Diagnostic: attach procdump as a debugger so a hard crash (entering the strategic map
+# on software Mesa) is captured with a full dump. With a debugger attached the game's
+# own unhandled-exception filter is bypassed, so the access violation reaches procdump.
+function AttachProcDump([System.Diagnostics.Process]$Proc, [string]$Role) {
+    if (-not $ProcDump -or -not $DumpDir) { return }
+    New-Item -ItemType Directory -Force -Path $DumpDir | Out-Null
+    $out = Join-Path $DumpDir "$Role`_$($Proc.Id).dmp"
+    Start-Process -FilePath $ProcDump -ArgumentList @('-accepteula', '-e', '-ma', "$($Proc.Id)", $out) -WindowStyle Hidden
+    Write-Host "[pair] procdump -e attached to $Role pid=$($Proc.Id) -> $out"
+    Start-Sleep -Milliseconds 1000  # let procdump attach before the game gets far
+}
+
 Write-Host "[pair] launching HOST..." -ForegroundColor Cyan
 $h = Launch "host"
 $hostLog = "$Game\mss32_$($h.Id).log"
 Write-Host "[pair] host pid=$($h.Id) log=$hostLog"
+AttachProcDump $h "host"
 
 # Wait until the host has actually created the DPlay session before the joiner enumerates.
 $t0 = Get-Date
@@ -81,6 +96,7 @@ Write-Host "[pair] launching JOINER..." -ForegroundColor Cyan
 $j = Launch "join"
 $joinLog = "$Game\mss32_$($j.Id).log"
 Write-Host "[pair] joiner pid=$($j.Id) log=$joinLog"
+AttachProcDump $j "join"
 
 $t0 = Get-Date
 $hostOk = $false; $joinOk = $false; $released = $false

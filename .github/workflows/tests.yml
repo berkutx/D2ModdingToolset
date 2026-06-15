@@ -209,8 +209,17 @@ jobs:
           & $sevenzip x $z "-o$ex" -y "x86" | Out-Null
           Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
           Write-Host "Mesa opengl32.dll = $((Get-Item (Join-Path $dir 'opengl32.dll')).Length) bytes"
+      - name: Fetch procdump (diagnostic crash capture)
+        run: |
+          $pd = Join-Path $env:GITHUB_WORKSPACE 'procdump.exe'
+          # 32-bit procdump -> captures the x86 thread context of the WOW64 game
+          Invoke-WebRequest 'https://live.sysinternals.com/procdump.exe' -OutFile $pd -UseBasicParsing
+          $dumps = Join-Path $env:GITHUB_WORKSPACE 'dumps'
+          New-Item -ItemType Directory -Force -Path $dumps | Out-Null
+          "PROCDUMP=$pd"   | Out-File -FilePath $env:GITHUB_ENV -Append
+          "DUMPDIR=$dumps" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Host + joiner -> both reach the strategic map
-        run: ./tools/test/pair-mp.ps1 -Game "$env:GAME_DIR" -TimeoutSec 240 -Kill
+        run: ./tools/test/pair-mp.ps1 -Game "$env:GAME_DIR" -TimeoutSec 240 -Kill -ProcDump "$env:PROCDUMP" -DumpDir "$env:DUMPDIR"
 
       - name: Dump per-instance logs on failure
         if: failure()
@@ -227,6 +236,34 @@ jobs:
           name: mp-pair-logs
           path: ${{ env.GAME_DIR }}/mss32_*.log
           if-no-files-found: warn
+      - name: Analyze crash dumps (cdb stacks)
+        if: failure()
+        run: |
+          $dumps = Get-ChildItem "$env:DUMPDIR" -Filter *.dmp -ErrorAction SilentlyContinue
+          if (-not $dumps) { Write-Host "no crash dumps captured (green, or a hang rather than a crash)"; exit 0 }
+          $cdb = @(
+            "C:\Program Files (x86)\Windows Kits\10\Debuggers\x86\cdb.exe",
+            "C:\Program Files\Windows Kits\10\Debuggers\x86\cdb.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          Write-Host "cdb: $cdb"
+          $sym = "srv*$env:TEMP\sym*https://msdl.microsoft.com/download/symbols"
+          foreach ($d in $dumps) {
+            Write-Host "===================== $($d.Name) ====================="
+            if ($cdb) {
+              $txt = Join-Path $env:DUMPDIR "$($d.BaseName).stacks.txt"
+              & $cdb -z $d.FullName -y $sym -c ".ecxr; r; kb 40; lmf; q" 2>&1 | Out-File $txt
+              Get-Content $txt -Tail 55 | ForEach-Object { Write-Host $_ }
+            } else { Write-Host "x86 cdb not found" }
+          }
+      - name: Upload crash dumps + stacks
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mp-pair-crashdumps
+          path: |
+            ${{ env.DUMPDIR }}/*.dmp
+            ${{ env.DUMPDIR }}/*.stacks.txt
+          if-no-files-found: ignore
 
   # Future tests go here as more jobs — each: download the DLL artifact, restore the
   # game cache, deploy, run a script.
