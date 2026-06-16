@@ -149,13 +149,29 @@ function Launch([string]$Role) {
 
 # ---- the test (dispatcher drives both instances) --------------------------
 function Run-Pairing {
-    # HOST: menu -> Multiplayer -> TCP/IP -> Host -> scenario -> lobby (creates the session).
+    # Both instances are already launched (joiner ~10s after host) and boot in PARALLEL — no
+    # waiting for the host to finish before the joiner even starts. The ONLY ordering constraint
+    # is that the joiner must not SEARCH/JOIN a TCP/IP session until the host's lobby exists
+    # (its EnumSessions would otherwise find nothing); so the joiner navigates its menu up to
+    # DLG_LOAD_NEW_MULTI and STAGES there, then joins the instant the host is in its lobby.
     if (-not (WaitDlg "host" "DLG_MAIN_MENU" 90)) { return $false }
+    if (-not (WaitDlg "join" "DLG_MAIN_MENU" 90)) { return $false }
+
+    # HOST menu -> DLG_LOAD_NEW_MULTI.
     if (-not (StepTo "host" "DLG_MAIN_MENU" "BTN_MULTI" "DLG_PROTOCOL" 45)) { return $false }
     SelectSettle "host" "DLG_PROTOCOL" "TLBOX_PROTOCOL" 2  # 2 = TCP/IP
     if (-not (StepTo "host" "DLG_PROTOCOL" "BTN_CONTINUE" "DLG_LOAD_NEW_MULTI" 45)) { return $false }
-    # BTN_HOST opens the skirmish setup (DLG_CHOOSE_SKIRMISH co-present inside DLG_HOST, so the
-    # "current" dialog there is not DLG_CHOOSE_SKIRMISH); drive by name until we reach the lobby.
+
+    # JOINER menu -> DLG_LOAD_NEW_MULTI, then STAGE (do NOT press BTN_JOIN yet — no session to
+    # find until the host creates one). It booted in parallel, so this is quick.
+    if (-not (StepTo "join" "DLG_MAIN_MENU" "BTN_MULTI" "DLG_PROTOCOL" 45)) { return $false }
+    SelectSettle "join" "DLG_PROTOCOL" "TLBOX_PROTOCOL" 2
+    if (-not (StepTo "join" "DLG_PROTOCOL" "BTN_CONTINUE" "DLG_LOAD_NEW_MULTI" 45)) { return $false }
+    Write-Host "[disp] JOINER staged at DLG_LOAD_NEW_MULTI (waiting for the host's session)" -ForegroundColor DarkGray
+
+    # HOST: DLG_LOAD_NEW_MULTI -> skirmish -> DLG_LOBBY (creates the session). BTN_HOST opens the
+    # skirmish setup (DLG_CHOOSE_SKIRMISH co-present inside DLG_HOST, so the "current" dialog
+    # there is not DLG_CHOOSE_SKIRMISH); drive by name until we reach the lobby.
     $t0 = Get-Date; $hostLobby = $false; $lastFire = (Get-Date).AddSeconds(-10)
     while ((((Get-Date) - $t0).TotalSeconds) -lt 45) {
         $d = Dlg "host"
@@ -170,13 +186,7 @@ function Run-Pairing {
     if (-not $hostLobby) { Write-Host "[disp] host STUCK at '$(Dlg "host")' (wanted DLG_LOBBY)" -ForegroundColor Red; return $false }
     Write-Host "[disp] HOST in lobby (session created)" -ForegroundColor Green
 
-    # JOINER: launch now that the session exists; menu -> Multiplayer -> TCP/IP -> Join -> lobby.
-    $script:j = Launch "join"; $script:joinLog = "$Game\mss32_$($script:j.Id).log"
-    Write-Host "[disp] launched JOINER pid=$($script:j.Id)"
-    if (-not (WaitDlg "join" "DLG_MAIN_MENU" 90)) { return $false }
-    if (-not (StepTo "join" "DLG_MAIN_MENU" "BTN_MULTI" "DLG_PROTOCOL" 45)) { return $false }
-    SelectSettle "join" "DLG_PROTOCOL" "TLBOX_PROTOCOL" 2
-    if (-not (StepTo "join" "DLG_PROTOCOL" "BTN_CONTINUE" "DLG_LOAD_NEW_MULTI" 45)) { return $false }
+    # GATE released: the host's session now exists, so the staged joiner searches + joins it.
     if (-not (StepTo "join" "DLG_LOAD_NEW_MULTI" "BTN_JOIN" "DLG_SESSION" 45)) { return $false }
     Start-Sleep -Seconds 3 # session enumeration settle
     if (-not (StepTo "join" "DLG_SESSION" "BTN_JOIN_GAME" "DLG_LOBBY" 45)) { return $false }
@@ -229,6 +239,12 @@ try {
     Write-Host "[disp] launching HOST..." -ForegroundColor Cyan
     $h = Launch "host"; $hostLog = "$Game\mss32_$($h.Id).log"
     Write-Host "[disp] host pid=$($h.Id)"
+    # Joiner starts 10s later: both boot in PARALLEL — don't wait for the host to create the
+    # session first. Run-Pairing gates only the joiner's TCP/IP search/join on the host's lobby.
+    Start-Sleep -Seconds 10
+    Write-Host "[disp] launching JOINER (10s after host)..." -ForegroundColor Cyan
+    $j = Launch "join"; $joinLog = "$Game\mss32_$($j.Id).log"
+    Write-Host "[disp] join pid=$($j.Id)"
 
     $ok = Run-Pairing
 
