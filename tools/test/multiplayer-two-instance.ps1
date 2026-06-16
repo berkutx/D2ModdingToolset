@@ -25,6 +25,7 @@ param(
 )
 
 . "$PSScriptRoot\_show-window.ps1"
+. "$PSScriptRoot\_capture.ps1"
 $exe = "$Game\Discipl2.exe"
 
 # Clean slate without a blanket kill: only our tagged [HOST]/[CLIENT] windows (never a foreign
@@ -37,6 +38,7 @@ Start-Sleep -Milliseconds 1200
 Get-ChildItem $Game -Filter "mss32_*.log" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
 # ---- relay -----------------------------------------------------------------
+if ($DumpDir) { New-Item -ItemType Directory -Force -Path $DumpDir | Out-Null }
 $relayLog = if ($DumpDir) { Join-Path $DumpDir "relay.out.log" } else { Join-Path ([System.IO.Path]::GetTempPath()) "d2relay.out.log" }
 Write-Host "[disp] starting relay: node $RelayJs" -ForegroundColor Cyan
 $relay = Start-Process -FilePath "node" -ArgumentList "`"$RelayJs`"" -PassThru `
@@ -102,12 +104,15 @@ function ClickAndLeave([string]$role, [string]$dlg, [string]$btn, [int]$timeoutS
     }
     return $false
 }
+# First-turn popups that dismiss on a click, mapped to their real button. NOTE: DLG_GETINFO_BOX is
+# NOT here — it's a dead-end overlay whose only button (BTN_CLOSE) does NOT dismiss it; you bypass it
+# by acting on the co-present dialog underneath (see -EndHostTurn, which ends the turn through it).
 $Dismiss = @{
     'DLG_SCENARIO_BRIEFING' = 'BTN_CONTINUE'; 'DLG_BEGIN_TURN' = 'BTN_OK'
-    'DLG_GETINFO_BOX' = 'BTN_CLOSE'; 'DLG_MESSAGE_BOX' = 'BTN_OK'; 'DLG_EVENT_POPUP' = 'BTN_RIGHTSIDE'
+    'DLG_MESSAGE_BOX' = 'BTN_OK'; 'DLG_EVENT_POPUP' = 'BTN_RIGHTSIDE'
 }
-# Dismiss first-turn popups until the role reaches the map (relay-latched reachedStrategic). Paced:
-# don't re-click the same popup faster than ~2.5s — back-to-back clicks hang the begin-turn reconcile.
+# Dismiss first-turn popups until the role reaches the map (relay-latched reachedStrategic). Paced
+# (~2.5s/popup): the custom menus tick slowly, so rapid re-clicks just coalesce and waste time.
 function DriveToStrategic([string]$role, [int]$timeoutSec) {
     $t0 = Get-Date; $lastDlg = ''; $lastFire = (Get-Date).AddSeconds(-10)
     while ((((Get-Date) - $t0).TotalSeconds) -lt $timeoutSec) {
@@ -115,6 +120,7 @@ function DriveToStrategic([string]$role, [int]$timeoutSec) {
         if ($r -and $r.reachedStrategic) { return $true }
         $d = if ($r) { $r.dialog } else { $null }
         if ($d -and $Dismiss.ContainsKey($d) -and ($d -ne $lastDlg -or ((Get-Date) - $lastFire).TotalSeconds -ge 2.5)) {
+            if ($d -ne $lastDlg) { Write-Host "[disp]   $role dialog appeared: $d -> click $($Dismiss[$d])" }
             InvokeBtn $role $d $Dismiss[$d]; $lastDlg = $d; $lastFire = Get-Date
         }
         Start-Sleep -Milliseconds 700
@@ -187,31 +193,41 @@ function Run-Pairing {
     Write-Host "[disp] JOINER reached strategic map" -ForegroundColor Green
 
     if ($EndHostTurn) {
-        # Sequential turns: drive the host past its own new day (DLG_BEGIN_TURN) and end the turn
-        # (BTN_END_TURN on the co-present DLG_STRATEGIC side panel) so it passes to the joiner.
-        # Paced SINGLE clicks per tick (not the back-to-back dismissal that hangs the begin-turn
-        # reconciliation). The new-day dialog is relay-latched as sawBeginTurn. Pass criteria
-        # (your bar): the joiner holds the strategic map, a new day was observed (turn machinery
-        # ran), and neither instance crashed (states still readable). A new day for the JOINER is
-        # the best outcome (the turn fully passed), reported separately.
-        Write-Host "[disp] HOST skips its turn -> expect a new day (begin-turn)" -ForegroundColor Cyan
-        $t0 = Get-Date
-        while ((((Get-Date) - $t0).TotalSeconds) -lt 120) {
-            if ((State).join.sawBeginTurn) { break }   # turn fully passed to the joiner
-            switch (Dlg "host") {
-                "DLG_BEGIN_TURN" { InvokeBtn "host" "DLG_BEGIN_TURN" "BTN_OK" }
-                "DLG_MESSAGE_BOX" { InvokeBtn "host" "DLG_MESSAGE_BOX" "BTN_OK" }
-                default { InvokeBtn "host" "DLG_STRATEGIC" "BTN_END_TURN" }
+        # First-turn popups for both players are auto-clicked on their real button ($Dismiss), each
+        # appearance + click logged. The host's begin-turn (BTN_OK) drops it onto the dead-end
+        # DLG_GETINFO_BOX (its only button, BTN_CLOSE, does NOT dismiss it) — so once the host has seen
+        # its new day, end the turn with BTN_END_TURN on DLG_STRATEGIC, which resolves BY NAME and fires
+        # straight through the GETINFO overlay (or from the bare map). That passes the turn: relay.js
+        # latches the JOINER's OWN new-day DLG_BEGIN_TURN as join.sawBeginTurn. Success = the joiner
+        # reached its own new day, still holds the map, and neither instance crashed.
+        Write-Host "[disp] HOST skips its turn -> clear first-turn popups (BOTH roles), end host turn" -ForegroundColor Cyan
+        $HostEndFrom = 'DLG_GETINFO_BOX', 'DLG_STRATEGIC', 'DLG_ISO_PAL'   # host: new day seen -> end turn from here
+        $seen = @{ host = ''; join = '' }
+        $last = @{ host = (Get-Date).AddSeconds(-10); join = (Get-Date).AddSeconds(-10) }
+        $endLogged = $false; $t0 = Get-Date
+        while ((((Get-Date) - $t0).TotalSeconds) -lt 150) {
+            $s = State
+            if ($s.join.sawBeginTurn) { break }   # the joiner reached its OWN new day -> turn passed
+            foreach ($role in 'host', 'join') {
+                $d = if ($s.$role) { $s.$role.dialog } else { $null }
+                if (-not $d -or ((Get-Date) - $last[$role]).TotalSeconds -lt 2.0) { continue }   # pace ~2s/click
+                if ($role -eq 'host' -and $s.host.sawBeginTurn -and ($HostEndFrom -contains $d)) {
+                    if (-not $endLogged) { Write-Host "[disp]   host new day cleared -> end turn (DLG_STRATEGIC::BTN_END_TURN, through $d)"; $endLogged = $true }
+                    InvokeBtn 'host' 'DLG_STRATEGIC' 'BTN_END_TURN'; $last['host'] = Get-Date
+                } elseif ($Dismiss.ContainsKey($d)) {
+                    if ($seen[$role] -ne $d) { Write-Host "[disp]   $role dialog appeared: $d -> click $($Dismiss[$d])"; $seen[$role] = $d }
+                    InvokeBtn $role $d $Dismiss[$d]; $last[$role] = Get-Date
+                }
             }
-            Start-Sleep -Seconds 4
+            Start-Sleep -Milliseconds 600
         }
         $s = State
-        if (-not ($s.host.sawBeginTurn -or $s.join.sawBeginTurn)) {
-            Write-Host "[disp] no new-day dialog observed (turn machinery did not run)" -ForegroundColor Red; return $false
-        }
+        Write-Host ("[disp] end-turn: host.sawBeginTurn={0} join.sawBeginTurn={1} | host at '{2}', join at '{3}'" -f $s.host.sawBeginTurn, $s.join.sawBeginTurn, (Dlg 'host'), (Dlg 'join')) -ForegroundColor Cyan
+        if ($DumpDir) { CaptureWindow $h "host"; if ($j) { CaptureWindow $j "join" } }
+        if (-not $s.join.sawBeginTurn) { Write-Host "[disp] JOINER never reached its new day (turn did not fully pass)" -ForegroundColor Red; return $false }
         if (-not $s.join.reachedStrategic) { Write-Host "[disp] JOINER lost the strategic map" -ForegroundColor Red; return $false }
         if (-not ($s.host.connected -and $s.join.connected)) { Write-Host "[disp] an instance dropped (crash?)" -ForegroundColor Red; return $false }
-        Write-Host ("[disp] new day observed (host={0} joiner={1}); joiner on the map; both alive + readable" -f $s.host.sawBeginTurn, $s.join.sawBeginTurn) -ForegroundColor Green
+        Write-Host "[disp] turn passed: host cleared its new day + ended turn; JOINER reached + dismissed its OWN new day, still on the map" -ForegroundColor Green
     }
     return $true
 }
@@ -226,17 +242,13 @@ function SnapshotInstance([System.Diagnostics.Process]$Proc, [string]$Role) {
 }
 function CaptureWindow([System.Diagnostics.Process]$Proc, [string]$Role) {
     if (-not $DumpDir -or -not $Proc -or $Proc.HasExited) { return }
-    try { Show-GameWindow -Proc $Proc } catch {}
-    Start-Sleep -Milliseconds 900
+    New-Item -ItemType Directory -Force -Path $DumpDir | Out-Null
+    try { Show-GameWindow -Proc $Proc } catch {}   # un-occlude so the GL wrapper repaints before grabbing
+    Start-Sleep -Milliseconds 1000
+    $png = Join-Path $DumpDir "$Role`_screen.png"
     try {
-        Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-        $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-        $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
-        $g = [System.Drawing.Graphics]::FromImage($bmp)
-        $g.CopyFromScreen($b.X, $b.Y, 0, 0, $b.Size)
-        $png = Join-Path $DumpDir "$Role`_screen.png"
-        $bmp.Save($png, [System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $bmp.Dispose()
-        Write-Host "[disp] $Role screenshot -> $png"
+        if (Capture-GameWindow -Proc $Proc -Path $png) { Write-Host "[disp] $Role screenshot -> $png" }
+        else { Write-Host "[disp] $Role screenshot skipped (no window)" }
     } catch { Write-Host "[disp] $Role screenshot failed: $($_.Exception.Message)" }
 }
 

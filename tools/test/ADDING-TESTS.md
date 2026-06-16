@@ -48,6 +48,35 @@ The agent resolves a widget **by dialog name**, so a click on a co-present (non-
 - Assert the dialog you expect with `Dlg` / `WaitDlg`. Reaching a dialog via `StepTo` already **proves the agent executed the clicks**.
 - Form *values* (selection / spin / text) are not exposed in `/api/state`; assert instead that the agent **stayed responsive** (still on the dialog, or a clean follow-up transition). Do **not** grep logs for state or ordering — logs are for human debugging only.
 
+## Verify a dialog appeared (and was auto-dismissed)
+
+First-turn popups stack for **both** players when a turn begins — scenario briefing, the new-day
+income `DLG_BEGIN_TURN`, an info box, message boxes — and must be clicked through. Auto-click each
+on **its own button** and **log every appearance + click** (do this on any test that reaches the map):
+
+```powershell
+$Dismiss = @{ 'DLG_SCENARIO_BRIEFING'='BTN_CONTINUE'; 'DLG_BEGIN_TURN'='BTN_OK'; 'DLG_MESSAGE_BOX'='BTN_OK' }
+$d = Dlg $role
+if ($Dismiss.ContainsKey($d)) { Write-Host "$role dialog appeared: $d -> click $($Dismiss[$d])"; InvokeBtn $role $d $Dismiss[$d] }
+```
+
+Two ways to assert a dialog actually appeared:
+
+- **Poll** `/api/state` for its name (`Dlg`/`WaitDlg`) — for a dialog that stays up.
+- **Latch it in the relay** — for a *flickering* dialog a poll can miss. `relay.js` sets a sticky
+  per-role flag the first time it sees the name (e.g. `sawBeginTurn` flips `true` on the first
+  `DLG_BEGIN_TURN` and stays true); read `State.<role>.sawBeginTurn`. Add a latch for any dialog you
+  must not miss the same way.
+
+"Appeared **and dismissed**" = the latch is set **and** a later poll shows it gone / a follow-up
+transition. Find each dialog's real button in `/api/state` and pace clicks (~2 s) — don't fire the
+same popup back-to-back. **Dead-end overlays:** some dialogs don't dismiss on their own button —
+`DLG_GETINFO_BOX`'s only button (`BTN_CLOSE`) leaves it up. You don't dismiss those; you act on the
+**co-present dialog underneath** by name (e.g. `-EndHostTurn` ends the turn with
+`InvokeBtn host DLG_STRATEGIC BTN_END_TURN` straight through the GETINFO overlay — by-name
+resolution makes it a no-op only if that dialog is truly absent). **Caveat:** a `CMessageBox` with
+*no* bound buttons is not reported (relay-invisible — see gotchas), so it can't be latched by name.
+
 ## Add it to CI (optional)
 
 Add a job to `.github/workflows/tests.yml` mirroring an existing one (download the `mss32-debugtest` DLL, restore the game cache, deploy, run your `.ps1`). A change to **only** `tools/**` reuses the last prebuilt DLL via `tests-only.yml` — no rebuild.
@@ -117,6 +146,35 @@ Stop-Process -Id $h.Id,$relay.Id -Force
 
 - Проверяй ожидаемый диалог через `Dlg`/`WaitDlg`. Дойти до диалога через `StepTo` уже **доказывает, что агент исполнил клики**.
 - *Значения* формы (выбор/спин/текст) в `/api/state` не отдаются; вместо этого проверяй, что агент **остался жив** (тот же диалог / чистый следующий переход). Логи для состояний/очерёдности **не** скрести — логи только для человека.
+
+### Проверить, что диалог появился (и был прокликан)
+
+В начале хода у **обоих** игроков всплывают диалоги — брифинг, новый день `DLG_BEGIN_TURN` (доход),
+инфо-бокс, месседж-боксы — и их надо прокликать. Жми каждый по **своей** кнопке и **логируй каждое
+появление + клик** (делай так в любом тесте, доходящем до карты):
+
+```powershell
+$Dismiss = @{ 'DLG_SCENARIO_BRIEFING'='BTN_CONTINUE'; 'DLG_BEGIN_TURN'='BTN_OK'; 'DLG_MESSAGE_BOX'='BTN_OK' }
+$d = Dlg $role
+if ($Dismiss.ContainsKey($d)) { Write-Host "$role dialog appeared: $d -> click $($Dismiss[$d])"; InvokeBtn $role $d $Dismiss[$d] }
+```
+
+Два способа убедиться, что диалог реально появился:
+
+- **Опрос** `/api/state` по имени (`Dlg`/`WaitDlg`) — для диалога, который висит.
+- **Защёлка в рилее** — для *мелькающего* диалога, который опрос может пропустить. `relay.js`
+  ставит липкий флаг на роль при первом появлении имени (например, `sawBeginTurn` становится `true`
+  на первом `DLG_BEGIN_TURN` и держится); читай `State.<role>.sawBeginTurn`. Любой важный диалог
+  защёлкивай так же.
+
+«Появился **и прокликан**» = защёлка взведена **и** дальнейший опрос показывает, что его нет /
+случился переход. Настоящую кнопку смотри в `/api/state`, и пейси клики (~2 с) — не сыпь по одному
+попапу подряд. **Тупиковые оверлеи:** некоторые диалоги по своей кнопке НЕ закрываются —
+у `DLG_GETINFO_BOX` единственная кнопка (`BTN_CLOSE`) его не убирает. Такие не закрывают, а
+действуют по имени на **co-present диалог под ним** (например, `-EndHostTurn` завершает ход через
+`InvokeBtn host DLG_STRATEGIC BTN_END_TURN` прямо сквозь оверлей GETINFO — резолв по имени делает
+это no-op, только если того диалога реально нет). **Грабли:** `CMessageBox` без забинженных кнопок
+не репортится (через рилей не виден — см. грабли), по имени его не защёлкнуть.
 
 ### Подключить к CI (опционально)
 
