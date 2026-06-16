@@ -49,6 +49,8 @@ enum class Op : uint16_t
     PacketTraceRx = 0x0203,  // RX
     InvokeButton = 0x0300,   // <- dispatcher: click a button (handled by the autonav executor)
     SetSelection = 0x0301,   // <- dispatcher: set a listbox selection (autonav executor)
+    SetSpin = 0x0302,        // <- dispatcher: set a spin-button option (autonav executor)
+    SetEditText = 0x0303,    // <- dispatcher: set an edit-box's text (autonav executor)
     Dialog = 0x0410,         // -> relay: live UI state ("dialogName\nbtn1,btn2,...")
     Log = 0xFF00,
 };

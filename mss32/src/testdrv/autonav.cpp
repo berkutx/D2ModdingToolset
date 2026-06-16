@@ -19,8 +19,10 @@
 #include "testdrv/uistatereporter.h"
 #include "button.h"
 #include "dialoginterf.h"
+#include "editboxinterf.h"
 #include "listbox.h"
 #include "smartptr.h"
+#include "spinbuttoninterf.h"
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -151,15 +153,52 @@ bool setListSelection(const char* dlgName, const char* lbName, int index)
     return ok;
 }
 
+bool setSpinOption(const char* dlgName, const char* spinName, int option)
+{
+    game::CDialogInterf* dlg = uistatereporter::findDialog(dlgName);
+    if (!dlg)
+        return false;
+    bool ok = false;
+    __try {
+        game::CSpinButtonInterf* spin = game::CDialogInterfApi::get().findSpinButton(dlg, spinName);
+        if (spin) {
+            game::CSpinButtonInterfApi::get().setSelectedOption(spin, option);
+            spdlog::info("[testdrv] nav spin {}::{} = {:d}", dlgName, spinName, option);
+            ok = true;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return ok;
+}
+
+bool setEditText(const char* dlgName, const char* editName, const char* text)
+{
+    game::CDialogInterf* dlg = uistatereporter::findDialog(dlgName);
+    if (!dlg)
+        return false;
+    bool ok = false;
+    __try {
+        game::CEditBoxInterf* eb = game::CDialogInterfApi::get().findEditBox(dlg, editName);
+        if (eb) {
+            game::CEditBoxInterfApi::get().setString(eb, text);
+            spdlog::info("[testdrv] nav edit {}::{} = '{}'", dlgName, editName, text);
+            ok = true;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return ok;
+}
+
 // --- dispatcher-driven remote commands ---------------------------------------
 // Commands arrive on the BRIDGE thread (onRemoteCommand only queues); the per-frame tick
 // drains them on the UI thread, where invoking a functor is safe.
 struct RemoteCmd
 {
-    int type; // 0 = invoke button, 1 = set listbox selection
+    int type; // 0 = invoke button, 1 = listbox selection, 2 = spin option, 3 = edit-box text
     char dlg[48];
     char widget[48];
-    int param;
+    int param;       // index (listbox / spin)
+    char value[64];  // text (edit box)
 };
 std::mutex g_remoteMutex; // guards g_remoteCmds, g_inFlight, g_hasInFlight
 std::deque<RemoteCmd> g_remoteCmds;
@@ -187,19 +226,26 @@ void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size
         if (!readStr(cmd.dlg, sizeof(cmd.dlg)) || !readStr(cmd.widget, sizeof(cmd.widget)))
             return;
         cmd.type = 0;
-    } else if (op == 0x0301) { // SetSelection: u16 dlgLen|dlg | u16 lbLen|lb | u32 index
+    } else if (op == 0x0301 || op == 0x0302) {
+        // SetSelection (listbox) / SetSpin (spin button): u16 dlg | u16 widget | u32 index
         if (!readStr(cmd.dlg, sizeof(cmd.dlg)) || !readStr(cmd.widget, sizeof(cmd.widget)))
             return;
         if (off + 4 > size)
             return;
         cmd.param = *reinterpret_cast<const int*>(p + off);
-        cmd.type = 1;
+        cmd.type = (op == 0x0301) ? 1 : 2;
+    } else if (op == 0x0303) { // SetEditText: u16 dlg | u16 edit | u16 text
+        if (!readStr(cmd.dlg, sizeof(cmd.dlg)) || !readStr(cmd.widget, sizeof(cmd.widget))
+            || !readStr(cmd.value, sizeof(cmd.value)))
+            return;
+        cmd.type = 3;
     } else {
         return; // not a command we own
     }
     auto sameCmd = [&](const RemoteCmd& q) {
         return q.type == cmd.type && q.param == cmd.param
-               && lstrcmpA(q.dlg, cmd.dlg) == 0 && lstrcmpA(q.widget, cmd.widget) == 0;
+               && lstrcmpA(q.dlg, cmd.dlg) == 0 && lstrcmpA(q.widget, cmd.widget) == 0
+               && lstrcmpA(q.value, cmd.value) == 0;
     };
     std::lock_guard<std::mutex> lk(g_remoteMutex);
     // Coalesce against the queue AND the in-flight command: while the UI thread is blocked
@@ -230,8 +276,12 @@ void drainRemoteCommands()
         }
         if (cmd.type == 0)
             invokeButton(cmd.dlg, cmd.widget);
-        else
+        else if (cmd.type == 1)
             setListSelection(cmd.dlg, cmd.widget, cmd.param);
+        else if (cmd.type == 2)
+            setSpinOption(cmd.dlg, cmd.widget, cmd.param);
+        else
+            setEditText(cmd.dlg, cmd.widget, cmd.value);
     }
 }
 

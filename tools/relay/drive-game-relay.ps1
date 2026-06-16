@@ -81,5 +81,31 @@ function Set-GameSelection {
     Invoke-RestMethod -Method Post -Uri $uri
 }
 
+function Set-GameSpin {
+    # Set a spin-button option (0-based) on the agent of -Role (e.g. map size in the generator).
+    param(
+        [Parameter(Mandatory)][string]$Role,
+        [Parameter(Mandatory)][string]$Dialog,
+        [Parameter(Mandatory)][string]$Spin,
+        [Parameter(Mandatory)][int]$Index
+    )
+    $uri = "$script:RelayBase/api/spin?role=$([uri]::EscapeDataString($Role))" +
+           "&dlg=$([uri]::EscapeDataString($Dialog))&spin=$([uri]::EscapeDataString($Spin))&index=$Index"
+    Invoke-RestMethod -Method Post -Uri $uri
+}
+
+function Set-GameEdit {
+    # Set an edit-box's text on the agent of -Role (e.g. the player name before generating).
+    param(
+        [Parameter(Mandatory)][string]$Role,
+        [Parameter(Mandatory)][string]$Dialog,
+        [Parameter(Mandatory)][string]$Edit,
+        [Parameter(Mandatory)][string]$Text
+    )
+    $uri = "$script:RelayBase/api/edit?role=$([uri]::EscapeDataString($Role))" +
+           "&dlg=$([uri]::EscapeDataString($Dialog))&edit=$([uri]::EscapeDataString($Edit))&text=$([uri]::EscapeDataString($Text))"
+    Invoke-RestMethod -Method Post -Uri $uri
+}
+
 Write-Host "drive-game-relay loaded. Relay: $script:RelayBase" -ForegroundColor Cyan
-Write-Host "Commands: Get-GameStatus, Get-GameMenu [-Role], Get-GameLog, Get-GameChat, Get-GameEvents, Get-GamePackets, Invoke-GameButton -Role <r> -Dialog <d> -Button <b>, Set-GameSelection -Role <r> -Dialog <d> -ListBox <lb> -Index <i>" -ForegroundColor DarkGray
+Write-Host "Commands: Get-GameStatus, Get-GameMenu [-Role], Get-GameLog, Get-GameChat, Get-GameEvents, Get-GamePackets, Invoke-GameButton -Role <r> -Dialog <d> -Button <b>, Set-GameSelection -Role <r> -Dialog <d> -ListBox <lb> -Index <i>, Set-GameSpin -Role <r> -Dialog <d> -Spin <s> -Index <i>" -ForegroundColor DarkGray

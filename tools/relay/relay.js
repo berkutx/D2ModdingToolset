@@ -31,6 +31,8 @@ const Op = {
     PacketTraceRx: 0x0203,  // RX
     InvokeButton: 0x0300,   // -> agent: click a button
     SetSelection: 0x0301,   // -> agent: set a listbox selection
+    SetSpin: 0x0302,        // -> agent: set a spin-button option
+    SetEditText: 0x0303,    // -> agent: set an edit-box's text
     Dialog: 0x0410,         // <- agent: live UI state ("dialogName\nbtn1,btn2,...")
     Log: 0xff00,
 };
@@ -288,6 +290,21 @@ const httpServer = http.createServer((req, res) => {
         const idx = Buffer.alloc(4); idx.writeInt32LE(index, 0);
         send(sock, Op.SetSelection, Buffer.concat([encodeStr(dlg), encodeStr(lb), idx]));
         return sendJson(res, 200, { sent: { role: roleOf(sock), select: { dlg, lb, index } } });
+    }
+    if (req.method === 'POST' && path === '/api/spin') {
+        const sock = clientByRole(q.get('role'));
+        if (!sock) return sendJson(res, 503, { error: 'no agent for role ' + q.get('role') });
+        const dlg = q.get('dlg') || '', spin = q.get('spin') || '', index = parseInt(q.get('index') || '0', 10);
+        const idx = Buffer.alloc(4); idx.writeInt32LE(index, 0);
+        send(sock, Op.SetSpin, Buffer.concat([encodeStr(dlg), encodeStr(spin), idx]));
+        return sendJson(res, 200, { sent: { role: roleOf(sock), spin: { dlg, spin, index } } });
+    }
+    if (req.method === 'POST' && path === '/api/edit') {
+        const sock = clientByRole(q.get('role'));
+        if (!sock) return sendJson(res, 503, { error: 'no agent for role ' + q.get('role') });
+        const dlg = q.get('dlg') || '', edit = q.get('edit') || '', text = q.get('text') || '';
+        send(sock, Op.SetEditText, Buffer.concat([encodeStr(dlg), encodeStr(edit), encodeStr(text)]));
+        return sendJson(res, 200, { sent: { role: roleOf(sock), edit: { dlg, edit, text } } });
     }
     sendJson(res, 404, { error: 'not found' });
 });
