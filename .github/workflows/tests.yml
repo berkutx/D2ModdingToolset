@@ -1,11 +1,8 @@
 name: tests
 
-# Reusable test suite for the DebugTest build. The DLL source is a parameter (dll_run_id):
-#   - mss32.yml calls this right after Build DebugTest with NO dll_run_id, so it pulls the
-#     same-run artifact (the DLL it just built);
-#   - tests-only.yml (triggered by a tools/** test-script change) passes the run id of the
-#     latest successful mss32 build, so the unchanged prebuilt DLL is REUSED — no rebuild.
-# Several jobs run in parallel against the minimal standalone game (restored from cache).
+# Reusable test suite for the DebugTest build. The DLL source is the dll_run_id input: mss32.yml
+# passes none (same-run DLL it just built); tests-only.yml passes a prior mss32 run id to REUSE
+# the prebuilt DLL. Jobs run in parallel against the minimal standalone game (restored from cache).
 
 on:
   workflow_call:

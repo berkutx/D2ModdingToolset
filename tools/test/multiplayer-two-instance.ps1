@@ -5,13 +5,10 @@
   verify both reach the strategic map — the COMPLEX, two-instance test.
 
 .DESCRIPTION
-  The PowerShell dispatcher is the brain. The in-DLL agents are thin: they report the live
-  UI (dialog + buttons) and execute invoke/select commands. The dispatcher, over the node
-  relay (tools/relay/relay.js), SCANS each agent's UI (/api/state), DRIVES it
-  (POST /api/invoke|/api/select), VERIFIES dialogs and COORDINATES the two instances —
-  with NO files on disk and NO log scraping for state. Per-PID logs mss32_<pid>.log are
-  kept for human debugging only. Windows are tagged [HOST] / [CLIENT]. Requires the
-  DebugTest mss32 build in -Game and Node.js for the relay.
+  The dispatcher is the brain; the in-DLL agents are thin (report UI, execute invoke/select).
+  Over the node relay (tools/relay/relay.js) it scans each agent's UI (/api/state), drives it
+  (/api/invoke|/api/select) and coordinates both instances — no files, no log scraping for state.
+  Needs the DebugTest mss32 build in -Game and Node.js. Windows are tagged [HOST] / [CLIENT].
 
 .EXAMPLE
   .\multiplayer-two-instance.ps1 -Kill
@@ -29,9 +26,8 @@ param(
 . "$PSScriptRoot\_show-window.ps1"
 $exe = "$Game\Discipl2.exe"
 
-# Clean slate WITHOUT a blanket kill: only our own test instances are tagged [HOST]/[CLIENT],
-# so target those — never a manually launched game (e.g. another agent's). dplaysvr is the
-# shared DirectPlay helper; drop a stale one so the session is fresh.
+# Clean slate without a blanket kill: only our tagged [HOST]/[CLIENT] windows (never a foreign
+# game), plus a stale dplaysvr so the DirectPlay session is fresh.
 Get-Process Discipl2 -ErrorAction SilentlyContinue |
     Where-Object { $_.MainWindowTitle -match '\[(HOST|CLIENT)\]' } |
     Stop-Process -Force -ErrorAction SilentlyContinue
@@ -51,10 +47,9 @@ for ($i = 0; $i -lt 25; $i++) {
 if (-not $relayUp) { Write-Error "[disp] relay did not come up on $RelayBase"; if ($relay) { Stop-Process -Id $relay.Id -Force -ErrorAction SilentlyContinue }; exit 1 }
 Write-Host "[disp] relay up on $RelayBase" -ForegroundColor Green
 
-# Re-fire cadence for StepTo / ClickAndLeave. Kept ABOVE the longest synchronous UI-thread
-# stall (a DPlay EnumSessions/JoinSession blocks the joiner's UI thread ~10s): the DLL agent
-# also coalesces an identical in-flight command, but re-firing only after the stall window
-# avoids issuing spurious duplicate clicks in the first place.
+# How often StepTo/ClickAndLeave re-nudge a step that hasn't progressed. Pure liveness: the
+# agent's in-flight coalescing (autonav.cpp) owns "don't double-act", so this value is free —
+# 12s just avoids needless re-fires during the ~10s DPlay stall.
 $RefireSec = 12
 
 # ---- relay helpers (the dispatcher's eyes + hands) -------------------------
@@ -75,26 +70,21 @@ function WaitDlg([string]$role, [string]$dialog, [int]$timeoutSec) {
     }
     return $false
 }
-# Click <btn> on <srcDlg> until the agent reaches <expect>. The invoke targets the dialog
-# BY NAME, so the agent resolves it through its registry even when it is a co-present
-# (non-current) dialog; a click on an already-closed dialog is a harmless no-op. We retry
-# because the button may not be bound the instant we first ask.
+# Click <btn> on <srcDlg> until <expect>. The agent resolves the dialog by name (works for a
+# co-present or already-closed one), and we retry since the button may not be bound on first ask.
 function StepTo([string]$role, [string]$srcDlg, [string]$btn, [string]$expect, [int]$timeoutSec) {
     $t0 = Get-Date
-    InvokeBtn $role $srcDlg $btn          # fire once up front
+    InvokeBtn $role $srcDlg $btn
     $lastFire = Get-Date
     while ((((Get-Date) - $t0).TotalSeconds) -lt $timeoutSec) {
         if ((Dlg $role) -eq $expect) { Write-Host "[disp] $role $srcDlg::$btn -> $expect" -ForegroundColor Green; return $true }
-        # Re-fire only if clearly stuck. A transition (esp. the network join) can take a few
-        # seconds; re-clicking during it double-acts (e.g. a second join -> error popup).
         if (((Get-Date) - $lastFire).TotalSeconds -ge $RefireSec) { InvokeBtn $role $srcDlg $btn; $lastFire = Get-Date }
         Start-Sleep -Milliseconds 500
     }
     Write-Host "[disp] $role STUCK at '$(Dlg $role)' (wanted $expect after $srcDlg::$btn)" -ForegroundColor Red
     return $false
 }
-# Select a listbox value and give the agent a moment to apply it (commands execute one
-# per UI-frame tick) before the dependent button is pressed.
+# Set a listbox value, then let the agent apply it (one command per UI tick) before the next click.
 function SelectSettle([string]$role, [string]$dlg, [string]$lb, [int]$index) {
     SetSel $role $dlg $lb $index
     Start-Sleep -Milliseconds 1000
@@ -111,14 +101,12 @@ function ClickAndLeave([string]$role, [string]$dlg, [string]$btn, [int]$timeoutS
     }
     return $false
 }
-# Dismiss first-turn popups until the agent is genuinely in DLG_STRATEGIC (scenario loaded).
 $Dismiss = @{
     'DLG_SCENARIO_BRIEFING' = 'BTN_CONTINUE'; 'DLG_BEGIN_TURN' = 'BTN_OK'
     'DLG_GETINFO_BOX' = 'BTN_CLOSE'; 'DLG_MESSAGE_BOX' = 'BTN_OK'; 'DLG_EVENT_POPUP' = 'BTN_RIGHTSIDE'
 }
-# Dismiss first-turn popups until the role has REACHED the strategic map (relay-latched).
-# Popups are paced: don't re-click the same dialog faster than ~2.5s — clicking first-turn
-# popups back-to-back hangs the begin-turn reconciliation (the engine needs a beat).
+# Dismiss first-turn popups until the role reaches the map (relay-latched reachedStrategic). Paced:
+# don't re-click the same popup faster than ~2.5s — back-to-back clicks hang the begin-turn reconcile.
 function DriveToStrategic([string]$role, [int]$timeoutSec) {
     $t0 = Get-Date; $lastDlg = ''; $lastFire = (Get-Date).AddSeconds(-10)
     while ((((Get-Date) - $t0).TotalSeconds) -lt $timeoutSec) {
@@ -141,19 +129,15 @@ function Launch([string]$Role) {
     $psi.EnvironmentVariables["D2TESTDRV_UI_REPORTER"] = "1"
     $psi.EnvironmentVariables["D2TESTDRV_ROLE"] = $Role
     $psi.EnvironmentVariables["D2TESTDRV_RELAY_BRIDGE"] = "1"   # dispatcher-driven (no SELFNAV)
-    # Popups are dismissed dispatcher-side, PACED: clearing them back-to-back in-tick hangs
-    # the begin-turn reconciliation (the engine needs a beat between first-turn popups).
-    # NET_INTERCEPT (packet-trace forwarding) stays OFF: it runs on the UI thread per packet.
+    # NET_INTERCEPT (packet-trace forwarding) stays off — it runs on the UI thread per packet.
     return [System.Diagnostics.Process]::Start($psi)
 }
 
 # ---- the test (dispatcher drives both instances) --------------------------
 function Run-Pairing {
-    # Both instances are already launched (joiner ~10s after host) and boot in PARALLEL — no
-    # waiting for the host to finish before the joiner even starts. The ONLY ordering constraint
-    # is that the joiner must not SEARCH/JOIN a TCP/IP session until the host's lobby exists
-    # (its EnumSessions would otherwise find nothing); so the joiner navigates its menu up to
-    # DLG_LOAD_NEW_MULTI and STAGES there, then joins the instant the host is in its lobby.
+    # Both instances boot in PARALLEL (joiner launched 10s after the host). Only ordering
+    # constraint: the joiner must not search/join a TCP/IP session until the host's lobby exists
+    # (else EnumSessions finds nothing), so it stages at DLG_LOAD_NEW_MULTI until then.
     if (-not (WaitDlg "host" "DLG_MAIN_MENU" 90)) { return $false }
     if (-not (WaitDlg "join" "DLG_MAIN_MENU" 90)) { return $false }
 
@@ -162,16 +146,14 @@ function Run-Pairing {
     SelectSettle "host" "DLG_PROTOCOL" "TLBOX_PROTOCOL" 2  # 2 = TCP/IP
     if (-not (StepTo "host" "DLG_PROTOCOL" "BTN_CONTINUE" "DLG_LOAD_NEW_MULTI" 45)) { return $false }
 
-    # JOINER menu -> DLG_LOAD_NEW_MULTI, then STAGE (do NOT press BTN_JOIN yet — no session to
-    # find until the host creates one). It booted in parallel, so this is quick.
+    # JOINER menu -> DLG_LOAD_NEW_MULTI, then STAGE (no BTN_JOIN yet — no session until the host makes one).
     if (-not (StepTo "join" "DLG_MAIN_MENU" "BTN_MULTI" "DLG_PROTOCOL" 45)) { return $false }
     SelectSettle "join" "DLG_PROTOCOL" "TLBOX_PROTOCOL" 2
     if (-not (StepTo "join" "DLG_PROTOCOL" "BTN_CONTINUE" "DLG_LOAD_NEW_MULTI" 45)) { return $false }
     Write-Host "[disp] JOINER staged at DLG_LOAD_NEW_MULTI (waiting for the host's session)" -ForegroundColor DarkGray
 
-    # HOST: DLG_LOAD_NEW_MULTI -> skirmish -> DLG_LOBBY (creates the session). BTN_HOST opens the
-    # skirmish setup (DLG_CHOOSE_SKIRMISH co-present inside DLG_HOST, so the "current" dialog
-    # there is not DLG_CHOOSE_SKIRMISH); drive by name until we reach the lobby.
+    # HOST: DLG_LOAD_NEW_MULTI -> skirmish -> DLG_LOBBY (creates the session). DLG_CHOOSE_SKIRMISH
+    # is co-present inside DLG_HOST (not the "current" dialog), so drive by name until the lobby.
     $t0 = Get-Date; $hostLobby = $false; $lastFire = (Get-Date).AddSeconds(-10)
     while ((((Get-Date) - $t0).TotalSeconds) -lt 45) {
         $d = Dlg "host"
@@ -192,11 +174,9 @@ function Run-Pairing {
     if (-not (StepTo "join" "DLG_SESSION" "BTN_JOIN_GAME" "DLG_LOBBY" 45)) { return $false }
     Write-Host "[disp] JOINER in lobby" -ForegroundColor Green
 
-    # COORDINATE: let the joiner's lobby handshake settle, then the host starts and reaches the
-    # map (DLG_ISO_PAL / DLG_STRATEGIC); only then the joiner requests the snapshot and reaches
-    # the map too. "Reached the map" is latched the instant DLG_ISO_PAL appears — BEFORE the
-    # first-turn event popups, which we deliberately never touch (dismissing them mid-begin-turn
-    # hangs the engine's display reconciliation; the test goal is reaching the map, not turn 1).
+    # Host starts and reaches the map first; only then the joiner requests the snapshot. Success
+    # latches at DLG_ISO_PAL — the map view BEFORE the first-turn popups, which we never touch
+    # (dismissing them mid-begin-turn hangs reconciliation; the goal is reaching the map, not turn 1).
     Start-Sleep -Milliseconds 1500
     if (-not (ClickAndLeave "host" "DLG_LOBBY" "BTN_OK" 45)) { return $false }
     if (-not (DriveToStrategic "host" 180)) { return $false }   # dismiss briefing -> reach the map (slow on software Mesa)
@@ -232,16 +212,14 @@ function CaptureWindow([System.Diagnostics.Process]$Proc, [string]$Role) {
 }
 
 # ---- run -------------------------------------------------------------------
-# Wrapped so the relay (and the games, under -Kill) are ALWAYS cleaned up — an uncaught
-# throw mid-run must not orphan the node relay, whose named pipe would block the next run.
+# try/finally so the relay (and games, under -Kill) are ALWAYS cleaned up — a throw must not
+# orphan the relay, whose named pipe would block the next run.
 $h = $null; $j = $null; $ok = $false
 try {
     Write-Host "[disp] launching HOST..." -ForegroundColor Cyan
     $h = Launch "host"; $hostLog = "$Game\mss32_$($h.Id).log"
     Write-Host "[disp] host pid=$($h.Id)"
-    # Joiner starts 10s later: both boot in PARALLEL — don't wait for the host to create the
-    # session first. Run-Pairing gates only the joiner's TCP/IP search/join on the host's lobby.
-    Start-Sleep -Seconds 10
+    Start-Sleep -Seconds 10  # joiner starts 10s later -> parallel boot; Run-Pairing gates its join
     Write-Host "[disp] launching JOINER (10s after host)..." -ForegroundColor Cyan
     $j = Launch "join"; $joinLog = "$Game\mss32_$($j.Id).log"
     Write-Host "[disp] join pid=$($j.Id)"

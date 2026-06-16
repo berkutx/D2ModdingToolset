@@ -2,18 +2,12 @@
  * Publishable test/logging system for the Disciples 2 modding toolset.
  * Auto-nav executor — see testdrv/autonav.h.
  *
- * A thin in-process agent. It invokes button functors / sets listbox selections on the
- * UI/dialog thread, ticked once per screen-loop iteration from a Detour of sub_5629CA
- * (the per-frame cursor helper) — required, since invoking a functor must happen on the
- * thread that owns the dialogs, and with no dependency on the message pump (which the
- * DisciplesGL software-render path on a GPU-less runner does not service). Two modes:
- *   - SELFNAV (D2TESTDRV_SELFNAV): run a built-in script for the role — for MINIMAL,
- *     single-instance tests (probe: menu->Multiplayer->TCP/IP->Continue; exit: quit).
- *   - DISPATCHER-DRIVEN (D2TESTDRV_RELAY_BRIDGE): execute invoke/select commands the
- *     PowerShell dispatcher sends over the relay. The agent itself holds NO test logic,
- *     verification or coordination — that lives in the dispatcher, which scans the live
- *     UI (uistatereporter -> relay) and drives both instances. For COMPLEX / 2-instance
- *     tests.
+ * A thin in-process agent that invokes button functors / sets listbox selections on the UI
+ * thread. It ticks from a Detour of sub_5629CA (the per-frame screen-loop helper), not the
+ * message pump: the functor must run on the dialog-owning thread, and the GPU-less DisciplesGL
+ * software-render path does not reliably service the pump. Two modes: SELFNAV runs a built-in
+ * script (minimal single-instance tests); RELAY_BRIDGE executes the dispatcher's invoke/select
+ * commands (the agent holds no test logic — the dispatcher owns that).
  * Compile-gated by D2_TESTDRV.
  */
 
@@ -158,9 +152,8 @@ bool setListSelection(const char* dlgName, const char* lbName, int index)
 }
 
 // --- dispatcher-driven remote commands ---------------------------------------
-// The dispatcher (via the relay) sends InvokeButton / SetSelection commands; the bridge
-// hands them here on the BRIDGE thread, so we only queue them — the per-frame tick drains
-// the queue on the UI/dialog thread, where invoking a functor is safe.
+// Commands arrive on the BRIDGE thread (onRemoteCommand only queues); the per-frame tick
+// drains them on the UI thread, where invoking a functor is safe.
 struct RemoteCmd
 {
     int type; // 0 = invoke button, 1 = set listbox selection
@@ -168,10 +161,10 @@ struct RemoteCmd
     char widget[48];
     int param;
 };
-std::mutex g_remoteMutex;
+std::mutex g_remoteMutex; // guards g_remoteCmds, g_inFlight, g_hasInFlight
 std::deque<RemoteCmd> g_remoteCmds;
-RemoteCmd g_inFlight{};     // the command the UI thread popped and is currently executing
-bool g_hasInFlight = false; // (it can block ~10s in a synchronous DPlay call); guarded by g_remoteMutex
+RemoteCmd g_inFlight{};     // command being executed right now (popped out of the queue)
+bool g_hasInFlight = false; // whether g_inFlight is valid
 
 void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size)
 {
@@ -205,22 +198,18 @@ void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size
         return; // not a command we own
     }
     auto sameCmd = [&](const RemoteCmd& q) {
-        return q.type == cmd.type && lstrcmpA(q.dlg, cmd.dlg) == 0
-               && lstrcmpA(q.widget, cmd.widget) == 0;
+        return q.type == cmd.type && q.param == cmd.param
+               && lstrcmpA(q.dlg, cmd.dlg) == 0 && lstrcmpA(q.widget, cmd.widget) == 0;
     };
     std::lock_guard<std::mutex> lk(g_remoteMutex);
-    // Coalesce: drop this command if an identical one is already pending OR currently in flight.
-    // The UI thread can block ~10s in a synchronous DPlay call (e.g. EnumSessions) while
-    // EXECUTING a popped command, during which it is no longer in the queue; the dispatcher
-    // re-fires the click every few seconds, so without the in-flight check a re-fire would slip
-    // past the queue scan and double-act (two JoinSession -> error popup). One copy — queued or
-    // in flight — is enough.
+    // Coalesce against the queue AND the in-flight command: while the UI thread is blocked
+    // ~10s inside a synchronous DPlay send the executing command is no longer in the queue,
+    // so without this a dispatcher re-fire would double-act (two JoinSession -> error).
     if (g_hasInFlight && sameCmd(g_inFlight))
         return;
-    for (const auto& q : g_remoteCmds) {
+    for (const auto& q : g_remoteCmds)
         if (sameCmd(q))
             return;
-    }
     g_remoteCmds.push_back(cmd);
 }
 
@@ -236,10 +225,7 @@ void drainRemoteCommands()
             }
             cmd = g_remoteCmds.front();
             g_remoteCmds.pop_front();
-            // Mark in flight BEFORE releasing the lock: invokeButton can block ~10s on a
-            // synchronous DPlay call, during which onRemoteCommand must still coalesce a
-            // re-fire of this same command (it is no longer in the queue).
-            g_inFlight = cmd;
+            g_inFlight = cmd; // publish before unlocking, so a re-fire during the DPlay block coalesces
             g_hasInFlight = true;
         }
         if (cmd.type == 0)
@@ -281,13 +267,9 @@ void resetAutoDismiss()
     g_adLastClickedDlg[0] = 0;
 }
 
-// Continuously dismiss known first-turn popups, in the tick (on the UI thread), when
-// D2TESTDRV_AUTODISMISS is set. NOTE: the two-instance MP dispatcher deliberately does NOT
-// enable this — it dismisses popups itself, PACED (clearing first-turn popups back-to-back
-// hangs the begin-turn display reconciliation). This in-agent path is kept for future
-// single-instance tests that want popups cleared the instant they appear, with no relay
-// round-trip. Mechanical (a fixed popup list), so it can live in the agent; the dispatcher
-// still owns coordination + verification.
+// Dismiss known first-turn popups every tick when D2TESTDRV_AUTODISMISS is set. The two-instance
+// MP dispatcher does NOT set it — it paces dismissal itself, since clearing first-turn popups
+// back-to-back hangs the begin-turn reconciliation. Kept for single-instance tests.
 void dismissPopupsTick()
 {
     const DWORD now = GetTickCount();
@@ -356,9 +338,8 @@ void navStep()
 }
 
 // --- per-frame hook -----------------------------------------------------------
-// sub_5629CA is the per-iteration helper the screen message loop (sub_56288A) calls on
-// the UI/dialog thread. Detour it so the agent ticks once per iteration on the correct
-// thread, with no dependency on the message pump being serviced.
+// sub_5629CA: the per-iteration helper the screen loop (sub_56288A) calls on the UI thread;
+// Detour it to tick there once per iteration (see file header for why, not the message pump).
 using Sub5629CA_t = LONG(__stdcall*)(HWND, LPPOINT, LONG*);
 Sub5629CA_t g_orig5629CA = reinterpret_cast<Sub5629CA_t>(0x5629CA);
 
@@ -399,7 +380,6 @@ void onUiReady()
     g_autoDismiss = testenv::on("D2TESTDRV_AUTODISMISS");
 
     if (selfnav) {
-        // Built-in self-drive script for minimal single-instance tests.
         if (lstrcmpiA(role, "exit") == 0) {
             g_navScript = g_exitScript;
             g_navLen = (int)(sizeof(g_exitScript) / sizeof(g_exitScript[0]));
@@ -409,10 +389,8 @@ void onUiReady()
         }
         g_navIdx = 0;
     }
-    if (relay) {
-        // Dispatcher-driven: execute the invoke/select commands it sends over the relay.
+    if (relay)
         bridge::setCommandCallback(&onRemoteCommand);
-    }
     if (selfnav || relay) {
         g_active = true;
         installFrameHook();
@@ -430,9 +408,7 @@ void onDialogBound()
     spdlog::info("[testdrv] nav armed");
 }
 
-// Ticked once per screen-loop iteration from the sub_5629CA frame hook — i.e. on the
-// thread that owns the dialogs, so invoking a button functor is safe and needs no message
-// pump. Reentrancy-guarded. Drains dispatcher commands, then advances any self-nav script.
+// Ticked per screen-loop iteration on the dialog-owning thread (hook5629CA). Reentrancy-guarded.
 void tick()
 {
     if (!g_navArmed)

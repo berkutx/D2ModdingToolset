@@ -1,15 +1,9 @@
 name: mss32
 
-# Build orchestrator. Builds all three configs in parallel:
-#   - Debug, Release  : compile checks only (do the sources still build?).
-#   - DebugTest       : the publishable D2_TESTDRV test/logging system; its DLL is
-#                       uploaded and then handed to the separate 'tests' workflow.
-# The heavy deps are not rebuilt here — they come from the latest successful "deps"
-# run as the "deps-libs" artifact (run "deps" once first).
-#
-# Triggers ONLY on DLL sources (mss32/**). Test-script-only changes (tools/**, the test
-# suite) go through tests-only.yml, which REUSES this build's DebugTest DLL instead of
-# rebuilding it — so editing the dispatcher/relay/test logic skips the ~10-min compile.
+# Build orchestrator: Debug + Release are compile checks; DebugTest builds the publishable
+# D2_TESTDRV DLL and hands it to tests.yml. Deps come from the latest "deps" run's deps-libs.
+# Triggers only on mss32/** — test-script changes (tools/**) go through tests-only.yml, which
+# REUSES this DLL instead of rebuilding (skips the ~10-min compile).
 
 on:
   push:

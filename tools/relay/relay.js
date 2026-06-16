@@ -1,20 +1,13 @@
 /*
  * d2lobby.packetlogic relay — part of the publishable test/logging system.
  *
- * A dependency-free Node.js server the mss32 test build's bridge connects to over a
- * Windows named pipe. It is MULTI-CLIENT (host + joiner connect at once, each tagged by
- * role from its Hello) and is a dumb live MIRROR + COMMAND RELAY — no test logic of its
- * own:
- *   - mirrors each agent's live UI state ("dialog now" + its buttons) and packets/events;
- *   - relays the dispatcher's InvokeButton / SetSelection commands to a specific agent.
- * The PowerShell dispatcher (the brain) reads /api/state to scan/verify the UI and POSTs
- * /api/invoke|/api/select to drive each instance — so two instances coordinate with NO
- * files on disk and NO log scraping.
+ * A dependency-free Node.js server the mss32 bridge connects to over a Windows named pipe.
+ * MULTI-CLIENT (host + joiner, each tagged by role from its Hello), a dumb mirror + command
+ * relay with no test logic: it mirrors each agent's live UI (dialog + buttons) and packets, and
+ * relays the dispatcher's InvokeButton / SetSelection commands to a role. The dispatcher reads
+ * /api/state and POSTs /api/invoke|/api/select, so two instances coordinate with no files.
  *
- * Run:  node relay.js            (pipe \\.\pipe\d2lobby.packetlogic, http :8077)
- * Then launch the game(s) with the DebugTest mss32 build and D2TESTDRV_RELAY_BRIDGE=1.
- *
- * No external dependencies — only the built-in `net` and `http` modules.
+ * Run: node relay.js  (pipe \\.\pipe\d2lobby.packetlogic, http :8077). Built-ins net + http only.
  */
 
 'use strict';
@@ -46,9 +39,8 @@ const MAX_RING = 500;
 const state = {
     clients: new Map(),  // socket -> { role, pid, modulePath, dialog, buttons }
     byRole: {},          // role -> { connected, pid, dialog, buttons }  (serialized to /api/state)
-    socketByRole: {},    // role -> the CURRENT socket for that role (NOT serialized) — the
-                         // authoritative owner, so a relaunch supersedes the old socket and a
-                         // late 'close' from a stale socket can't knock the live one offline.
+    socketByRole: {},    // role -> current socket (NOT serialized); the authoritative owner, so a
+                         // relaunch supersedes it and a stale socket's late 'close' can't flip it offline.
     logs: [],
     packets: [],
     chat: [],
@@ -162,9 +154,8 @@ function handleMessage(socket, op, flags, payload) {
         const h = parseHello(payload);
         if (!h) { console.error('[pipe] malformed Hello dropped'); break; }
         const role = h.role || `pid${h.pid}`;
-        // A re-registering role (relaunch/reconnect) supersedes any prior socket for that role:
-        // evict the stale client so clientByRole never returns a dead/duplicate socket, and its
-        // later 'close' won't touch the live entry (drop checks socket identity).
+        // A re-registering role (relaunch) supersedes the prior socket: evict it so clientByRole
+        // never returns a dead duplicate, and its late 'close' can't touch the live entry.
         const prev = state.socketByRole[role];
         if (prev && prev !== socket) { state.clients.delete(prev); try { prev.destroy(); } catch (e) { /* gone */ } }
         state.clients.set(socket, { role, pid: h.pid, modulePath: h.modulePath, dialog: null, buttons: [] });
@@ -188,11 +179,9 @@ function handleMessage(socket, op, flags, payload) {
             const r = state.byRole[c.role];
             if (r) {
                 r.dialog = dialog; r.buttons = buttons;
-                // Sticky "reached the strategic map". DLG_ISO_PAL is the isometric map view
-                // (its toolbar — BTN_RES_PAL/REPORT/QUESTLOG — is the strategic-map UI) and is
-                // reached BEFORE the first-turn event popups; DLG_STRATEGIC is the same map.
-                // Latch on either (the dialog only flickers through them, a poll can miss it),
-                // matching the original test's "DLG_STRATEGIC|DLG_ISO_PAL" success signal.
+                // Sticky "reached the map": DLG_ISO_PAL (the isometric map view) appears BEFORE
+                // the first-turn popups; DLG_STRATEGIC is the same map. Latch on either — the
+                // dialog only flickers through, so a poll can miss it.
                 if (dialog === 'DLG_STRATEGIC' || dialog === 'DLG_ISO_PAL') r.reachedStrategic = true;
             }
         }
@@ -262,8 +251,7 @@ pipeServer.listen(PIPE_NAME, () => console.log(`[pipe] listening on ${PIPE_NAME}
 
 // ---- HTTP API --------------------------------------------------------------
 function clientByRole(role) {
-    // The authoritative current socket for the role (null once it has been dropped) — never a
-    // stale/duplicate entry, so a command is routed to the live agent or fails fast with 503.
+    // the role's current socket, or null once dropped — never a stale duplicate (else 503)
     const sock = state.socketByRole[role];
     return (sock && state.clients.has(sock)) ? sock : null;
 }
