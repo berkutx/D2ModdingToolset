@@ -161,7 +161,7 @@ function handleMessage(socket, op, flags, payload) {
         const prev = state.socketByRole[role];
         if (prev && prev !== socket) { state.clients.delete(prev); try { prev.destroy(); } catch (e) { /* gone */ } }
         state.clients.set(socket, { role, pid: h.pid, modulePath: h.modulePath, dialog: null, buttons: [] });
-        state.byRole[role] = { connected: true, pid: h.pid, dialog: null, buttons: [], reachedStrategic: false };
+        state.byRole[role] = { connected: true, pid: h.pid, dialog: null, buttons: [], reachedStrategic: false, sawBeginTurn: false };
         state.socketByRole[role] = socket;
         console.log(`[hello] role=${role} pid=${h.pid} v${h.version}`);
         const ack = Buffer.alloc(8);
@@ -185,6 +185,7 @@ function handleMessage(socket, op, flags, payload) {
                 // the first-turn popups; DLG_STRATEGIC is the same map. Latch on either — the
                 // dialog only flickers through, so a poll can miss it.
                 if (dialog === 'DLG_STRATEGIC' || dialog === 'DLG_ISO_PAL') r.reachedStrategic = true;
+                if (dialog === 'DLG_BEGIN_TURN') r.sawBeginTurn = true; // a new day / turn began for this role
             }
         }
         console.log(`[ui] ${roleOf(socket)} -> ${dialog} [${buttons.join(',')}]`);

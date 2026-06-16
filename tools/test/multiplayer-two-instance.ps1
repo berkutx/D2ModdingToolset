@@ -16,6 +16,7 @@
 param(
     [int]$Scenario = 0,
     [switch]$Kill,
+    [switch]$EndHostTurn,   # after both reach the map, end the host's turn -> the joiner's begins
     [string]$Game = "C:\GOG Games\slasher_mns_2_4",
     [string]$RelayJs = "$PSScriptRoot\..\relay\relay.js",
     [string]$RelayBase = "http://127.0.0.1:8077",
@@ -184,6 +185,34 @@ function Run-Pairing {
     if (-not (ClickAndLeave "join" "DLG_LOBBY" "BTN_OK" 45)) { return $false }
     if (-not (DriveToStrategic "join" 180)) { return $false }   # dismiss briefing -> reach the map (slow on software Mesa)
     Write-Host "[disp] JOINER reached strategic map" -ForegroundColor Green
+
+    if ($EndHostTurn) {
+        # Sequential turns: drive the host past its own new day (DLG_BEGIN_TURN) and end the turn
+        # (BTN_END_TURN on the co-present DLG_STRATEGIC side panel) so it passes to the joiner.
+        # Paced SINGLE clicks per tick (not the back-to-back dismissal that hangs the begin-turn
+        # reconciliation). The new-day dialog is relay-latched as sawBeginTurn. Pass criteria
+        # (your bar): the joiner holds the strategic map, a new day was observed (turn machinery
+        # ran), and neither instance crashed (states still readable). A new day for the JOINER is
+        # the best outcome (the turn fully passed), reported separately.
+        Write-Host "[disp] HOST skips its turn -> expect a new day (begin-turn)" -ForegroundColor Cyan
+        $t0 = Get-Date
+        while ((((Get-Date) - $t0).TotalSeconds) -lt 120) {
+            if ((State).join.sawBeginTurn) { break }   # turn fully passed to the joiner
+            switch (Dlg "host") {
+                "DLG_BEGIN_TURN" { InvokeBtn "host" "DLG_BEGIN_TURN" "BTN_OK" }
+                "DLG_MESSAGE_BOX" { InvokeBtn "host" "DLG_MESSAGE_BOX" "BTN_OK" }
+                default { InvokeBtn "host" "DLG_STRATEGIC" "BTN_END_TURN" }
+            }
+            Start-Sleep -Seconds 4
+        }
+        $s = State
+        if (-not ($s.host.sawBeginTurn -or $s.join.sawBeginTurn)) {
+            Write-Host "[disp] no new-day dialog observed (turn machinery did not run)" -ForegroundColor Red; return $false
+        }
+        if (-not $s.join.reachedStrategic) { Write-Host "[disp] JOINER lost the strategic map" -ForegroundColor Red; return $false }
+        if (-not ($s.host.connected -and $s.join.connected)) { Write-Host "[disp] an instance dropped (crash?)" -ForegroundColor Red; return $false }
+        Write-Host ("[disp] new day observed (host={0} joiner={1}); joiner on the map; both alive + readable" -f $s.host.sawBeginTurn, $s.join.sawBeginTurn) -ForegroundColor Green
+    }
     return $true
 }
 
