@@ -70,12 +70,19 @@ Two ways to assert a dialog actually appeared:
 
 "Appeared **and dismissed**" = the latch is set **and** a later poll shows it gone / a follow-up
 transition. Find each dialog's real button in `/api/state` and pace clicks (~2 s) — don't fire the
-same popup back-to-back. **Dead-end overlays:** some dialogs don't dismiss on their own button —
-`DLG_GETINFO_BOX`'s only button (`BTN_CLOSE`) leaves it up. You don't dismiss those; you act on the
-**co-present dialog underneath** by name (e.g. `-EndHostTurn` ends the turn with
-`InvokeBtn host DLG_STRATEGIC BTN_END_TURN` straight through the GETINFO overlay — by-name
-resolution makes it a no-op only if that dialog is truly absent). **Caveat:** a `CMessageBox` with
-*no* bound buttons is not reported (relay-invisible — see gotchas), so it can't be latched by name.
+same popup back-to-back.
+
+**The stale-dialog trap (important).** `/api/state` is updated only when the agent BINDS a button
+(`assignFunctor`). A new dialog re-binds, so opening one is reported — but **closing a modal that
+reveals an already-bound dialog underneath does NOT re-report**, so `/api/state` keeps showing the
+*closed* dialog. Example: the lord-name `DLG_GETINFO_BOX` closes on ONE `BTN_CLOSE` (it holds the
+lord's default name — do NOT `SetEdit` it, which corrupts the accept), revealing the strategic map;
+but the relay still shows `DLG_GETINFO_BOX`. So: (1) click such a dialog's close button **exactly
+once** — the first click frees it; re-clicking faults the freed dialog (harmless, SEH-swallowed, but
+pointless); (2) track closure in YOUR script (a `$closed` flag), don't wait for `/api/state` to leave
+it. After the close the role is on the bare map, where the next action (e.g. `BTN_END_TURN`) is
+legitimate. **Caveat:** a `CMessageBox` with *no* bound buttons is not reported (relay-invisible —
+see gotchas), so it can't be latched by name either.
 
 ## Add it to CI (optional)
 
@@ -169,12 +176,19 @@ if ($Dismiss.ContainsKey($d)) { Write-Host "$role dialog appeared: $d -> click $
 
 «Появился **и прокликан**» = защёлка взведена **и** дальнейший опрос показывает, что его нет /
 случился переход. Настоящую кнопку смотри в `/api/state`, и пейси клики (~2 с) — не сыпь по одному
-попапу подряд. **Тупиковые оверлеи:** некоторые диалоги по своей кнопке НЕ закрываются —
-у `DLG_GETINFO_BOX` единственная кнопка (`BTN_CLOSE`) его не убирает. Такие не закрывают, а
-действуют по имени на **co-present диалог под ним** (например, `-EndHostTurn` завершает ход через
-`InvokeBtn host DLG_STRATEGIC BTN_END_TURN` прямо сквозь оверлей GETINFO — резолв по имени делает
-это no-op, только если того диалога реально нет). **Грабли:** `CMessageBox` без забинженных кнопок
-не репортится (через рилей не виден — см. грабли), по имени его не защёлкнуть.
+попапу подряд.
+
+**Грабли «застрявшего диалога» (важно).** `/api/state` обновляется только когда агент БИНДИТ кнопку
+(`assignFunctor`). Новый диалог ребиндит → его открытие видно; но **закрытие модалки, под которой
+уже забинженный диалог, НЕ ребиндит** → рилей продолжает показывать *закрытый* диалог. Пример:
+имя-лорда `DLG_GETINFO_BOX` закрывается ОДНИМ `BTN_CLOSE` (в нём дефолтное имя лорда — НЕ делай
+`SetEdit`, он ломает accept), под ним открывается карта; но рилей всё ещё показывает
+`DLG_GETINFO_BOX`. Поэтому: (1) жми кнопку закрытия таких диалогов РОВНО ОДИН раз — первый клик
+освобождает диалог, повторный фолтит по освобождённому указателю (безвредно, SEH глотает, но
+бессмысленно); (2) отслеживай закрытие В СВОЁМ скрипте (флаг `$closed`), не жди, пока `/api/state`
+уйдёт с него. После закрытия роль на голой карте, где следующее действие (напр. `BTN_END_TURN`)
+легитимно. **Грабли:** `CMessageBox` без забинженных кнопок не репортится (через рилей не виден),
+по имени его не защёлкнуть.
 
 ### Подключить к CI (опционально)
 
