@@ -19,4 +19,5 @@
 	url = https://github.com/UnveN/SLikeNet.git
 [submodule "D2RSG"]
 	path = D2RSG
-	url = https://github.com/UnveN/D2RSG.git
+	url = https://github.com/Bartonsun/D2RSG.git
+	branch = dev

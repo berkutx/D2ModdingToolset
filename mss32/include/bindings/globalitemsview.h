@@ -1,7 +1,7 @@
 /*
  * This file is part of the modding toolset for Disciples 2.
- * (https://github.com/VladimirMakeev/D2ModdingToolset)
- * Copyright (C) 2024 Vladimir Makeev.
+ * (https://github.com/bartonsun/D2ModdingToolset)
+ * Copyright (C) 2026 Max Vynogradov.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,13 +17,11 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef GLOBALVIEW_H
-#define GLOBALVIEW_H
+#ifndef GLOBALITEMSVIEW_H
+#define GLOBALITEMSVIEW_H
 
-#include "globalvariablesview.h"
-#include "globalunitsview.h"
-#include "globalitemsview.h"
-#include "globalspellsview.h"
+#include <optional>
+#include <string>
 
 namespace sol {
 class state;
@@ -31,17 +29,16 @@ class state;
 
 namespace bindings {
 
-class GlobalView
+class ItemBaseView;
+
+class GlobalItemsView
 {
 public:
     static void bind(sol::state& lua);
 
-    GlobalVariablesView getGlobalVariables() const;
-    GlobalUnitsView getUnits() const;
-    GlobalItemsView getItems() const;
-    GlobalSpellsView getSpells() const;
+    std::optional<ItemBaseView> getBase(const std::string& idStr) const;
 };
 
 } // namespace bindings
 
-#endif // GLOBALVIEW_H
+#endif

@@ -21,6 +21,7 @@
 #include "globaldata.h"
 #include <sol/sol.hpp>
 
+
 namespace bindings {
 
 void GlobalView::bind(sol::state& lua)
@@ -29,6 +30,8 @@ void GlobalView::bind(sol::state& lua)
 
     view["variables"] = sol::property(&GlobalView::getGlobalVariables);
     view["units"] = sol::property(&GlobalView::getUnits);
+    view["items"] = sol::property(&GlobalView::getItems);
+    view["spells"] = sol::property(&GlobalView::getSpells);
 }
 
 GlobalVariablesView GlobalView::getGlobalVariables() const
@@ -45,4 +48,13 @@ GlobalUnitsView GlobalView::getUnits() const
     return GlobalUnitsView();
 }
 
+GlobalItemsView GlobalView::getItems() const
+{
+    return GlobalItemsView();
+}
+
+GlobalSpellsView GlobalView::getSpells() const
+{
+    return GlobalSpellsView();
+}
 } // namespace bindings

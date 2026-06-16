@@ -776,6 +776,22 @@ using GetSideshowUnitImpl = game::CMidgardID*(__thiscall*)(TRaceType* thisptr,
 using FindCapitalByPlayerId = game::CFortification*(__stdcall*)(game::CMidgardID* playerId,
                                                                 game::IMidgardObjectMap* objectMap);
 
+
+
+/**
+ * Handles keyboard input in strategy map interface.
+ * @returns 1 if key was processed, 0 otherwise.
+ */
+using StratInterfKeyHandler = int(__thiscall*)(void* thisPtr, int key, int a3);
+
+
+/**
+ * Sends save game message to server.
+ * Host immediately starts save process, clients send save request.
+ */
+using StratInterfSendSaveGameMsgToServer = void(__thiscall*)(void* thisPtr,
+                                                             const char* saveFilename);
+
 /**
  * Called when a player's turn begins.
  *
@@ -787,6 +803,7 @@ using FindCapitalByPlayerId = game::CFortification*(__stdcall*)(game::CMidgardID
  */
 using MidServerLogicDataBeginTurn = void(__thiscall*)(CMidServerLogicData* thisptr,
                                                       CMidgardID* playerId);
+
 
 
 /** Game and editor functions that can be hooked. */
@@ -928,6 +945,8 @@ struct Functions
     AddSideshowUnitToUI addSideshowUnitToUI;
     GetSideshowUnitImpl getSideshowUnitImpl;
     FindCapitalByPlayerId findCapitalByPlayerId;
+    StratInterfKeyHandler stratInterfKeyHandler;
+    StratInterfSendSaveGameMsgToServer sendSaveGameMsgToServer;
     MidServerLogicDataBeginTurn midServerLogicDataBeginTurn;
 };
 

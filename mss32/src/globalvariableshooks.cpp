@@ -33,12 +33,14 @@ static const char stealRmktMinColumn[]{"S_RMKT_MIN"};
 static const char stealItemAllColumn[]{"S_ITEM_ALL"};
 static const char rmktRiotMinColumn[]{"RMKT_R_MIN"};
 static const char rmktRiotMaxColumn[]{"RMKT_R_MAX"};
+static const char stealItemValueColumn[]{"S_ITM_VAL"};
+static const char stealSpellValueColumn[]{"S_SPL_VAL"};
 
-static bool hasCustomVariables(const utils::DbfFile& dbfFile)
-{
+static bool hasCustomVariables(const utils::DbfFile& dbfFile) {
     return dbfFile.column(stealRmktColumn) || dbfFile.column(rmktRiotMinColumn)
            || dbfFile.column(rmktRiotMaxColumn) || dbfFile.column(stealRmktMinColumn)
-           || dbfFile.column(stealItemAllColumn);
+           || dbfFile.column(stealItemAllColumn) || dbfFile.column(stealItemValueColumn)
+           || dbfFile.column(stealSpellValueColumn);
 }
 
 game::GlobalVariables* __fastcall globalVariablesCtorHooked(game::GlobalVariables* thisptr,
@@ -96,6 +98,18 @@ game::GlobalVariables* __fastcall globalVariablesCtorHooked(game::GlobalVariable
     int riotMax{};
     if (record.value(riotMax, rmktRiotMaxColumn)) {
         extendedData->rmktRiotMax = std::clamp(riotMax, 0, INT_MAX);
+    }
+
+    extendedData->stealItemValue = 9999*6;
+    int stealItemValue{};
+    if (record.value(stealItemValue, stealItemValueColumn)) {
+        extendedData->stealItemValue = std::clamp(stealItemValue, 0, INT_MAX);
+    }
+
+    extendedData->stealSpellValue = 9999*6;
+    int stealSpellValue{};
+    if (record.value(stealSpellValue, stealSpellValueColumn)) {
+        extendedData->stealSpellValue = std::clamp(stealSpellValue, 0, INT_MAX);
     }
 
     originalCtor(thisptr, directory, proxy);

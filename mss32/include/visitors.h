@@ -311,11 +311,18 @@ struct Api
                                                   int apply);
     ChangeSiteAiPriority changeSiteAiPriority;
 
+    
+    using EraseStack = bool(__stdcall*)(CMidgardID* stackId,
+                                        IMidgardObjectMap* objectMap,
+                                        int apply);
+    EraseStack eraseStack;
+
     using ChangeStackLeader = bool(__stdcall*)(CMidgardID* stackId,
                                                CMidgardID* unitId,
                                                IMidgardObjectMap* objectMap,
                                                int apply);
     ChangeStackLeader changeStackLeader;
+
 };
 
 Api& get();

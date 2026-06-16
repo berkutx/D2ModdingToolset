@@ -37,6 +37,8 @@
 #include "gameview.h"
 #include "globalvariablesview.h"
 #include "globalview.h"
+#include "globalitemsview.h"
+#include "globalspellsview.h"
 #include "groupview.h"
 #include "idview.h"
 #include "itembaseview.h"
@@ -58,6 +60,7 @@
 #include "settings.h"
 #include "siteview.h"
 #include "stackview.h"
+#include "spellview.h"
 #include "tileview.h"
 #include "trainerview.h"
 #include "unitimplview.h"
@@ -511,6 +514,9 @@ static void bindApi(sol::state& lua)
     bindings::GlobalVariablesView::bind(lua);
     bindings::GlobalUnitsView::bind(lua);
     bindings::GlobalView::bind(lua);
+    bindings::SpellView::bind(lua);
+    bindings::GlobalItemsView::bind(lua);
+    bindings::GlobalSpellsView::bind(lua);
     bindings::GameView::bind(lua);
     bindings::BuildingView::bind(lua);
     bindings::AttackView::bind(lua);

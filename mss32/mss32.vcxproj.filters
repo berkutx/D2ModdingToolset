@@ -1576,8 +1576,29 @@
     <ClCompile Include="src\bindings\globalunitsview.cpp">
       <Filter>bindings</Filter>
     </ClCompile>
+    <ClCompile Include="src\quicksavehook.cpp">
+      <Filter>hooks</Filter>
+    </ClCompile>
     <ClCompile Include="src\turnhooks.cpp">
       <Filter>hooks</Filter>
+    </ClCompile>
+    <ClCompile Include="src\spellutils.cpp">
+      <Filter>game</Filter>
+    </ClCompile>
+    <ClCompile Include="src\stealspellinterf.cpp">
+      <Filter>game</Filter>
+    </ClCompile>
+    <ClCompile Include="src\addstealspellhooks.cpp">
+      <Filter>hooks</Filter>
+    </ClCompile>
+    <ClCompile Include="src\bindings\spellview.cpp">
+      <Filter>bindings</Filter>
+    </ClCompile>
+    <ClCompile Include="src\bindings\globalitemsview.cpp">
+      <Filter>bindings</Filter>
+    </ClCompile>
+    <ClCompile Include="src\bindings\globalspellsview.cpp">
+      <Filter>bindings</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -3933,8 +3954,29 @@
     <ClInclude Include="include\bindings\globalunitsview.h">
       <Filter>bindings</Filter>
     </ClInclude>
+    <ClInclude Include="include\quicksavehook.h">
+      <Filter>hooks</Filter>
+    </ClInclude>
     <ClInclude Include="include\turnhooks.h">
       <Filter>hooks</Filter>
+    </ClInclude>
+    <ClInclude Include="include\spellutils.h">
+      <Filter>game</Filter>
+    </ClInclude>
+    <ClInclude Include="include\stealspellinterf.h">
+      <Filter>game</Filter>
+    </ClInclude>
+    <ClInclude Include="include\addstealspellhooks.h">
+      <Filter>hooks</Filter>
+    </ClInclude>
+    <ClInclude Include="include\bindings\spellview.h">
+      <Filter>bindings</Filter>
+    </ClInclude>
+    <ClInclude Include="include\bindings\globalspellsview.h">
+      <Filter>bindings</Filter>
+    </ClInclude>
+    <ClInclude Include="include\bindings\globalitemsview.h">
+      <Filter>bindings</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
