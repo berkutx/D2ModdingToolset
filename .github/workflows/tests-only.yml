@@ -1,0 +1,68 @@
+name: tests-only
+
+# Fast path for TEST-LOGIC-ONLY changes (the dispatcher / relay / test scripts under
+# tools/**, or the test suite itself). The DLL is NOT a function of these files, so there
+# is nothing to rebuild — this workflow finds the DebugTest DLL from the latest successful
+# mss32 build on this branch and re-runs the SAME reusable test suite (tests.yml) against
+# it. Editing test logic/ordering therefore skips the ~10-min compile entirely.
+#
+# DLL sources (mss32/**) still go through mss32.yml (build + test). The two path filters are
+# disjoint, so a given push runs exactly one of the two (a push touching both runs mss32.yml,
+# and this one harmlessly reuses the prior DLL).
+
+on:
+  push:
+    paths:
+      - "tools/**"
+      - ".github/workflows/tests.yml"
+      - ".github/workflows/tests-only.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read # list mss32 runs + download the mss32-debugtest artifact
+
+concurrency:
+  group: tests-only-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-dll:
+    name: Find the latest prebuilt DebugTest DLL
+    runs-on: ubuntu-latest
+    outputs:
+      run_id: ${{ steps.find.outputs.run_id }}
+    steps:
+      - name: Latest successful mss32 run that has a mss32-debugtest artifact
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rid=""
+          # Walk recent successful mss32 builds on this branch; pick the first whose
+          # artifact still exists (artifacts expire, so a too-old build won't do).
+          for id in $(gh run list --workflow mss32.yml --branch "$BRANCH" --status success \
+                        -L 20 --json databaseId --jq '.[].databaseId' -R "$REPO"); do
+            if gh api "repos/$REPO/actions/runs/$id/artifacts" \
+                 --jq '.artifacts[].name' 2>/dev/null | grep -qx 'mss32-debugtest'; then
+              rid="$id"; break
+            fi
+          done
+          if [ -z "$rid" ]; then
+            echo "::error::No successful mss32 build with a live mss32-debugtest artifact on '$BRANCH'. Push an mss32/** change (or re-run mss32) to produce one, then retry."
+            exit 1
+          fi
+          echo "Reusing the DebugTest DLL from mss32 run $rid"
+          echo "run_id=$rid" >> "$GITHUB_OUTPUT"
+
+  tests:
+    name: Tests (reuse prebuilt DLL)
+    needs: resolve-dll
+    uses: ./.github/workflows/tests.yml
+    with:
+      dll_run_id: ${{ needs.resolve-dll.outputs.run_id }}
+    secrets: inherit

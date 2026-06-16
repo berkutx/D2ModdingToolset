@@ -1,18 +1,31 @@
 name: tests
 
-# Reusable test suite for the DebugTest build. Called by mss32.yml after the
-# DebugTest DLL is built (uses:), so it sees that DLL as a same-run artifact;
-# also dispatchable on its own. Several test jobs run in parallel against the
-# minimal standalone game (restored from cache). Validates the open question:
-# does the game reach DLG_MAIN_MENU on a headless GitHub windows runner?
+# Reusable test suite for the DebugTest build. The DLL source is a parameter (dll_run_id):
+#   - mss32.yml calls this right after Build DebugTest with NO dll_run_id, so it pulls the
+#     same-run artifact (the DLL it just built);
+#   - tests-only.yml (triggered by a tools/** test-script change) passes the run id of the
+#     latest successful mss32 build, so the unchanged prebuilt DLL is REUSED — no rebuild.
+# Several jobs run in parallel against the minimal standalone game (restored from cache).
 
 on:
   workflow_call:
+    inputs:
+      dll_run_id:
+        description: "Run id of the mss32 build whose mss32-debugtest artifact to test. Empty = same run (the caller just built it)."
+        type: string
+        required: false
+        default: ""
   workflow_dispatch:
+    inputs:
+      dll_run_id:
+        description: "Run id of an mss32 build to pull the DebugTest DLL from. Empty = this run (only valid when dispatched from a build that produced the artifact)."
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
-  actions: read
+  actions: read # list runs + download the mss32-debugtest artifact (same- or cross-run)
 
 jobs:
   # Warm the ~1.95 GB minimal game into the Actions cache once per run/branch.
@@ -61,9 +74,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with: { submodules: false, fetch-depth: 1 }
-      - name: Get DebugTest DLL (same-run artifact)
+      - name: Get DebugTest DLL (same run, or the reused prebuilt one)
         uses: actions/download-artifact@v5
-        with: { name: mss32-debugtest, path: dll }
+        with:
+          name: mss32-debugtest
+          path: dll
+          run-id: ${{ inputs.dll_run_id || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Restore game from cache
         uses: actions/cache/restore@v4
         with:
@@ -93,9 +110,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with: { submodules: false, fetch-depth: 1 }
-      - name: Get DebugTest DLL (same-run artifact)
+      - name: Get DebugTest DLL (same run, or the reused prebuilt one)
         uses: actions/download-artifact@v5
-        with: { name: mss32-debugtest, path: dll }
+        with:
+          name: mss32-debugtest
+          path: dll
+          run-id: ${{ inputs.dll_run_id || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Restore game from cache
         uses: actions/cache/restore@v4
         with:
@@ -129,9 +150,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with: { submodules: false, fetch-depth: 1 }
-      - name: Get DebugTest DLL (same-run artifact)
+      - name: Get DebugTest DLL (same run, or the reused prebuilt one)
         uses: actions/download-artifact@v5
-        with: { name: mss32-debugtest, path: dll }
+        with:
+          name: mss32-debugtest
+          path: dll
+          run-id: ${{ inputs.dll_run_id || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Enable DirectPlay (native TCP/IP service provider for D2 multiplayer)
         run: |
           # The minimal game uses native DirectPlay TCP/IP for MP. A clean Windows
