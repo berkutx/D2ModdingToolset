@@ -34,19 +34,16 @@ public:
     const rsg::UnitsInfo& getUnits() const override;
     const rsg::UnitInfoArray& getLeaders() const override;
     const rsg::UnitInfoArray& getSoldiers() const override;
-    // STUB: the pinned D2RSG's rsg::GameInfo base does not declare the noble/
-    // guardian accessors, so these cannot be 'override' yet. Drop 'override'
-    // until D2RSG is updated with the matching virtuals (then restore it).
-    const rsg::UnitInfoArray& getNobles() const /*override*/;
-    const rsg::UnitInfoArray& getGuardians() const /*override*/;
+    const rsg::UnitInfoArray& getNobles() const override;
+    const rsg::UnitInfoArray& getGuardians() const override;
     int getMinLeaderValue() const override;
     int getMaxLeaderValue() const override;
     int getMinSoldierValue() const override;
     int getMaxSoldierValue() const override;
-    int getMinNobleValue() const /*override*/;
-    int getMaxNobleValue() const /*override*/;
-    int getMinGuardianValue() const /*override*/;
-    int getMaxGuardianValue() const /*override*/;
+    int getMinNobleValue() const override;
+    int getMaxNobleValue() const override;
+    int getMinGuardianValue() const override;
+    int getMaxGuardianValue() const override;
 
     const rsg::ItemsInfo& getItemsInfo() const override;
     const rsg::ItemInfoArray& getItems() const override;

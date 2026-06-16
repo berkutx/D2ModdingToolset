@@ -115,6 +115,7 @@ static const std::array<Rtti, 4> types = {{
         (TypeDescriptor*)0x793bc8, // CMidRoadType
         (TypeDescriptor*)0x793040, // CCmdStackVisitMsgType
         (TypeDescriptor*)0x793b90, // CMidSiteType
+        (TypeDescriptor*)0x78EDA8,
         (BaseClassDescriptor*)0x719cf0, // IMidObjectDescriptor
         (BaseClassDescriptor*)0x71f190, // IMidScenarioObjectDescriptor
         (BaseClassDescriptor*)0x71f328, // IMapElementDescriptor
@@ -183,6 +184,7 @@ static const std::array<Rtti, 4> types = {{
         (TypeDescriptor*)0x793bc8, // CMidRoadType
         (TypeDescriptor*)0x793040, // CCmdStackVisitMsgType
         (TypeDescriptor*)0x793b90, // CMidSiteType
+        (TypeDescriptor*)0x78EDA8,
         (BaseClassDescriptor*)0x719cf0, // IMidObjectDescriptor
         (BaseClassDescriptor*)0x71f190, // IMidScenarioObjectDescriptor
         (BaseClassDescriptor*)0x71f328, // IMapElementDescriptor
@@ -251,6 +253,7 @@ static const std::array<Rtti, 4> types = {{
         (TypeDescriptor*)0x791b70, // CMidRoadType
         (TypeDescriptor*)0x790fe8, // CCmdStackVisitMsgType
         (TypeDescriptor*)0x791b38, // CMidSiteType
+        (TypeDescriptor*)0x78EDA8, // потом поменять 
         (BaseClassDescriptor*)0x717c58, // IMidObjectDescriptor
         (BaseClassDescriptor*)0x71d0f8, // IMidScenarioObjectDescriptor
         (BaseClassDescriptor*)0x71d290, // IMapElementDescriptor
@@ -319,6 +322,7 @@ static const std::array<Rtti, 4> types = {{
         (TypeDescriptor*)0x649488, // CMidRoadType
         (TypeDescriptor*)nullptr, // CCmdStackVisitMsgType
         (TypeDescriptor*)0x649470, // CMidSiteType
+        (TypeDescriptor*)0x78EDA8, // потом поменять
         (BaseClassDescriptor*)0x5f5f90, // IMidObjectDescriptor
         (BaseClassDescriptor*)0x5f5fa8, // IMidScenarioObjectDescriptor
         (BaseClassDescriptor*)0x5f6748, // IMapElementDescriptor

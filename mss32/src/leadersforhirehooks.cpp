@@ -170,12 +170,45 @@ bool __stdcall changeStackLeaderInCapitalHooked(game::IMidgardObjectMap* objectM
 {
     using namespace game;
 
+    const int MODE_SKIP = 1;
+    const int MODE_CLEAR_IMPORT = 2;
+
     const auto& fn = gameFunctions();
     const auto& idApi{CMidgardIDApi::get()};
     const auto& visitor = VisitorApi::get();
     const auto& global = GlobalDataApi::get();
     const auto globalData = *global.getGlobalData();
     const auto& groupApi = CMidUnitGroupApi::get();
+    const auto& smartPtrApi = SmartPointerApi::get();
+    auto variables{getScenarioVariables(objectMap)};
+
+    int mode{0};
+    if (variables && variables->variables.length) {
+        spdlog::debug("Loop through {:d} scenario variables", variables->variables.length);
+        for (const auto& variable : variables->variables) {
+            const auto& name = variable.second.name;
+            const auto expectedName{"START_LEADER_CHANGE_MODE"};
+            if (!strncmp(name, expectedName, sizeof(name))) {
+                mode = variable.second.value;
+                break;
+            }
+        }
+    }
+
+    if (mode == -1) {
+        CMidgardID playerId = playerInfo->playerId;
+        auto capital = fn.findCapitalByPlayerId(&playerId, objectMap);
+        visitor.eraseStack(&capital->stackId, objectMap, 1);        
+        return false;
+    }
+
+    if (mode & MODE_CLEAR_IMPORT) {
+        smartPtrApi.createOrFree(&playerInfo->importLeaderStore, 0);
+    }
+
+    if (mode & MODE_SKIP) {
+        return false;
+    }
 
     bool wasReplaced = getOriginalFunctions().changeStackLeaderInCapital(objectMap, playerInfo, turn);
 

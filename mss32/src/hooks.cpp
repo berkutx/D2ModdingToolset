@@ -18,6 +18,8 @@
  */
 
 #include "hooks.h"
+#include "stealitemhooks.h"
+#include "stealmerchantiteminterf.h"
 #include "aigiveitemsaction.h"
 #include "aigiveitemsactionhooks.h"
 #include "attackimpl.h"
@@ -144,6 +146,7 @@
 #include "midgard.h"
 #include "midgardhooks.h"
 #include "midgardid.h"
+#include "strategicspell.h"
 #include "midgardmsgbox.h"
 #include "midgardscenariomap.h"
 #include "midgardstreamenv.h"
@@ -174,6 +177,7 @@
 #include "objectinterfhooks.h"
 #include "originalfunctions.h"
 #include "phasegame.h"
+#include "MIDITEM.h"
 #include "phasegamehooks.h"
 #include "playerbuildings.h"
 #include "playerincomehooks.h"
@@ -251,6 +255,10 @@
 #include "batattackboostdamage.h"
 #include "dotattackhooks.h"
 #include "batunitanim.h"
+#include "quicksavehook.h"
+#include "stealspellinterf.h"
+#include "addstealspellhooks.h"
+
 
 struct PendingBattleEffect
 {
@@ -276,6 +284,10 @@ static Hooks getGameHooks()
 
     // clang-format off
     Hooks hooks{
+
+          // Quick save hotkey for host in multiplayer 
+         {(void*)fn.stratInterfKeyHandler, hookedKeyHandler, (void**)&originalKeyHandler},
+
         // Fix game crash in battles with summoners
         {CMidUnitApi::get().removeModifier, removeModifierHooked},
         // Fix unit transformation to include hp mods into current hp recalculation
@@ -528,6 +540,7 @@ static Hooks getGameHooks()
         {BattleViewerInterfApi::vftable()->battleEnd, battleEndHooked, (void**)&orig.battleEnd},
         {battle.decreaseUnitAttacks, decreaseUnitAttacksHooked, (void**)&orig.decreaseUnitAttacks},
         {CBatLogicApi::get().applyCBatAttackUntransformEffect, applyCBatAttackUntransformEffectHooked, (void**)&orig.applyCBatAttackUntransformEffect},
+
         // Allow modify leaders hire list with lua
         {LeadersForHireApi::get().getLeadersHireList, getLeadersHireListHooked},
         {LeadersForHireApi::get().addNobleLeaderToUI, addNobleLeaderToUIHooked},
@@ -539,7 +552,7 @@ static Hooks getGameHooks()
         {BattleViewerInterfApi::vftable()->showAttackEffect, showAttackEffectHooked, (void**)&orig.showAttackEffect},
     };
     // clang-format on
-
+    
     // Extended battle options
     if (userSettings().extendedBattle.dotDamageCanStack
         != baseSettings().extendedBattle.dotDamageCanStack) {
@@ -685,6 +698,53 @@ static Hooks getGameHooks()
         hookSendObjectsChanges = true;
     }
 
+
+    //
+    // build spell list
+    //
+    hooks.emplace_back(HookInfo{(void*)game::StealSpellInterfApi::get().buildSpellList,
+
+                                hooks::getBuildSpellListHooked(),
+
+                                hooks::getBuildSpellListOrig()});
+
+    //
+    // filtered insertion
+    //
+    hooks.emplace_back(HookInfo{(void*)game::IdSetApi::get().insert,
+
+                                hooks::getSortedIdListInsertHooked(),
+
+                                hooks::getSortedIdListInsertOrig()});
+
+    //
+    // Steal spell
+    //
+    hooks.emplace_back(HookInfo{(void*)game::StealSpellInterfApi::get().constructor,
+
+                                hooks::getStealSpellInterfCtorHooked(),
+
+                                hooks::getStealSpellInterfCtorOrig()});
+
+
+
+
+    //
+    // Steal merchant items
+    //
+
+     hooks.emplace_back(HookInfo{(void*) game::StealMerchantItemInterfApi::get().constructor,
+        hooks::getStealItemCtorHooked(),
+        hooks::getStealItemCtorOrig()});
+
+     //
+     // Steal merchant items
+     //
+     hooks.emplace_back(HookInfo{(void*) game::StealMerchantItemInterfApi::get().addStealItem,
+            hooks::getAddStealItemHooked(),
+            hooks::getAddStealItemOrig()});
+      
+
     if (hookSendObjectsChanges) {
         hooks.emplace_back(HookInfo{CMidServerLogicApi::vftable().midMsgSender->sendObjectsChanges,
                                     midServerLogicSendObjectsChangesHooked,
@@ -740,6 +800,7 @@ static Hooks getScenarioEditorHooks()
     return hooks;
 }
 
+
 Hooks getHooks()
 {
     using namespace game;
@@ -749,12 +810,12 @@ Hooks getHooks()
     auto& fn = gameFunctions();
     auto& orig = getOriginalFunctions();
 
-    
   
- // Called when a player's turn begins.Invoked for all players, including neutral factions.
+    // Called when a player's turn begins.Invoked for all players, including neutral factions.
     if (hooks::executableIsGame() && fn.midServerLogicDataBeginTurn) {
         hooks.emplace_back(HookInfo{fn.midServerLogicDataBeginTurn, getBeginTurnHooked(), getBeginTurnOrig()});
     }
+
     // Register buildings with custom branch category as unit buildings
     hooks.emplace_back(HookInfo{fn.createBuildingType, createBuildingTypeHooked});
     // Support custom building branch category
@@ -3047,6 +3108,7 @@ void __stdcall applyCBatAttackUntransformEffectHooked(game::IMidgardObjectMap* o
     getOriginalFunctions().applyCBatAttackUntransformEffect(objectMap, unitId, battleMsgData,
                                                             resultSender, sendResult);
 }
+
 
 void __fastcall showAttackEffectHooked(game::IBatViewer* thisptr,
     int /*%edx*/,

@@ -175,6 +175,14 @@ struct GlobalVariablesDataHooked : public GlobalVariablesData
     int rmktRiotMin;
     /** Maximal resource market riot duration in days. 'RMKT_RIOT_MAX' */
     int rmktRiotMax;
+
+    /** 'S_ITM_VAL' */
+    int stealItemValue;
+
+    /** 'S_SPL_VAL' */
+    int stealSpellValue;
+
+
 };
 
 struct GlobalVariables

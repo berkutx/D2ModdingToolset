@@ -185,6 +185,7 @@ struct Rtti
     TypeDescriptor* CMidRoadType;
     TypeDescriptor* CCmdStackVisitMsgType;
     TypeDescriptor* CMidSiteType;
+    TypeDescriptor* CMidSiteMageType;
 
     BaseClassDescriptor* IMidObjectDescriptor;
     BaseClassDescriptor* IMidScenarioObjectDescriptor;

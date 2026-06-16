@@ -354,6 +354,12 @@ call ..\buildDetours.bat ..\Detours
     <ClCompile Include="..\SLikeNet\DependentExtensions\Lobby2\Rooms\RoomsErrorCodes.cpp" />
     <ClCompile Include="..\SLikeNet\DependentExtensions\Lobby2\Rooms\RoomsPlugin.cpp" />
     <ClCompile Include="..\SLikeNet\DependentExtensions\Lobby2\Rooms\RoomTypes.cpp" />
+    <ClCompile Include="src\bindings\globalitemsview.cpp" />
+    <ClCompile Include="src\bindings\globalspellsview.cpp" />
+    <ClCompile Include="src\bindings\spellview.cpp" />
+    <ClCompile Include="src\stealmerchantiteminterf.cpp" />
+    <ClCompile Include="src\stealitemhooks.cpp" />
+    <ClCompile Include="src\addstealspellhooks.cpp" />
     <ClCompile Include="src\aiattitudescat.cpp" />
     <ClCompile Include="src\aiattitudestable.cpp" />
     <ClCompile Include="src\aigiveitemsaction.cpp" />
@@ -603,6 +609,7 @@ call ..\buildDetours.bat ..\Detours
     <ClCompile Include="src\paperdollchildinterf.cpp" />
     <ClCompile Include="src\phasegame.cpp" />
     <ClCompile Include="src\phasegamehooks.cpp" />
+    <ClCompile Include="src\quicksavehook.cpp" />
     <ClCompile Include="src\resourcemarketinterface.cpp" />
     <ClCompile Include="src\resourcetype.cpp" />
     <ClCompile Include="src\resultsender.cpp" />
@@ -759,10 +766,12 @@ call ..\buildDetours.bat ..\Detours
     <ClCompile Include="src\pointset.cpp" />
     <ClCompile Include="src\raceset.cpp" />
     <ClCompile Include="src\sounds.cpp" />
+    <ClCompile Include="src\spellutils.cpp" />
     <ClCompile Include="src\spinbuttoninterf.cpp" />
     <ClCompile Include="src\stackbattleactionmsg.cpp" />
     <ClCompile Include="src\stackmovemsg.cpp" />
     <ClCompile Include="src\stacktemplatecache.cpp" />
+    <ClCompile Include="src\stealspellinterf.cpp" />
     <ClCompile Include="src\streambits.cpp" />
     <ClCompile Include="src\streamutils.cpp" />
     <ClCompile Include="src\stringandid.cpp" />
@@ -884,6 +893,12 @@ call ..\buildDetours.bat ..\Detours
     <ClInclude Include="include\2dengine.h" />
     <ClInclude Include="include\2denginemap.h" />
     <ClInclude Include="include\2denginemapimpl.h" />
+    <ClInclude Include="include\bindings\globalitemsview.h" />
+    <ClInclude Include="include\bindings\globalspellsview.h" />
+    <ClInclude Include="include\bindings\spellview.h" />
+    <ClInclude Include="include\stealmerchantiteminterf.h" />
+    <ClInclude Include="include\stealitemhooks.h" />
+    <ClInclude Include="include\addstealspellhooks.h" />
     <ClInclude Include="include\aiattitudes.h" />
     <ClInclude Include="include\aiattitudescat.h" />
     <ClInclude Include="include\aiattitudestable.h" />
@@ -1194,6 +1209,7 @@ call ..\buildDetours.bat ..\Detours
     <ClInclude Include="include\paperdollchildinterf.h" />
     <ClInclude Include="include\phasegamehooks.h" />
     <ClInclude Include="include\playerlistentry.h" />
+    <ClInclude Include="include\quicksavehook.h" />
     <ClInclude Include="include\quickstring.h" />
     <ClInclude Include="include\refreshinfo.h" />
     <ClInclude Include="include\nativegameinfo.h" />
@@ -1512,8 +1528,10 @@ call ..\buildDetours.bat ..\Detours
     <ClInclude Include="include\sounds.h" />
     <ClInclude Include="include\soundsystemsample.h" />
     <ClInclude Include="include\soundsystemstream.h" />
+    <ClInclude Include="include\spellutils.h" />
     <ClInclude Include="include\stackmovemsg.h" />
     <ClInclude Include="include\stacktemplatecache.h" />
+    <ClInclude Include="include\stealspellinterf.h" />
     <ClInclude Include="include\streambits.h" />
     <ClInclude Include="include\streamholder.h" />
     <ClInclude Include="include\streamregister.h" />

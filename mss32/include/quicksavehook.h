@@ -1,7 +1,7 @@
 /*
  * This file is part of the modding toolset for Disciples 2.
- * (https://github.com/VladimirMakeev/D2ModdingToolset)
- * Copyright (C) 2024 Vladimir Makeev.
+ * (https://github.com/bartonsun/D2ModdingToolset)
+ * Copyright (C) 2026 Max Vynogradov.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,32 +16,12 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+#pragma once
 
-#ifndef GLOBALVIEW_H
-#define GLOBALVIEW_H
+namespace hooks {
+using KeyHandler = int(__thiscall*)(void* thisPtr, int key, int a3);
 
-#include "globalvariablesview.h"
-#include "globalunitsview.h"
-#include "globalitemsview.h"
-#include "globalspellsview.h"
+extern KeyHandler originalKeyHandler;
 
-namespace sol {
-class state;
-}
-
-namespace bindings {
-
-class GlobalView
-{
-public:
-    static void bind(sol::state& lua);
-
-    GlobalVariablesView getGlobalVariables() const;
-    GlobalUnitsView getUnits() const;
-    GlobalItemsView getItems() const;
-    GlobalSpellsView getSpells() const;
-};
-
-} // namespace bindings
-
-#endif // GLOBALVIEW_H
+int __fastcall hookedKeyHandler(void* thisPtr, void*, int key, int a3);
+} // namespace hooks

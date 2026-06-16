@@ -425,28 +425,28 @@ static void updateMenuUi(CMenuRandomScenario* menu, int selectedIndex)
 
     CDialogInterf* dialog{menuBase.getDialogInterface(menu)};
 
-    if (generatorSettings.enableParameterForest) {
+    if (dialogApi.findControl(dialog, forestSpinName)) {
         CSpinButtonInterf* forestSpin = dialogApi.findSpinButton(dialog, forestSpinName);
         if (forestSpin) {
             spinBox.setSelectedOption(forestSpin, settings.forest / forestSpinStep);
         }
     }
 
-    if (generatorSettings.enableParameterRoads) {
+    if (dialogApi.findControl(dialog, roadsSpinName)) {
         CSpinButtonInterf* roadsSpin = dialogApi.findSpinButton(dialog, roadsSpinName);
         if (roadsSpin) {
             spinBox.setSelectedOption(roadsSpin, settings.roads / roadsSpinStep);
         }
     }
 
-    if (generatorSettings.enableParameterGold) {
+    if (dialogApi.findControl(dialog, goldSpinName)) {
         CSpinButtonInterf* goldSpin{dialogApi.findSpinButton(dialog, goldSpinName)};
         if (goldSpin) {
             spinBox.setSelectedOption(goldSpin, settings.startingGold / goldSpinStep);
         }
     }
 
-    if (generatorSettings.enableParameterMana) {
+    if (dialogApi.findControl(dialog, manaSpinName)) {
         CSpinButtonInterf* manaSpin{dialogApi.findSpinButton(dialog, manaSpinName)};
         if (manaSpin) {
             spinBox.setSelectedOption(manaSpin, settings.startingNativeMana / manaSpinStep);
@@ -474,6 +474,10 @@ static void updateMenuUi(CMenuRandomScenario* menu, int selectedIndex)
 
         const char* parameterSpinName = bufferSpin;
         const char* parameterTxtName = bufferTxt;
+
+        if (!dialogApi.findControl(dialog, parameterSpinName)) {
+            continue;
+        }
 
         CSpinButtonInterf* parameterSpin{dialogApi.findSpinButton(dialog, parameterSpinName)};
         if (parameterSpin) {
@@ -809,28 +813,28 @@ static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /
         return;
     }
 
-    if (generatorSettings.enableParameterForest) {
+    if (dialogApi.findControl(dialog, forestSpinName)) {
         const CSpinButtonInterf* forestSpin = dialogApi.findSpinButton(dialog, forestSpinName);
         if (!forestSpin) {
             return;
         }
     }
 
-    if (generatorSettings.enableParameterRoads) {
+    if (dialogApi.findControl(dialog, roadsSpinName)) {
         const CSpinButtonInterf* roadsSpin = dialogApi.findSpinButton(dialog, roadsSpinName);
         if (!roadsSpin) {
             return;
         }
     }
 
-    if (generatorSettings.enableParameterGold) {
+    if (dialogApi.findControl(dialog, goldSpinName)) {
         const CSpinButtonInterf* goldSpin = dialogApi.findSpinButton(dialog, goldSpinName);
         if (!goldSpin) {
             return;
         }
     }
 
-    if (generatorSettings.enableParameterMana) {
+    if (dialogApi.findControl(dialog, manaSpinName)) {
         const CSpinButtonInterf* manaSpin = dialogApi.findSpinButton(dialog, manaSpinName);
         if (!manaSpin) {
             return;
@@ -878,28 +882,28 @@ static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /
         settings.size = spinSizeOptionToScenarioSize(sizeSpin, settings.sizeMin, settings.sizeMax);
         raceIndicesToRaces(settings.races, thisptr->raceIndices);
 
-        if (generatorSettings.enableParameterForest) {
+        if (dialogApi.findControl(dialog, forestSpinName)) {
             const CSpinButtonInterf* forestSpin = dialogApi.findSpinButton(dialog, forestSpinName);
             if (forestSpin) {
                 settings.forest = forestSpin->data->selectedOption * forestSpinStep;
             }
         }
 
-        if (generatorSettings.enableParameterRoads) {
+        if (dialogApi.findControl(dialog, roadsSpinName)) {
             const CSpinButtonInterf* roadsSpin = dialogApi.findSpinButton(dialog, roadsSpinName);
             if (roadsSpin) {
                 settings.roads = roadsSpin->data->selectedOption * roadsSpinStep;
             }
         }
 
-        if (generatorSettings.enableParameterGold) {
+        if (dialogApi.findControl(dialog, goldSpinName)) {
             const CSpinButtonInterf* goldSpin = dialogApi.findSpinButton(dialog, goldSpinName);
             if (goldSpin) {
                 settings.startingGold = goldSpin->data->selectedOption * goldSpinStep;
             }
         }
 
-        if (generatorSettings.enableParameterMana) {
+        if (dialogApi.findControl(dialog, manaSpinName)) {
             const CSpinButtonInterf* manaSpin = dialogApi.findSpinButton(dialog, manaSpinName);
             if (manaSpin) {
                 settings.startingNativeMana = manaSpin->data->selectedOption * manaSpinStep;
@@ -987,28 +991,28 @@ static void setupMenuUi(CMenuRandomScenario* menu, const char* dialogName)
     freeFunctor(&functor, nullptr);
 
     // Create spin button options, template selection will only change currently selected option
-    if (generatorSettings.enableParameterForest) {
+    if (dialogApi.findControl(dialog, forestSpinName)) {
         CSpinButtonInterf* forestSpin{dialogApi.findSpinButton(dialog, forestSpinName)};
         if (forestSpin) {
             setupSpinButtonOptions(forestSpin, 0, 100, forestSpinStep, "%");
         }
     }
 
-    if (generatorSettings.enableParameterRoads) {
+    if (dialogApi.findControl(dialog, roadsSpinName)) {
         CSpinButtonInterf* roadsSpin{dialogApi.findSpinButton(dialog, roadsSpinName)};
         if (roadsSpin) {
             setupSpinButtonOptions(roadsSpin, 0, 100, roadsSpinStep, "%");
         }
     }
 
-    if (generatorSettings.enableParameterGold) {
+    if (dialogApi.findControl(dialog, goldSpinName)) {
         CSpinButtonInterf* goldSpin{dialogApi.findSpinButton(dialog, goldSpinName)};
         if (goldSpin) {
             setupSpinButtonOptions(goldSpin, 0, 9999, goldSpinStep);
         }
     }
 
-    if (generatorSettings.enableParameterMana) {
+    if (dialogApi.findControl(dialog, manaSpinName)) {
         CSpinButtonInterf* manaSpin{dialogApi.findSpinButton(dialog, manaSpinName)};
         if (manaSpin) {
             setupSpinButtonOptions(manaSpin, 0, 9999, manaSpinStep);
