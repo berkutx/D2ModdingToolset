@@ -38,7 +38,9 @@ void stop();
 /** Send a Log line to the relay. Safe from any thread; dropped if not connected. */
 void send_log(const char* utf8_message);
 
-/** Register a handler for control opcodes the bridge does not own (null clears). */
+/** Register a handler for control opcodes the bridge does not own — e.g. the
+ * dispatcher's InvokeButton / SetSelection commands, which the auto-nav executor
+ * queues for the UI thread. Runs on the bridge thread; must not block. Null clears. */
 void setCommandCallback(CommandCallback cb);
 
 } // namespace bridge

@@ -31,6 +31,7 @@ using FnAssignFunctor = game::CButtonInterf*(__stdcall*)(game::CDialogInterf*, c
 FnAssignFunctor g_origAssignFunctor = nullptr;
 
 char g_lastDialog[48] = {};
+char g_buttonsCsv[512] = {};                // buttons bound for the current dialog (reset on change)
 game::CDialogInterf* g_curDialog = nullptr; // live ptr of the current (last-bound) dialog
 
 // Registry of bound dialogs by name (D2 keeps several co-present). Last writer per
@@ -66,7 +67,14 @@ void recordBind(game::CDialogInterf* dialog, const char* dialogName, const char*
     registerDialog(dialogName, dialog);
     if (lstrcmpA(g_lastDialog, dialogName) != 0) {
         lstrcpynA(g_lastDialog, dialogName, sizeof(g_lastDialog));
+        g_buttonsCsv[0] = 0; // new screen -> fresh button list
         spdlog::info("[testdrv] dialog now: {}", dialogName); // the "current screen" signal
+    }
+    // Accumulate the current dialog's buttons (comma-separated) for the live UI scan.
+    if (lstrlenA(g_buttonsCsv) + lstrlenA(buttonName) + 2 < (int)sizeof(g_buttonsCsv)) {
+        if (g_buttonsCsv[0])
+            lstrcatA(g_buttonsCsv, ",");
+        lstrcatA(g_buttonsCsv, buttonName);
     }
     // Log every (dialog,button) so the real names can be discovered live.
     spdlog::info("[testdrv] bind {}::{}", dialogName, buttonName);
@@ -92,6 +100,11 @@ game::CDialogInterf* currentDialog()
 const char* currentDialogName()
 {
     return g_lastDialog;
+}
+
+const char* currentButtonsCsv()
+{
+    return g_buttonsCsv;
 }
 
 game::CDialogInterf* findDialog(const char* name)
@@ -121,7 +134,7 @@ void install()
 {
     if (!executableIsGame() || gameVersion() != GameVersion::Russobit)
         return;
-    if (!testenv::on("D2TESTDRV_UI"))
+    if (!testenv::on("D2TESTDRV_UI_REPORTER"))
         return;
     g_origAssignFunctor = game::CButtonInterfApi::get().assignFunctor;
     if (!g_origAssignFunctor) {

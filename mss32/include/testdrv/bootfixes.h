@@ -23,7 +23,7 @@ namespace testdrv {
 namespace bootfixes {
 
 /** Apply the static byte patches from DllMain (earliest): skip-intro if
- * D2TESTDRV_SKIP_INTRO, fg-flag if D2TESTDRV_BOOT. No-op on a non-Russobit image. */
+ * D2TESTDRV_SKIP_INTRO, fg-flag if D2TESTDRV_BLACKSCREEN_FIX. No-op on a non-Russobit image. */
 void installEarly();
 
 } // namespace bootfixes

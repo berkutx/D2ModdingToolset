@@ -34,6 +34,7 @@
 #include <spdlog/sinks/msvc_sink.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/spdlog.h>
+#include <chrono>
 #include <string>
 #include <thread>
 #define WIN32_LEAN_AND_MEAN
@@ -291,9 +292,9 @@ BOOL APIENTRY DllMain(HMODULE hDll, DWORD reason, LPVOID reserved)
     }
 
 #ifdef D2_TESTDRV
-    // [test/logging system] UI-state reporter, menu auto-nav, window caption, and —
-    // if D2TESTDRV_NET — the unified network trace hooks + relay bridge. Each is
-    // runtime-gated by its D2TESTDRV_* env var.
+    // [test/logging system] UI-state reporter, auto-nav executor, window caption, the
+    // network interception layer (D2TESTDRV_NET_INTERCEPT) and the relay bridge
+    // (D2TESTDRV_RELAY_BRIDGE). Each is runtime-gated by its D2TESTDRV_* env var.
     hooks::testdrv::install(library);
 #endif
 

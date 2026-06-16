@@ -1,36 +1,37 @@
 /*
  * Publishable test/logging system for the Disciples 2 modding toolset.
- * Auto-nav driver — see testdrv/autonav.h.
+ * Auto-nav executor — see testdrv/autonav.h.
  *
- * Drives the menu chain hands-free by invoking buttons' onClicked functors directly
- * (no synthetic input). Ticked once per screen-loop iteration from a Detour of
- * sub_5629CA (the per-frame cursor helper), so it runs on the UI/dialog thread —
- * required, since invoking a functor must happen on the thread that owns the dialogs —
- * with no dependency on the message pump being serviced (which it isn't under the
- * DisciplesGL software-render path on a GPU-less runner). Roles (D2TESTDRV_ROLE):
- *   probe — main menu -> Multiplayer -> TCP/IP -> Continue (stops at host/join screen)
- *   exit  — reach the menu, then quit (boot-reliability harness)
- *   host  — create a TCP/IP session, wait for the joiner, start the game
- *   join  — join the host's TCP/IP session, follow it into the started game
- * The host waits for the joiner via a DLL-side RX gate (CConnectMsg); the joiner waits
- * for the host to be FULLY in the strategic map via WaitHostReady (an orchestrator
- * file signal — see pair-mp.ps1) before requesting start. Compile-gated by D2_TESTDRV.
+ * A thin in-process agent. It invokes button functors / sets listbox selections on the
+ * UI/dialog thread, ticked once per screen-loop iteration from a Detour of sub_5629CA
+ * (the per-frame cursor helper) — required, since invoking a functor must happen on the
+ * thread that owns the dialogs, and with no dependency on the message pump (which the
+ * DisciplesGL software-render path on a GPU-less runner does not service). Two modes:
+ *   - SELFNAV (D2TESTDRV_SELFNAV): run a built-in script for the role — for MINIMAL,
+ *     single-instance tests (probe: menu->Multiplayer->TCP/IP->Continue; exit: quit).
+ *   - DISPATCHER-DRIVEN (D2TESTDRV_RELAY_BRIDGE): execute invoke/select commands the
+ *     PowerShell dispatcher sends over the relay. The agent itself holds NO test logic,
+ *     verification or coordination — that lives in the dispatcher, which scans the live
+ *     UI (uistatereporter -> relay) and drives both instances. For COMPLEX / 2-instance
+ *     tests.
+ * Compile-gated by D2_TESTDRV.
  */
 
 #ifdef D2_TESTDRV
 
 #include "testdrv/autonav.h"
-#include "testdrv/nettracehooks.h"
+#include "testdrv/packetlogicbridge.h"
+#include "testdrv/testenv.h"
 #include "testdrv/uistatereporter.h"
 #include "button.h"
 #include "dialoginterf.h"
 #include "listbox.h"
-#include "midcommandqueue2.h"
 #include "smartptr.h"
-#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <mutex>
 #include <spdlog/spdlog.h>
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -44,15 +45,11 @@ namespace {
 
 enum class NavAction
 {
-    WaitDialog,        // wait until <dlg> is the current dialog
-    Invoke,            // click <widget> in <dlg> (invoke its onClicked functor)
-    SetSelection,      // set listbox <widget> in <dlg> to index <param>
-    Delay,             // wait <param> ms
-    WaitPeer,          // wait until the joiner has connected (host script)
-    WaitHostBriefing,  // wait until the host has entered the game (join script)
-    WaitHostStrategic, // wait until the host reached the strategic map (join script)
-    WaitHostReady,     // wait until the host has FULLY entered strategic (orchestrator signal, join script)
-    AutoDismiss,       // dismiss any known first-turn popup until quiet, up to <param> ms
+    WaitDialog,   // wait until <dlg> is the current dialog (skips on timeout)
+    Invoke,       // click <widget> in <dlg> (invoke its onClicked functor)
+    SetSelection, // set listbox <widget> in <dlg> to index <param>
+    Delay,        // wait <param> ms
+    AutoDismiss,  // dismiss any known first-turn popup until quiet, up to <param> ms
     Done
 };
 
@@ -64,46 +61,7 @@ struct NavStep
     int param;
 };
 
-// --- RX gates (set by the network observer; ported from lobby hooks.cpp) ------
-std::atomic<bool> g_peerObserved{false};      // a second player's CConnectMsg seen (host)
-std::atomic<bool> g_hostInBriefing{false};    // host CJoinGameMsg seen (joiner)
-std::atomic<bool> g_hostInStrategic{false};   // host CCmdBeginTurnMsg seen (joiner)
-std::atomic<std::uint32_t> g_firstConnectDpid{0};
-
-// Inbound-packet observer. `payload` points at the CNetMsg class name (raw RTTI
-// mangled name); `size` is the full message length. Same offsets as the lobby.
-void onRxGate(void* /*self*/, int /*sender*/, const std::uint8_t* payload, std::uint32_t size)
-{
-    if (!payload)
-        return;
-    // Host: a CConnectMsg whose embedded DPID (offset +36) differs from our own
-    // (first one seen) means a real peer joined the DPlay session. Need >=48 bytes:
-    // the DPID is a u32 at payload+36 (payload = message+8, so message offset 44..47).
-    if (size >= 48 && memcmp(payload, ".?AVCConnectMsg@@", 17) == 0) {
-        std::uint32_t dpid = *reinterpret_cast<const std::uint32_t*>(payload + 36);
-        if (dpid > 1) {
-            // Atomically claim "self DPID" so two RX threads can't both cache it.
-            std::uint32_t expected = 0;
-            if (g_firstConnectDpid.compare_exchange_strong(expected, dpid)) {
-                spdlog::info("[testdrv] gate: cached self DPID={} (first CConnectMsg)", dpid);
-            } else if (dpid != expected && !g_peerObserved.exchange(true)) {
-                spdlog::info("[testdrv] gate: peer DPID={} joined — WaitPeer released", dpid);
-            }
-        }
-    }
-    // Joiner: host's own "game started" broadcast.
-    if (size >= 18 && memcmp(payload, ".?AVCJoinGameMsg@@", 18) == 0) {
-        if (!g_hostInBriefing.exchange(true))
-            spdlog::info("[testdrv] gate: CJoinGameMsg — host in game, WaitHostBriefing released");
-    }
-    // Joiner: host reached the strategic map.
-    if (size >= 22 && memcmp(payload, ".?AVCCmdBeginTurnMsg@@", 22) == 0) {
-        if (!g_hostInStrategic.exchange(true))
-            spdlog::info("[testdrv] gate: CCmdBeginTurnMsg — host strategic, WaitHostStrategic released");
-    }
-}
-
-// --- nav scripts ------------------------------------------------------------
+// --- built-in self-nav scripts (minimal single-instance tests only) ----------
 const NavStep g_probeScript[] = {
     {NavAction::WaitDialog, "DLG_MAIN_MENU", "", 0},
     {NavAction::Invoke, "DLG_MAIN_MENU", "BTN_MULTI", 0},
@@ -121,60 +79,7 @@ const NavStep g_exitScript[] = {
     {NavAction::Done, "", "", 0},
 };
 
-// Host: create a TCP/IP session, wait for the joiner, start the game. End-Turn is
-// intentionally NOT pressed — we only need to reach the started game.
-const NavStep g_hostScript[] = {
-    {NavAction::WaitDialog, "DLG_MAIN_MENU", "", 0},
-    {NavAction::Invoke, "DLG_MAIN_MENU", "BTN_MULTI", 0},
-    {NavAction::WaitDialog, "DLG_PROTOCOL", "", 0},
-    {NavAction::SetSelection, "DLG_PROTOCOL", "TLBOX_PROTOCOL", 2},
-    {NavAction::Delay, "", "", 400},
-    {NavAction::Invoke, "DLG_PROTOCOL", "BTN_CONTINUE", 0},
-    {NavAction::WaitDialog, "DLG_LOAD_NEW_MULTI", "", 0},
-    {NavAction::Invoke, "DLG_LOAD_NEW_MULTI", "BTN_HOST", 0},
-    {NavAction::WaitDialog, "DLG_CHOOSE_SKIRMISH", "", 0},
-    {NavAction::SetSelection, "DLG_CHOOSE_SKIRMISH", "TLBOX_GAME_SLOT", 0}, // scenario (env override)
-    {NavAction::Invoke, "DLG_CHOOSE_SKIRMISH", "BTN_LOAD", 0},
-    {NavAction::WaitPeer, "", "", 0},
-    {NavAction::Delay, "settle-post-peer", "", 500},
-    {NavAction::Invoke, "DLG_LOBBY", "BTN_OK", 0},
-    {NavAction::Delay, "async-load", "", 500},
-    {NavAction::AutoDismiss, "first-turn-popups", "", 25000},
-    {NavAction::Delay, "strategic-settle", "", 2000},
-    {NavAction::Done, "", "", 0},
-};
-
-// Joiner: join the host's session, follow it into the started game.
-const NavStep g_joinScript[] = {
-    {NavAction::WaitDialog, "DLG_MAIN_MENU", "", 0},
-    {NavAction::Invoke, "DLG_MAIN_MENU", "BTN_MULTI", 0},
-    {NavAction::WaitDialog, "DLG_PROTOCOL", "", 0},
-    {NavAction::SetSelection, "DLG_PROTOCOL", "TLBOX_PROTOCOL", 2},
-    {NavAction::Delay, "", "", 400},
-    {NavAction::Invoke, "DLG_PROTOCOL", "BTN_CONTINUE", 0},
-    {NavAction::WaitDialog, "DLG_LOAD_NEW_MULTI", "", 0},
-    {NavAction::Invoke, "DLG_LOAD_NEW_MULTI", "BTN_JOIN", 0},
-    {NavAction::Delay, "session-enum-settle", "", 2000},
-    {NavAction::Invoke, "DLG_SESSION", "BTN_JOIN_GAME", 0},
-    {NavAction::WaitDialog, "DLG_LOBBY", "", 0}, // sit in the multiplayer lobby...
-    // ...and wait until the HOST has FULLY entered the strategic map before pressing
-    // OK. The joiner's OK sends CMenusReqStartGameMsg, to which the host responds by
-    // immediately serving its CURRENT scenario snapshot; if the host is still loading
-    // (it is much slower on a GPU-less software-render runner) that snapshot is
-    // inconsistent and the joiner dies applying it. The correct entry order is
-    // host-fully-in-strategic THEN joiner: gate the OK on the host's actual readiness,
-    // which the orchestrator observes from the host log and signals via the file named
-    // by D2TESTDRV_HOST_READY_FILE (no timing guesses, no defensive masking).
-    {NavAction::WaitHostReady, "", "", 0},
-    {NavAction::Invoke, "DLG_LOBBY", "BTN_OK", 0},
-    {NavAction::Delay, "async-load", "", 500},
-    {NavAction::AutoDismiss, "join-entry-popups", "", 20000},
-    {NavAction::Delay, "host-turn-broadcast", "", 5000},
-    {NavAction::AutoDismiss, "join-active-popups", "", 20000},
-    {NavAction::Done, "", "", 0},
-};
-
-// First-turn / entry popups, dismissed in whatever order they appear.
+// First-turn / entry popups, dismissed in whatever order they appear (selfnav helper).
 struct DismissCandidate
 {
     const char* dlg;
@@ -192,22 +97,23 @@ const DismissCandidate kDismissCandidates[] = {
     {"DLG_ITEM", "BTN_OK"},
 };
 
-const NavStep* g_navScript = nullptr;
+const NavStep* g_navScript = nullptr; // active self-nav script (null in dispatcher-only mode)
 int g_navLen = 0;
 int g_navIdx = 0;
 DWORD g_stepStart = 0;
+bool g_active = false;      // the agent acts (selfnav and/or dispatcher-driven)
 bool g_navArmed = false;
+bool g_autoDismiss = false; // continuously dismiss known first-turn popups in the tick
 int g_scenarioIdx = 0;
-constexpr DWORD kStepTimeoutMs = 15000; // menu transitions
-constexpr DWORD kGateTimeoutMs = 60000; // RX gates (peer/host) — generous for a real pairing
+constexpr DWORD kStepTimeoutMs = 15000;
 
 // AutoDismiss per-step state.
 bool g_adSeenAny = false;
 DWORD g_adLastPopupMs = 0;
 DWORD g_adLastClickMs = 0;
 char g_adLastClickedDlg[48] = {};
-constexpr DWORD kAdSameCooldownMs = 1200; // don't re-click the same dialog faster than this
-constexpr DWORD kAdQuietMs = 3000;        // done once popups stop for this long (after seeing any)
+constexpr DWORD kAdSameCooldownMs = 1200;
+constexpr DWORD kAdQuietMs = 3000;
 
 bool invokeButton(const char* dlgName, const char* btnName)
 {
@@ -215,8 +121,8 @@ bool invokeButton(const char* dlgName, const char* btnName)
     if (!dlg)
         return false; // target dialog not bound (yet) — co-present dialogs resolve by name
     bool invoked = false;
-    // SEH around resolve+invoke: a popup can close mid-tick, leaving a stale
-    // dialog ptr; a benign C++ throw can unwind through the menu-phase switch.
+    // SEH around resolve+invoke: a popup can close mid-tick, leaving a stale dialog ptr;
+    // a benign C++ throw can unwind through the menu-phase switch.
     __try {
         game::CButtonInterf* btn = game::CDialogInterfApi::get().findButton(dlg, btnName);
         if (btn && btn->buttonData) {
@@ -251,16 +157,91 @@ bool setListSelection(const char* dlgName, const char* lbName, int index)
     return ok;
 }
 
-// One AutoDismiss tick. Returns true when the step is complete (popups went quiet
-// after at least one was dismissed, or the cap elapsed).
+// --- dispatcher-driven remote commands ---------------------------------------
+// The dispatcher (via the relay) sends InvokeButton / SetSelection commands; the bridge
+// hands them here on the BRIDGE thread, so we only queue them — the per-frame tick drains
+// the queue on the UI/dialog thread, where invoking a functor is safe.
+struct RemoteCmd
+{
+    int type; // 0 = invoke button, 1 = set listbox selection
+    char dlg[48];
+    char widget[48];
+    int param;
+};
+std::mutex g_remoteMutex;
+std::deque<RemoteCmd> g_remoteCmds;
+
+void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size)
+{
+    size_t off = 0;
+    auto readStr = [&](char* out, size_t outsz) -> bool {
+        if (off + 2 > size)
+            return false;
+        std::uint16_t len = *reinterpret_cast<const std::uint16_t*>(p + off);
+        off += 2;
+        if (off + len > size)
+            return false;
+        size_t n = (len < outsz - 1) ? len : (outsz - 1);
+        memcpy(out, p + off, n);
+        out[n] = 0;
+        off += len;
+        return true;
+    };
+    RemoteCmd cmd{};
+    if (op == 0x0300) { // InvokeButton: u16 dlgLen|dlg | u16 btnLen|btn
+        if (!readStr(cmd.dlg, sizeof(cmd.dlg)) || !readStr(cmd.widget, sizeof(cmd.widget)))
+            return;
+        cmd.type = 0;
+    } else if (op == 0x0301) { // SetSelection: u16 dlgLen|dlg | u16 lbLen|lb | u32 index
+        if (!readStr(cmd.dlg, sizeof(cmd.dlg)) || !readStr(cmd.widget, sizeof(cmd.widget)))
+            return;
+        if (off + 4 > size)
+            return;
+        cmd.param = *reinterpret_cast<const int*>(p + off);
+        cmd.type = 1;
+    } else {
+        return; // not a command we own
+    }
+    std::lock_guard<std::mutex> lk(g_remoteMutex);
+    // Coalesce: if an identical command is already pending, drop this one. The UI thread can
+    // be briefly blocked (e.g. a synchronous DPlay EnumSessions stalls it ~10s), so the
+    // dispatcher may re-fire a click while the first is still queued — executing both when
+    // the thread resumes would double-act (two JoinSession -> error). One pending is enough.
+    for (const auto& q : g_remoteCmds) {
+        if (q.type == cmd.type && lstrcmpA(q.dlg, cmd.dlg) == 0 && lstrcmpA(q.widget, cmd.widget) == 0)
+            return;
+    }
+    g_remoteCmds.push_back(cmd);
+}
+
+void drainRemoteCommands()
+{
+    for (;;) {
+        RemoteCmd cmd;
+        {
+            std::lock_guard<std::mutex> lk(g_remoteMutex);
+            if (g_remoteCmds.empty())
+                break;
+            cmd = g_remoteCmds.front();
+            g_remoteCmds.pop_front();
+        }
+        if (cmd.type == 0)
+            invokeButton(cmd.dlg, cmd.widget);
+        else
+            setListSelection(cmd.dlg, cmd.widget, cmd.param);
+    }
+}
+
+// One AutoDismiss tick. Returns true once popups went quiet after one was dismissed, or
+// the cap elapsed.
 bool tickAutoDismiss(int capMs)
 {
     const DWORD now = GetTickCount();
     for (const auto& c : kDismissCandidates) {
         const bool sameAsLast = (lstrcmpA(g_adLastClickedDlg, c.dlg) == 0);
         if (sameAsLast && (now - g_adLastClickMs) < kAdSameCooldownMs)
-            continue; // don't hammer the same popup faster than the cooldown
-        if (invokeButton(c.dlg, c.btn)) { // resolves the dialog by name via the registry
+            continue;
+        if (invokeButton(c.dlg, c.btn)) {
             g_adSeenAny = true;
             g_adLastPopupMs = now;
             g_adLastClickMs = now;
@@ -283,22 +264,27 @@ void resetAutoDismiss()
     g_adLastClickedDlg[0] = 0;
 }
 
-// True once the orchestrator has signalled that the HOST has FULLY entered the
-// strategic map — it observes the host log and creates the file named by
-// D2TESTDRV_HOST_READY_FILE. The joiner waits on this before requesting start, so the
-// host only ever serves a fully-loaded, consistent scenario snapshot. With no file
-// configured (e.g. a standalone run) the gate is inert and passes immediately.
-bool hostReady()
+// Continuously dismiss known first-turn popups, in the tick (on the UI thread). The MP
+// dispatcher enables this (D2TESTDRV_AUTODISMISS) so popups are cleared the instant they
+// appear — driving the dismiss over the relay round-trip lands the click ~600ms late, and
+// a begin-turn command stalled that long on a modal popup resumes into a moved-on game
+// state and hangs the display reconciliation. Mechanical (a fixed popup list), so it stays
+// in the agent; the dispatcher still owns coordination + verification.
+void dismissPopupsTick()
 {
-    char path[MAX_PATH]{};
-    if (GetEnvironmentVariableA("D2TESTDRV_HOST_READY_FILE", path, sizeof(path)) == 0)
-        return true; // not orchestrated -> nothing to wait for
-    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+    const DWORD now = GetTickCount();
+    for (const auto& c : kDismissCandidates) {
+        if (lstrcmpA(g_adLastClickedDlg, c.dlg) == 0 && (now - g_adLastClickMs) < kAdSameCooldownMs)
+            continue;
+        if (invokeButton(c.dlg, c.btn)) {
+            g_adLastClickMs = now;
+            lstrcpynA(g_adLastClickedDlg, c.dlg, sizeof(g_adLastClickedDlg));
+            break;
+        }
+    }
 }
 
-// One nav step. Ticked once per screen-loop iteration from the sub_5629CA frame hook
-// (so it runs on the UI/dialog thread): invokeButton calls the target button's
-// onClicked functor via the dialog registry, advancing the script one action per call.
+// One self-nav step (minimal tests only).
 void navStep()
 {
     if (!g_navScript || g_navIdx >= g_navLen)
@@ -307,14 +293,14 @@ void navStep()
     static int s_lastIdx = -1;
     if (g_navIdx != s_lastIdx) {
         s_lastIdx = g_navIdx;
-        resetAutoDismiss(); // fresh state on entering any step (AutoDismiss needs it)
+        resetAutoDismiss();
     }
 
     const NavStep& s = g_navScript[g_navIdx];
     bool advance = false;
     switch (s.action) {
     case NavAction::Done:
-        g_navScript = nullptr; // stops the driver thread loop
+        g_navScript = nullptr;
         spdlog::info("[testdrv] nav script complete");
         return;
     case NavAction::WaitDialog:
@@ -331,18 +317,6 @@ void navStep()
     case NavAction::Delay:
         advance = (GetTickCount() - g_stepStart) >= (DWORD)s.param;
         break;
-    case NavAction::WaitPeer:
-        advance = g_peerObserved.load();
-        break;
-    case NavAction::WaitHostBriefing:
-        advance = g_hostInBriefing.load();
-        break;
-    case NavAction::WaitHostStrategic:
-        advance = g_hostInStrategic.load();
-        break;
-    case NavAction::WaitHostReady:
-        advance = hostReady();
-        break;
     case NavAction::AutoDismiss:
         advance = tickAutoDismiss(s.param);
         break;
@@ -354,36 +328,19 @@ void navStep()
         return;
     }
 
-    // Timeouts: gates wait long; menu steps short; Delay/AutoDismiss self-complete.
-    // WaitHostReady NEVER times out: skipping it would press OK before the host has
-    // finished loading and reintroduce the very race it exists to prevent. The host
-    // can take well over a minute to fully enter strategic on a slow runner; the
-    // joiner must wait however long that takes. The orchestrator's outer test timeout
-    // (pair-mp.ps1) bounds a genuinely-stuck host.
-    const bool isGate = (s.action == NavAction::WaitPeer || s.action == NavAction::WaitHostBriefing
-                         || s.action == NavAction::WaitHostStrategic);
-    const DWORD timeout = isGate                              ? kGateTimeoutMs
-                          : (s.action == NavAction::SetSelection) ? 4000 // best-effort; don't stall
-                                                                  : kStepTimeoutMs;
+    const DWORD timeout = (s.action == NavAction::SetSelection) ? 4000 : kStepTimeoutMs;
     if (s.action != NavAction::Delay && s.action != NavAction::AutoDismiss
-        && s.action != NavAction::WaitHostReady
         && (GetTickCount() - g_stepStart) >= timeout) {
-        spdlog::warn("[testdrv] nav step {:d} ({} {}::{}) timed out — skipping", g_navIdx,
-                     isGate ? "gate" : "ui", s.dlg, s.widget);
+        spdlog::warn("[testdrv] nav step {:d} ({}::{}) timed out — skipping", g_navIdx, s.dlg, s.widget);
         ++g_navIdx;
         g_stepStart = GetTickCount();
     }
 }
 
 // --- per-frame hook -----------------------------------------------------------
-// sub_5629CA is the per-iteration helper the screen message loop (sub_56288A) calls
-// on the UI/dialog thread; it leads into the DisciplesGL frame render. Detour it so
-// the nav ticks once per iteration on the correct thread, with no dependency on the
-// message pump being serviced. Tick BEFORE the original: the render is the slow part
-// (software GL on a GPU-less runner can take a long time per frame), and the nav must
-// advance per loop iteration regardless of how long the frame itself takes. Ticking
-// after would starve the nav if a frame blocks. Not reentrant with dialog
-// construction either way (called from the loop, not from assignFunctor).
+// sub_5629CA is the per-iteration helper the screen message loop (sub_56288A) calls on
+// the UI/dialog thread. Detour it so the agent ticks once per iteration on the correct
+// thread, with no dependency on the message pump being serviced.
 using Sub5629CA_t = LONG(__stdcall*)(HWND, LPPOINT, LONG*);
 Sub5629CA_t g_orig5629CA = reinterpret_cast<Sub5629CA_t>(0x5629CA);
 
@@ -409,173 +366,55 @@ void installFrameHook()
     }
 }
 
-// --- render watchdog (diagnostic) --------------------------------------------
-// sub_5642E1 is the display-list render pass (called once per screen-loop iteration
-// for the strategic map / lobby). On a GPU-less runner the host's nav freezes here.
-// This proves whether a SINGLE sub_5642E1 call stops returning (the render genuinely
-// not completing) vs the loop cycling normally: the wrapper times each call, and a 2s
-// watchdog logs while a call is still in flight.
-using Sub5642E1_t = int(__fastcall*)(void*, void*);
-Sub5642E1_t g_origSub5642E1 = reinterpret_cast<Sub5642E1_t>(0x5642E1);
-std::atomic<DWORD> g_rdStart{0}; // tick when the current call entered (0 = not in a call)
-std::atomic<int> g_rdId{0};
-
-int __fastcall hookSub5642E1(void* ecx, void* edx)
-{
-    const int id = ++g_rdId;
-    const DWORD t0 = GetTickCount();
-    g_rdStart = t0;
-    const int r = g_origSub5642E1(ecx, edx);
-    g_rdStart = 0;
-    const DWORD dt = GetTickCount() - t0;
-    if (dt >= 200)
-        spdlog::warn("[render] sub_5642E1 #{} returned after {}ms", id, dt);
-    return r;
-}
-
-DWORD WINAPI renderWatchdog(LPVOID)
-{
-    for (;;) {
-        Sleep(2000);
-        const DWORD s = g_rdStart.load();
-        if (s && (GetTickCount() - s) >= 2000)
-            spdlog::warn("[render] sub_5642E1 #{} STILL RUNNING {}ms — not returning to the screen loop",
-                         g_rdId.load(), GetTickCount() - s);
-    }
-}
-
-bool g_renderDiagInstalled = false;
-void installRenderDiag()
-{
-    if (g_renderDiagInstalled)
-        return;
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-    DetourAttach(&reinterpret_cast<PVOID&>(g_origSub5642E1), hookSub5642E1);
-    if (DetourTransactionCommit() == NO_ERROR) {
-        g_renderDiagInstalled = true;
-        CreateThread(nullptr, 0, renderWatchdog, nullptr, 0, nullptr);
-        spdlog::info("[render] render watchdog installed (sub_5642E1 timing + 2s stuck check)");
-    } else {
-        spdlog::error("[render] render watchdog: DetourAttach failed");
-    }
-}
-
-// --- command-queue diagnostic ------------------------------------------------
-// The begin-turn command's local update completes via a message-pump-driven chain:
-// notify1 -> processCommands posts MQ_COMMANDQUEUE2 -> the pump dispatches it ->
-// commandQueueMessageCallback advances the notify chain -> applyCommandUpdate ->
-// notify2 (pendingLocalUpdates--). On the runner notify2 never fires; trace the chain
-// to find the lost step (e.g. the posted MQ_COMMANDQUEUE2 is never dispatched because
-// the host's spin loop doesn't pump it).
-using CqMethod_t = void(__fastcall*)(game::CMidCommandQueue2*, void*);
-using CqCallback_t = void(__fastcall*)(game::CMidCommandQueue2*, void*, unsigned int, long);
-CqMethod_t g_origProcessCommands = nullptr;
-CqMethod_t g_origApplyCommandUpdate = nullptr;
-CqCallback_t g_origCqCallback = nullptr;
-
-void __fastcall hookProcessCommands(game::CMidCommandQueue2* q, void* edx)
-{
-    if (q)
-        spdlog::info("[cq] processCommands ENTER (processing={}, updateApplied={}, started={})",
-                     (int)q->processingCommand, (int)q->commandUpdateApplied, (int)q->started);
-    g_origProcessCommands(q, edx);
-}
-
-void __fastcall hookApplyCommandUpdate(game::CMidCommandQueue2* q, void* edx)
-{
-    spdlog::info("[cq] applyCommandUpdate (processing={})", q ? (int)q->processingCommand : -1);
-    g_origApplyCommandUpdate(q, edx);
-}
-
-void __fastcall hookCqCallback(game::CMidCommandQueue2* q, void* edx, unsigned int wParam, long lParam)
-{
-    spdlog::info("[cq] MQ_COMMANDQUEUE2 dispatched (wParam={})", wParam);
-    g_origCqCallback(q, edx, wParam, lParam);
-}
-
-bool g_cqDiagInstalled = false;
-void installCommandQueueDiag()
-{
-    if (g_cqDiagInstalled)
-        return;
-    auto& api = game::CMidCommandQueue2Api::get();
-    g_origProcessCommands = reinterpret_cast<CqMethod_t>(api.processCommands);
-    g_origApplyCommandUpdate = reinterpret_cast<CqMethod_t>(api.applyCommandUpdate);
-    g_origCqCallback = reinterpret_cast<CqCallback_t>(api.commandQueueMessageCallback);
-    if (!g_origProcessCommands || !g_origApplyCommandUpdate || !g_origCqCallback) {
-        spdlog::warn("[cq] command-queue API unresolved — diag skipped");
-        return;
-    }
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-    DetourAttach(&reinterpret_cast<PVOID&>(g_origProcessCommands), hookProcessCommands);
-    DetourAttach(&reinterpret_cast<PVOID&>(g_origApplyCommandUpdate), hookApplyCommandUpdate);
-    DetourAttach(&reinterpret_cast<PVOID&>(g_origCqCallback), hookCqCallback);
-    if (DetourTransactionCommit() == NO_ERROR) {
-        g_cqDiagInstalled = true;
-        spdlog::info("[cq] command-queue diag installed");
-    } else {
-        spdlog::error("[cq] command-queue diag: commit failed");
-    }
-}
-
 } // namespace
 
 void onUiReady()
 {
     char role[16]{};
     GetEnvironmentVariableA("D2TESTDRV_ROLE", role, sizeof(role));
-    if (!role[0])
-        return;
-
     char sc[8]{};
     if (GetEnvironmentVariableA("D2TESTDRV_SCENARIO_INDEX", sc, sizeof(sc)) > 0)
         g_scenarioIdx = atoi(sc);
 
-    bool wantsGates = false;
-    if (lstrcmpiA(role, "exit") == 0) {
-        g_navScript = g_exitScript;
-        g_navLen = (int)(sizeof(g_exitScript) / sizeof(g_exitScript[0]));
-    } else if (lstrcmpiA(role, "host") == 0) {
-        g_navScript = g_hostScript;
-        g_navLen = (int)(sizeof(g_hostScript) / sizeof(g_hostScript[0]));
-        wantsGates = true;
-    } else if (lstrcmpiA(role, "join") == 0 || lstrcmpiA(role, "joiner") == 0) {
-        g_navScript = g_joinScript;
-        g_navLen = (int)(sizeof(g_joinScript) / sizeof(g_joinScript[0]));
-        wantsGates = true;
-    } else {
-        g_navScript = g_probeScript;
-        g_navLen = (int)(sizeof(g_probeScript) / sizeof(g_probeScript[0]));
-    }
-    g_navIdx = 0;
+    const bool selfnav = testenv::on("D2TESTDRV_SELFNAV");
+    const bool relay = testenv::on("D2TESTDRV_RELAY_BRIDGE");
+    g_autoDismiss = testenv::on("D2TESTDRV_AUTODISMISS");
 
-    if (wantsGates) {
-        // Sequencing needs the RX gates — ensure the network hooks exist and watch
-        // the inbound stream for the connect/begin-turn markers.
-        nettracehooks::install();
-        nettracehooks::addRxObserver(&onRxGate);
+    if (selfnav) {
+        // Built-in self-drive script for minimal single-instance tests.
+        if (lstrcmpiA(role, "exit") == 0) {
+            g_navScript = g_exitScript;
+            g_navLen = (int)(sizeof(g_exitScript) / sizeof(g_exitScript[0]));
+        } else { // probe / anything else
+            g_navScript = g_probeScript;
+            g_navLen = (int)(sizeof(g_probeScript) / sizeof(g_probeScript[0]));
+        }
+        g_navIdx = 0;
     }
-    installFrameHook();        // per-frame tick from the screen loop (sub_5629CA)
-    installRenderDiag();       // diagnostic: detect a non-returning sub_5642E1 render pass
-    installCommandQueueDiag(); // diagnostic: trace the begin-turn command/update chain
-    spdlog::info("[testdrv] nav role='{}' -> {:d} steps (gates={}, scenario={})", role, g_navLen,
-                 wantsGates, g_scenarioIdx);
+    if (relay) {
+        // Dispatcher-driven: execute the invoke/select commands it sends over the relay.
+        bridge::setCommandCallback(&onRemoteCommand);
+    }
+    if (selfnav || relay) {
+        g_active = true;
+        installFrameHook();
+    }
+    spdlog::info("[testdrv] nav: role='{}' selfnav={} relay-driven={} scenario={}", role, selfnav,
+                 relay, g_scenarioIdx);
 }
 
 void onDialogBound()
 {
-    if (g_navArmed || !g_navScript)
+    if (g_navArmed || !g_active)
         return;
     g_navArmed = true;
     g_stepStart = GetTickCount();
-    spdlog::info("[testdrv] nav driver armed ({:d} steps)", g_navLen);
+    spdlog::info("[testdrv] nav armed");
 }
 
 // Ticked once per screen-loop iteration from the sub_5629CA frame hook — i.e. on the
-// thread that owns the dialogs, so invoking a button functor is safe (no cross-thread
-// crash) and needs no message pump. Reentrancy-guarded as a belt-and-braces measure.
+// thread that owns the dialogs, so invoking a button functor is safe and needs no message
+// pump. Reentrancy-guarded. Drains dispatcher commands, then advances any self-nav script.
 void tick()
 {
     if (!g_navArmed)
@@ -584,7 +423,11 @@ void tick()
     if (s_inTick)
         return;
     s_inTick = true;
-    navStep();
+    drainRemoteCommands();
+    if (g_navScript)
+        navStep();
+    if (g_autoDismiss)
+        dismissPopupsTick();
     s_inTick = false;
 }
 

@@ -15,6 +15,8 @@
 
 #include "testdrv/packetlogicbridge.h"
 #include "testdrv/nettracehooks.h"
+#include "testdrv/testenv.h"
+#include "testdrv/uistatereporter.h"
 #include <atomic>
 #include <cstring>
 #include <deque>
@@ -43,9 +45,11 @@ enum class Op : uint16_t
     Goodbye = 0x0003,
     ConfigurePatches = 0x0004,
     LocalPlayerHandle = 0x0007,
-    PacketTrace = 0x0202,   // TX
-    PacketTraceRx = 0x0203, // RX
-    InvokeButton = 0x0300,
+    PacketTrace = 0x0202,    // TX
+    PacketTraceRx = 0x0203,  // RX
+    InvokeButton = 0x0300,   // <- dispatcher: click a button (handled by the autonav executor)
+    SetSelection = 0x0301,   // <- dispatcher: set a listbox selection (autonav executor)
+    Dialog = 0x0410,         // -> relay: live UI state ("dialogName\nbtn1,btn2,...")
     Log = 0xFF00,
 };
 
@@ -246,11 +250,19 @@ std::vector<uint8_t> build_hello_payload()
     char module_path[MAX_PATH];
     GetModuleFileNameA(g_self, module_path, sizeof(module_path));
     size_t mod_len = strlen(module_path);
-    std::vector<uint8_t> p(12 + mod_len);
+    // Role (host/join/...) lets the relay tag each of the two instances. Appended
+    // after the module path so an older relay that ignores it still parses Hello.
+    char role[32]{};
+    GetEnvironmentVariableA("D2TESTDRV_ROLE", role, sizeof(role));
+    size_t role_len = strlen(role);
+    std::vector<uint8_t> p(12 + mod_len + 4 + role_len);
     *(uint32_t*)(p.data() + 0) = kProtocolVersion;
     *(uint32_t*)(p.data() + 4) = GetCurrentProcessId();
     *(uint32_t*)(p.data() + 8) = static_cast<uint32_t>(mod_len);
     memcpy(p.data() + 12, module_path, mod_len);
+    *(uint32_t*)(p.data() + 12 + mod_len) = static_cast<uint32_t>(role_len);
+    if (role_len)
+        memcpy(p.data() + 12 + mod_len + 4, role, role_len);
     return p;
 }
 
@@ -360,7 +372,27 @@ void bridge_thread_main()
     const char* msg = "mss32 testdrv bridge alive";
     write_message(Op::Log, msg, (uint32_t)strlen(msg));
 
+    char last_ui[600] = {};
     while (g_running.load()) {
+        // 0. Forward the live UI state (current dialog + its buttons) to the relay whenever
+        //    it changes, so the dispatcher can scan/verify the UI without scraping logs.
+        {
+            const char* dlg = uistatereporter::currentDialogName();
+            if (dlg && *dlg) {
+                char ui[600];
+                lstrcpynA(ui, dlg, 64);
+                lstrcatA(ui, "\n");
+                char bb[520];
+                const char* btns = uistatereporter::currentButtonsCsv();
+                lstrcpynA(bb, btns ? btns : "", sizeof(bb));
+                lstrcatA(ui, bb);
+                if (lstrcmpA(ui, last_ui) != 0) {
+                    lstrcpynA(last_ui, ui, sizeof(last_ui));
+                    write_message(Op::Dialog, ui, (uint32_t)lstrlenA(ui));
+                }
+            }
+        }
+
         // 1. Drain pending writes from the game-thread enqueue.
         for (;;) {
             SendItem item;
@@ -425,10 +457,15 @@ bool start(HMODULE selfModule)
     if (g_running.exchange(true))
         return false; // already started
     g_self = selfModule;
-    // Register as observers (process-lifetime). on_rx/tx_trace self-gate on
-    // g_running, so they go quiet after stop() without needing removal.
-    nettracehooks::addRxObserver(&on_rx_trace);
-    nettracehooks::addTxObserver(&on_tx_trace);
+    // Packet-trace forwarding is opt-in (D2TESTDRV_NET_INTERCEPT): on_rx_trace runs on the
+    // UI/dispatch thread for EVERY received packet, which during a begin-turn replication
+    // burst piles work onto the thread the game is mid-loading on. The dispatcher-driven MP
+    // test drives off UI state, not packets, so it leaves this off; logging/secret builds
+    // turn it on. on_rx/tx_trace self-gate on g_running, so they go quiet after stop().
+    if (testenv::on("D2TESTDRV_NET_INTERCEPT")) {
+        nettracehooks::addRxObserver(&on_rx_trace);
+        nettracehooks::addTxObserver(&on_tx_trace);
+    }
     g_thread = std::thread(bridge_thread_main);
     g_thread.detach();
     return true;
@@ -454,6 +491,7 @@ void send_log(const char* utf8_message)
     if (utf8_message)
         write_message(Op::Log, utf8_message, (uint32_t)strlen(utf8_message));
 }
+
 
 } // namespace bridge
 } // namespace testdrv

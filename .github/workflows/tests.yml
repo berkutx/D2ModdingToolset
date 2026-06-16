@@ -51,8 +51,8 @@ jobs:
           key: slasher-min-v1
           enableCrossOsArchive: true
 
-  smoke:
-    name: Smoke — headless boot (1x)
+  headless-boot-smoke:
+    name: Headless boot — smoke (1x)
     needs: prep-game
     runs-on: windows-2025-vs2026
     defaults:
@@ -83,8 +83,8 @@ jobs:
       - name: Boot once -> DLG_MAIN_MENU
         run: ./tools/test/reliability_test.ps1 -N 1 -Boot 1 -TimeoutSec 60 -Game "$env:GAME_DIR"
 
-  reliability:
-    name: Reliability — headless boot (5x)
+  headless-boot-reliability:
+    name: Headless boot — reliability (5x)
     needs: prep-game
     runs-on: windows-2025-vs2026
     defaults:
@@ -113,12 +113,12 @@ jobs:
       - name: Boot 5x -> DLG_MAIN_MENU
         run: ./tools/test/reliability_test.ps1 -N 5 -Boot 1 -TimeoutSec 60 -Game "$env:GAME_DIR"
 
-  # Two-instance multiplayer: launch a host + a joiner, drive both (self-nav by
-  # role) through the menus into a started game over native DirectPlay TCP/IP on
-  # localhost, and confirm both reach the strategic map. This is the next real
-  # unknown on a hosted runner: does DirectPlay localhost pairing work headless?
-  mp-pair:
-    name: Two-instance MP -> strategic map
+  # Two-instance multiplayer: a PowerShell dispatcher launches a host + a joiner and
+  # drives both through the menus into a started game over native DirectPlay TCP/IP on
+  # localhost — entirely over the node relay (read each agent's live UI, send invoke/
+  # select commands, no files) — and confirms both reach the strategic map.
+  multiplayer-two-instance-strategic:
+    name: Multiplayer — two instances reach the strategic map
     needs: prep-game
     runs-on: windows-2025-vs2026
     env:
@@ -218,23 +218,29 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dumps | Out-Null
           "PROCDUMP=$pd"   | Out-File -FilePath $env:GITHUB_ENV -Append
           "DUMPDIR=$dumps" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Host + joiner -> both reach the strategic map
-        run: ./tools/test/pair-mp.ps1 -Game "$env:GAME_DIR" -TimeoutSec 240 -Kill -ProcDump "$env:PROCDUMP" -DumpDir "$env:DUMPDIR"
+      - name: Host + joiner (dispatcher over the relay) -> both reach the strategic map
+        run: |
+          node --version  # the dispatcher starts tools/relay/relay.js; GitHub runners ship Node
+          ./tools/test/multiplayer-two-instance.ps1 -Game "$env:GAME_DIR" -Kill -ProcDump "$env:PROCDUMP" -DumpDir "$env:DUMPDIR"
 
-      - name: Dump per-instance logs on failure
+      - name: Dump per-instance logs + relay state on failure
         if: failure()
         run: |
           Get-ChildItem "$env:GAME_DIR" -Filter "mss32_*.log" | Sort-Object Name | ForEach-Object {
             Write-Host "===================== $($_.Name) ====================="
-            (Get-Content $_.FullName) -match '\[testdrv\]|\[nettrace\]|\[render\]|\[reconcile\]|\[cq\]|midObjectLock' | Select-Object -Last 150
+            (Get-Content $_.FullName) -match '\[testdrv\]|\[nettrace\]|midObjectLock' | Select-Object -Last 150
           }
+          $relay = Join-Path "$env:DUMPDIR" 'relay.out.log'
+          if (Test-Path $relay) { Write-Host "===================== relay ====================="; Get-Content $relay -Tail 120 }
         shell: pwsh
-      - name: Upload full per-instance logs on failure
+      - name: Upload full per-instance logs + relay log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: mp-pair-logs
-          path: ${{ env.GAME_DIR }}/mss32_*.log
+          name: multiplayer-logs
+          path: |
+            ${{ env.GAME_DIR }}/mss32_*.log
+            ${{ env.DUMPDIR }}/relay.out.log
           if-no-files-found: warn
       - name: Analyze hung-instance snapshots (cdb stacks)
         if: failure()
@@ -261,7 +267,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: mp-pair-stacks
+          name: multiplayer-stacks
           path: |
             ${{ env.DUMPDIR }}/*.stacks.txt
             ${{ env.DUMPDIR }}/*.png

@@ -93,7 +93,7 @@ void installEarly()
         return;
     if (testenv::on("D2TESTDRV_SKIP_INTRO"))
         patchSkipIntro();
-    if (testenv::on("D2TESTDRV_BOOT"))
+    if (testenv::on("D2TESTDRV_BLACKSCREEN_FIX"))
         patchFgFlag();
 }
 

@@ -20,9 +20,9 @@ namespace testdrv {
 /** Apply the early boot byte-patches (skip-intro / fg-flag). Call first in DllMain. */
 void installEarly();
 
-/** Install the activation driver, UI-state reporter, auto-nav, and — if
- * D2TESTDRV_NET — the network trace hooks + relay bridge. `self` is the mss32
- * module (reported to the relay in the Hello handshake). */
+/** Install the UI-state reporter + auto-nav executor and window tag; the network
+ * interception layer if D2TESTDRV_NET_INTERCEPT; and the relay bridge if
+ * D2TESTDRV_RELAY_BRIDGE. `self` is the mss32 module (sent to the relay in Hello). */
 void install(HMODULE self);
 
 } // namespace testdrv

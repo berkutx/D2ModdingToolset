@@ -30,16 +30,24 @@ void install(HMODULE self)
 {
     if (!executableIsGame() || gameVersion() != GameVersion::Russobit)
         return;
-    spdlog::info("[testdrv] install: UI/nav/net/bridge");
+    spdlog::info("[testdrv] install");
 
-    uistatereporter::install(); // D2TESTDRV_UI (+ arms auto-nav if D2TESTDRV_ROLE;
-                                // host/join roles also install nettracehooks for RX gates)
-    windowtag::start();         // [HOST]/[CLIENT] caption tag for host/join roles
+    // UI-state reporter (D2TESTDRV_UI_REPORTER) — the foundation: exposes the live dialog
+    // + buttons and arms the auto-nav executor (onUiReady reads D2TESTDRV_SELFNAV /
+    // D2TESTDRV_RELAY_BRIDGE to pick self-driven vs dispatcher-driven).
+    uistatereporter::install();
+    windowtag::start(); // [HOST]/[CLIENT] caption tag for host/join roles
 
-    if (testenv::on("D2TESTDRV_NET")) {
+    // Network interception layer: RX/TX hooks = logging AND the pass/drop/defer + TX-gate
+    // seams the secret sim-turns branch registers its policy on. Independent of the relay.
+    const bool wantRelay = testenv::on("D2TESTDRV_RELAY_BRIDGE");
+    if (testenv::on("D2TESTDRV_NET_INTERCEPT") || wantRelay)
         nettracehooks::install();
-        bridge::start(self); // connects only if a relay is listening; otherwise inert
-    }
+
+    // Relay bridge: connect to the node relay (live UI-state forwarding + dispatcher
+    // invoke/select commands + packet-trace forwarding). Inert if no relay is listening.
+    if (wantRelay)
+        bridge::start(self);
 }
 
 } // namespace testdrv

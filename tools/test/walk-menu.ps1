@@ -34,10 +34,11 @@ $psi.FileName = $exe
 $psi.WorkingDirectory = $Game
 $psi.UseShellExecute = $false
 $psi.EnvironmentVariables["D2TESTDRV_SKIP_INTRO"] = "1"
-$psi.EnvironmentVariables["D2TESTDRV_BOOT"] = "1"
-$psi.EnvironmentVariables["D2TESTDRV_UI"] = "1"
+$psi.EnvironmentVariables["D2TESTDRV_BLACKSCREEN_FIX"] = "1"
+$psi.EnvironmentVariables["D2TESTDRV_UI_REPORTER"] = "1"
 $psi.EnvironmentVariables["D2TESTDRV_ROLE"] = $Role
-if ($Net) { $psi.EnvironmentVariables["D2TESTDRV_NET"] = "1" }
+$psi.EnvironmentVariables["D2TESTDRV_SELFNAV"] = "1"            # run the built-in role script
+if ($Net) { $psi.EnvironmentVariables["D2TESTDRV_NET_INTERCEPT"] = "1" }  # RX/TX trace logging
 
 $p = [System.Diagnostics.Process]::Start($psi)
 
