@@ -27,12 +27,6 @@ permissions:
   contents: read
   actions: read # list runs + download the mss32-debugtest artifact (same- or cross-run)
 
-env:
-  # actions/cache + actions/download-artifact still ship a Node 20 runtime, which GitHub is
-  # removing from runners (Sept 2026). v4/v5 are their latest majors (no Node-24 bump to take),
-  # so opt them into Node 24 via the supported toggle instead of a version change.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 jobs:
   # Warm the ~1.95 GB minimal game into the Actions cache once per run/branch.
   # ubuntu does the download; the windows test jobs restore it (cross-OS archive).
@@ -44,14 +38,14 @@ jobs:
     steps:
       - name: Restore (skip download on a hit)
         id: c
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: game.tar.gz
           key: slasher-min-v1
           enableCrossOsArchive: true
       - name: Set up Python
         if: steps.c.outputs.cache-hit != 'true'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Download from the public HF bucket
@@ -64,7 +58,7 @@ jobs:
           sha256sum game.tar.gz
       - name: Save cache
         if: steps.c.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: game.tar.gz
           key: slasher-min-v1
@@ -78,17 +72,17 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with: { submodules: false, fetch-depth: 1 }
       - name: Get DebugTest DLL (same run, or the reused prebuilt one)
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: mss32-debugtest
           path: dll
           run-id: ${{ inputs.dll_run_id || github.run_id }}
           github-token: ${{ github.token }}
       - name: Restore game from cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: game.tar.gz
           key: slasher-min-v1
@@ -114,17 +108,17 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with: { submodules: false, fetch-depth: 1 }
       - name: Get DebugTest DLL (same run, or the reused prebuilt one)
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: mss32-debugtest
           path: dll
           run-id: ${{ inputs.dll_run_id || github.run_id }}
           github-token: ${{ github.token }}
       - name: Restore game from cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: game.tar.gz
           key: slasher-min-v1
@@ -154,10 +148,10 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with: { submodules: false, fetch-depth: 1 }
       - name: Get DebugTest DLL (same run, or the reused prebuilt one)
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: mss32-debugtest
           path: dll
@@ -191,7 +185,7 @@ jobs:
           }
           Write-Host "dpwsockx (SysWOW64): $(Test-Path "$env:SystemRoot\SysWOW64\dpwsockx.dll")"
       - name: Restore game from cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: game.tar.gz
           key: slasher-min-v1
@@ -266,7 +260,7 @@ jobs:
         shell: pwsh
       - name: Upload full per-instance logs + relay log on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: multiplayer-logs
           path: |
@@ -296,7 +290,7 @@ jobs:
           }
       - name: Upload crash stacks + screenshots
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: multiplayer-stacks
           path: |

@@ -22,11 +22,6 @@ permissions:
   contents: read
   actions: read # download the deps-libs artifact
 
-env:
-  # Opt JS actions (cache/artifact) into the Node 24 runtime; Node 20 is being removed from
-  # runners (Sept 2026) and v4/v5 of those actions have no newer major to bump to.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 concurrency:
   group: mss32-${{ github.ref }}
   cancel-in-progress: true
@@ -36,7 +31,7 @@ jobs:
     name: Pre-checks (submodules)
     runs-on: ubuntu-slim
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           submodules: false
           fetch-depth: 1
@@ -61,7 +56,7 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
           fetch-depth: 1
@@ -97,7 +92,7 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
           fetch-depth: 1
