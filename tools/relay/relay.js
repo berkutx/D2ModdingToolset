@@ -45,7 +45,10 @@ const Op = {
 const MAX_RING = 500;
 const state = {
     clients: new Map(),  // socket -> { role, pid, modulePath, dialog, buttons }
-    byRole: {},          // role -> { connected, pid, dialog, buttons }
+    byRole: {},          // role -> { connected, pid, dialog, buttons }  (serialized to /api/state)
+    socketByRole: {},    // role -> the CURRENT socket for that role (NOT serialized) — the
+                         // authoritative owner, so a relaunch supersedes the old socket and a
+                         // late 'close' from a stale socket can't knock the live one offline.
     logs: [],
     packets: [],
     chat: [],
@@ -137,9 +140,11 @@ function onTrace(socket, dir, payload) {
 
 // ---- named-pipe server (agent connections) ---------------------------------
 function parseHello(payload) {
+    if (payload.length < 12) return null; // too short for version|pid|modLen — malformed
     const version = payload.readUInt32LE(0);
     const pid = payload.readUInt32LE(4);
-    const modLen = payload.readUInt32LE(8);
+    let modLen = payload.readUInt32LE(8);
+    if (modLen > payload.length - 12) modLen = payload.length - 12; // clamp a corrupt length
     const modulePath = payload.slice(12, 12 + modLen).toString('utf8');
     let role = '';
     const roleOff = 12 + modLen;
@@ -155,9 +160,16 @@ function handleMessage(socket, op, flags, payload) {
     switch (op) {
     case Op.Hello: {
         const h = parseHello(payload);
+        if (!h) { console.error('[pipe] malformed Hello dropped'); break; }
         const role = h.role || `pid${h.pid}`;
+        // A re-registering role (relaunch/reconnect) supersedes any prior socket for that role:
+        // evict the stale client so clientByRole never returns a dead/duplicate socket, and its
+        // later 'close' won't touch the live entry (drop checks socket identity).
+        const prev = state.socketByRole[role];
+        if (prev && prev !== socket) { state.clients.delete(prev); try { prev.destroy(); } catch (e) { /* gone */ } }
         state.clients.set(socket, { role, pid: h.pid, modulePath: h.modulePath, dialog: null, buttons: [] });
         state.byRole[role] = { connected: true, pid: h.pid, dialog: null, buttons: [], reachedStrategic: false };
+        state.socketByRole[role] = socket;
         console.log(`[hello] role=${role} pid=${h.pid} v${h.version}`);
         const ack = Buffer.alloc(8);
         ack.writeUInt32LE(1, 0);
@@ -232,8 +244,13 @@ const pipeServer = net.createServer((socket) => {
     attachParser(socket);
     const drop = () => {
         const c = state.clients.get(socket);
-        if (c && state.byRole[c.role]) state.byRole[c.role].connected = false;
         state.clients.delete(socket);
+        // Only flip the role offline if THIS socket is still its current owner — a late 'close'
+        // from a socket already superseded by a relaunch must not knock the live one offline.
+        if (c && state.socketByRole[c.role] === socket) {
+            if (state.byRole[c.role]) state.byRole[c.role].connected = false;
+            delete state.socketByRole[c.role];
+        }
         console.log(`[pipe] ${c ? c.role : '?'} disconnected`);
     };
     socket.on('close', drop);
@@ -245,8 +262,10 @@ pipeServer.listen(PIPE_NAME, () => console.log(`[pipe] listening on ${PIPE_NAME}
 
 // ---- HTTP API --------------------------------------------------------------
 function clientByRole(role) {
-    for (const [sock, c] of state.clients) if (c.role === role) return sock;
-    return null;
+    // The authoritative current socket for the role (null once it has been dropped) — never a
+    // stale/duplicate entry, so a command is routed to the live agent or fails fast with 503.
+    const sock = state.socketByRole[role];
+    return (sock && state.clients.has(sock)) ? sock : null;
 }
 
 function sendJson(res, code, obj) {

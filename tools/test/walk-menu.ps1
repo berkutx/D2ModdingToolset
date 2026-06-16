@@ -6,12 +6,15 @@
   so you can poke at it. Pass -Kill to close it at the end instead.
 
 .EXAMPLE
-  .\walk-menu.ps1                       # role 'probe', stays open
-  .\walk-menu.ps1 -Role host -Seconds 45
-  .\walk-menu.ps1 -Role probe -Kill     # close when done
+  .\walk-menu.ps1                       # role 'probe' (menu->Multiplayer->TCP/IP->Continue), stays open
+  .\walk-menu.ps1 -Role exit -Seconds 20  # role 'exit' (quit from the main menu)
+  .\walk-menu.ps1 -Kill                 # close when done
 
 .NOTES
-  host/join roles write a per-PID log (mss32_<pid>.log); other roles use mss32.log.
+  Self-nav has only two built-in scripts: 'exit' (quit) and 'probe' (everything else,
+  including host/join — there is no host/join pairing script here; the two-instance MP
+  flow is driven by the dispatcher in multiplayer-two-instance.ps1, not self-nav).
+  host/join roles still write a per-PID log (mss32_<pid>.log); other roles use mss32.log.
 #>
 param(
     [string]$Role = "probe",
@@ -37,7 +40,7 @@ $psi.EnvironmentVariables["D2TESTDRV_SKIP_INTRO"] = "1"
 $psi.EnvironmentVariables["D2TESTDRV_BLACKSCREEN_FIX"] = "1"
 $psi.EnvironmentVariables["D2TESTDRV_UI_REPORTER"] = "1"
 $psi.EnvironmentVariables["D2TESTDRV_ROLE"] = $Role
-$psi.EnvironmentVariables["D2TESTDRV_SELFNAV"] = "1"            # run the built-in role script
+$psi.EnvironmentVariables["D2TESTDRV_SELFNAV"] = "1"            # run the built-in self-nav script ('exit' or, for any other role, 'probe')
 if ($Net) { $psi.EnvironmentVariables["D2TESTDRV_NET_INTERCEPT"] = "1" }  # RX/TX trace logging
 
 $p = [System.Diagnostics.Process]::Start($psi)

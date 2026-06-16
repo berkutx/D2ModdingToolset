@@ -170,6 +170,8 @@ struct RemoteCmd
 };
 std::mutex g_remoteMutex;
 std::deque<RemoteCmd> g_remoteCmds;
+RemoteCmd g_inFlight{};     // the command the UI thread popped and is currently executing
+bool g_hasInFlight = false; // (it can block ~10s in a synchronous DPlay call); guarded by g_remoteMutex
 
 void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size)
 {
@@ -202,13 +204,21 @@ void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size
     } else {
         return; // not a command we own
     }
+    auto sameCmd = [&](const RemoteCmd& q) {
+        return q.type == cmd.type && lstrcmpA(q.dlg, cmd.dlg) == 0
+               && lstrcmpA(q.widget, cmd.widget) == 0;
+    };
     std::lock_guard<std::mutex> lk(g_remoteMutex);
-    // Coalesce: if an identical command is already pending, drop this one. The UI thread can
-    // be briefly blocked (e.g. a synchronous DPlay EnumSessions stalls it ~10s), so the
-    // dispatcher may re-fire a click while the first is still queued — executing both when
-    // the thread resumes would double-act (two JoinSession -> error). One pending is enough.
+    // Coalesce: drop this command if an identical one is already pending OR currently in flight.
+    // The UI thread can block ~10s in a synchronous DPlay call (e.g. EnumSessions) while
+    // EXECUTING a popped command, during which it is no longer in the queue; the dispatcher
+    // re-fires the click every few seconds, so without the in-flight check a re-fire would slip
+    // past the queue scan and double-act (two JoinSession -> error popup). One copy — queued or
+    // in flight — is enough.
+    if (g_hasInFlight && sameCmd(g_inFlight))
+        return;
     for (const auto& q : g_remoteCmds) {
-        if (q.type == cmd.type && lstrcmpA(q.dlg, cmd.dlg) == 0 && lstrcmpA(q.widget, cmd.widget) == 0)
+        if (sameCmd(q))
             return;
     }
     g_remoteCmds.push_back(cmd);
@@ -220,10 +230,17 @@ void drainRemoteCommands()
         RemoteCmd cmd;
         {
             std::lock_guard<std::mutex> lk(g_remoteMutex);
-            if (g_remoteCmds.empty())
+            if (g_remoteCmds.empty()) {
+                g_hasInFlight = false; // nothing executing
                 break;
+            }
             cmd = g_remoteCmds.front();
             g_remoteCmds.pop_front();
+            // Mark in flight BEFORE releasing the lock: invokeButton can block ~10s on a
+            // synchronous DPlay call, during which onRemoteCommand must still coalesce a
+            // re-fire of this same command (it is no longer in the queue).
+            g_inFlight = cmd;
+            g_hasInFlight = true;
         }
         if (cmd.type == 0)
             invokeButton(cmd.dlg, cmd.widget);
@@ -264,12 +281,13 @@ void resetAutoDismiss()
     g_adLastClickedDlg[0] = 0;
 }
 
-// Continuously dismiss known first-turn popups, in the tick (on the UI thread). The MP
-// dispatcher enables this (D2TESTDRV_AUTODISMISS) so popups are cleared the instant they
-// appear — driving the dismiss over the relay round-trip lands the click ~600ms late, and
-// a begin-turn command stalled that long on a modal popup resumes into a moved-on game
-// state and hangs the display reconciliation. Mechanical (a fixed popup list), so it stays
-// in the agent; the dispatcher still owns coordination + verification.
+// Continuously dismiss known first-turn popups, in the tick (on the UI thread), when
+// D2TESTDRV_AUTODISMISS is set. NOTE: the two-instance MP dispatcher deliberately does NOT
+// enable this — it dismisses popups itself, PACED (clearing first-turn popups back-to-back
+// hangs the begin-turn display reconciliation). This in-agent path is kept for future
+// single-instance tests that want popups cleared the instant they appear, with no relay
+// round-trip. Mechanical (a fixed popup list), so it can live in the agent; the dispatcher
+// still owns coordination + verification.
 void dismissPopupsTick()
 {
     const DWORD now = GetTickCount();

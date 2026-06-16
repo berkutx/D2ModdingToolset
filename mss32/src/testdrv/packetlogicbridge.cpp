@@ -384,7 +384,10 @@ void bridge_thread_main()
                 lstrcatA(ui, "\n");
                 char bb[520];
                 const char* btns = uistatereporter::currentButtonsCsv();
-                lstrcpynA(bb, btns ? btns : "", sizeof(bb));
+                // Cap the copy at the SOURCE size (g_buttonsCsv is 512 bytes), not sizeof(bb):
+                // it is mutated unsynchronized on the UI thread, so a torn read can momentarily
+                // lack a NUL; bounding to 512 keeps the read inside the source buffer.
+                lstrcpynA(bb, btns ? btns : "", 512);
                 lstrcatA(ui, bb);
                 if (lstrcmpA(ui, last_ui) != 0) {
                     lstrcpynA(last_ui, ui, sizeof(last_ui));

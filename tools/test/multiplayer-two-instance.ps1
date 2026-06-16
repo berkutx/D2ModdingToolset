@@ -51,6 +51,12 @@ for ($i = 0; $i -lt 25; $i++) {
 if (-not $relayUp) { Write-Error "[disp] relay did not come up on $RelayBase"; if ($relay) { Stop-Process -Id $relay.Id -Force -ErrorAction SilentlyContinue }; exit 1 }
 Write-Host "[disp] relay up on $RelayBase" -ForegroundColor Green
 
+# Re-fire cadence for StepTo / ClickAndLeave. Kept ABOVE the longest synchronous UI-thread
+# stall (a DPlay EnumSessions/JoinSession blocks the joiner's UI thread ~10s): the DLL agent
+# also coalesces an identical in-flight command, but re-firing only after the stall window
+# avoids issuing spurious duplicate clicks in the first place.
+$RefireSec = 12
+
 # ---- relay helpers (the dispatcher's eyes + hands) -------------------------
 function State { try { (Invoke-RestMethod "$RelayBase/api/state" -TimeoutSec 3).roles } catch { $null } }
 function Dlg([string]$role) { $s = State; if ($s -and $s.$role) { return $s.$role.dialog } else { return $null } }
@@ -81,7 +87,7 @@ function StepTo([string]$role, [string]$srcDlg, [string]$btn, [string]$expect, [
         if ((Dlg $role) -eq $expect) { Write-Host "[disp] $role $srcDlg::$btn -> $expect" -ForegroundColor Green; return $true }
         # Re-fire only if clearly stuck. A transition (esp. the network join) can take a few
         # seconds; re-clicking during it double-acts (e.g. a second join -> error popup).
-        if (((Get-Date) - $lastFire).TotalSeconds -ge 6) { InvokeBtn $role $srcDlg $btn; $lastFire = Get-Date }
+        if (((Get-Date) - $lastFire).TotalSeconds -ge $RefireSec) { InvokeBtn $role $srcDlg $btn; $lastFire = Get-Date }
         Start-Sleep -Milliseconds 500
     }
     Write-Host "[disp] $role STUCK at '$(Dlg $role)' (wanted $expect after $srcDlg::$btn)" -ForegroundColor Red
@@ -100,7 +106,7 @@ function ClickAndLeave([string]$role, [string]$dlg, [string]$btn, [int]$timeoutS
     $lastFire = Get-Date
     while ((((Get-Date) - $t0).TotalSeconds) -lt $timeoutSec) {
         if ((Dlg $role) -ne $dlg) { return $true }
-        if (((Get-Date) - $lastFire).TotalSeconds -ge 6) { InvokeBtn $role $dlg $btn; $lastFire = Get-Date }
+        if (((Get-Date) - $lastFire).TotalSeconds -ge $RefireSec) { InvokeBtn $role $dlg $btn; $lastFire = Get-Date }
         Start-Sleep -Milliseconds 500
     }
     return $false
@@ -216,34 +222,42 @@ function CaptureWindow([System.Diagnostics.Process]$Proc, [string]$Role) {
 }
 
 # ---- run -------------------------------------------------------------------
-Write-Host "[disp] launching HOST..." -ForegroundColor Cyan
-$h = Launch "host"; $hostLog = "$Game\mss32_$($h.Id).log"
-Write-Host "[disp] host pid=$($h.Id)"
-$j = $null
+# Wrapped so the relay (and the games, under -Kill) are ALWAYS cleaned up — an uncaught
+# throw mid-run must not orphan the node relay, whose named pipe would block the next run.
+$h = $null; $j = $null; $ok = $false
+try {
+    Write-Host "[disp] launching HOST..." -ForegroundColor Cyan
+    $h = Launch "host"; $hostLog = "$Game\mss32_$($h.Id).log"
+    Write-Host "[disp] host pid=$($h.Id)"
 
-$ok = Run-Pairing
+    $ok = Run-Pairing
 
-Write-Host ""
-Write-Host "==== RESULT: both-reached-strategic=$ok ====" -ForegroundColor $(if ($ok) { 'Green' } else { 'Yellow' })
-Write-Host "host log: $hostLog"; if ($j) { Write-Host "join log: $joinLog" }
+    Write-Host ""
+    Write-Host "==== RESULT: both-reached-strategic=$ok ====" -ForegroundColor $(if ($ok) { 'Green' } else { 'Yellow' })
+    Write-Host "host log: $hostLog"; if ($j) { Write-Host "join log: $joinLog" }
 
-if (-not $ok) {
-    Write-Host "[disp] --- relay /api/state ---"
-    try { Invoke-RestMethod "$RelayBase/api/state" -TimeoutSec 3 | ConvertTo-Json -Depth 6 | Write-Host } catch {}
-    Write-Host "[disp] --- relay stdout (last 60) ---"
-    if (Test-Path $relayLog) { Get-Content $relayLog -Tail 60 | ForEach-Object { Write-Host "[relay] $_" } }
-    CaptureWindow $h "host"; if ($j) { CaptureWindow $j "join" }
-    SnapshotInstance $h "host"; if ($j) { SnapshotInstance $j "join" }
-}
-
-if ($Kill) {
-    Stop-Process -Id $h.Id -Force -ErrorAction SilentlyContinue
-    if ($j) { Stop-Process -Id $j.Id -Force -ErrorAction SilentlyContinue }
-    if ($relay) { Stop-Process -Id $relay.Id -Force -ErrorAction SilentlyContinue }
-    Write-Host "[disp] instances + relay closed."
-} else {
-    Show-GameWindow -Proc $h; if ($j) { Show-GameWindow -Proc $j }
-    Write-Host "[disp] left running (relay pid=$($relay.Id))." -ForegroundColor Yellow
+    if (-not $ok) {
+        Write-Host "[disp] --- relay /api/state ---"
+        try { Invoke-RestMethod "$RelayBase/api/state" -TimeoutSec 3 | ConvertTo-Json -Depth 6 | Write-Host } catch {}
+        Write-Host "[disp] --- relay stdout (last 60) ---"
+        if (Test-Path $relayLog) { Get-Content $relayLog -Tail 60 | ForEach-Object { Write-Host "[relay] $_" } }
+        CaptureWindow $h "host"; if ($j) { CaptureWindow $j "join" }
+        SnapshotInstance $h "host"; if ($j) { SnapshotInstance $j "join" }
+    }
+} catch {
+    Write-Host "[disp] run aborted by error: $($_.Exception.Message)" -ForegroundColor Red
+    $ok = $false
+} finally {
+    if ($Kill) {
+        if ($h) { Stop-Process -Id $h.Id -Force -ErrorAction SilentlyContinue }
+        if ($j) { Stop-Process -Id $j.Id -Force -ErrorAction SilentlyContinue }
+        if ($relay) { Stop-Process -Id $relay.Id -Force -ErrorAction SilentlyContinue }
+        Stop-Process -Name dplaysvr -Force -ErrorAction SilentlyContinue  # clear the shared DPlay helper too
+        Write-Host "[disp] instances + relay closed."
+    } else {
+        if ($h) { Show-GameWindow -Proc $h }; if ($j) { Show-GameWindow -Proc $j }
+        if ($relay) { Write-Host "[disp] left running (relay pid=$($relay.Id))." -ForegroundColor Yellow }
+    }
 }
 
 if (-not $ok) { Write-Error "two-instance MP did not reach the strategic map"; exit 1 }
