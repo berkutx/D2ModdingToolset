@@ -27,6 +27,12 @@ permissions:
   contents: read
   actions: read # list runs + download the mss32-debugtest artifact (same- or cross-run)
 
+env:
+  # actions/cache + actions/download-artifact still ship a Node 20 runtime, which GitHub is
+  # removing from runners (Sept 2026). v4/v5 are their latest majors (no Node-24 bump to take),
+  # so opt them into Node 24 via the supported toggle instead of a version change.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   # Warm the ~1.95 GB minimal game into the Actions cache once per run/branch.
   # ubuntu does the download; the windows test jobs restore it (cross-OS archive).
