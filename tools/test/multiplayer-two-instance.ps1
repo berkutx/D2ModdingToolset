@@ -104,12 +104,12 @@ function ClickAndLeave([string]$role, [string]$dlg, [string]$btn, [int]$timeoutS
     }
     return $false
 }
-# First-turn popups that re-bind a NEW dialog when dismissed (so the relay moves on) — safe to re-click
-# on a timer. NOT here: the "name your lord" DLG_GETINFO_BOX, which closes to the already-bound map
-# underneath — the reporter only updates on a button-bind, so after BTN_CLOSE the relay shows a STALE
-# DLG_GETINFO_BOX and re-clicking it faults the freed dialog. GETINFO is handled with a click-ONCE flag.
+# First-turn popups, each mapped to the button that closes it. DLG_GETINFO_BOX is the "name your lord"
+# prompt — BTN_CLOSE accepts the lord's DEFAULT name and closes (do NOT SetEdit it, which corrupts the
+# accept). The reporter reports the REAL topmost dialog (it polls getTopmostInterface), so a close is
+# reflected immediately and the same paced loop drives every popup, GETINFO included.
 $Dismiss = @{
-    'DLG_SCENARIO_BRIEFING' = 'BTN_CONTINUE'; 'DLG_BEGIN_TURN' = 'BTN_OK'
+    'DLG_SCENARIO_BRIEFING' = 'BTN_CONTINUE'; 'DLG_BEGIN_TURN' = 'BTN_OK'; 'DLG_GETINFO_BOX' = 'BTN_CLOSE'
     'DLG_MESSAGE_BOX' = 'BTN_OK'; 'DLG_EVENT_POPUP' = 'BTN_RIGHTSIDE'
 }
 # Dismiss first-turn popups until the role reaches the map (relay-latched reachedStrategic). Paced
@@ -195,17 +195,14 @@ function Run-Pairing {
 
     if ($EndHostTurn) {
         # Sequential turn-pass, closing every dialog LEGITIMATELY (a role must not act while a dialog is
-        # open). Both players close their first-turn popups on the real button: scenario briefing
-        # (BTN_CONTINUE), the new-day DLG_BEGIN_TURN income (BTN_OK), and the "name your lord"
-        # DLG_GETINFO_BOX (BTN_CLOSE — its seal accepts the DEFAULT leader name, clicked exactly ONCE: the
-        # close frees the dialog, but the reporter only updates on a button-bind, so the relay then shows a
-        # STALE DLG_GETINFO_BOX over the revealed map; re-clicking would fault the freed dialog). With its
-        # dialogs closed the host is on the bare map, so BTN_END_TURN passes the turn and the joiner gets
-        # its OWN new day (relay-latched join.sawBeginTurn). Success = the joiner reached its new day, holds
-        # its map, neither crashed. Note: $closedGI is the dispatcher's truth for "lord-name closed" since
-        # the relay can't report that close.
+        # open). Both players close their first-turn popups on the real button ($Dismiss): scenario
+        # briefing (BTN_CONTINUE), the new-day DLG_BEGIN_TURN income (BTN_OK), and the "name your lord"
+        # DLG_GETINFO_BOX (BTN_CLOSE accepts the default lord name). The reporter reports the REAL topmost
+        # dialog, so each close is reflected and the role lands on the bare DLG_STRATEGIC/DLG_ISO_PAL map;
+        # only THEN does the HOST press BTN_END_TURN -> the turn passes and the joiner gets its OWN new day
+        # (relay-latched join.sawBeginTurn). Success = the joiner reached its new day, holds its map, no crash.
         Write-Host "[disp] HOST skips its turn -> close first-turn dialogs (BOTH roles), then end host turn" -ForegroundColor Cyan
-        $closedGI = @{ host = $false; join = $false }   # clicked the lord-name BTN_CLOSE? (relay stale after)
+        $BareMap = 'DLG_STRATEGIC', 'DLG_ISO_PAL'   # host ends the turn ONLY from here, all overlays closed
         $seen = @{ host = ''; join = '' }
         $last = @{ host = (Get-Date).AddSeconds(-10); join = (Get-Date).AddSeconds(-10) }
         $endLogged = $false; $t0 = Get-Date
@@ -215,21 +212,17 @@ function Run-Pairing {
             foreach ($role in 'host', 'join') {
                 $d = if ($s.$role) { $s.$role.dialog } else { $null }
                 if (-not $d -or ((Get-Date) - $last[$role]).TotalSeconds -lt 2.0) { continue }   # pace ~2s/click
-                if ($d -eq 'DLG_GETINFO_BOX') {
-                    if (-not $closedGI[$role]) { Write-Host "[disp]   $role dialog appeared: DLG_GETINFO_BOX (name your lord) -> click BTN_CLOSE"; InvokeBtn $role 'DLG_GETINFO_BOX' 'BTN_CLOSE'; $closedGI[$role] = $true; $last[$role] = Get-Date }
-                } elseif ($Dismiss.ContainsKey($d)) {
+                if ($Dismiss.ContainsKey($d)) {
                     if ($seen[$role] -ne $d) { Write-Host "[disp]   $role dialog appeared: $d -> click $($Dismiss[$d])"; $seen[$role] = $d }
                     InvokeBtn $role $d $Dismiss[$d]; $last[$role] = Get-Date
+                } elseif ($role -eq 'host' -and $s.host.sawBeginTurn -and ($BareMap -contains $d)) {
+                    if (-not $endLogged) {
+                        Write-Host "[disp]   host dialogs closed, on bare map ($d) -> end turn (BTN_END_TURN)"
+                        if ($DumpDir) { CaptureWindow $h "host_pre_endturn" }   # host's view the instant before End Turn
+                        $endLogged = $true
+                    }
+                    InvokeBtn 'host' 'DLG_STRATEGIC' 'BTN_END_TURN'; $last['host'] = Get-Date
                 }
-            }
-            # Host: once it has closed its lord-name and seen its new day, it sits on the bare map -> end turn.
-            if ($s.host.sawBeginTurn -and $closedGI['host'] -and ((Get-Date) - $last['host']).TotalSeconds -ge 2.0) {
-                if (-not $endLogged) {
-                    Write-Host "[disp]   host dialogs closed -> on the bare map, end turn (BTN_END_TURN)"
-                    if ($DumpDir) { CaptureWindow $h "host_pre_endturn" }   # host's view the instant before End Turn
-                    $endLogged = $true
-                }
-                InvokeBtn 'host' 'DLG_STRATEGIC' 'BTN_END_TURN'; $last['host'] = Get-Date
             }
             Start-Sleep -Milliseconds 600
         }
@@ -239,15 +232,13 @@ function Run-Pairing {
         if (-not $s.join.reachedStrategic) { Write-Host "[disp] JOINER lost the strategic map" -ForegroundColor Red; return $false }
         if (-not ($s.host.connected -and $s.join.connected)) { Write-Host "[disp] an instance dropped (crash?)" -ForegroundColor Red; return $false }
 
-        # The turn is the joiner's now -> close ITS first-turn dialogs the same legitimate way (begin-turn
-        # income BTN_OK, then the lord-name DLG_GETINFO_BOX via ONE BTN_CLOSE) so it sits on its OWN map.
+        # The turn is the joiner's now -> close ITS first-turn dialogs the same way until it sits on its map.
         $t1 = Get-Date; $jlast = (Get-Date).AddSeconds(-10); $jseen = ''
-        while ((((Get-Date) - $t1).TotalSeconds) -lt 60 -and -not $closedGI['join']) {
+        while ((((Get-Date) - $t1).TotalSeconds) -lt 60) {
             $jd = Dlg 'join'
+            if ($jd -eq 'DLG_ISO_PAL' -or $jd -eq 'DLG_STRATEGIC') { break }   # overlays closed -> its own map
             if (((Get-Date) - $jlast).TotalSeconds -ge 2.0) {
-                if ($jd -eq 'DLG_GETINFO_BOX') {
-                    Write-Host "[disp]   join dialog appeared: DLG_GETINFO_BOX (name your lord) -> click BTN_CLOSE"; InvokeBtn 'join' 'DLG_GETINFO_BOX' 'BTN_CLOSE'; $closedGI['join'] = $true
-                } elseif ($Dismiss.ContainsKey($jd)) {
+                if ($Dismiss.ContainsKey($jd)) {
                     if ($jseen -ne $jd) { Write-Host "[disp]   join dialog appeared: $jd -> click $($Dismiss[$jd])"; $jseen = $jd }
                     InvokeBtn 'join' $jd $Dismiss[$jd]
                 }

@@ -72,16 +72,15 @@ Two ways to assert a dialog actually appeared:
 transition. Find each dialog's real button in `/api/state` and pace clicks (~2 s) — don't fire the
 same popup back-to-back.
 
-**The stale-dialog trap (important).** `/api/state` is updated only when the agent BINDS a button
-(`assignFunctor`). A new dialog re-binds, so opening one is reported — but **closing a modal that
-reveals an already-bound dialog underneath does NOT re-report**, so `/api/state` keeps showing the
-*closed* dialog. Example: the lord-name `DLG_GETINFO_BOX` closes on ONE `BTN_CLOSE` (it holds the
-lord's default name — do NOT `SetEdit` it, which corrupts the accept), revealing the strategic map;
-but the relay still shows `DLG_GETINFO_BOX`. So: (1) click such a dialog's close button **exactly
-once** — the first click frees it; re-clicking faults the freed dialog (harmless, SEH-swallowed, but
-pointless); (2) track closure in YOUR script (a `$closed` flag), don't wait for `/api/state` to leave
-it. After the close the role is on the bare map, where the next action (e.g. `BTN_END_TURN`) is
-legitimate. **Caveat:** a `CMessageBox` with *no* bound buttons is not reported (relay-invisible —
+**Closing a dialog is reported.** The reporter polls the engine's real topmost interface each frame
+(`CInterfManager::getTopmostInterface`), so when a modal closes and reveals the dialog underneath,
+`/api/state` switches to the revealed dialog on its own — no stale value, nothing to track in your
+script. Example: the lord-name `DLG_GETINFO_BOX` closes on ONE `BTN_CLOSE` (it already holds the
+lord's default name — do NOT `SetEdit` it, which corrupts the accept), and the relay immediately
+shows the strategic map underneath, so the next action (e.g. `BTN_END_TURN`) just works. (Co-present
+dialogs like `DLG_ISO_PAL` + `DLG_STRATEGIC` share one screen, so the relay may report either of that
+pair — both resolve by name for `InvokeBtn` regardless.) **Caveat:** a `CMessageBox` with *no* bound
+buttons is not reported (relay-invisible —
 see gotchas), so it can't be latched by name either.
 
 ## Add it to CI (optional)
@@ -178,17 +177,15 @@ if ($Dismiss.ContainsKey($d)) { Write-Host "$role dialog appeared: $d -> click $
 случился переход. Настоящую кнопку смотри в `/api/state`, и пейси клики (~2 с) — не сыпь по одному
 попапу подряд.
 
-**Грабли «застрявшего диалога» (важно).** `/api/state` обновляется только когда агент БИНДИТ кнопку
-(`assignFunctor`). Новый диалог ребиндит → его открытие видно; но **закрытие модалки, под которой
-уже забинженный диалог, НЕ ребиндит** → рилей продолжает показывать *закрытый* диалог. Пример:
-имя-лорда `DLG_GETINFO_BOX` закрывается ОДНИМ `BTN_CLOSE` (в нём дефолтное имя лорда — НЕ делай
-`SetEdit`, он ломает accept), под ним открывается карта; но рилей всё ещё показывает
-`DLG_GETINFO_BOX`. Поэтому: (1) жми кнопку закрытия таких диалогов РОВНО ОДИН раз — первый клик
-освобождает диалог, повторный фолтит по освобождённому указателю (безвредно, SEH глотает, но
-бессмысленно); (2) отслеживай закрытие В СВОЁМ скрипте (флаг `$closed`), не жди, пока `/api/state`
-уйдёт с него. После закрытия роль на голой карте, где следующее действие (напр. `BTN_END_TURN`)
-легитимно. **Грабли:** `CMessageBox` без забинженных кнопок не репортится (через рилей не виден),
-по имени его не защёлкнуть.
+**Закрытие диалога репортится.** Репортер каждый кадр опрашивает реальный верхний интерфейс движка
+(`CInterfManager::getTopmostInterface`), поэтому когда модалка закрывается и под ней открывается
+диалог — `/api/state` сам переключается на него, никакого устаревшего значения и ничего отслеживать в
+скрипте не надо. Пример: имя-лорда `DLG_GETINFO_BOX` закрывается ОДНИМ `BTN_CLOSE` (в нём уже дефолтное
+имя лорда — НЕ делай `SetEdit`, он ломает accept), и рилей сразу показывает карту под ним, так что
+следующее действие (напр. `BTN_END_TURN`) просто работает. (Co-present диалоги `DLG_ISO_PAL` +
+`DLG_STRATEGIC` делят один экран, поэтому рилей может показать любой из этой пары — оба резолвятся по
+имени для `InvokeBtn`.) **Грабли:** `CMessageBox` без забинженных кнопок не репортится (через рилей не
+виден), по имени его не защёлкнуть.
 
 ### Подключить к CI (опционально)
 

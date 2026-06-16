@@ -467,6 +467,7 @@ void tick()
     if (s_inTick)
         return;
     s_inTick = true;
+    uistatereporter::refreshCurrentDialog(); // report the REAL topmost dialog (catch modal closes)
     drainRemoteCommands();
     if (g_navScript)
         navStep();

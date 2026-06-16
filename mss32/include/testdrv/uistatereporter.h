@@ -38,6 +38,10 @@ const char* currentButtonsCsv();
  * target dialog by name through this registry, not by the last bind. */
 game::CDialogInterf* findDialog(const char* name);
 
+/** Re-sync the current dialog to the engine's REAL topmost interface (so a modal closing
+ * over an already-bound dialog isn't reported stale). Cheap; call once per frame. */
+void refreshCurrentDialog();
+
 } // namespace uistatereporter
 } // namespace testdrv
 } // namespace hooks
