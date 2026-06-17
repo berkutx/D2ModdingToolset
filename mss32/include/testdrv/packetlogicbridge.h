@@ -6,10 +6,10 @@
  *   uint32 length (= 4 + payload) | uint16 opcode | uint16 flags | byte[] payload
  * Pipe name: \\.\pipe\d2lobby.packetlogic. All integers little-endian.
  *
- * Pure observability/control transport: it forwards RX/TX packet traces + log
- * lines to the relay and hands incoming control opcodes it does not itself own to
- * a registered command callback (so a consumer can extend the protocol without
- * this file knowing about it). Compile-gated by D2_TESTDRV.
+ * Pure observability/control transport: it forwards the live UI snapshot, RX/TX
+ * packet traces + log lines to the relay and hands incoming control opcodes it does
+ * not itself own to a registered command callback (so a consumer can extend the
+ * protocol without this file knowing about it). Compile-gated by D2_TESTDRV.
  */
 
 #ifndef TESTDRV_PACKETLOGICBRIDGE_H

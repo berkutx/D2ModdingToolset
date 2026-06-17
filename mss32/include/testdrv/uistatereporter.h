@@ -2,15 +2,20 @@
  * Publishable test/logging system for the Disciples 2 modding toolset.
  *
  * UI-state reporter: Detours the game's button-bind helper
- * (CButtonInterfApi::assignFunctor) so the current dialog + its buttons can be
- * observed programmatically — the "true path" replacing screenshots. Native menus
- * bind through it, so one hook catches the whole menu chain and emits a live log
- * of every (dialog, button); the current dialog is exposed for the auto-nav
- * driver. Gated at runtime by D2TESTDRV_UI_REPORTER; compile-gated by D2_TESTDRV.
+ * (CButtonInterfApi::assignFunctor) to track the current dialog, then enumerates
+ * ALL of that dialog's controls (buttons, list boxes, spin buttons, edit boxes,
+ * text) with their live state into a JSON snapshot — the "true path" replacing
+ * screenshots. Native menus bind through assignFunctor, so one hook catches the
+ * whole menu chain; the snapshot is the relay's GET /api/ui payload, and the
+ * current dialog is exposed for the auto-nav driver. Gated at runtime by
+ * D2TESTDRV_UI_REPORTER; compile-gated by D2_TESTDRV.
  */
 
 #ifndef TESTDRV_UISTATEREPORTER_H
 #define TESTDRV_UISTATEREPORTER_H
+
+#include <cstdint>
+#include <string>
 
 namespace game {
 struct CDialogInterf;
@@ -28,9 +33,6 @@ void install();
 game::CDialogInterf* currentDialog();
 /** Name of the current dialog (empty string before any bind). */
 const char* currentDialogName();
-/** Comma-separated button names bound for the current dialog (best-effort; reset on
- * each dialog change). Lets the dispatcher scan the live UI over the relay. */
-const char* currentButtonsCsv();
 
 /** Look up a bound dialog by name, or null if it was never bound / has closed.
  * D2 co-presents nested dialogs (e.g. DLG_CHOOSE_SKIRMISH inside DLG_HOST), so the
@@ -39,8 +41,14 @@ const char* currentButtonsCsv();
 game::CDialogInterf* findDialog(const char* name);
 
 /** Re-sync the current dialog to the engine's REAL topmost interface (so a modal closing
- * over an already-bound dialog isn't reported stale). Cheap; call once per frame. */
+ * over an already-bound dialog isn't reported stale) and rebuild the widget snapshot.
+ * Cheap; called once per frame from the auto-nav tick (the UI thread). */
 void refreshCurrentDialog();
+
+/** Copy the current dialog's widget snapshot (JSON: {"dialog":..,"widgets":[{name,type,state}]})
+ * and its change epoch. Thread-safe — the bridge thread calls this; the snapshot is built on
+ * the UI thread under the same lock. Returns false before the first dialog exists. */
+bool copyUiSnapshot(std::string& outJson, std::uint32_t& outEpoch);
 
 } // namespace uistatereporter
 } // namespace testdrv

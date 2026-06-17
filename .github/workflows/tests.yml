@@ -95,7 +95,7 @@ jobs:
           Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
           "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Boot once -> DLG_MAIN_MENU
-        run: ./tools/test/reliability_test.ps1 -N 1 -Boot 1 -TimeoutSec 60 -Game "$env:GAME_DIR"
+        run: ./tools/test/reliability_test.ps1 -N 1 -Boot 1 -TimeoutSec 60 -GameDir "$env:GAME_DIR"
 
   headless-boot-reliability:
     name: Headless boot — reliability (5x)
@@ -129,7 +129,7 @@ jobs:
           Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
           "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Boot 5x -> DLG_MAIN_MENU
-        run: ./tools/test/reliability_test.ps1 -N 5 -Boot 1 -TimeoutSec 60 -Game "$env:GAME_DIR"
+        run: ./tools/test/reliability_test.ps1 -N 5 -Boot 1 -TimeoutSec 60 -GameDir "$env:GAME_DIR"
 
   # Two-instance multiplayer: a PowerShell dispatcher launches a host + a joiner and
   # drives both through the menus into a started game over native DirectPlay TCP/IP on
@@ -243,7 +243,7 @@ jobs:
       - name: Host + joiner (dispatcher over the relay) -> both reach the strategic map
         run: |
           node --version  # the dispatcher starts tools/relay/relay.js; GitHub runners ship Node
-          ./tools/test/multiplayer-two-instance.ps1 -Game "$env:GAME_DIR" -Kill -ProcDump "$env:PROCDUMP" -DumpDir "$env:DUMPDIR"
+          ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -Kill -ProcDump "$env:PROCDUMP" -DumpDir "$env:DUMPDIR"
 
       - name: Dump per-instance logs + relay state on failure
         if: failure()

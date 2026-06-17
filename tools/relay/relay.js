@@ -3,9 +3,10 @@
  *
  * A dependency-free Node.js server the mss32 bridge connects to over a Windows named pipe.
  * MULTI-CLIENT (host + joiner, each tagged by role from its Hello), a dumb mirror + command
- * relay with no test logic: it mirrors each agent's live UI (dialog + buttons) and packets, and
- * relays the dispatcher's InvokeButton / SetSelection commands to a role. The dispatcher reads
- * /api/state and POSTs /api/invoke|/api/select, so two instances coordinate with no files.
+ * relay with no test logic: it mirrors each agent's live UI (current dialog + every widget with
+ * its state) and packets, and relays the dispatcher's invoke/select/spin/edit commands to a role.
+ * The dispatcher reads GET /api/ui and POSTs /api/ui/{invoke,select,spin,edit}, so two instances
+ * coordinate with no files.
  *
  * Run: node relay.js  (pipe \\.\pipe\d2lobby.packetlogic, http :8077). Built-ins net + http only.
  */
@@ -33,14 +34,14 @@ const Op = {
     SetSelection: 0x0301,   // -> agent: set a listbox selection
     SetSpin: 0x0302,        // -> agent: set a spin-button option
     SetEditText: 0x0303,    // -> agent: set an edit-box's text
-    Dialog: 0x0410,         // <- agent: live UI state ("dialogName\nbtn1,btn2,...")
+    UiSnapshot: 0x0410,     // <- agent: current dialog + all its widgets with state (JSON)
     Log: 0xff00,
 };
 
 const MAX_RING = 500;
 const state = {
-    clients: new Map(),  // socket -> { role, pid, modulePath, dialog, buttons }
-    byRole: {},          // role -> { connected, pid, dialog, buttons }  (serialized to /api/state)
+    clients: new Map(),  // socket -> { role, pid, modulePath, dialog, widgets, buttons }
+    byRole: {},          // role -> { connected, pid, dialog, widgets, buttons }  (serialized to /api/state)
     socketByRole: {},    // role -> current socket (NOT serialized); the authoritative owner, so a
                          // relaunch supersedes it and a stale socket's late 'close' can't flip it offline.
     logs: [],
@@ -160,8 +161,8 @@ function handleMessage(socket, op, flags, payload) {
         // never returns a dead duplicate, and its late 'close' can't touch the live entry.
         const prev = state.socketByRole[role];
         if (prev && prev !== socket) { state.clients.delete(prev); try { prev.destroy(); } catch (e) { /* gone */ } }
-        state.clients.set(socket, { role, pid: h.pid, modulePath: h.modulePath, dialog: null, buttons: [] });
-        state.byRole[role] = { connected: true, pid: h.pid, dialog: null, buttons: [], reachedStrategic: false, sawBeginTurn: false };
+        state.clients.set(socket, { role, pid: h.pid, modulePath: h.modulePath, dialog: null, widgets: [], buttons: [] });
+        state.byRole[role] = { connected: true, pid: h.pid, dialog: null, widgets: [], buttons: [], reachedStrategic: false, sawBeginTurn: false };
         state.socketByRole[role] = socket;
         console.log(`[hello] role=${role} pid=${h.pid} v${h.version}`);
         const ack = Buffer.alloc(8);
@@ -170,17 +171,21 @@ function handleMessage(socket, op, flags, payload) {
         send(socket, Op.HelloAck, ack);
         break;
     }
-    case Op.Dialog: {
-        const s = payload.toString('utf8');
-        const nl = s.indexOf('\n');
-        const dialog = nl >= 0 ? s.slice(0, nl) : s;
-        const buttons = nl >= 0 && s.length > nl + 1 ? s.slice(nl + 1).split(',').filter(Boolean) : [];
+    case Op.UiSnapshot: {
+        // JSON: { dialog: "DLG_X", widgets: [ {name, type, state}, ... ] }. The DLL escapes all
+        // strings, so a parse failure means a torn frame — log and skip, never crash the relay.
+        let snap;
+        try { snap = JSON.parse(payload.toString('utf8')); }
+        catch (e) { console.error(`[ui] ${roleOf(socket)} bad snapshot JSON: ${e.message}`); break; }
+        const dialog = snap.dialog || '';
+        const widgets = Array.isArray(snap.widgets) ? snap.widgets : [];
+        const buttons = widgets.filter((w) => w.type === 'button').map((w) => w.name); // back-compat view
         const c = state.clients.get(socket);
         if (c) {
-            c.dialog = dialog; c.buttons = buttons;
+            c.dialog = dialog; c.widgets = widgets; c.buttons = buttons;
             const r = state.byRole[c.role];
             if (r) {
-                r.dialog = dialog; r.buttons = buttons;
+                r.dialog = dialog; r.widgets = widgets; r.buttons = buttons;
                 // Sticky "reached the map": DLG_ISO_PAL (the isometric map view) appears BEFORE
                 // the first-turn popups; DLG_STRATEGIC is the same map. Latch on either — the
                 // dialog only flickers through, so a poll can miss it.
@@ -188,7 +193,7 @@ function handleMessage(socket, op, flags, payload) {
                 if (dialog === 'DLG_BEGIN_TURN') r.sawBeginTurn = true; // a new day / turn began for this role
             }
         }
-        console.log(`[ui] ${roleOf(socket)} -> ${dialog} [${buttons.join(',')}]`);
+        console.log(`[ui] ${roleOf(socket)} -> ${dialog} (${widgets.length} widgets)`);
         break;
     }
     case Op.Log: {
@@ -270,21 +275,34 @@ const httpServer = http.createServer((req, res) => {
     const q = url.searchParams;
 
     if (req.method === 'GET' && path === '/api/status') return sendJson(res, 200, { roles: state.byRole });
-    // Live per-role UI state for the dispatcher: { roles: { host:{connected,dialog,buttons}, ... } }.
+    // Per-role status + latches for the dispatcher: { roles: { host:{connected,dialog,widgets,...}, ... } }.
     if (req.method === 'GET' && path === '/api/state') return sendJson(res, 200, { roles: state.byRole });
+    // The live UI snapshot. With ?role=, one role's { role, dialog, widgets }; without, every role.
+    if (req.method === 'GET' && path === '/api/ui') {
+        const role = q.get('role');
+        if (role) {
+            const r = state.byRole[role];
+            return sendJson(res, 200, { role, dialog: r ? r.dialog : null, widgets: r ? r.widgets : [] });
+        }
+        const roles = {};
+        for (const [name, r] of Object.entries(state.byRole)) roles[name] = { dialog: r.dialog, widgets: r.widgets };
+        return sendJson(res, 200, { roles });
+    }
     if (req.method === 'GET' && path === '/api/log') return sendJson(res, 200, { logs: state.logs.slice(-100), packets: state.packets.slice(-100) });
     if (req.method === 'GET' && path === '/api/chat') return sendJson(res, 200, { chat: state.chat.slice(-100) });
     if (req.method === 'GET' && path === '/api/events') return sendJson(res, 200, { events: state.events.slice(-100) });
     if (req.method === 'GET' && path === '/api/packets') return sendJson(res, 200, { packets: state.packets.slice(-200) });
 
-    if (req.method === 'POST' && path === '/api/invoke') {
+    // UI actions, grouped under /api/ui/*. Each resolves the role's agent socket then forwards one
+    // bridge command; 503 if that role has no connected agent.
+    if (req.method === 'POST' && path === '/api/ui/invoke') {
         const sock = clientByRole(q.get('role'));
         if (!sock) return sendJson(res, 503, { error: 'no agent for role ' + q.get('role') });
         const dlg = q.get('dlg') || '', btn = q.get('btn') || '';
         send(sock, Op.InvokeButton, Buffer.concat([encodeStr(dlg), encodeStr(btn)]));
         return sendJson(res, 200, { sent: { role: roleOf(sock), invoke: { dlg, btn } } });
     }
-    if (req.method === 'POST' && path === '/api/select') {
+    if (req.method === 'POST' && path === '/api/ui/select') {
         const sock = clientByRole(q.get('role'));
         if (!sock) return sendJson(res, 503, { error: 'no agent for role ' + q.get('role') });
         const dlg = q.get('dlg') || '', lb = q.get('lb') || '', index = parseInt(q.get('index') || '0', 10);
@@ -292,7 +310,7 @@ const httpServer = http.createServer((req, res) => {
         send(sock, Op.SetSelection, Buffer.concat([encodeStr(dlg), encodeStr(lb), idx]));
         return sendJson(res, 200, { sent: { role: roleOf(sock), select: { dlg, lb, index } } });
     }
-    if (req.method === 'POST' && path === '/api/spin') {
+    if (req.method === 'POST' && path === '/api/ui/spin') {
         const sock = clientByRole(q.get('role'));
         if (!sock) return sendJson(res, 503, { error: 'no agent for role ' + q.get('role') });
         const dlg = q.get('dlg') || '', spin = q.get('spin') || '', index = parseInt(q.get('index') || '0', 10);
@@ -300,7 +318,7 @@ const httpServer = http.createServer((req, res) => {
         send(sock, Op.SetSpin, Buffer.concat([encodeStr(dlg), encodeStr(spin), idx]));
         return sendJson(res, 200, { sent: { role: roleOf(sock), spin: { dlg, spin, index } } });
     }
-    if (req.method === 'POST' && path === '/api/edit') {
+    if (req.method === 'POST' && path === '/api/ui/edit') {
         const sock = clientByRole(q.get('role'));
         if (!sock) return sendJson(res, 503, { error: 'no agent for role ' + q.get('role') });
         const dlg = q.get('dlg') || '', edit = q.get('edit') || '', text = q.get('text') || '';

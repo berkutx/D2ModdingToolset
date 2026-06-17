@@ -22,6 +22,7 @@
 #include <deque>
 #include <mutex>
 #include <spdlog/spdlog.h>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -51,7 +52,7 @@ enum class Op : uint16_t
     SetSelection = 0x0301,   // <- dispatcher: set a listbox selection (autonav executor)
     SetSpin = 0x0302,        // <- dispatcher: set a spin-button option (autonav executor)
     SetEditText = 0x0303,    // <- dispatcher: set an edit-box's text (autonav executor)
-    Dialog = 0x0410,         // -> relay: live UI state ("dialogName\nbtn1,btn2,...")
+    UiSnapshot = 0x0410,     // -> relay: current dialog + all its widgets with state (JSON)
     Log = 0xFF00,
 };
 
@@ -374,26 +375,18 @@ void bridge_thread_main()
     const char* msg = "mss32 testdrv bridge alive";
     write_message(Op::Log, msg, (uint32_t)strlen(msg));
 
-    char last_ui[600] = {};
+    uint32_t last_ui_epoch = 0;
     while (g_running.load()) {
-        // 0. Forward the live UI state (current dialog + its buttons) to the relay whenever
-        //    it changes, so the dispatcher can scan/verify the UI without scraping logs.
+        // 0. Forward the live UI snapshot (current dialog + every widget with its state) to the
+        //    relay whenever it changes, so the dispatcher can scan/verify the UI without scraping
+        //    logs. The reporter builds it on the UI thread under a lock and bumps the epoch on each
+        //    change; we ship only on a new epoch.
         {
-            const char* dlg = uistatereporter::currentDialogName();
-            if (dlg && *dlg) {
-                char ui[600];
-                lstrcpynA(ui, dlg, 64);
-                lstrcatA(ui, "\n");
-                char bb[520];
-                const char* btns = uistatereporter::currentButtonsCsv();
-                // cap at the 512-byte source (g_buttonsCsv), not sizeof(bb): it is mutated
-                // unsynchronized, so a torn read may lack a NUL — 512 keeps the read in-bounds.
-                lstrcpynA(bb, btns ? btns : "", 512);
-                lstrcatA(ui, bb);
-                if (lstrcmpA(ui, last_ui) != 0) {
-                    lstrcpynA(last_ui, ui, sizeof(last_ui));
-                    write_message(Op::Dialog, ui, (uint32_t)lstrlenA(ui));
-                }
+            std::string snap;
+            uint32_t epoch = 0;
+            if (uistatereporter::copyUiSnapshot(snap, epoch) && epoch != last_ui_epoch) {
+                last_ui_epoch = epoch;
+                write_message(Op::UiSnapshot, snap.data(), (uint32_t)snap.size());
             }
         }
 
