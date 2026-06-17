@@ -4,7 +4,7 @@
  * UI-state reporter: Detours the game's button-bind helper
  * (CButtonInterfApi::assignFunctor) to track the current dialog, then enumerates
  * ALL of that dialog's controls (buttons, list boxes, spin buttons, edit boxes,
- * text) with their live state into a JSON snapshot — the "true path" replacing
+ * text) with their live state into a JSON snapshot, the "true path" replacing
  * screenshots. Native menus bind through assignFunctor, so one hook catches the
  * whole menu chain; the snapshot is the relay's GET /api/ui payload, and the
  * current dialog is exposed for the auto-nav driver. Gated at runtime by
@@ -36,7 +36,7 @@ const char* currentDialogName();
 
 /** Look up a bound dialog by name, or null if it was never bound / has closed.
  * D2 co-presents nested dialogs (e.g. DLG_CHOOSE_SKIRMISH inside DLG_HOST), so the
- * "current" dialog is not always the one a button lives in — auto-nav resolves the
+ * "current" dialog is not always the one a button lives in, auto-nav resolves the
  * target dialog by name through this registry, not by the last bind. */
 game::CDialogInterf* findDialog(const char* name);
 
@@ -46,7 +46,7 @@ game::CDialogInterf* findDialog(const char* name);
 void refreshCurrentDialog();
 
 /** Copy the current dialog's widget snapshot (JSON: {"dialog":..,"widgets":[{name,type,state}]})
- * and its change epoch. Thread-safe — the bridge thread calls this; the snapshot is built on
+ * and its change epoch. Thread-safe, the bridge thread calls this; the snapshot is built on
  * the UI thread under the same lock. Returns false before the first dialog exists. */
 bool copyUiSnapshot(std::string& outJson, std::uint32_t& outEpoch);
 

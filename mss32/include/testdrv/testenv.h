@@ -2,7 +2,7 @@
  * Publishable test/logging system for the Disciples 2 modding toolset.
  *
  * Tiny shared helper: read a boolean runtime gate from an environment variable.
- * The test/logging system is gated two ways — compile-time by D2_TESTDRV (is the
+ * The test/logging system is gated two ways, compile-time by D2_TESTDRV (is the
  * code in the DLL at all) and runtime by D2TESTDRV_* env vars (is this feature on
  * in this launch). This is the runtime half. Compile-gated by D2_TESTDRV.
  */

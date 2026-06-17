@@ -28,7 +28,7 @@ jobs:
   # Warm the ~1.95 GB minimal game into the Actions cache once per run/branch.
   # ubuntu does the download; the windows test jobs restore it (cross-OS archive).
   # A same-branch cache is readable on that branch, so this self-warms on a feature
-  # branch — no default-branch dispatch needed.
+  # branch, no default-branch dispatch needed.
   prep-game:
     name: Prepare game (cache)
     runs-on: ubuntu-latest
@@ -62,7 +62,7 @@ jobs:
           enableCrossOsArchive: true
 
   headless-boot-smoke:
-    name: Headless boot — smoke (1x)
+    name: Headless boot, smoke (1x)
     needs: prep-game
     runs-on: windows-2025-vs2026
     defaults:
@@ -98,7 +98,7 @@ jobs:
         run: ./tools/test/reliability_test.ps1 -N 1 -Boot 1 -TimeoutSec 60 -GameDir "$env:GAME_DIR"
 
   headless-boot-reliability:
-    name: Headless boot — reliability (5x)
+    name: Headless boot, reliability (5x)
     needs: prep-game
     runs-on: windows-2025-vs2026
     defaults:
@@ -133,10 +133,10 @@ jobs:
 
   # Two-instance multiplayer: a PowerShell dispatcher launches a host + a joiner and
   # drives both through the menus into a started game over native DirectPlay TCP/IP on
-  # localhost — entirely over the node relay (read each agent's live UI, send invoke/
-  # select commands, no files) — and confirms both reach the strategic map.
+  # localhost, entirely over the node relay (read each agent's live UI, send invoke/
+  # select commands, no files), and confirms both reach the strategic map.
   multiplayer-two-instance-strategic:
-    name: Multiplayer — two instances reach the strategic map
+    name: Multiplayer, two instances reach the strategic map
     needs: prep-game
     runs-on: windows-2025-vs2026
     env:
@@ -159,7 +159,7 @@ jobs:
           # The minimal game uses native DirectPlay TCP/IP for MP. A clean Windows
           # Server runner ships the DirectPlay legacy feature DISABLED, so D2's
           # protocol list collapses to Hotseat only (TLBOX_PROTOCOL total=1) and
-          # TCP/IP (index 2) is absent — the host falls through to DLG_HOTSEAT and MP
+          # TCP/IP (index 2) is absent, the host falls through to DLG_HOTSEAT and MP
           # never starts. Enabling it registers dplayx/dpwsockx + the DirectPlay
           # Service Providers (incl. "Internet TCP/IP Connection For DirectPlay"),
           # machine-wide, so both the host and joiner instances see TCP/IP.
@@ -178,7 +178,7 @@ jobs:
             Write-Host "DirectPlay service providers registered:"
             (Get-ChildItem $sp).PSChildName | ForEach-Object { Write-Host "  - $_" }
           } else {
-            Write-Host "::error::DirectPlay SP registry key absent after enable — TCP/IP will be missing"
+            Write-Host "::error::DirectPlay SP registry key absent after enable, TCP/IP will be missing"
           }
           Write-Host "dpwsockx (SysWOW64): $(Test-Path "$env:SystemRoot\SysWOW64\dpwsockx.dll")"
       - name: Restore game from cache
@@ -196,7 +196,7 @@ jobs:
           Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
           # DisciplesGL renders via OpenGL (Renderer=3) on Mesa llvmpipe (deployed next).
           # ColdCPU=0 (frame limiter OFF): the strategic-map render hung with the limiter
-          # on — a snapshot caught the UI thread parked in DisciplesGL's per-frame
+          # on, a snapshot caught the UI thread parked in DisciplesGL's per-frame
           # Sleep(v36) at C4dll_R+0xcb7a inside the map's display-list render loop
           # (sub_5642E1), never returning to the message pump. Try without the limiter.
           $ini = Join-Path $dir 'Disciple.ini'
@@ -295,5 +295,5 @@ jobs:
             ${{ env.DUMPDIR }}/*.png
           if-no-files-found: ignore
 
-  # Future tests go here as more jobs — each: download the DLL artifact, restore the
+  # Future tests go here as more jobs, each: download the DLL artifact, restore the
   # game cache, deploy, run a script.

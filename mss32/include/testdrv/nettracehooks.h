@@ -8,8 +8,8 @@
  * mod). This module is pure mechanism + logging: it owns NO gameplay policy.
  *
  * Two kinds of seam are exposed:
- *   - trace sinks (setRx/TxTraceCallback)  — observability, used by the relay bridge;
- *   - gating callbacks (setDispatch/TxCallback) — a single hook point where a
+ *   - trace sinks (setRx/TxTraceCallback) , observability, used by the relay bridge;
+ *   - gating callbacks (setDispatch/TxCallback), a single hook point where a
  *     consumer (e.g. a relay-driven test, or another module) may pass / drop /
  *     defer (RX) or pass / drop / redirect (TX) a packet. Null in a public build,
  *     so the hook then merely logs and passes.
@@ -78,7 +78,7 @@ int recvDispatchDepth();
 unsigned long mainThreadId();
 
 /** Install the RX recv-dispatch hook + the DirectPlay TX Send hook (Russobit-
- * pinned, idempotent — safe to call from more than one installer). Returns true
+ * pinned, idempotent, safe to call from more than one installer). Returns true
  * if the RX call-site patches applied. */
 bool install();
 

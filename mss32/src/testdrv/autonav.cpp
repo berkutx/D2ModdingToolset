@@ -1,13 +1,13 @@
 /*
  * Publishable test/logging system for the Disciples 2 modding toolset.
- * Auto-nav executor — see testdrv/autonav.h.
+ * Auto-nav executor. See testdrv/autonav.h.
  *
  * A thin in-process agent that invokes button functors / sets listbox selections on the UI
  * thread. It ticks from a Detour of sub_5629CA (the per-frame screen-loop helper), not the
  * message pump: the functor must run on the dialog-owning thread, and the GPU-less DisciplesGL
  * software-render path does not reliably service the pump. Two modes: SELFNAV runs a built-in
  * script (minimal single-instance tests); RELAY_BRIDGE executes the dispatcher's invoke/select
- * commands (the agent holds no test logic — the dispatcher owns that).
+ * commands (the agent holds no test logic, the dispatcher owns that).
  * Compile-gated by D2_TESTDRV.
  */
 
@@ -111,79 +111,108 @@ char g_adLastClickedDlg[48] = {};
 constexpr DWORD kAdSameCooldownMs = 1200;
 constexpr DWORD kAdQuietMs = 3000;
 
-bool invokeButton(const char* dlgName, const char* btnName)
+// A command carries a sequence id so the dispatcher's POST can wait for its outcome. kNoSeq marks
+// internal callers (self-nav, auto-dismiss) that have no POST waiting on a result.
+constexpr std::uint32_t kNoSeq = 0xFFFFFFFFu;
+
+// Report whether a command resolved its target. Sent BEFORE the action runs, so the POST returns
+// even when the click triggers a ~10s blocking send; the action's effect is observed via UI state.
+void reportFound(std::uint32_t seq, bool found)
+{
+    if (seq != kNoSeq)
+        bridge::send_command_result(seq, found);
+}
+
+bool invokeButton(const char* dlgName, const char* btnName, std::uint32_t seq = kNoSeq)
 {
     game::CDialogInterf* dlg = uistatereporter::findDialog(dlgName);
-    if (!dlg)
-        return false; // target dialog not bound (yet) — co-present dialogs resolve by name
-    bool invoked = false;
-    // SEH around resolve+invoke: a popup can close mid-tick, leaving a stale dialog ptr;
-    // a benign C++ throw can unwind through the menu-phase switch.
+    game::CBFunctorDispatch0* functor = nullptr;
+    // SEH around the resolve: a popup can close mid-tick, leaving a stale dialog ptr.
     __try {
-        game::CButtonInterf* btn = game::CDialogInterfApi::get().findButton(dlg, btnName);
+        game::CButtonInterf* btn = dlg ? game::CDialogInterfApi::get().findButton(dlg, btnName) : nullptr;
         if (btn && btn->buttonData) {
             game::CBFunctorDispatch0* f = btn->buttonData->onClickedFunctor.data;
-            if (f && f->vftable && f->vftable->runCallback) {
-                spdlog::info("[testdrv] nav invoke {}::{}", dlgName, btnName);
-                f->vftable->runCallback(f);
-                invoked = true;
-            }
+            if (f && f->vftable && f->vftable->runCallback)
+                functor = f;
         }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        functor = nullptr;
+    }
+    reportFound(seq, functor != nullptr);
+    if (!functor)
+        return false;
+    bool invoked = false;
+    __try {
+        spdlog::info("[testdrv] nav invoke {}::{}", dlgName, btnName);
+        functor->vftable->runCallback(functor);
+        invoked = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     return invoked;
 }
 
-bool setListSelection(const char* dlgName, const char* lbName, int index)
+bool setListSelection(const char* dlgName, const char* lbName, int index, std::uint32_t seq = kNoSeq)
 {
     game::CDialogInterf* dlg = uistatereporter::findDialog(dlgName);
-    if (!dlg)
+    game::CListBoxInterf* lb = nullptr;
+    __try {
+        lb = dlg ? game::CDialogInterfApi::get().findListBox(dlg, lbName) : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        lb = nullptr;
+    }
+    reportFound(seq, lb != nullptr);
+    if (!lb)
         return false;
     bool ok = false;
     __try {
-        game::CListBoxInterf* lb = game::CDialogInterfApi::get().findListBox(dlg, lbName);
-        if (lb) {
-            game::CListBoxInterfApi::get().setSelectedIndex(lb, index);
-            spdlog::info("[testdrv] nav select {}::{} = {:d} (total={:d})", dlgName, lbName, index,
-                         lb->listBoxData ? lb->listBoxData->elementsTotal : -1);
-            ok = true;
-        }
+        game::CListBoxInterfApi::get().setSelectedIndex(lb, index);
+        spdlog::info("[testdrv] nav select {}::{} = {:d} (total={:d})", dlgName, lbName, index,
+                     lb->listBoxData ? lb->listBoxData->elementsTotal : -1);
+        ok = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     return ok;
 }
 
-bool setSpinOption(const char* dlgName, const char* spinName, int option)
+bool setSpinOption(const char* dlgName, const char* spinName, int option, std::uint32_t seq = kNoSeq)
 {
     game::CDialogInterf* dlg = uistatereporter::findDialog(dlgName);
-    if (!dlg)
+    game::CSpinButtonInterf* spin = nullptr;
+    __try {
+        spin = dlg ? game::CDialogInterfApi::get().findSpinButton(dlg, spinName) : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        spin = nullptr;
+    }
+    reportFound(seq, spin != nullptr);
+    if (!spin)
         return false;
     bool ok = false;
     __try {
-        game::CSpinButtonInterf* spin = game::CDialogInterfApi::get().findSpinButton(dlg, spinName);
-        if (spin) {
-            game::CSpinButtonInterfApi::get().setSelectedOption(spin, option);
-            spdlog::info("[testdrv] nav spin {}::{} = {:d}", dlgName, spinName, option);
-            ok = true;
-        }
+        game::CSpinButtonInterfApi::get().setSelectedOption(spin, option);
+        spdlog::info("[testdrv] nav spin {}::{} = {:d}", dlgName, spinName, option);
+        ok = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     return ok;
 }
 
-bool setEditText(const char* dlgName, const char* editName, const char* text)
+bool setEditText(const char* dlgName, const char* editName, const char* text, std::uint32_t seq = kNoSeq)
 {
     game::CDialogInterf* dlg = uistatereporter::findDialog(dlgName);
-    if (!dlg)
+    game::CEditBoxInterf* eb = nullptr;
+    __try {
+        eb = dlg ? game::CDialogInterfApi::get().findEditBox(dlg, editName) : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        eb = nullptr;
+    }
+    reportFound(seq, eb != nullptr);
+    if (!eb)
         return false;
     bool ok = false;
     __try {
-        game::CEditBoxInterf* eb = game::CDialogInterfApi::get().findEditBox(dlg, editName);
-        if (eb) {
-            game::CEditBoxInterfApi::get().setString(eb, text);
-            spdlog::info("[testdrv] nav edit {}::{} = '{}'", dlgName, editName, text);
-            ok = true;
-        }
+        game::CEditBoxInterfApi::get().setString(eb, text);
+        spdlog::info("[testdrv] nav edit {}::{} = '{}'", dlgName, editName, text);
+        ok = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     return ok;
@@ -195,6 +224,7 @@ bool setEditText(const char* dlgName, const char* editName, const char* text)
 struct RemoteCmd
 {
     int type; // 0 = invoke button, 1 = listbox selection, 2 = spin option, 3 = edit-box text
+    std::uint32_t seq; // echoed in the CommandResult so the relay can match the waiting POST
     char dlg[48];
     char widget[48];
     int param;       // index (listbox / spin)
@@ -207,6 +237,8 @@ bool g_hasInFlight = false; // whether g_inFlight is valid
 
 void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size)
 {
+    if (op != 0x0300 && op != 0x0301 && op != 0x0302 && op != 0x0303)
+        return; // not a command we own
     size_t off = 0;
     auto readStr = [&](char* out, size_t outsz) -> bool {
         if (off + 2 > size)
@@ -222,6 +254,10 @@ void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size
         return true;
     };
     RemoteCmd cmd{};
+    if (off + 4 > size) // every command starts with a u32 seq
+        return;
+    cmd.seq = *reinterpret_cast<const std::uint32_t*>(p + off);
+    off += 4;
     if (op == 0x0300) { // InvokeButton: u16 dlgLen|dlg | u16 btnLen|btn
         if (!readStr(cmd.dlg, sizeof(cmd.dlg)) || !readStr(cmd.widget, sizeof(cmd.widget)))
             return;
@@ -234,13 +270,11 @@ void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size
             return;
         cmd.param = *reinterpret_cast<const int*>(p + off);
         cmd.type = (op == 0x0301) ? 1 : 2;
-    } else if (op == 0x0303) { // SetEditText: u16 dlg | u16 edit | u16 text
+    } else { // 0x0303 SetEditText: u16 dlg | u16 edit | u16 text
         if (!readStr(cmd.dlg, sizeof(cmd.dlg)) || !readStr(cmd.widget, sizeof(cmd.widget))
             || !readStr(cmd.value, sizeof(cmd.value)))
             return;
         cmd.type = 3;
-    } else {
-        return; // not a command we own
     }
     auto sameCmd = [&](const RemoteCmd& q) {
         return q.type == cmd.type && q.param == cmd.param
@@ -250,12 +284,18 @@ void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size
     std::lock_guard<std::mutex> lk(g_remoteMutex);
     // Coalesce against the queue AND the in-flight command: while the UI thread is blocked
     // ~10s inside a synchronous DPlay send the executing command is no longer in the queue,
-    // so without this a dispatcher re-fire would double-act (two JoinSession -> error).
-    if (g_hasInFlight && sameCmd(g_inFlight))
+    // so without this a dispatcher re-fire would double-act (two JoinSession -> error). A
+    // coalesced duplicate is acked as found so its POST returns at once instead of timing out;
+    // a real not-found command never blocks, so it would not be in-flight to coalesce against.
+    if (g_hasInFlight && sameCmd(g_inFlight)) {
+        bridge::send_command_result(cmd.seq, true);
         return;
+    }
     for (const auto& q : g_remoteCmds)
-        if (sameCmd(q))
+        if (sameCmd(q)) {
+            bridge::send_command_result(cmd.seq, true);
             return;
+        }
     g_remoteCmds.push_back(cmd);
 }
 
@@ -275,13 +315,13 @@ void drainRemoteCommands()
             g_hasInFlight = true;
         }
         if (cmd.type == 0)
-            invokeButton(cmd.dlg, cmd.widget);
+            invokeButton(cmd.dlg, cmd.widget, cmd.seq);
         else if (cmd.type == 1)
-            setListSelection(cmd.dlg, cmd.widget, cmd.param);
+            setListSelection(cmd.dlg, cmd.widget, cmd.param, cmd.seq);
         else if (cmd.type == 2)
-            setSpinOption(cmd.dlg, cmd.widget, cmd.param);
+            setSpinOption(cmd.dlg, cmd.widget, cmd.param, cmd.seq);
         else
-            setEditText(cmd.dlg, cmd.widget, cmd.value);
+            setEditText(cmd.dlg, cmd.widget, cmd.value, cmd.seq);
     }
 }
 
@@ -318,7 +358,7 @@ void resetAutoDismiss()
 }
 
 // Dismiss known first-turn popups every tick when D2TESTDRV_AUTODISMISS is set. The two-instance
-// MP dispatcher does NOT set it — it paces dismissal itself, since clearing first-turn popups
+// MP dispatcher does NOT set it, it paces dismissal itself, since clearing first-turn popups
 // back-to-back hangs the begin-turn reconciliation. Kept for single-instance tests.
 void dismissPopupsTick()
 {
@@ -381,7 +421,7 @@ void navStep()
     const DWORD timeout = (s.action == NavAction::SetSelection) ? 4000 : kStepTimeoutMs;
     if (s.action != NavAction::Delay && s.action != NavAction::AutoDismiss
         && (GetTickCount() - g_stepStart) >= timeout) {
-        spdlog::warn("[testdrv] nav step {:d} ({}::{}) timed out — skipping", g_navIdx, s.dlg, s.widget);
+        spdlog::warn("[testdrv] nav step {:d} ({}::{}) timed out, skipping", g_navIdx, s.dlg, s.widget);
         ++g_navIdx;
         g_stepStart = GetTickCount();
     }

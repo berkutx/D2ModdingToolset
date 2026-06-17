@@ -1,6 +1,6 @@
 /*
  * Publishable test/logging system for the Disciples 2 modding toolset.
- * Window-caption role tag — see testdrv/windowtag.h.
+ * Window-caption role tag. See testdrv/windowtag.h.
  *
  * Compile-gated by D2_TESTDRV: without the macro the whole file compiles to
  * nothing and the build is byte-identical to vanilla.
@@ -53,7 +53,7 @@ const char* roleTag()
     return nullptr;
 }
 
-// Re-applies "<base>  [ROLE]" every ~2s — the engine rewrites its own caption, so
+// Re-applies "<base>  [ROLE]" every ~2s, the engine rewrites its own caption, so
 // a one-shot SetWindowText would be lost. Snapshots the base title once (skipping
 // an already-tagged title so a relaunch doesn't double-tag).
 DWORD WINAPI tagThread(LPVOID)

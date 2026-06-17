@@ -9,7 +9,7 @@
   there, then exercises every command type: Set-ListSelection (the template list), Set-EditText
   (the player name), Set-SpinOption (the size/goal spinners) and Invoke-Button (Generate).
 
-  Verification is relay-only — the generator opened, every Step-ToDialog transition required a
+  Verification is relay-only, the generator opened, every Step-ToDialog transition required a
   real click, the expected widgets are present, the form commands left the client alive on the
   dialog, and Generate was clicked. The generated map itself is NOT asserted (it depends on the
   game's own Lua templates, out of scope for a harness test).
@@ -43,7 +43,8 @@ try {
 
     # Multiplayer setup -> the random-scenario generator.
     if (-not (Step-ToDialog host DLG_MAIN_MENU BTN_MULTI DLG_PROTOCOL)) { throw "no DLG_PROTOCOL" }
-    Set-ListSelection host DLG_PROTOCOL TLBOX_PROTOCOL 2; Start-Sleep 1   # 2 = TCP/IP
+    if (-not (Set-ListSelection host DLG_PROTOCOL TLBOX_PROTOCOL 2)) { throw "TLBOX_PROTOCOL not set" }   # 2 = TCP/IP
+    Start-Sleep 1
     if (-not (Step-ToDialog host DLG_PROTOCOL BTN_CONTINUE DLG_LOAD_NEW_MULTI)) { throw "no DLG_LOAD_NEW_MULTI" }
     # BTN_HOST opens DLG_HOST (with DLG_CHOOSE_SKIRMISH co-present); BTN_RANDOM_MAP lives there.
     if (-not (Step-ToDialog host DLG_LOAD_NEW_MULTI BTN_HOST DLG_HOST)) { throw "no DLG_HOST" }
@@ -57,17 +58,20 @@ try {
     }
     Write-Host "[gen] generator open ($($names.Count) widgets)" -ForegroundColor Green
 
-    # Drive the form. The generator is a custom menu that ticks slower than the native menus, so
-    # give each command a settle (~3s) instead of firing back-to-back.
-    Set-ListSelection host $D TLBOX_TEMPLATES $Template; Start-Sleep 3
-    Set-EditText      host $D EDIT_NAME "AutoTest";      Start-Sleep 3   # BTN_GENERATE needs a name
-    Set-SpinOption    host $D SPIN_SIZE 1;               Start-Sleep 3
-    Set-SpinOption    host $D SPIN_GOAL 0;               Start-Sleep 3
+    # Drive the form. Each command returns whether it found its widget, so a wrong name or a closed
+    # dialog is caught here. The generator is a custom menu that ticks slower than the native menus,
+    # so give each command a settle (~3s) instead of firing back-to-back.
+    if (-not (Set-ListSelection host $D TLBOX_TEMPLATES $Template)) { throw "TLBOX_TEMPLATES not set" }
+    Start-Sleep 3
+    if (-not (Set-EditText host $D EDIT_NAME "AutoTest")) { throw "EDIT_NAME not set" }   # BTN_GENERATE needs a name
+    Start-Sleep 3
+    if (-not (Set-SpinOption host $D SPIN_SIZE 1)) { throw "SPIN_SIZE not set" }
+    Start-Sleep 3
+    if (-not (Set-SpinOption host $D SPIN_GOAL 0)) { throw "SPIN_GOAL not set" }
+    Start-Sleep 3
 
-    # The form commands have no relay-visible value, but a crash WOULD: confirm the client is still
-    # alive on the generator dialog after driving the whole form.
     if ((Get-Dialog host) -ne $D) { throw "client left '$D' while driving the form (crash?)" }
-    Invoke-Button host $D BTN_GENERATE
+    if (-not (Invoke-Button host $D BTN_GENERATE)) { throw "BTN_GENERATE not found" }
     Write-Host "[gen] form driven (template=$Template, name set, 2 spins) + BTN_GENERATE clicked" -ForegroundColor Green
     $ok = $true
 } catch {

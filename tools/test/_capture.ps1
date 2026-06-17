@@ -3,7 +3,7 @@
 # throws "handle is invalid" from a non-interactive/headless session; PrintWindow renders through the
 # window's own DC and PW_RENDERFULLCONTENT (2) grabs DWM-composited GL/ddraw content. The DisciplesGL
 # wrapper is a menu-bar frame window with an inner GL surface, and which HWND the GL content composites
-# into varies — so we grab EVERY visible window of the process and keep the least-black one. Dot-source.
+# into varies, so we grab EVERY visible window of the process and keep the least-black one. Dot-source.
 
 if (-not ([System.Management.Automation.PSTypeName]'D2.Cap').Type) {
     Add-Type -Namespace D2 -Name Cap -MemberDefinition @'

@@ -1,62 +1,43 @@
 # Disciples 2 test harness
 
-Drive the game from a script: launch one or two clients, read the live UI, click buttons, fill
-forms, and assert — all over a local relay, no screenshots and no log scraping. A test is a
-PowerShell file in this folder.
+A UI test harness for Disciples 2. A PowerShell test script launches one or two game instances,
+reads the state of their interface, and sends commands to it (button clicks, list selections, spin
+and text input) through a local relay process. Tests assert against interface state, not against
+screenshots or log output.
 
-> English first; **Русская версия ниже** (`## RU`).
+English first; the Russian version follows under `## RU`.
 
-## The worked example — read this first
+## Architecture
 
-[`scenario-generation.ps1`](scenario-generation.ps1) drives the random-scenario generator's form.
-This is the whole shape of a test:
+The harness has three layers.
 
-```powershell
-. "$PSScriptRoot\_relay.ps1"
-$GameDir = Resolve-GameDir $GameDir       # from -GameDir, else test.config.psd1
-$relay   = Start-TestRelay                # node relay.js
-$client  = Start-GameClient -GameDir $GameDir -Role host
+| Layer | Responsibility | Location |
+|---|---|---|
+| Game client | The `mss32.dll` DebugTest build, loaded by `Discipl2.exe`. Its reporter (`uistatereporter`) tracks the current dialog and, every frame, enumerates all of its controls into a JSON snapshot. Its executor (`autonav`) runs each incoming command on the game's UI thread. It contains no test logic. | `mss32/src/testdrv/` |
+| Relay | A dependency-free Node.js server. It keeps the latest snapshot of each client, keyed by role, and forwards the dispatcher's commands to the client. It contains no test logic. | `tools/relay/relay.js` |
+| Dispatcher | The PowerShell test script. It launches the clients, reads their interface state, sends commands, checks the result, and coordinates the two clients when a test needs both. | `tools/test/*.ps1` |
 
-Wait-Dialog host DLG_MAIN_MENU 90                                   # wait for a dialog
-Step-ToDialog host DLG_MAIN_MENU BTN_MULTI DLG_PROTOCOL            # click until the next dialog
-Set-ListSelection host DLG_PROTOCOL TLBOX_PROTOCOL 2               # pick TCP/IP
-Step-ToDialog host DLG_PROTOCOL BTN_CONTINUE DLG_LOAD_NEW_MULTI
-# ... on to the generator (DLG_RANDOM_SCENARIO_MULTI) ...
+The relay exists because the dispatcher and the game run in separate processes. The dispatcher
+cannot read the game's in-memory interface or call into it directly. The game client reports its
+interface to the relay and executes commands the relay delivers; the relay is the shared point both
+the dispatcher and every client connect to. It also lets one dispatcher drive two clients (a host
+and a joiner) at once, each addressed by its role.
 
-$names = (Get-GameUi host).widgets.name                            # read every widget on the dialog
-Set-ListSelection host $D TLBOX_TEMPLATES 3                        # a specific template
-Set-EditText      host $D EDIT_NAME "AutoTest"                     # the player name
-Set-SpinOption    host $D SPIN_SIZE 1                              # a spinner
-Invoke-Button     host $D BTN_GENERATE
-```
-
-Verification is relay-only: the generator opened, each `Step-ToDialog` required a real click, the
-expected widgets are present (`Get-GameUi`), and the client stayed alive on the dialog.
-
-## How it works — three layers
+Data flow:
 
 ```
-   DISPATCHER  (your .ps1)            RELAY  (node)              GAME CLIENT  (mss32 DebugTest DLL)
-   the brain                          dumb mirror + relay        thin: no test logic
-   ───────────────────────           ─────────────────          ──────────────────────────────────
-   Get-Dialog / Get-GameUi  ─GET /api/ui──▶  ┌─────────┐ ◀─UiSnapshot (JSON)──  uistatereporter
-                                             │  state  │                        enumerates the current
-   Invoke-Button            ─POST──────────▶ │   per   │ ─InvokeButton (opcode)▶ dialog's widgets every
-   Set-ListSelection         /api/ui/invoke  │  role   │                         frame; runs the click on
-   Set-SpinOption / -EditText  select/...    └─────────┘                         the game's UI thread
+dispatcher  ->  relay  ->  game client      commands  (POST /api/ui/invoke, /select, /spin, /edit)
+dispatcher  <-  relay  <-  game client      state     (GET  /api/ui)
 ```
 
-- **Game client** — the `mss32.dll` **DebugTest** build, loaded by `Discipl2.exe`. Its
-  `uistatereporter` ([../../mss32/src/testdrv/uistatereporter.cpp](../../mss32/src/testdrv/uistatereporter.cpp))
-  hooks the dialog button-bind, tracks the current dialog, and each frame enumerates **all** of its
-  controls into a JSON snapshot. The `autonav` executor runs invoke/select/spin/edit on the UI
-  thread. No test logic; gated by `D2TESTDRV_*` env vars. (`mss32/src/testdrv/`)
-- **Relay** — a dependency-free Node server ([../relay/relay.js](../relay/relay.js)). It mirrors each
-  client's latest snapshot (keyed by role) and forwards the dispatcher's commands. No test logic.
-- **Dispatcher** — your test (PowerShell, this folder). The brain: it reads each client's UI, drives
-  it, verifies, and coordinates two clients — over the relay, no files.
+The dispatcher reads `GET /api/ui` to get the snapshot the client last sent (over the `UiSnapshot`
+bridge opcode), and posts to `/api/ui/*` to forward a command to the client (over the matching
+command opcode). The client runs the command on its UI thread and sends an updated snapshot on the
+next frame.
 
-The snapshot the reporter ships and the relay serves at `GET /api/ui` is:
+## The UI snapshot
+
+`GET /api/ui?role=<role>` returns the current dialog and every control on it:
 
 ```json
 { "role": "host", "dialog": "DLG_PROTOCOL", "widgets": [
@@ -65,359 +46,442 @@ The snapshot the reporter ships and the relay serves at `GET /api/ui` is:
   { "name": "EDIT_NAME",      "type": "edit",    "state": { "text": "AutoTest" } } ] }
 ```
 
-`type` is `button` / `listbox` / `spin` / `edit` / `text` / `picture` / `toggle` / `radio`. `state`
-carries `enabled` (button), `selected` + `total` (listbox), `index` + `text` (spin), or `text`
-(edit/text). A message box is an ordinary dialog (`DLG_MESSAGE_BOX`) — its body is the `text` of a
-text widget, so it shows up in the snapshot like anything else.
+| `type` | Control | `state` fields |
+|---|---|---|
+| `button` | push button | `enabled` (bool) |
+| `listbox` | list | `selected`, `total` (int) |
+| `spin` | spin button | `index` (int), `text` (current option) |
+| `edit` | text input | `text` |
+| `text` | static text | `text` |
+| `picture`, `toggle`, `radio`, `scrollbar` | other controls | none |
+
+A message box is an ordinary dialog (`DLG_MESSAGE_BOX`); its body is the `text` of a text widget, so
+it appears in the snapshot like any other dialog.
+
+## Enabling the harness
+
+The harness is compiled into `mss32.dll` only in the **DebugTest** configuration (the `D2_TESTDRV`
+define). The Debug and Release builds are byte-identical to the unmodified DLL.
+
+Within a DebugTest build, each feature is switched on at runtime by a `D2TESTDRV_*` environment
+variable. `Start-GameClient` sets these on the launched game process: `D2TESTDRV_UI_REPORTER` (the
+snapshot), `D2TESTDRV_RELAY_BRIDGE` (the command bridge), `D2TESTDRV_SKIP_INTRO` and
+`D2TESTDRV_BLACKSCREEN_FIX` (headless boot), and `D2TESTDRV_ROLE` (the relay key). To run a feature
+by hand, set the same variables before launching `Discipl2.exe`.
 
 ## Setup
 
-1. **Config.** Copy [`test.config.sample.psd1`](test.config.sample.psd1) to `test.config.psd1`
-   (gitignored) and set `GameDir` to your Disciples 2 install. Scripts read it when you don't pass
-   `-GameDir`; if the path is wrong they say exactly what to fix.
-2. **DLL.** Build the **DebugTest** `mss32.dll` and deploy it over your `GameDir` (the folder must
-   have `Discipl2.exe` and the renamed `Mss23.dll`).
-3. **Node.js** on `PATH` (the dispatcher starts `relay.js`).
+1. Configuration. Copy `test.config.sample.psd1` to `test.config.psd1` (which is gitignored) and set
+   `GameDir` to the Disciples 2 installation. The scripts read it whenever `-GameDir` is not given on
+   the command line, and report the path to correct if it is wrong.
+2. DLL. Build the DebugTest `mss32.dll` and place it in `GameDir`, alongside `Discipl2.exe` and the
+   renamed `Mss23.dll`.
+3. Node.js on `PATH`. The dispatcher starts `relay.js`.
 
-Then run a test:
+## Running a test
 
 ```powershell
-.\scenario-generation.ps1            # single instance
-.\multiplayer-two-instance.ps1 -Kill # host + joiner reach the strategic map
+.\scenario-generation.ps1             # single instance
+.\multiplayer-two-instance.ps1 -Kill  # host and joiner reach the strategic map
 ```
 
-## The commands
+## Example: scenario-generation.ps1
 
-From [`_relay.ps1`](_relay.ps1) — dot-source it. `<role>` is `host` / `join` / etc. (matches the
-client's `D2TESTDRV_ROLE`).
+[`scenario-generation.ps1`](scenario-generation.ps1) drives the random-scenario generator's form
+with a single client. It navigates the multiplayer menu to the generator
+(`DLG_RANDOM_SCENARIO_MULTI`), reads the snapshot to confirm the form is present, and exercises every
+command type:
 
-| Command | Does | Endpoint |
+```powershell
+. "$PSScriptRoot\_relay.ps1"
+$GameDir = Resolve-GameDir $GameDir       # from -GameDir, otherwise test.config.psd1
+$relay   = Start-TestRelay
+$client  = Start-GameClient -GameDir $GameDir -Role host
+
+Wait-Dialog   host DLG_MAIN_MENU 90
+Step-ToDialog host DLG_MAIN_MENU BTN_MULTI DLG_PROTOCOL
+Set-ListSelection host DLG_PROTOCOL TLBOX_PROTOCOL 2   # TCP/IP
+# ... on to DLG_RANDOM_SCENARIO_MULTI ...
+
+$names = (Get-GameUi host).widgets.name
+Set-ListSelection host $D TLBOX_TEMPLATES 3
+Set-EditText      host $D EDIT_NAME "AutoTest"
+Set-SpinOption    host $D SPIN_SIZE 1
+Invoke-Button     host $D BTN_GENERATE
+```
+
+The test passes when the generator dialog opens, each navigation step produces the expected dialog,
+the expected widgets are present, and the client is still on the generator dialog after the form is
+driven.
+
+## Commands
+
+From [`_relay.ps1`](_relay.ps1); dot-source it. `<role>` is `host`, `join`, and so on, and matches
+the client's `D2TESTDRV_ROLE`.
+
+| Command | Action | Endpoint |
 |---|---|---|
-| `Resolve-GameDir [$GameDir]` | the game folder, from `-GameDir` or the config (validated) | — |
-| `Start-TestRelay` | start `relay.js`, return its process | — |
-| `Start-GameClient -GameDir <d> -Role <r>` | launch a DebugTest client | — |
+| `Resolve-GameDir [$GameDir]` | the game folder, from `-GameDir` or the config, validated | none |
+| `Start-TestRelay` | start `relay.js`, return its process | none |
+| `Start-GameClient -GameDir <d> -Role <r>` | launch a DebugTest client | none |
 | `Get-Dialog <role>` | the current dialog name | `GET /api/state` |
-| `Get-GameUi <role>` | `{role, dialog, widgets[]}` — every widget + state | `GET /api/ui` |
-| `Get-RoleState <role>` | one role's `{dialog, widgets, connected, …}` | `GET /api/state` |
-| `Wait-Dialog <role> <dlg> [sec]` | wait until the client is on `<dlg>` | — |
-| `Invoke-Button <role> <dlg> <btn>` | click a button (run its functor) | `POST /api/ui/invoke` |
-| `Set-ListSelection <role> <dlg> <listbox> <i>` | set a listbox selection | `POST /api/ui/select` |
+| `Get-GameUi <role>` | `{ role, dialog, widgets }`, every widget with its state | `GET /api/ui` |
+| `Get-RoleState <role>` | one role's `{ dialog, widgets, connected, ... }` and latched flags | `GET /api/state` |
+| `Wait-Dialog <role> <dlg> [sec]` | wait until the client is on `<dlg>` | none |
+| `Invoke-Button <role> <dlg> <btn>` | click a button | `POST /api/ui/invoke` |
+| `Set-ListSelection <role> <dlg> <listbox> <i>` | set a list selection | `POST /api/ui/select` |
 | `Set-SpinOption <role> <dlg> <spin> <i>` | set a spin-button option | `POST /api/ui/spin` |
 | `Set-EditText <role> <dlg> <edit> <text>` | set an edit-box's text | `POST /api/ui/edit` |
-| `Step-ToDialog <role> <dlg> <btn> <toDlg> [sec]` | click `<btn>` until the client reaches `<toDlg>` (re-fires) | — |
+| `Step-ToDialog <role> <dlg> <btn> <toDlg> [sec]` | click `<btn>` until the client reaches `<toDlg>` | none |
 
-The client resolves a widget **by dialog name**, so a click on a co-present (non-current) or
-just-closed dialog is safe.
-
-For interactive poking, dot-source [`../relay/drive-game-relay.ps1`](../relay/drive-game-relay.ps1):
-the same commands plus `Get-GameStatus` / `Get-GameLog` / `Get-GameChat` / `Get-GameEvents`.
+For interactive use, dot-source [`../relay/drive-game-relay.ps1`](../relay/drive-game-relay.ps1): it
+provides the same commands plus the read-only inspectors `Get-GameStatus`, `Get-GameLog`,
+`Get-GameChat`, and `Get-GameEvents`.
 
 ## Finding dialog and widget names
 
-Launch one client (`UI_REPORTER` + `RELAY_BRIDGE`, the `Start-GameClient` default), then read the
-live UI as you navigate — every control is in the snapshot, with its name, type and state:
+Launch one client and read the snapshot with `Get-GameUi` as you navigate. It lists every control of
+the current dialog with its name, type, and state, including list boxes, spin buttons, and edit boxes:
 
 ```powershell
 $relay = Start-TestRelay; $c = Start-GameClient -GameDir (Resolve-GameDir) -Role host
-Get-GameUi host | % widgets | Format-Table name, type, @{n='state';e={$_.state | ConvertTo-Json -Compress}}
+Get-GameUi host | ForEach-Object widgets | Format-Table name, type
 Invoke-Button host DLG_MAIN_MENU BTN_MULTI
-Get-Dialog host      # -> DLG_PROTOCOL, then read its widgets again
+Get-Dialog host    # read the next dialog, then its widgets
 ```
 
-No need to grep the game's `.dlg` files — list boxes, spin buttons and edit boxes are all in the
-snapshot, unlike the old buttons-only view.
+## Addressing widgets by name
 
-## Verifying — over the relay, never logs or files
+Commands address a widget by its dialog name, not by the topmost dialog. The game keeps several
+dialogs open at once (for example `DLG_CHOOSE_SKIRMISH` inside `DLG_HOST`), so the button a test wants
+may belong to a dialog that is not on top. The client resolves the name across all open dialogs.
 
-- **Reaching a dialog proves the clicks ran.** Assert with `Get-Dialog` / `Wait-Dialog`; a
-  successful `Step-ToDialog` already means the client executed each click.
-- **Read widget state with `Get-GameUi`** — assert a button is enabled, a listbox landed on the
-  right index, a spinner shows the right option, an edit holds the right text.
-- **Flickering dialogs**: a poll can miss a dialog that only flashes by. `relay.js` latches a sticky
-  per-role flag on first sight (e.g. `sawBeginTurn` flips `true` on the first `DLG_BEGIN_TURN`); read
-  `(Get-RoleState <role>).sawBeginTurn`. Add a latch for any dialog you must not miss.
-- **A close is reported.** The reporter polls the engine's real topmost interface each frame, so when
-  a modal closes and reveals the dialog underneath, the snapshot switches to it on its own — no stale
-  value to work around. (Co-present `DLG_ISO_PAL` + `DLG_STRATEGIC` share a screen, so either of that
-  pair may be reported; both resolve by name regardless.)
-- Logs are for humans. Don't scrape them for state or ordering.
+Each command reports whether it resolved its target. `Invoke-Button`, `Set-ListSelection`,
+`Set-SpinOption`, and `Set-EditText` return `$true` when the dialog and widget were found and the
+action ran, and `$false` otherwise (a wrong name, or the dialog is not open). The relay holds the
+request open until the client answers, so a command to an absent target is reported, not silently
+dropped. A test therefore waits for a dialog and then acts on it: `Step-ToDialog` retries the click
+while the source dialog is not yet present and stops once the target dialog appears or the timeout
+elapses.
 
-### First-turn popups
+## Driving through a sequence of dialogs
 
-When a turn begins, popups stack for **both** players — scenario briefing, the new-day income
-`DLG_BEGIN_TURN`, the "name your lord" `DLG_GETINFO_BOX`, message boxes — and must be clicked
-through. Map each to the button that closes it, pace the clicks (~2 s), and log each:
+Several game flows present a sequence of modal dialogs, each closed by a specific button before the
+flow continues. The first turn is the main example: the scenario briefing, the new-day income dialog,
+the lord-naming dialog, and message boxes appear in turn for each player.
+
+Detect the current dialog with `Get-Dialog` (or `Get-RoleState` for the full state). Map each expected
+dialog to the button that closes it, and click that button whenever the dialog is current:
 
 ```powershell
-$Dismiss = @{ 'DLG_SCENARIO_BRIEFING'='BTN_CONTINUE'; 'DLG_BEGIN_TURN'='BTN_OK'
-              'DLG_GETINFO_BOX'='BTN_CLOSE'; 'DLG_MESSAGE_BOX'='BTN_OK' }
-$d = Get-Dialog $role
-if ($Dismiss.ContainsKey($d)) { Invoke-Button $role $d $Dismiss[$d] }
+$Dismiss = @{
+    'DLG_SCENARIO_BRIEFING' = 'BTN_CONTINUE'
+    'DLG_BEGIN_TURN'        = 'BTN_OK'
+    'DLG_GETINFO_BOX'       = 'BTN_CLOSE'
+    'DLG_MESSAGE_BOX'       = 'BTN_OK'
+}
+while (-not (Get-RoleState $role).reachedStrategic) {
+    $d = Get-Dialog $role
+    if ($Dismiss.ContainsKey($d)) { Invoke-Button $role $d $Dismiss[$d] }
+    Start-Sleep -Milliseconds 2000
+}
 ```
 
-`DLG_GETINFO_BOX` closes on a single `BTN_CLOSE` — it already holds the lord's default name, so do
-**not** `Set-EditText` it (that corrupts the accept). The reporter shows the map underneath as soon
-as it closes, so the next action just works. See `DriveToStrategic` in
-[`multiplayer-two-instance.ps1`](multiplayer-two-instance.ps1).
+Three points govern this loop.
+
+1. Pace the clicks. Custom game menus advance one frame at a time, far more slowly than the native
+   menus. Clicking the same dialog again before it has processed the previous click queues a duplicate
+   command. A pause of about two seconds is enough; track the last dialog clicked so the same one is
+   not clicked twice in a row.
+2. A dialog that only flashes by can be missed by polling. The relay records a sticky per-role flag
+   the first time it sees such a dialog: `sawBeginTurn` becomes true on the first `DLG_BEGIN_TURN` and
+   stays true, and `reachedStrategic` latches the same way on the map view. Read these flags through
+   `Get-RoleState` instead of trying to catch the dialog in a poll.
+3. Closing a dialog updates the snapshot on its own. The reporter polls the engine's real topmost
+   interface each frame, so when a modal closes and reveals the dialog beneath it, the snapshot reports
+   the revealed dialog with no further action from the script.
+
+The lord-naming dialog `DLG_GETINFO_BOX` is closed by a single `BTN_CLOSE`. It already holds the
+lord's default name, so do not call `Set-EditText` on it: setting the text resets the input and
+prevents the close from committing. `DriveToStrategic` in
+[`multiplayer-two-instance.ps1`](multiplayer-two-instance.ps1) is the complete implementation.
 
 ## Adding a test
 
-1. Write `tools/test/<name>.ps1`. Start from the [worked example](#the-worked-example--read-this-first):
-   `param([string]$GameDir, [switch]$Kill)`, dot-source `_relay.ps1`, `Resolve-GameDir`,
-   `Start-TestRelay`, `Start-GameClient`, drive, assert, and clean up the relay + clients in a
-   `finally` (an orphaned relay's pipe blocks the next run). `exit 1` on failure.
-2. A two-instance / coordinated test runs **entirely over the relay** (request → wait → response →
-   action). A minimal single-instance test can use the built-in self-nav instead (`-Flags …,SELFNAV`,
-   see [`walk-menu.ps1`](walk-menu.ps1)).
+Write `tools/test/<name>.ps1`. Take `param([string]$GameDir, [switch]$Kill)`, dot-source `_relay.ps1`,
+call `Resolve-GameDir`, `Start-TestRelay`, and `Start-GameClient`, drive the client, check the result,
+and stop the relay and clients in a `finally` block. An orphaned relay holds its named pipe and blocks
+the next run. Exit with code 1 on failure.
 
-## Adding it to CI
+A two-instance or otherwise coordinated test runs entirely through the relay: send a command, wait,
+read the resulting state, act. A minimal single-instance test may instead use the built-in self-nav
+(add `SELFNAV` to the client flags; see [`walk-menu.ps1`](walk-menu.ps1)).
 
-CI lives in [`../../.github/workflows`](../../.github/workflows). The reusable suite is
-**`tests.yml`**; two entrypoints call it on disjoint path filters:
+## Adding a CI job
 
-- **`mss32.yml`** (on `mss32/**`) builds Debug + Release + **DebugTest**, then runs `tests.yml`
-  against the DLL it just built.
-- **`tests-only.yml`** (on `tools/**`) skips the build and **reuses** the last DebugTest DLL — a
-  script-only change runs the tests in minutes, no recompile.
+CI lives in [`../../.github/workflows`](../../.github/workflows). The reusable suite is `tests.yml`.
+Two entrypoints call it on disjoint path filters: `mss32.yml` (on `mss32/**`) rebuilds the DLL and
+runs the suite against it; `tests-only.yml` (on `tools/**`) reuses the last built DLL without
+recompiling.
 
-`tests.yml` jobs: `prep-game` (caches the ~2 GB minimal game once per run), `headless-boot-smoke`
-(boot 1×), `headless-boot-reliability` (boot 5×), and `multiplayer-two-instance-strategic` (the
-two-client MP test). Each test job: download the `mss32-debugtest` artifact → restore the game cache
-→ deploy `mss32.dll` → run the `.ps1`.
+To add a test to CI, copy one of the test jobs in `tests.yml` (for example
+`multiplayer-two-instance-strategic`) and change its final step to run your script with
+`-GameDir "$env:GAME_DIR" -Kill`. Each test job downloads the `mss32-debugtest` artifact, restores the
+cached game, deploys `mss32.dll`, and runs the script. CI has no config file, so `-GameDir` is passed
+explicitly and `-Kill` makes the run clean up after itself.
 
-To add your test, copy one of those jobs and change the last step:
-
-```yaml
-  my-test:
-    name: My test
-    needs: prep-game
-    runs-on: windows-2025-vs2026
-    defaults: { run: { shell: pwsh } }
-    steps:
-      - uses: actions/checkout@v6
-        with: { submodules: false, fetch-depth: 1 }
-      - uses: actions/download-artifact@v8
-        with: { name: mss32-debugtest, path: dll, run-id: '${{ inputs.dll_run_id || github.run_id }}', github-token: '${{ github.token }}' }
-      - uses: actions/cache/restore@v5
-        with: { path: game.tar.gz, key: slasher-min-v1, enableCrossOsArchive: true, fail-on-cache-miss: true }
-      - name: Unpack game + deploy DLL
-        run: |
-          New-Item -ItemType Directory -Force -Path game | Out-Null
-          tar -xzf game.tar.gz -C game
-          $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
-          Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
-          "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Run my test
-        run: ./tools/test/my-test.ps1 -GameDir "$env:GAME_DIR" -Kill
-```
-
-Pass `-GameDir "$env:GAME_DIR"` (CI has no config file) and `-Kill` so the run cleans up.
-
-## The files
+## Files
 
 | File | Role |
 |---|---|
-| `_relay.ps1` | the toolkit: config, relay, clients, the commands above |
-| `test.config.sample.psd1` | per-machine config template (copy to `test.config.psd1`) |
+| `_relay.ps1` | the toolkit: config, relay, clients, and the commands above |
+| `test.config.sample.psd1` | per-machine config template; copy to `test.config.psd1` |
 | `scenario-generation.ps1` | single-instance form-driving example |
-| `multiplayer-two-instance.ps1` | two clients into a started MP game (host + joiner) |
-| `reliability_test.ps1` | boot N× to the main menu (the CI boot test) |
-| `walk-menu.ps1` | one self-nav client, leave it running to poke at |
-| `_show-window.ps1`, `_capture.ps1` | bring a kept window forward / grab a PNG (diagnostics only) |
-| `../relay/relay.js` | the node relay |
+| `multiplayer-two-instance.ps1` | two clients into a started multiplayer game (host and joiner) |
+| `reliability_test.ps1` | boot N times to the main menu (the CI boot test) |
+| `walk-menu.ps1` | one self-nav client, left running for manual inspection |
+| `_show-window.ps1`, `_capture.ps1` | bring a window forward, capture a PNG (diagnostics only) |
+| `../relay/relay.js` | the relay |
 | `../relay/drive-game-relay.ps1` | interactive console over the relay |
 
 ---
 
 ## RU
 
-Управляй игрой из скрипта: запусти один-два клиента, читай живой UI, жми кнопки, заполняй формы и
-проверяй — всё через локальный рилей, без скриншотов и без скрёбки логов. Тест — это PowerShell-файл
-в этой папке.
+Каркас для тестирования интерфейса Disciples 2. Тестовый скрипт на PowerShell запускает один или два
+экземпляра игры, читает состояние их интерфейса и подаёт ему команды (нажатие кнопок, выбор в списках,
+переключение спиннеров, ввод текста) через локальный процесс-посредник (рилей). Проверки опираются на
+состояние интерфейса, а не на скриншоты или содержимое логов.
 
-### Рабочий пример — читать первым
+## Архитектура
 
-[`scenario-generation.ps1`](scenario-generation.ps1) рулит формой генератора случайных карт. Это вся
-форма теста:
+Каркас состоит из трёх слоёв.
 
-```powershell
-. "$PSScriptRoot\_relay.ps1"
-$GameDir = Resolve-GameDir $GameDir       # из -GameDir, иначе из test.config.psd1
-$relay   = Start-TestRelay                # node relay.js
-$client  = Start-GameClient -GameDir $GameDir -Role host
+| Слой | Назначение | Расположение |
+|---|---|---|
+| Клиент игры | Сборка `mss32.dll` в конфигурации DebugTest, загружаемая `Discipl2.exe`. Репортёр (`uistatereporter`) отслеживает текущий диалог и каждый кадр перечисляет все его контролы в JSON-снапшот. Исполнитель (`autonav`) выполняет каждую входящую команду на UI-потоке игры. Тестовой логики не содержит. | `mss32/src/testdrv/` |
+| Рилей | Node.js-сервер без зависимостей. Хранит последний снапшот каждого клиента по ключу-роли и пересылает команды диспетчера клиенту. Тестовой логики не содержит. | `tools/relay/relay.js` |
+| Диспетчер | Тестовый скрипт на PowerShell. Запускает клиентов, читает состояние их интерфейса, подаёт команды, проверяет результат и координирует двух клиентов, когда тесту нужны оба. | `tools/test/*.ps1` |
 
-Wait-Dialog host DLG_MAIN_MENU 90                                   # ждать диалог
-Step-ToDialog host DLG_MAIN_MENU BTN_MULTI DLG_PROTOCOL            # жать, пока не следующий диалог
-Set-ListSelection host DLG_PROTOCOL TLBOX_PROTOCOL 2               # выбрать TCP/IP
-$names = (Get-GameUi host).widgets.name                            # прочитать все виджеты диалога
-Set-EditText host $D EDIT_NAME "AutoTest"
-Invoke-Button host $D BTN_GENERATE
-```
+Рилей нужен потому, что диспетчер и игра работают в разных процессах. Диспетчер не может читать
+интерфейс игры из её памяти или вызывать её напрямую. Клиент игры сообщает свой интерфейс рилею и
+выполняет команды, которые рилей доставляет; рилей служит общей точкой, к которой подключаются и диспетчер, и
+каждый клиент. Он же позволяет одному диспетчеру вести два клиента сразу (хост и присоединяющегося),
+обращаясь к каждому по его роли.
 
-Проверка только через рилей: генератор открылся, каждый `Step-ToDialog` потребовал реального клика,
-нужные виджеты на месте (`Get-GameUi`), клиент жив на диалоге.
-
-### Как устроено — три слоя
+Поток данных:
 
 ```
-   ДИСПЕТЧЕР  (твой .ps1)             РИЛЕЙ  (node)              КЛИЕНТ ИГРЫ  (mss32 DebugTest DLL)
-   мозг                              тупое зеркало + ретранслятор  тонкий: без тест-логики
-   ───────────────────────          ─────────────────          ──────────────────────────────────
-   Get-Dialog / Get-GameUi  ─GET /api/ui──▶  ┌─────────┐ ◀─UiSnapshot (JSON)──  uistatereporter
-                                             │ состояние│                        каждый кадр перечисляет
-   Invoke-Button            ─POST──────────▶ │  по роли │ ─InvokeButton (опкод)▶ все виджеты текущего
-   Set-ListSelection         /api/ui/invoke  └─────────┘                         диалога; клик — на
-   Set-SpinOption / -EditText  select/...                                        UI-потоке игры
+диспетчер  ->  рилей  ->  клиент игры      команды    (POST /api/ui/invoke, /select, /spin, /edit)
+диспетчер  <-  рилей  <-  клиент игры      состояние  (GET  /api/ui)
 ```
 
-- **Клиент игры** — сборка `mss32.dll` **DebugTest**, которую грузит `Discipl2.exe`. Его
-  `uistatereporter` хукает бинд кнопок диалога, отслеживает текущий диалог и каждый кадр перечисляет
-  **все** его контролы в JSON-снапшот. Исполнитель `autonav` выполняет invoke/select/spin/edit на
-  UI-потоке. Тест-логики нет; гейтится `D2TESTDRV_*`. (`mss32/src/testdrv/`)
-- **Рилей** — Node-сервер без зависимостей ([../relay/relay.js](../relay/relay.js)). Зеркалит
-  последний снапшот каждого клиента (по роли) и пробрасывает команды. Тест-логики нет.
-- **Диспетчер** — твой тест (PowerShell, эта папка). Мозг: читает UI, рулит, проверяет, координирует
-  два клиента — через рилей, без файлов.
+Диспетчер читает `GET /api/ui`, получая снапшот, который клиент прислал последним (опкодом
+`UiSnapshot`), и шлёт `POST /api/ui/*`, чтобы передать команду клиенту (соответствующим командным
+опкодом). Клиент выполняет команду на UI-потоке и присылает обновлённый снапшот на следующем кадре.
 
-Снапшот, который отдаёт `GET /api/ui`:
+## Снапшот интерфейса
+
+`GET /api/ui?role=<role>` возвращает текущий диалог и все его контролы:
 
 ```json
 { "role": "host", "dialog": "DLG_PROTOCOL", "widgets": [
+  { "name": "BTN_CONTINUE",   "type": "button",  "state": { "enabled": true } },
   { "name": "TLBOX_PROTOCOL", "type": "listbox", "state": { "selected": 2, "total": 3 } },
   { "name": "EDIT_NAME",      "type": "edit",    "state": { "text": "AutoTest" } } ] }
 ```
 
-`type` — `button` / `listbox` / `spin` / `edit` / `text` / `picture` / `toggle` / `radio`. `state` —
-`enabled` (button), `selected`+`total` (listbox), `index`+`text` (spin), `text` (edit/text).
-Месседж-бокс — обычный диалог (`DLG_MESSAGE_BOX`), его текст — это `text` текстового виджета, так что
-он виден в снапшоте как всё остальное.
+| `type` | Контрол | Поля `state` |
+|---|---|---|
+| `button` | кнопка | `enabled` (bool) |
+| `listbox` | список | `selected`, `total` (int) |
+| `spin` | спин-кнопка | `index` (int), `text` (текущая опция) |
+| `edit` | поле ввода | `text` |
+| `text` | статический текст | `text` |
+| `picture`, `toggle`, `radio`, `scrollbar` | прочие контролы | нет |
 
-### Настройка
+Месседж-бокс является обычным диалогом (`DLG_MESSAGE_BOX`); его текст хранится в поле `text` текстового виджета,
+поэтому в снапшоте он виден так же, как любой другой диалог.
 
-1. **Конфиг.** Скопируй [`test.config.sample.psd1`](test.config.sample.psd1) в `test.config.psd1`
-   (в gitignore) и впиши `GameDir` — путь к установке Disciples 2. Скрипты читают его, когда не
-   передан `-GameDir`; при неверном пути скажут, что поправить.
-2. **DLL.** Собери **DebugTest** `mss32.dll` и положи её в `GameDir` (там должны быть `Discipl2.exe`
-   и переименованная `Mss23.dll`).
-3. **Node.js** в `PATH` (диспетчер запускает `relay.js`).
+## Включение каркаса
 
-Запуск:
+Каркас попадает в `mss32.dll` только в конфигурации **DebugTest** (дефайн `D2_TESTDRV`). Сборки Debug и
+Release побайтно совпадают с неизменённой DLL.
+
+Внутри сборки DebugTest каждая возможность включается во время выполнения переменной среды `D2TESTDRV_*`.
+`Start-GameClient` задаёт их запускаемому процессу игры: `D2TESTDRV_UI_REPORTER` (снапшот),
+`D2TESTDRV_RELAY_BRIDGE` (командный мост), `D2TESTDRV_SKIP_INTRO` и `D2TESTDRV_BLACKSCREEN_FIX`
+(headless-загрузка), `D2TESTDRV_ROLE` (ключ-роль у рилея). Чтобы запустить возможность вручную, задайте
+те же переменные перед запуском `Discipl2.exe`.
+
+## Настройка
+
+1. Конфигурация. Скопируйте `test.config.sample.psd1` в `test.config.psd1` (он в gitignore) и задайте
+   `GameDir` как путь к установке Disciples 2. Скрипты читают его, когда `-GameDir` не передан в командной
+   строке, и при неверном пути сообщают, что исправить.
+2. DLL. Соберите `mss32.dll` в конфигурации DebugTest и положите её в `GameDir`, рядом с `Discipl2.exe`
+   и переименованной `Mss23.dll`.
+3. Node.js в `PATH`. Диспетчер запускает `relay.js`.
+
+## Запуск теста
 
 ```powershell
-.\scenario-generation.ps1
-.\multiplayer-two-instance.ps1 -Kill
+.\scenario-generation.ps1             # один экземпляр
+.\multiplayer-two-instance.ps1 -Kill  # хост и присоединяющийся доходят до стратегической карты
 ```
 
-### Команды
+## Пример: scenario-generation.ps1
 
-Из [`_relay.ps1`](_relay.ps1) — подключи через `.`. `<role>` — `host` / `join` и т.п. (совпадает с
-`D2TESTDRV_ROLE` клиента).
+[`scenario-generation.ps1`](scenario-generation.ps1) ведёт форму генератора случайных карт одним
+клиентом. Он проходит мультиплеерное меню до генератора (`DLG_RANDOM_SCENARIO_MULTI`), читает снапшот,
+чтобы убедиться в наличии формы, и задействует каждый тип команды:
 
-| Команда | Что | Endpoint |
+```powershell
+. "$PSScriptRoot\_relay.ps1"
+$GameDir = Resolve-GameDir $GameDir       # из -GameDir, иначе из test.config.psd1
+$relay   = Start-TestRelay
+$client  = Start-GameClient -GameDir $GameDir -Role host
+
+Wait-Dialog   host DLG_MAIN_MENU 90
+Step-ToDialog host DLG_MAIN_MENU BTN_MULTI DLG_PROTOCOL
+Set-ListSelection host DLG_PROTOCOL TLBOX_PROTOCOL 2   # TCP/IP
+# ... далее до DLG_RANDOM_SCENARIO_MULTI ...
+
+$names = (Get-GameUi host).widgets.name
+Set-ListSelection host $D TLBOX_TEMPLATES 3
+Set-EditText      host $D EDIT_NAME "AutoTest"
+Set-SpinOption    host $D SPIN_SIZE 1
+Invoke-Button     host $D BTN_GENERATE
+```
+
+Тест проходит, когда диалог генератора открылся, каждый шаг навигации привёл к ожидаемому диалогу,
+нужные виджеты присутствуют, и клиент остаётся на диалоге генератора после прохода по форме.
+
+## Команды
+
+Из [`_relay.ps1`](_relay.ps1); подключите его через `.`. `<role>` это `host`, `join` и т. п., и
+совпадает с `D2TESTDRV_ROLE` клиента.
+
+| Команда | Действие | Endpoint |
 |---|---|---|
-| `Resolve-GameDir [$GameDir]` | папка игры, из `-GameDir` или конфига (с проверкой) | — |
-| `Start-TestRelay` | запустить `relay.js` | — |
-| `Start-GameClient -GameDir <d> -Role <r>` | запустить DebugTest-клиента | — |
+| `Resolve-GameDir [$GameDir]` | папка игры, из `-GameDir` или конфига, с проверкой | нет |
+| `Start-TestRelay` | запустить `relay.js`, вернуть процесс | нет |
+| `Start-GameClient -GameDir <d> -Role <r>` | запустить клиента DebugTest | нет |
 | `Get-Dialog <role>` | имя текущего диалога | `GET /api/state` |
-| `Get-GameUi <role>` | `{role, dialog, widgets[]}` — все виджеты + состояние | `GET /api/ui` |
-| `Get-RoleState <role>` | состояние роли `{dialog, widgets, connected, …}` | `GET /api/state` |
-| `Wait-Dialog <role> <dlg> [sec]` | ждать диалог | — |
+| `Get-GameUi <role>` | `{ role, dialog, widgets }`, все виджеты с их состоянием | `GET /api/ui` |
+| `Get-RoleState <role>` | состояние роли `{ dialog, widgets, connected, ... }` и липкие флаги | `GET /api/state` |
+| `Wait-Dialog <role> <dlg> [sec]` | ждать, пока клиент окажется на `<dlg>` | нет |
 | `Invoke-Button <role> <dlg> <btn>` | нажать кнопку | `POST /api/ui/invoke` |
-| `Set-ListSelection <role> <dlg> <listbox> <i>` | выбор в листбоксе | `POST /api/ui/select` |
-| `Set-SpinOption <role> <dlg> <spin> <i>` | опция спин-кнопки | `POST /api/ui/spin` |
-| `Set-EditText <role> <dlg> <edit> <text>` | текст поля ввода | `POST /api/ui/edit` |
-| `Step-ToDialog <role> <dlg> <btn> <toDlg> [sec]` | жать `<btn>`, пока не дойдёт до `<toDlg>` | — |
+| `Set-ListSelection <role> <dlg> <listbox> <i>` | выбрать элемент списка | `POST /api/ui/select` |
+| `Set-SpinOption <role> <dlg> <spin> <i>` | задать опцию спин-кнопки | `POST /api/ui/spin` |
+| `Set-EditText <role> <dlg> <edit> <text>` | задать текст поля ввода | `POST /api/ui/edit` |
+| `Step-ToDialog <role> <dlg> <btn> <toDlg> [sec]` | нажимать `<btn>`, пока клиент не дойдёт до `<toDlg>` | нет |
 
-Клиент резолвит виджет **по имени диалога**, поэтому клик по co-present/только что закрытому диалогу
-безопасен.
+Для интерактивной работы подключите [`../relay/drive-game-relay.ps1`](../relay/drive-game-relay.ps1):
+он даёт те же команды плюс инспекторы только для чтения `Get-GameStatus`, `Get-GameLog`,
+`Get-GameChat`, `Get-GameEvents`.
 
-Для ручного ковыряния — [`../relay/drive-game-relay.ps1`](../relay/drive-game-relay.ps1): те же
-команды плюс `Get-GameStatus` / `Get-GameLog` / `Get-GameChat` / `Get-GameEvents`.
+## Поиск имён диалогов и виджетов
 
-### Как узнать имена диалогов и виджетов
-
-Запусти один клиент (`UI_REPORTER` + `RELAY_BRIDGE` — дефолт `Start-GameClient`) и читай живой UI по
-ходу навигации — каждый контрол в снапшоте, с именем, типом и состоянием:
+Запустите один клиент и читайте снапшот через `Get-GameUi` по ходу навигации. Он перечисляет каждый
+контрол текущего диалога с именем, типом и состоянием, включая списки, спин-кнопки и поля ввода:
 
 ```powershell
 $relay = Start-TestRelay; $c = Start-GameClient -GameDir (Resolve-GameDir) -Role host
-Get-GameUi host | % widgets | Format-Table name, type
-Invoke-Button host DLG_MAIN_MENU BTN_MULTI; Get-Dialog host
+Get-GameUi host | ForEach-Object widgets | Format-Table name, type
+Invoke-Button host DLG_MAIN_MENU BTN_MULTI
+Get-Dialog host    # прочитать следующий диалог, затем его виджеты
 ```
 
-Grep `.dlg`-файлов больше не нужен — листбоксы, спины и поля ввода теперь все в снапшоте (в отличие
-от старого вида «только кнопки»).
+## Адресация виджетов по имени
 
-### Проверка — через рилей, не через логи/файлы
+Команда адресует виджет по имени диалога, а не по верхнему диалогу. Игра держит несколько диалогов
+открытыми одновременно (например, `DLG_CHOOSE_SKIRMISH` внутри `DLG_HOST`), поэтому нужная тесту кнопка
+может принадлежать диалогу, который не находится сверху. Клиент разрешает имя по всем открытым диалогам.
 
-- **Дойти до диалога = клики прошли.** Проверяй `Get-Dialog` / `Wait-Dialog`; успешный
-  `Step-ToDialog` уже значит, что клиент исполнил клики.
-- **Состояние виджетов через `Get-GameUi`** — что кнопка активна, листбокс на нужном индексе, спин
-  показывает нужную опцию, в поле нужный текст.
-- **Мелькающие диалоги**: опрос может пропустить вспыхнувший диалог. `relay.js` ставит липкий флаг на
-  роль при первом появлении (например, `sawBeginTurn` на первом `DLG_BEGIN_TURN`); читай
-  `(Get-RoleState <role>).sawBeginTurn`. Любой важный диалог защёлкивай так же.
-- **Закрытие репортится.** Репортер каждый кадр опрашивает реальный верхний интерфейс движка, так что
-  при закрытии модалки снапшот сам переключается на диалог под ней — устаревшего значения нет.
-  (Co-present `DLG_ISO_PAL` + `DLG_STRATEGIC` делят экран — может прийти любой; оба резолвятся по имени.)
-- Логи — для человека. Не скрёб их ради состояния/очерёдности.
+Каждая команда сообщает, разрешила ли она свою цель. `Invoke-Button`, `Set-ListSelection`,
+`Set-SpinOption` и `Set-EditText` возвращают `$true`, когда диалог и виджет найдены и действие
+выполнено, и `$false` иначе (неверное имя или диалог не открыт). Рилей держит запрос открытым, пока
+клиент не ответит, поэтому команда на отсутствующую цель сообщается, а не теряется молча. Поэтому тест
+ждёт диалог и затем действует на нём: `Step-ToDialog` повторяет нажатие, пока исходный диалог ещё не
+появился, и останавливается, когда появляется целевой диалог или истекает тайм-аут.
 
-#### Диалоги начала хода
+## Прохождение последовательности диалогов
 
-В начале хода у **обоих** игроков всплывают диалоги — брифинг, доход нового дня `DLG_BEGIN_TURN`,
-имя лорда `DLG_GETINFO_BOX`, месседж-боксы — их надо прокликать. Сопоставь каждому закрывающую кнопку,
-пейси клики (~2 с) и логируй:
+Ряд игровых сценариев показывает последовательность модальных диалогов, каждый из которых закрывается
+определённой кнопкой, прежде чем сценарий продолжится. Главный пример, первый ход: брифинг сценария,
+диалог дохода нового дня, диалог имени лорда и месседж-боксы появляются по очереди у каждого игрока.
+
+Определяйте текущий диалог через `Get-Dialog` (или `Get-RoleState` для полного состояния).
+Сопоставьте каждому ожидаемому диалогу закрывающую его кнопку и нажимайте её, когда диалог текущий:
 
 ```powershell
-$Dismiss = @{ 'DLG_SCENARIO_BRIEFING'='BTN_CONTINUE'; 'DLG_BEGIN_TURN'='BTN_OK'
-              'DLG_GETINFO_BOX'='BTN_CLOSE'; 'DLG_MESSAGE_BOX'='BTN_OK' }
-$d = Get-Dialog $role
-if ($Dismiss.ContainsKey($d)) { Invoke-Button $role $d $Dismiss[$d] }
+$Dismiss = @{
+    'DLG_SCENARIO_BRIEFING' = 'BTN_CONTINUE'
+    'DLG_BEGIN_TURN'        = 'BTN_OK'
+    'DLG_GETINFO_BOX'       = 'BTN_CLOSE'
+    'DLG_MESSAGE_BOX'       = 'BTN_OK'
+}
+while (-not (Get-RoleState $role).reachedStrategic) {
+    $d = Get-Dialog $role
+    if ($Dismiss.ContainsKey($d)) { Invoke-Button $role $d $Dismiss[$d] }
+    Start-Sleep -Milliseconds 2000
+}
 ```
 
-`DLG_GETINFO_BOX` закрывается одним `BTN_CLOSE` — в нём уже дефолтное имя лорда, поэтому **не** делай
-`Set-EditText` (ломает accept). Репортер сразу показывает карту под ним. Пример — `DriveToStrategic`
-в [`multiplayer-two-instance.ps1`](multiplayer-two-instance.ps1).
+Этим циклом управляют три обстоятельства.
 
-### Добавить тест
+1. Соблюдайте паузы между нажатиями. Кастомные игровые меню продвигаются по одному кадру и заметно
+   медленнее нативных. Повторное нажатие того же диалога до обработки предыдущего нажатия ставит в
+   очередь дублирующую команду. Паузы около двух секунд достаточно; запоминайте последний нажатый
+   диалог, чтобы не нажимать один и тот же дважды подряд.
+2. Диалог, который лишь мелькает, опрос может пропустить. Рилей записывает липкий флаг роли при первом
+   появлении такого диалога: `sawBeginTurn` становится истинным на первом `DLG_BEGIN_TURN` и остаётся
+   таким, а `reachedStrategic` так же фиксируется на виде карты. Читайте эти флаги через `Get-RoleState`,
+   а не пытайтесь поймать диалог опросом.
+3. Закрытие диалога обновляет снапшот само. Репортёр каждый кадр опрашивает реальный верхний интерфейс
+   движка, поэтому при закрытии модального окна и появлении диалога под ним снапшот сообщает открывшийся
+   диалог без действий со стороны скрипта.
 
-1. Создай `tools/test/<имя>.ps1`. Бери [рабочий пример](#рабочий-пример--читать-первым):
-   `param([string]$GameDir, [switch]$Kill)`, подключи `_relay.ps1`, `Resolve-GameDir`,
-   `Start-TestRelay`, `Start-GameClient`, рули, проверяй, и чисти рилей + клиентов в `finally`
-   (осиротевший рилей блокирует пайп для следующего запуска). `exit 1` при провале.
-2. Двух-инстансный / координированный тест — **только через рилей** (запрос → ожидание → ответ →
-   действие). Минимальный одиночный может использовать встроенный self-nav (`-Flags …,SELFNAV`, см.
-   [`walk-menu.ps1`](walk-menu.ps1)).
+Диалог имени лорда `DLG_GETINFO_BOX` закрывается одним `BTN_CLOSE`. В нём уже находится имя лорда по
+умолчанию, поэтому не вызывайте на нём `Set-EditText`: запись текста сбрасывает ввод и мешает закрытию
+зафиксироваться. Полную реализацию содержит `DriveToStrategic` в
+[`multiplayer-two-instance.ps1`](multiplayer-two-instance.ps1).
 
-### Подключить к CI
+## Добавление теста
 
-CI — в [`../../.github/workflows`](../../.github/workflows). Переиспользуемый набор — **`tests.yml`**;
-его зовут два входа по непересекающимся путям:
+Создайте `tools/test/<имя>.ps1`. Возьмите `param([string]$GameDir, [switch]$Kill)`, подключите
+`_relay.ps1`, вызовите `Resolve-GameDir`, `Start-TestRelay` и `Start-GameClient`, ведите клиента,
+проверьте результат и остановите рилей и клиентов в блоке `finally`. Осиротевший рилей удерживает свой
+именованный канал и блокирует следующий запуск. Завершайтесь кодом 1 при провале.
 
-- **`mss32.yml`** (на `mss32/**`) собирает Debug + Release + **DebugTest**, затем гоняет `tests.yml`
-  по только что собранной DLL.
-- **`tests-only.yml`** (на `tools/**`) пропускает сборку и **переиспользует** прошлую DebugTest DLL —
-  правка только скриптов проходит тесты за минуты, без перекомпиляции.
+Двух-инстансный или иначе координированный тест работает целиком через рилей: отправить команду,
+подождать, прочитать итоговое состояние, действовать. Минимальный одиночный тест может вместо этого
+использовать встроенный self-nav (добавьте `SELFNAV` к флагам клиента; см. [`walk-menu.ps1`](walk-menu.ps1)).
 
-Джобы `tests.yml`: `prep-game` (кэширует ~2 ГБ минимальной игры), `headless-boot-smoke` (бут 1×),
-`headless-boot-reliability` (бут 5×), `multiplayer-two-instance-strategic` (двух-клиентный MP). Каждый
-тест-джоб: скачать артефакт `mss32-debugtest` → восстановить игру из кэша → положить `mss32.dll` →
-запустить `.ps1`.
+## Добавление джоба в CI
 
-Чтобы добавить свой — скопируй джоб и поменяй последний шаг на свой `.ps1` с
-`-GameDir "$env:GAME_DIR" -Kill` (в CI конфига нет, `-Kill` чистит за собой). Шаблон — в английской
-части выше.
+CI находится в [`../../.github/workflows`](../../.github/workflows). Переиспользуемый набор называется `tests.yml`.
+Его вызывают два входа по непересекающимся фильтрам путей: `mss32.yml` (на `mss32/**`) пересобирает DLL
+и прогоняет по ней набор; `tests-only.yml` (на `tools/**`) переиспользует последнюю собранную DLL без
+перекомпиляции.
 
-### Файлы
+Чтобы добавить тест в CI, скопируйте один из тест-джобов в `tests.yml` (например,
+`multiplayer-two-instance-strategic`) и замените его последний шаг на запуск вашего скрипта с
+`-GameDir "$env:GAME_DIR" -Kill`. Каждый тест-джоб скачивает артефакт `mss32-debugtest`, восстанавливает
+игру из кэша, разворачивает `mss32.dll` и запускает скрипт. Конфига в CI нет, поэтому `-GameDir`
+передаётся явно, а `-Kill` обеспечивает уборку после прогона.
+
+## Файлы
 
 | Файл | Роль |
 |---|---|
-| `_relay.ps1` | тулкит: конфиг, рилей, клиенты, команды выше |
-| `test.config.sample.psd1` | шаблон конфига машины (копируй в `test.config.psd1`) |
-| `scenario-generation.ps1` | пример драйва формы (один инстанс) |
-| `multiplayer-two-instance.ps1` | два клиента в начатую MP-игру (host + joiner) |
-| `reliability_test.ps1` | бут N× до главного меню (бут-тест CI) |
-| `walk-menu.ps1` | один self-nav клиент, оставить запущенным |
-| `_show-window.ps1`, `_capture.ps1` | поднять окно / снять PNG (только диагностика) |
-| `../relay/relay.js` | node-рилей |
+| `_relay.ps1` | тулкит: конфиг, рилей, клиенты и команды выше |
+| `test.config.sample.psd1` | шаблон конфига машины; копируется в `test.config.psd1` |
+| `scenario-generation.ps1` | пример драйва формы одним экземпляром |
+| `multiplayer-two-instance.ps1` | два клиента в начатую мультиплеерную игру (хост и присоединяющийся) |
+| `reliability_test.ps1` | загрузка N раз до главного меню (бут-тест CI) |
+| `walk-menu.ps1` | один self-nav клиент, оставленный запущенным для ручного осмотра |
+| `_show-window.ps1`, `_capture.ps1` | поднять окно, снять PNG (только диагностика) |
+| `../relay/relay.js` | рилей |
 | `../relay/drive-game-relay.ps1` | интерактивная консоль над рилеем |

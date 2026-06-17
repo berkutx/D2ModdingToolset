@@ -1,5 +1,5 @@
 /*
- * d2lobby.packetlogic relay — part of the publishable test/logging system.
+ * d2lobby.packetlogic relay, part of the publishable test/logging system.
  *
  * A dependency-free Node.js server the mss32 bridge connects to over a Windows named pipe.
  * MULTI-CLIENT (host + joiner, each tagged by role from its Hello), a dumb mirror + command
@@ -21,7 +21,7 @@ const HTTP_HOST = '127.0.0.1';
 const HTTP_PORT = 8077;
 const PROTOCOL_VERSION = 1;
 
-// Opcodes (mirror testdrv/packetlogicbridge.cpp — public protocol only).
+// Opcodes (mirror testdrv/packetlogicbridge.cpp, public protocol only).
 const Op = {
     Hello: 0x0001,
     HelloAck: 0x0002,
@@ -30,11 +30,12 @@ const Op = {
     LocalPlayerHandle: 0x0007,
     PacketTrace: 0x0202,    // TX
     PacketTraceRx: 0x0203,  // RX
-    InvokeButton: 0x0300,   // -> agent: click a button
-    SetSelection: 0x0301,   // -> agent: set a listbox selection
-    SetSpin: 0x0302,        // -> agent: set a spin-button option
-    SetEditText: 0x0303,    // -> agent: set an edit-box's text
-    UiSnapshot: 0x0410,     // <- agent: current dialog + all its widgets with state (JSON)
+    InvokeButton: 0x0300,   // -> client: click a button
+    SetSelection: 0x0301,   // -> client: set a listbox selection
+    SetSpin: 0x0302,        // -> client: set a spin-button option
+    SetEditText: 0x0303,    // -> client: set an edit-box's text
+    CommandResult: 0x0304,  // <- client: outcome of a command (u32 seq | u8 found)
+    UiSnapshot: 0x0410,     // <- client: current dialog + all its widgets with state (JSON)
     Log: 0xff00,
 };
 
@@ -89,6 +90,33 @@ function encodeStr(s) {
     return out;
 }
 
+function u32(n) {
+    const b = Buffer.alloc(4);
+    b.writeUInt32LE(n >>> 0, 0);
+    return b;
+}
+
+// ---- command-result correlation --------------------------------------------
+// Each command carries a sequence id; the client answers with a CommandResult so the POST can
+// report whether the addressed dialog and widget were found. seq -> resolver, cleared on answer
+// or timeout.
+let g_seq = 0;
+const g_pending = new Map();
+
+function awaitResult(seq, ms) {
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => { g_pending.delete(seq); resolve(null); }, ms);
+        g_pending.set(seq, { resolve, timer });
+    });
+}
+
+// Send a command to a client and resolve to its found flag (true/false), or null if no answer.
+function sendCommand(sock, op, body) {
+    const seq = (g_seq = (g_seq + 1) >>> 0);
+    send(sock, op, Buffer.concat([u32(seq), body]));
+    return awaitResult(seq, 5000);
+}
+
 // ---- net-message decoding --------------------------------------------------
 function decodeClassName(bytes) {
     const s = bytes.slice(0, Math.min(bytes.length, 64)).toString('latin1');
@@ -135,7 +163,7 @@ function onTrace(socket, dir, payload) {
 
 // ---- named-pipe server (agent connections) ---------------------------------
 function parseHello(payload) {
-    if (payload.length < 12) return null; // too short for version|pid|modLen — malformed
+    if (payload.length < 12) return null; // too short for version|pid|modLen, malformed
     const version = payload.readUInt32LE(0);
     const pid = payload.readUInt32LE(4);
     let modLen = payload.readUInt32LE(8);
@@ -173,7 +201,7 @@ function handleMessage(socket, op, flags, payload) {
     }
     case Op.UiSnapshot: {
         // JSON: { dialog: "DLG_X", widgets: [ {name, type, state}, ... ] }. The DLL escapes all
-        // strings, so a parse failure means a torn frame — log and skip, never crash the relay.
+        // strings, so a parse failure means a torn frame, log and skip, never crash the relay.
         let snap;
         try { snap = JSON.parse(payload.toString('utf8')); }
         catch (e) { console.error(`[ui] ${roleOf(socket)} bad snapshot JSON: ${e.message}`); break; }
@@ -187,7 +215,7 @@ function handleMessage(socket, op, flags, payload) {
             if (r) {
                 r.dialog = dialog; r.widgets = widgets; r.buttons = buttons;
                 // Sticky "reached the map": DLG_ISO_PAL (the isometric map view) appears BEFORE
-                // the first-turn popups; DLG_STRATEGIC is the same map. Latch on either — the
+                // the first-turn popups; DLG_STRATEGIC is the same map. Latch on either, the
                 // dialog only flickers through, so a poll can miss it.
                 if (dialog === 'DLG_STRATEGIC' || dialog === 'DLG_ISO_PAL') r.reachedStrategic = true;
                 if (dialog === 'DLG_BEGIN_TURN') r.sawBeginTurn = true; // a new day / turn began for this role
@@ -200,6 +228,14 @@ function handleMessage(socket, op, flags, payload) {
         const line = payload.toString('utf8');
         ring(state.logs, { t: nowIso(), role: roleOf(socket), line });
         console.log(`[log] (${roleOf(socket)}) ${line}`);
+        break;
+    }
+    case Op.CommandResult: {
+        if (payload.length < 5) break;
+        const seq = payload.readUInt32LE(0);
+        const found = payload.readUInt8(4) !== 0;
+        const p = g_pending.get(seq);
+        if (p) { clearTimeout(p.timer); g_pending.delete(seq); p.resolve(found); }
         break;
     }
     case Op.PacketTraceRx: onTrace(socket, 'RX', payload); break;
@@ -242,7 +278,7 @@ const pipeServer = net.createServer((socket) => {
     const drop = () => {
         const c = state.clients.get(socket);
         state.clients.delete(socket);
-        // Only flip the role offline if THIS socket is still its current owner — a late 'close'
+        // Only flip the role offline if THIS socket is still its current owner, a late 'close'
         // from a socket already superseded by a relaunch must not knock the live one offline.
         if (c && state.socketByRole[c.role] === socket) {
             if (state.byRole[c.role]) state.byRole[c.role].connected = false;
@@ -259,7 +295,7 @@ pipeServer.listen(PIPE_NAME, () => console.log(`[pipe] listening on ${PIPE_NAME}
 
 // ---- HTTP API --------------------------------------------------------------
 function clientByRole(role) {
-    // the role's current socket, or null once dropped — never a stale duplicate (else 503)
+    // the role's current socket, or null once dropped, never a stale duplicate (else 503)
     const sock = state.socketByRole[role];
     return (sock && state.clients.has(sock)) ? sock : null;
 }
@@ -269,7 +305,7 @@ function sendJson(res, code, obj) {
     res.end(JSON.stringify(obj, null, 2));
 }
 
-const httpServer = http.createServer((req, res) => {
+const httpServer = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${HTTP_HOST}:${HTTP_PORT}`);
     const path = url.pathname;
     const q = url.searchParams;
@@ -297,33 +333,33 @@ const httpServer = http.createServer((req, res) => {
     // bridge command; 503 if that role has no connected agent.
     if (req.method === 'POST' && path === '/api/ui/invoke') {
         const sock = clientByRole(q.get('role'));
-        if (!sock) return sendJson(res, 503, { error: 'no agent for role ' + q.get('role') });
+        if (!sock) return sendJson(res, 503, { error: 'no client for role ' + q.get('role') });
         const dlg = q.get('dlg') || '', btn = q.get('btn') || '';
-        send(sock, Op.InvokeButton, Buffer.concat([encodeStr(dlg), encodeStr(btn)]));
-        return sendJson(res, 200, { sent: { role: roleOf(sock), invoke: { dlg, btn } } });
+        const found = await sendCommand(sock, Op.InvokeButton, Buffer.concat([encodeStr(dlg), encodeStr(btn)]));
+        return sendJson(res, 200, { role: roleOf(sock), invoke: { dlg, btn }, found });
     }
     if (req.method === 'POST' && path === '/api/ui/select') {
         const sock = clientByRole(q.get('role'));
-        if (!sock) return sendJson(res, 503, { error: 'no agent for role ' + q.get('role') });
+        if (!sock) return sendJson(res, 503, { error: 'no client for role ' + q.get('role') });
         const dlg = q.get('dlg') || '', lb = q.get('lb') || '', index = parseInt(q.get('index') || '0', 10);
         const idx = Buffer.alloc(4); idx.writeInt32LE(index, 0);
-        send(sock, Op.SetSelection, Buffer.concat([encodeStr(dlg), encodeStr(lb), idx]));
-        return sendJson(res, 200, { sent: { role: roleOf(sock), select: { dlg, lb, index } } });
+        const found = await sendCommand(sock, Op.SetSelection, Buffer.concat([encodeStr(dlg), encodeStr(lb), idx]));
+        return sendJson(res, 200, { role: roleOf(sock), select: { dlg, lb, index }, found });
     }
     if (req.method === 'POST' && path === '/api/ui/spin') {
         const sock = clientByRole(q.get('role'));
-        if (!sock) return sendJson(res, 503, { error: 'no agent for role ' + q.get('role') });
+        if (!sock) return sendJson(res, 503, { error: 'no client for role ' + q.get('role') });
         const dlg = q.get('dlg') || '', spin = q.get('spin') || '', index = parseInt(q.get('index') || '0', 10);
         const idx = Buffer.alloc(4); idx.writeInt32LE(index, 0);
-        send(sock, Op.SetSpin, Buffer.concat([encodeStr(dlg), encodeStr(spin), idx]));
-        return sendJson(res, 200, { sent: { role: roleOf(sock), spin: { dlg, spin, index } } });
+        const found = await sendCommand(sock, Op.SetSpin, Buffer.concat([encodeStr(dlg), encodeStr(spin), idx]));
+        return sendJson(res, 200, { role: roleOf(sock), spin: { dlg, spin, index }, found });
     }
     if (req.method === 'POST' && path === '/api/ui/edit') {
         const sock = clientByRole(q.get('role'));
-        if (!sock) return sendJson(res, 503, { error: 'no agent for role ' + q.get('role') });
+        if (!sock) return sendJson(res, 503, { error: 'no client for role ' + q.get('role') });
         const dlg = q.get('dlg') || '', edit = q.get('edit') || '', text = q.get('text') || '';
-        send(sock, Op.SetEditText, Buffer.concat([encodeStr(dlg), encodeStr(edit), encodeStr(text)]));
-        return sendJson(res, 200, { sent: { role: roleOf(sock), edit: { dlg, edit, text } } });
+        const found = await sendCommand(sock, Op.SetEditText, Buffer.concat([encodeStr(dlg), encodeStr(edit), encodeStr(text)]));
+        return sendJson(res, 200, { role: roleOf(sock), edit: { dlg, edit, text }, found });
     }
     sendJson(res, 404, { error: 'not found' });
 });

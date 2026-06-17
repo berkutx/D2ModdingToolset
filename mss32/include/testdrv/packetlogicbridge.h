@@ -38,7 +38,12 @@ void stop();
 /** Send a Log line to the relay. Safe from any thread; dropped if not connected. */
 void send_log(const char* utf8_message);
 
-/** Register a handler for control opcodes the bridge does not own — e.g. the
+/** Report the outcome of a dispatcher command back to the relay. The relay holds the
+ * matching POST open until this arrives, so the test learns whether the addressed dialog
+ * and widget were actually found. Sent from the UI thread before the action runs. */
+void send_command_result(std::uint32_t seq, bool found);
+
+/** Register a handler for control opcodes the bridge does not own, e.g. the
  * dispatcher's InvokeButton / SetSelection commands, which the auto-nav executor
  * queues for the UI thread. Runs on the bridge thread; must not block. Null clears. */
 void setCommandCallback(CommandCallback cb);

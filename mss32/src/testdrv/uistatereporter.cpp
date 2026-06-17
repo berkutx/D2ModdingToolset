@@ -1,6 +1,6 @@
 /*
  * Publishable test/logging system for the Disciples 2 modding toolset.
- * UI-state reporter — see testdrv/uistatereporter.h.
+ * UI-state reporter. See testdrv/uistatereporter.h.
  *
  * Compile-gated by D2_TESTDRV: without the macro the whole file compiles to
  * nothing and the build is byte-identical to vanilla.
@@ -65,7 +65,7 @@ ScreenEntry g_screens[64] = {};
 int g_screenCount = 0;
 
 // The widget snapshot for the current dialog. Built on the UI thread (rebuildSnapshot),
-// read by the bridge thread (copyUiSnapshot) — both under g_snapMutex.
+// read by the bridge thread (copyUiSnapshot), both under g_snapMutex.
 std::mutex g_snapMutex;
 std::string g_snapJson;
 std::uint32_t g_snapEpoch = 0;
@@ -324,7 +324,7 @@ void recordBind(game::CDialogInterf* dialog, const char* dialogName, const char*
         return;
     g_curDialog = dialog;
     registerDialog(dialogName, dialog);
-    // The just-bound dialog is being shown ON the current topmost screen — let the per-frame poll
+    // The just-bound dialog is being shown ON the current topmost screen, let the per-frame poll
     // learn that screen<->name association (so a later close that reveals it can be reported).
     lstrcpynA(g_pendingBind, dialogName, sizeof(g_pendingBind));
     // Immediate "current screen" update on open; refreshCurrentDialog() corrects staleness on close.
@@ -342,7 +342,7 @@ game::CButtonInterf* __stdcall hookAssignFunctor(game::CDialogInterf* dialog, co
 {
     recordBind(dialog, dialogName, buttonName);
     autonav::onDialogBound(); // arm the nav once the UI exists (ticking is done from the
-                              // per-frame hook, not here — invoking here is reentrant)
+                              // per-frame hook, not here, invoking here is reentrant)
     return g_origAssignFunctor(dialog, buttonName, dialogName, functor, hotkey);
 }
 
@@ -395,7 +395,7 @@ void refreshCurrentDialog()
 {
     // The assignFunctor hook only fires on a button-bind, so a modal that closes to reveal an
     // already-bound dialog underneath would otherwise leave a STALE current-dialog. Poll the engine's
-    // real topmost INTERFACE (CInterfManager::getTopmostInterface) — note it is the SCREEN that hosts a
+    // real topmost INTERFACE (CInterfManager::getTopmostInterface), note it is the SCREEN that hosts a
     // dialog, NOT the CDialogInterf, and co-present dialogs (e.g. DLG_ISO_PAL + DLG_STRATEGIC) share one
     // screen ptr. So we LEARN screen<->name at bind time (the just-bound dialog lives on the current
     // topmost screen) and LOOK UP on close. Ticked per frame from autonav. SEH-guarded.

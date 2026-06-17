@@ -5,8 +5,8 @@
 
 .DESCRIPTION
   Dot-source this for an interactive session. It loads the test toolkit (tools/test/_relay.ps1) so
-  you get the same verb-noun commands the tests use — Get-Dialog, Get-GameUi, Invoke-Button,
-  Set-ListSelection, Set-SpinOption, Set-EditText, Wait-Dialog — plus the read-only inspectors below.
+  you get the same verb-noun commands the tests use, Get-Dialog, Get-GameUi, Invoke-Button,
+  Set-ListSelection, Set-SpinOption, Set-EditText, Wait-Dialog, plus the read-only inspectors below.
 
   Start relay.js first, then launch the game with the DebugTest mss32 build and at least
   D2TESTDRV_RELAY_BRIDGE=1 (bridge connects), D2TESTDRV_UI_REPORTER=1 (live UI), and

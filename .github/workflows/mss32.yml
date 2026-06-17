@@ -2,7 +2,7 @@ name: mss32
 
 # Build orchestrator: Debug + Release are compile checks; DebugTest builds the publishable
 # D2_TESTDRV DLL and hands it to tests.yml. Deps come from the latest "deps" run's deps-libs.
-# Triggers only on mss32/** — test-script changes (tools/**) go through tests-only.yml, which
+# Triggers only on mss32/**, test-script changes (tools/**) go through tests-only.yml, which
 # REUSES this DLL instead of rebuilding (skips the ~10-min compile).
 
 on:
@@ -120,7 +120,7 @@ jobs:
           }
           Write-Host "test/logging system present"
       - name: Upload DebugTest DLL
-        # Default archiving (zip) — download-artifact extracts it in the tests job.
+        # Default archiving (zip), download-artifact extracts it in the tests job.
         # (archive:false yields a raw artifact that download-artifact cannot extract.)
         uses: actions/upload-artifact@v7
         with:
@@ -128,7 +128,7 @@ jobs:
           path: out/mss32.dll
           if-no-files-found: warn
 
-  # Separate test suite — runs after the DebugTest build, consuming its DLL.
+  # Separate test suite, runs after the DebugTest build, consuming its DLL.
   tests:
     name: Tests
     needs: build-debugtest

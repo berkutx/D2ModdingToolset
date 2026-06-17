@@ -1,6 +1,6 @@
 /*
  * Publishable test/logging system for the Disciples 2 modding toolset.
- * Headless-boot fixes — see testdrv/bootfixes.h.
+ * Headless-boot fixes. See testdrv/bootfixes.h.
  *
  * Compile-gated by D2_TESTDRV: without the macro the whole file compiles to
  * nothing and the build is byte-identical to vanilla.

@@ -60,7 +60,7 @@ if ($Kill) {
     Write-Host "`n(game closed)"
 } elseif (-not $p.HasExited) {
     Show-GameWindow -Proc $p
-    Write-Host "`ngame left running (pid=$($p.Id)), foregrounded — poke away. Close with: Stop-Process -Id $($p.Id)" -ForegroundColor Yellow
+    Write-Host "`ngame left running (pid=$($p.Id)), foregrounded, poke away. Close with: Stop-Process -Id $($p.Id)" -ForegroundColor Yellow
 } else {
-    Write-Host "`n(game already exited — role '$Role' navigated to a quit, or crashed; check the log)" -ForegroundColor DarkYellow
+    Write-Host "`n(game already exited, role '$Role' navigated to a quit, or crashed; check the log)" -ForegroundColor DarkYellow
 }

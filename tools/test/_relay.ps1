@@ -5,8 +5,8 @@
 #   $client  = Start-GameClient -GameDir $GameDir -Role host
 # and drive each client over the relay with the verb-noun commands below. See README.md.
 
-$script:RelayBase = "http://127.0.0.1:8077"           # same for everyone — NOT machine-specific
-$script:RelayJs   = "$PSScriptRoot\..\relay\relay.js" # same for everyone — NOT machine-specific
+$script:RelayBase = "http://127.0.0.1:8077"           # same for everyone, NOT machine-specific
+$script:RelayJs   = "$PSScriptRoot\..\relay\relay.js" # same for everyone, NOT machine-specific
 
 # ---- machine-specific config (the only thing that differs per dev machine) --------------------
 # GameDir/ProcDump live in tools/test/test.config.psd1 (gitignored; copy test.config.sample.psd1).
@@ -86,32 +86,40 @@ function Wait-Dialog([string]$Role, [string]$Dialog, [int]$TimeoutSec = 60) {
     return $false
 }
 
-# ---- the dispatcher's hands (drive UI) — one bridge command each ------------------------------
+# ---- the dispatcher's hands (drive UI) ---------------------------------------------------------
+# Each command returns the client's `found` flag: $true if the addressed dialog and widget were
+# resolved (the action ran), $false if not (a wrong name, or the dialog is not open). The relay
+# holds the request until the client answers, so a command to an absent target is reported, not
+# silently dropped. The timeout exceeds the relay's own wait so a slow answer is not cut off.
 function script:Post([string]$Path) {
-    try { Invoke-RestMethod "$script:RelayBase/api/ui/$Path" -Method POST -TimeoutSec 3 | Out-Null } catch {}
+    try { return (Invoke-RestMethod "$script:RelayBase/api/ui/$Path" -Method POST -TimeoutSec 8).found } catch { return $false }
 }
 function Invoke-Button([string]$Role, [string]$Dialog, [string]$Button) {
-    script:Post "invoke?role=$([uri]::EscapeDataString($Role))&dlg=$([uri]::EscapeDataString($Dialog))&btn=$([uri]::EscapeDataString($Button))"
+    [bool](script:Post "invoke?role=$([uri]::EscapeDataString($Role))&dlg=$([uri]::EscapeDataString($Dialog))&btn=$([uri]::EscapeDataString($Button))")
 }
 function Set-ListSelection([string]$Role, [string]$Dialog, [string]$ListBox, [int]$Index) {
-    script:Post "select?role=$([uri]::EscapeDataString($Role))&dlg=$([uri]::EscapeDataString($Dialog))&lb=$([uri]::EscapeDataString($ListBox))&index=$Index"
+    [bool](script:Post "select?role=$([uri]::EscapeDataString($Role))&dlg=$([uri]::EscapeDataString($Dialog))&lb=$([uri]::EscapeDataString($ListBox))&index=$Index")
 }
 function Set-SpinOption([string]$Role, [string]$Dialog, [string]$Spin, [int]$Index) {
-    script:Post "spin?role=$([uri]::EscapeDataString($Role))&dlg=$([uri]::EscapeDataString($Dialog))&spin=$([uri]::EscapeDataString($Spin))&index=$Index"
+    [bool](script:Post "spin?role=$([uri]::EscapeDataString($Role))&dlg=$([uri]::EscapeDataString($Dialog))&spin=$([uri]::EscapeDataString($Spin))&index=$Index")
 }
 function Set-EditText([string]$Role, [string]$Dialog, [string]$Edit, [string]$Text) {
-    script:Post "edit?role=$([uri]::EscapeDataString($Role))&dlg=$([uri]::EscapeDataString($Dialog))&edit=$([uri]::EscapeDataString($Edit))&text=$([uri]::EscapeDataString($Text))"
+    [bool](script:Post "edit?role=$([uri]::EscapeDataString($Role))&dlg=$([uri]::EscapeDataString($Dialog))&edit=$([uri]::EscapeDataString($Edit))&text=$([uri]::EscapeDataString($Text))")
 }
 
-# Click <Button> on <Dialog> until <Role> reaches <ToDialog>; $true on arrival, $false on timeout.
-# Re-fires every <RefireSec> (a button may not be bound on the first ask, and the agent coalesces a
-# duplicate while a ~10s DPlay send blocks the UI thread). The agent resolves <Dialog> by name, so
-# this works even for a co-present or just-closed dialog.
+# Click <Button> on <Dialog> until <Role> reaches <ToDialog>. Returns $true on arrival, $false on
+# timeout. The click is retried every <RefireSec> for as long as the target dialog has not appeared;
+# Invoke-Button reports whether each attempt found its button, so a step that never resolves is
+# visible (under -Verbose) rather than a silent spin. <RefireSec> stays above the longest UI-thread
+# stall so the client coalesces a duplicate during a blocking send.
 function Step-ToDialog([string]$Role, [string]$Dialog, [string]$Button, [string]$ToDialog, [int]$TimeoutSec = 45, [int]$RefireSec = 12) {
-    $t0 = Get-Date; Invoke-Button $Role $Dialog $Button; $lastFire = Get-Date
+    $t0 = Get-Date; $lastFire = (Get-Date).AddSeconds(-$RefireSec)
     while ((((Get-Date) - $t0).TotalSeconds) -lt $TimeoutSec) {
         if ((Get-Dialog $Role) -eq $ToDialog) { return $true }
-        if (((Get-Date) - $lastFire).TotalSeconds -ge $RefireSec) { Invoke-Button $Role $Dialog $Button; $lastFire = Get-Date }
+        if (((Get-Date) - $lastFire).TotalSeconds -ge $RefireSec) {
+            if (-not (Invoke-Button $Role $Dialog $Button)) { Write-Verbose "[step] $Role $Dialog::$Button not found yet" }
+            $lastFire = Get-Date
+        }
         Start-Sleep -Milliseconds 500
     }
     return $false

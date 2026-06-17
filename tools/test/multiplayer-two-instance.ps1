@@ -2,12 +2,12 @@
 <#
 .SYNOPSIS
   Drive two game clients (HOST + JOINER) into a started TCP/IP multiplayer game and verify both
-  reach the strategic map — the complex, two-instance test.
+  reach the strategic map, the complex, two-instance test.
 
 .DESCRIPTION
   The dispatcher is the brain; the in-DLL clients are thin (report UI, execute invoke/select). Over
   the node relay (tools/relay/relay.js) it reads each client's UI (Get-Dialog/Get-RoleState), drives
-  it (Invoke-Button/Set-ListSelection) and coordinates both — no files, no log scraping for state.
+  it (Invoke-Button/Set-ListSelection) and coordinates both, no files, no log scraping for state.
   Needs the DebugTest mss32 build in the game folder and Node.js. Windows are tagged [HOST]/[CLIENT].
 
 .EXAMPLE
@@ -46,21 +46,21 @@ Write-Host "[disp] relay up" -ForegroundColor Green
 # ---- test-specific orchestration (built on the toolkit primitives) ------------------------------
 # Set a listbox value, then let the agent apply it (one command per UI tick) before the next click.
 function SelectSettle([string]$role, [string]$dlg, [string]$lb, [int]$index) {
-    Set-ListSelection $role $dlg $lb $index
+    $null = Set-ListSelection $role $dlg $lb $index
     Start-Sleep -Milliseconds 1000
 }
 # Click <btn> on <dlg> until the client LEAVES <dlg> (used for the lobby OK).
 function ClickAndLeave([string]$role, [string]$dlg, [string]$btn, [int]$timeoutSec) {
-    $t0 = Get-Date; Invoke-Button $role $dlg $btn; $lastFire = Get-Date
+    $t0 = Get-Date; $null = Invoke-Button $role $dlg $btn; $lastFire = Get-Date
     while ((((Get-Date) - $t0).TotalSeconds) -lt $timeoutSec) {
         if ((Get-Dialog $role) -ne $dlg) { return $true }
-        if (((Get-Date) - $lastFire).TotalSeconds -ge 12) { Invoke-Button $role $dlg $btn; $lastFire = Get-Date }
+        if (((Get-Date) - $lastFire).TotalSeconds -ge 12) { $null = Invoke-Button $role $dlg $btn; $lastFire = Get-Date }
         Start-Sleep -Milliseconds 500
     }
     return $false
 }
 # First-turn popups, each mapped to the button that closes it. DLG_GETINFO_BOX is the "name your lord"
-# prompt — BTN_CLOSE accepts the lord's DEFAULT name and closes (do NOT Set-EditText it, which corrupts
+# prompt, BTN_CLOSE accepts the lord's DEFAULT name and closes (do NOT Set-EditText it, which corrupts
 # the accept). The reporter reports the REAL topmost dialog, so a close is reflected immediately and the
 # same paced loop drives every popup, GETINFO included.
 $Dismiss = @{
@@ -77,7 +77,7 @@ function DriveToStrategic([string]$role, [int]$timeoutSec) {
         $d = if ($r) { $r.dialog } else { $null }
         if ($d -and $Dismiss.ContainsKey($d) -and ($d -ne $lastDlg -or ((Get-Date) - $lastFire).TotalSeconds -ge 2.5)) {
             if ($d -ne $lastDlg) { Write-Host "[disp]   $role dialog appeared: $d -> click $($Dismiss[$d])" }
-            Invoke-Button $role $d $Dismiss[$d]; $lastDlg = $d; $lastFire = Get-Date
+            $null = Invoke-Button $role $d $Dismiss[$d]; $lastDlg = $d; $lastFire = Get-Date
         }
         Start-Sleep -Milliseconds 700
     }
@@ -110,8 +110,8 @@ function Run-Pairing {
         $d = Get-Dialog host
         if ($d -eq "DLG_LOBBY") { $hostLobby = $true; break }
         if (((Get-Date) - $lastFire).TotalSeconds -ge 4) {
-            if ($d -eq "DLG_LOAD_NEW_MULTI") { Invoke-Button host DLG_LOAD_NEW_MULTI BTN_HOST }
-            else { Set-ListSelection host DLG_CHOOSE_SKIRMISH TLBOX_GAME_SLOT $Scenario; Start-Sleep -Milliseconds 400; Invoke-Button host DLG_CHOOSE_SKIRMISH BTN_LOAD }
+            if ($d -eq "DLG_LOAD_NEW_MULTI") { $null = Invoke-Button host DLG_LOAD_NEW_MULTI BTN_HOST }
+            else { $null = Set-ListSelection host DLG_CHOOSE_SKIRMISH TLBOX_GAME_SLOT $Scenario; Start-Sleep -Milliseconds 400; $null = Invoke-Button host DLG_CHOOSE_SKIRMISH BTN_LOAD }
             $lastFire = Get-Date
         }
         Start-Sleep -Milliseconds 500
@@ -126,7 +126,7 @@ function Run-Pairing {
     Write-Host "[disp] JOINER in lobby" -ForegroundColor Green
 
     # Host starts and reaches the map first; only then the joiner requests the snapshot. Success
-    # latches at DLG_ISO_PAL — the map view BEFORE the first-turn popups, which we never touch
+    # latches at DLG_ISO_PAL, the map view BEFORE the first-turn popups, which we never touch
     # (dismissing them mid-begin-turn hangs reconciliation; the goal is reaching the map, not turn 1).
     Start-Sleep -Milliseconds 1500
     if (-not (ClickAndLeave host DLG_LOBBY BTN_OK 45)) { return $false }
@@ -155,14 +155,14 @@ function Run-Pairing {
                 if (-not $d -or ((Get-Date) - $last[$role]).TotalSeconds -lt 2.0) { continue }   # pace ~2s/click
                 if ($Dismiss.ContainsKey($d)) {
                     if ($seen[$role] -ne $d) { Write-Host "[disp]   $role dialog appeared: $d -> click $($Dismiss[$d])"; $seen[$role] = $d }
-                    Invoke-Button $role $d $Dismiss[$d]; $last[$role] = Get-Date
+                    $null = Invoke-Button $role $d $Dismiss[$d]; $last[$role] = Get-Date
                 } elseif ($role -eq 'host' -and $s.host.sawBeginTurn -and ($BareMap -contains $d)) {
                     if (-not $endLogged) {
                         Write-Host "[disp]   host dialogs closed, on bare map ($d) -> end turn (BTN_END_TURN)"
                         if ($DumpDir) { CaptureWindow $h "host_pre_endturn" }
                         $endLogged = $true
                     }
-                    Invoke-Button host DLG_STRATEGIC BTN_END_TURN; $last['host'] = Get-Date
+                    $null = Invoke-Button host DLG_STRATEGIC BTN_END_TURN; $last['host'] = Get-Date
                 }
             }
             Start-Sleep -Milliseconds 600
@@ -181,7 +181,7 @@ function Run-Pairing {
             if (((Get-Date) - $jlast).TotalSeconds -ge 2.0) {
                 if ($Dismiss.ContainsKey($jd)) {
                     if ($jseen -ne $jd) { Write-Host "[disp]   join dialog appeared: $jd -> click $($Dismiss[$jd])"; $jseen = $jd }
-                    Invoke-Button join $jd $Dismiss[$jd]
+                    $null = Invoke-Button join $jd $Dismiss[$jd]
                 }
                 $jlast = Get-Date
             }
@@ -217,7 +217,7 @@ function CaptureWindow([System.Diagnostics.Process]$Proc, [string]$Role) {
 }
 
 # ---- run ----------------------------------------------------------------------------------------
-# try/finally so the relay (and games, under -Kill) are ALWAYS cleaned up — a throw must not orphan
+# try/finally so the relay (and games, under -Kill) are ALWAYS cleaned up, a throw must not orphan
 # the relay, whose named pipe would block the next run.
 $h = $null; $j = $null; $ok = $false
 try {

@@ -11,7 +11,7 @@
  * sufficient (fg-flag: 0/20 without -> 20/20 with). Forced OS window activation
  * (SetForegroundWindow / WM_ACTIVATE*) was deliberately NOT ported: it only helps
  * the window PAINT (GOG GL-wrapper render-pause, RE/08) and we read game STATE,
- * not pixels — so it was never exercised in a passing run. Compile-gated by
+ * not pixels, so it was never exercised in a passing run. Compile-gated by
  * D2_TESTDRV; each fix is independently gated by a runtime env var.
  */
 

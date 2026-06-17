@@ -1,6 +1,6 @@
 /*
  * Publishable test/logging system for the Disciples 2 modding toolset.
- * Relay client — see testdrv/packetlogicbridge.h.
+ * Relay client. See testdrv/packetlogicbridge.h.
  *
  * Compile-gated by D2_TESTDRV: without the macro the whole file compiles to
  * nothing and the build is byte-identical to vanilla.
@@ -52,6 +52,7 @@ enum class Op : uint16_t
     SetSelection = 0x0301,   // <- dispatcher: set a listbox selection (autonav executor)
     SetSpin = 0x0302,        // <- dispatcher: set a spin-button option (autonav executor)
     SetEditText = 0x0303,    // <- dispatcher: set an edit-box's text (autonav executor)
+    CommandResult = 0x0304,  // -> relay: outcome of a dispatcher command (u32 seq | u8 found)
     UiSnapshot = 0x0410,     // -> relay: current dialog + all its widgets with state (JSON)
     Log = 0xFF00,
 };
@@ -220,7 +221,7 @@ bool enqueue(Op opcode, const void* payload, uint32_t size)
 }
 
 // nettracehooks RX-trace sink. Frame: u32 self, u32 sender, u32 size, byte[size].
-// Runs on the game/worker thread — must only enqueue (non-blocking).
+// Runs on the game/worker thread, must only enqueue (non-blocking).
 void on_rx_trace(void* self, int sender, const uint8_t* payload, uint32_t size)
 {
     if (size > 0x10000)
@@ -284,7 +285,7 @@ void handle_incoming(Op op, const std::vector<uint8_t>& payload)
         if (g_command_cb) {
             g_command_cb(static_cast<uint16_t>(op), payload.data(), (uint32_t)payload.size());
         } else {
-            spdlog::info("[testdrv] bridge op 0x{:04X} ({:d} bytes) — no command handler",
+            spdlog::info("[testdrv] bridge op 0x{:04X} ({:d} bytes), no command handler",
                          (unsigned)op, (unsigned)payload.size());
         }
         break;
@@ -330,7 +331,7 @@ void bridge_thread_main()
             Sleep(500);
         }
         if (s == INVALID_SOCKET) {
-            spdlog::warn("[testdrv] bridge could not connect via TCP — giving up");
+            spdlog::warn("[testdrv] bridge could not connect via TCP, giving up");
             WSACleanup();
             return;
         }
@@ -353,7 +354,7 @@ void bridge_thread_main()
             Sleep(500);
         }
         if (h == INVALID_HANDLE_VALUE) {
-            spdlog::info("[testdrv] bridge: no relay running — observability off");
+            spdlog::info("[testdrv] bridge: no relay running, observability off");
             return;
         }
         g_pipe = h;
@@ -487,6 +488,14 @@ void send_log(const char* utf8_message)
 {
     if (utf8_message)
         write_message(Op::Log, utf8_message, (uint32_t)strlen(utf8_message));
+}
+
+void send_command_result(std::uint32_t seq, bool found)
+{
+    uint8_t p[5];
+    *(uint32_t*)(p + 0) = seq;
+    p[4] = found ? 1 : 0;
+    enqueue(Op::CommandResult, p, sizeof(p)); // bridge thread writes it; non-blocking on the UI thread
 }
 
 

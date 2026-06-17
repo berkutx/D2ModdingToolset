@@ -1,6 +1,6 @@
 /*
  * Publishable test/logging system for the Disciples 2 modding toolset.
- * Unified network interception + logging — see testdrv/nettracehooks.h.
+ * Unified network interception + logging. See testdrv/nettracehooks.h.
  *
  * Compile-gated by D2_TESTDRV: without the macro the whole file compiles to
  * nothing and the build is byte-identical to vanilla.
@@ -31,7 +31,7 @@ namespace {
 // so the single RX hook catches both native DirectPlay and the mod's SLikeNet
 // traffic. The Send vtable is the native-DirectPlay player's IMqNetPlayer table;
 // custom (SLikeNet) TX is logged by the mod itself.
-constexpr uintptr_t kRecvDispatchVA = 0x55B948;  // sub_55B948 — reception fan-out
+constexpr uintptr_t kRecvDispatchVA = 0x55B948;  // sub_55B948, reception fan-out
 constexpr uintptr_t kRecvCallSite1VA = 0x402CA7; // `call sub_55B948` in sub_402BD3 (worker thread)
 constexpr uintptr_t kRecvCallSite2VA = 0x43396E; // `call sub_55B948` in sub_4338BE (receive loop)
 constexpr uintptr_t kDPlayPlayerVftVA = 0x6E699C;  // CNetDPlayPlayer IMqNetPlayer vtable
@@ -82,7 +82,7 @@ std::atomic<FnJoinSession> g_orig_join{nullptr};
 bool g_installed = false; // touched only on the single-threaded loader path
 
 // A deferred packet, snapshotted for faithful replay through the SAME RX hook on
-// the UI thread. This is generic hold-and-replay infrastructure — what to defer
+// the UI thread. This is generic hold-and-replay infrastructure, what to defer
 // (and why) is the gate's policy, not ours.
 struct DeferredPacket
 {
@@ -107,7 +107,7 @@ int call_orig_recv_guarded(void* self, void* edx, int packet, int size, int send
     __try {
         r = ((FnRecvDispatch)kRecvDispatchVA)(self, edx, packet, size, sender);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        spdlog::warn("[nettrace] orig recv-dispatch SEH-escaped — depth kept balanced");
+        spdlog::warn("[nettrace] orig recv-dispatch SEH-escaped, depth kept balanced");
     }
     g_recv_dispatch_depth.fetch_sub(1);
     return r;
@@ -127,7 +127,7 @@ void enqueue_deferred_packet(void* self, void* edx, int size, int sender,
     {
         std::lock_guard<std::mutex> lk(g_deferred_mutex);
         if (g_deferred.size() >= kMaxDeferred) {
-            spdlog::warn("[nettrace] deferred-packet queue full — dropping OLDEST");
+            spdlog::warn("[nettrace] deferred-packet queue full, dropping OLDEST");
             g_deferred.erase(g_deferred.begin());
         }
         g_deferred.push_back(std::move(ent));
@@ -181,7 +181,7 @@ int __fastcall hook_recv_dispatch(void* self, void* edx, int packet, int size, i
 
         // Observability: report the received CNetMsg envelope to every observer
         // (the relay bridge + the MP-gate detector). Catches chat and system-
-        // notification messages too — the relay decodes class names.
+        // notification messages too, the relay decodes class names.
         spdlog::debug("[nettrace] RX '{:.31s}' from {:d} ({:d} B)", (const char*)payload, sender,
                       payload_size);
         const int rxn = g_rx_observer_count.load(std::memory_order_acquire);
@@ -228,7 +228,7 @@ int __fastcall hook_send(void* self, void* edx, std::uint32_t idTo,
 
 // --- DirectPlay session vtable hooks (native TCP/IP multiplayer) --------------
 // EnumSessions with a null/empty host pops DPlay's "Locate Session" common dialog
-// asking the user to type an IP — which stalls headless auto-nav. Substitute
+// asking the user to type an IP, which stalls headless auto-nav. Substitute
 // localhost so a joiner finds a same-machine host automatically. Create/Join are
 // logged only.
 void __fastcall hook_enum_sessions(void* self, void* edx, void* sessions, const GUID* appGuid,
@@ -269,13 +269,13 @@ LRESULT CALLBACK d2_wndproc_hook(HWND h, UINT msg, WPARAM w, LPARAM l)
         __try {
             drain_one_deferred_packet();
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            spdlog::warn("[nettrace] deferred-packet drain caught exception — continuing");
+            spdlog::warn("[nettrace] deferred-packet drain caught exception, continuing");
         }
         return 0;
     }
 
     // The subclass is installed on a background thread, so this hook can fire before
-    // g_orig_wndproc is stored — fall back to DefWindowProcA rather than crash.
+    // g_orig_wndproc is stored, fall back to DefWindowProcA rather than crash.
     WNDPROC orig = g_orig_wndproc.load(std::memory_order_acquire);
     return orig ? CallWindowProcA(orig, h, msg, w, l) : DefWindowProcA(h, msg, w, l);
 }
@@ -357,7 +357,7 @@ DWORD WINAPI subclass_window_thread(LPVOID)
         }
         Sleep(500);
     }
-    spdlog::warn("[nettrace] no game window found in 60s — deferred-packet replay disabled");
+    spdlog::warn("[nettrace] no game window found in 60s, deferred-packet replay disabled");
     return 0;
 }
 
@@ -426,7 +426,7 @@ bool install()
     if (g_installed)
         return true;
     if (!executableIsGame() || gameVersion() != GameVersion::Russobit) {
-        spdlog::warn("[nettrace] not the pinned Russobit image — network hooks disabled");
+        spdlog::warn("[nettrace] not the pinned Russobit image, network hooks disabled");
         return false;
     }
     g_installed = true;
@@ -455,7 +455,7 @@ bool install()
                          &o))
         g_orig_join.store(reinterpret_cast<FnJoinSession>(o), std::memory_order_release);
 
-    // NOTE: the window subclass is spawned lazily by setDispatchCallback — a pure
+    // NOTE: the window subclass is spawned lazily by setDispatchCallback, a pure
     // logging/observer build never subclasses the game window.
 
     spdlog::info("[nettrace] installed (RX call-sites: {} / {}; DPlay TX: {}; session hooks set)",

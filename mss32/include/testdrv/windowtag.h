@@ -1,7 +1,7 @@
 /*
  * Publishable test/logging system for the Disciples 2 modding toolset.
  *
- * Tags the game window caption with the role — "<base>  [HOST]" / "[CLIENT]" — so
+ * Tags the game window caption with the role, "<base>  [HOST]" / "[CLIENT]", so
  * the two Discipl2 windows of a two-instance test are distinguishable at a glance
  * (and so orchestration scripts can target / count test-launched instances by the
  * tag). Role from D2TESTDRV_ROLE; compile-gated by D2_TESTDRV.

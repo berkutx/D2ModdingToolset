@@ -1,6 +1,6 @@
 /*
  * Publishable test/logging system for the Disciples 2 modding toolset.
- * Installer / entry point — see testdrv/testdrv.h.
+ * Installer / entry point. See testdrv/testdrv.h.
  *
  * Compile-gated by D2_TESTDRV: without the macro the whole file compiles to
  * nothing and the build is byte-identical to vanilla.
@@ -32,7 +32,7 @@ void install(HMODULE self)
         return;
     spdlog::info("[testdrv] install");
 
-    // UI-state reporter (D2TESTDRV_UI_REPORTER) — the foundation: exposes the live dialog
+    // UI-state reporter (D2TESTDRV_UI_REPORTER), the foundation: exposes the live dialog
     // + buttons and arms the auto-nav executor (onUiReady reads D2TESTDRV_SELFNAV /
     // D2TESTDRV_RELAY_BRIDGE to pick self-driven vs dispatcher-driven).
     uistatereporter::install();
