@@ -1,0 +1,157 @@
+name: generation-matrix
+
+# On-demand: generate every random-scenario template, one job per template, and report which
+# generate vs error. Dispatch only (it is slow and the generator is heavy) and available once this
+# workflow is on the default branch. The matrix axis is parsed from the game's Templates/*.lua by
+# tools/test/list-templates.js; each job runs scenario-generation.ps1 with -WaitGenerationSec.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dll_run_id:
+        description: "mss32 run id for the DebugTest DLL (empty = latest successful build)"
+        type: string
+        required: false
+        default: ""
+      wait_sec:
+        description: "seconds to wait for each template's generation to finish"
+        type: string
+        required: false
+        default: "600"
+
+permissions:
+  contents: read
+  actions: read # list mss32 runs + download the mss32-debugtest artifact
+
+jobs:
+  setup:
+    name: Parse templates + resolve DLL
+    runs-on: ubuntu-latest
+    outputs:
+      run_id: ${{ steps.dll.outputs.run_id }}
+      matrix: ${{ steps.parse.outputs.matrix }}
+    steps:
+      # Sparse, no submodules: this root job only needs the parser, not the whole repo.
+      - uses: actions/checkout@v6
+        with:
+          submodules: false
+          fetch-depth: 1
+          sparse-checkout: tools/test
+          sparse-checkout-cone-mode: true
+      - name: Resolve the DebugTest DLL run
+        id: dll
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          GIVEN: ${{ inputs.dll_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rid="$GIVEN"
+          if [ -z "$rid" ]; then
+            for id in $(gh run list --workflow mss32.yml --branch "$BRANCH" --status success \
+                          -L 20 --json databaseId --jq '.[].databaseId' -R "$REPO"); do
+              if gh api "repos/$REPO/actions/runs/$id/artifacts" --jq '.artifacts[].name' 2>/dev/null | grep -qx 'mss32-debugtest'; then
+                rid="$id"; break
+              fi
+            done
+          fi
+          [ -n "$rid" ] || { echo "::error::no mss32 build with a live mss32-debugtest artifact on '$BRANCH'"; exit 1; }
+          echo "run_id=$rid" >> "$GITHUB_OUTPUT"
+      - name: Restore game cache (extract only Templates)
+        uses: actions/cache/restore@v5
+        with:
+          path: game.tar.gz
+          key: slasher-min-v1
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Parse template list -> matrix
+        id: parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir tpl
+          tar -xzf game.tar.gz -C tpl --wildcards '*/Templates/*.lua'   # only the templates, not the 2 GB game
+          tpldir=$(dirname "$(find tpl -ipath '*/Templates/*.lua' | head -1)")
+          echo "templates dir: $tpldir"
+          npm install luaparse --no-save --silent
+          node tools/test/list-templates.js "$tpldir" > matrix.json
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+
+  generate:
+    name: ${{ matrix.template.name }}
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        template: ${{ fromJson(needs.setup.outputs.matrix) }}
+    runs-on: windows-2025-vs2026
+    env:
+      GALLIUM_DRIVER: llvmpipe
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: false
+          fetch-depth: 1
+          sparse-checkout: tools
+          sparse-checkout-cone-mode: true
+      - name: Get the DebugTest DLL
+        uses: actions/download-artifact@v8
+        with:
+          name: mss32-debugtest
+          path: dll
+          run-id: ${{ needs.setup.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Enable DirectPlay (TCP/IP protocol for the multiplayer setup path)
+        run: |
+          try {
+            if ((Get-WindowsOptionalFeature -Online -FeatureName DirectPlay).State -ne 'Enabled') {
+              Enable-WindowsOptionalFeature -Online -FeatureName DirectPlay -All -NoRestart -ErrorAction Stop | Out-Null
+            }
+          } catch { Write-Host "::warning::Enable DirectPlay failed: $($_.Exception.Message)" }
+      - name: Restore game from cache
+        uses: actions/cache/restore@v5
+        with:
+          path: game.tar.gz
+          key: slasher-min-v1
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Unpack game + deploy DLL + force OpenGL/ColdCPU
+        run: |
+          New-Item -ItemType Directory -Force -Path game | Out-Null
+          tar -xzf game.tar.gz -C game
+          $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
+          Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
+          $ini = Join-Path $dir 'Disciple.ini'
+          if (Test-Path $ini) {
+            $c = Get-Content $ini -Raw
+            if ($c -match '(?m)^Renderer=')      { $c = $c -replace '(?m)^Renderer=\d+','Renderer=3' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nRenderer=3" }
+            else                                  { $c += "`r`n[Wrapper]`r`nRenderer=3`r`n" }
+            if ($c -match '(?m)^ColdCPU=')       { $c = $c -replace '(?m)^ColdCPU=\d+','ColdCPU=0' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nColdCPU=0" }
+            Set-Content -Path $ini -Value $c -Encoding ASCII -NoNewline
+          }
+          "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Deploy Mesa3D software OpenGL (llvmpipe)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $dir = $env:GAME_DIR
+          $asset = (gh api repos/pal1000/mesa-dist-win/releases/latest | ConvertFrom-Json).assets |
+            Where-Object { $_.name -match 'release-msvc\.7z$' } | Select-Object -First 1
+          $z = Join-Path $env:TEMP 'mesa.7z'
+          Invoke-WebRequest $asset.browser_download_url -OutFile $z -UseBasicParsing
+          $ex = Join-Path $env:TEMP 'mesa'
+          $sevenzip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
+          & $sevenzip x $z "-o$ex" -y "x86" | Out-Null
+          Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
+      - name: Generate template ${{ matrix.template.index }} (${{ matrix.template.name }})
+        run: |
+          node --version
+          ./tools/test/scenario-generation.ps1 -GameDir "$env:GAME_DIR" -Template ${{ matrix.template.index }} -WaitGenerationSec ${{ inputs.wait_sec }} -Kill

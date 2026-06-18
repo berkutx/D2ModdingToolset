@@ -66,7 +66,7 @@ define). The Debug and Release builds are byte-identical to the unmodified DLL.
 Within a DebugTest build, each feature is switched on at runtime by a `D2TESTDRV_*` environment
 variable. `Start-GameClient` sets these on the launched game process: `D2TESTDRV_UI_REPORTER` (the
 snapshot), `D2TESTDRV_RELAY_BRIDGE` (the command bridge), `D2TESTDRV_SKIP_INTRO` and
-`D2TESTDRV_BLACKSCREEN_FIX` (headless boot), and `D2TESTDRV_ROLE` (the relay key). To run a feature
+`D2TESTDRV_BLACKSCREEN_FIX` (boot fixes), and `D2TESTDRV_ROLE` (the relay key). To run a feature
 by hand, set the same variables before launching `Discipl2.exe`.
 
 ## Setup
@@ -225,7 +225,7 @@ runs the suite against it; `tests-only.yml` (on `tools/**`) reuses the last buil
 recompiling.
 
 To add a test to CI, copy one of the test jobs in `tests.yml` (for example
-`multiplayer-two-instance-strategic`) and change its final step to run your script with
+`multiplayer-strategic`) and change its final step to run your script with
 `-GameDir "$env:GAME_DIR" -Kill`. Each test job downloads the `mss32-debugtest` artifact, restores the
 cached game, deploys `mss32.dll`, and runs the script. CI has no config file, so `-GameDir` is passed
 explicitly and `-Kill` makes the run clean up after itself.
@@ -311,7 +311,7 @@ Release побайтно совпадают с неизменённой DLL.
 Внутри сборки DebugTest каждая возможность включается во время выполнения переменной среды `D2TESTDRV_*`.
 `Start-GameClient` задаёт их запускаемому процессу игры: `D2TESTDRV_UI_REPORTER` (снапшот),
 `D2TESTDRV_RELAY_BRIDGE` (командный мост), `D2TESTDRV_SKIP_INTRO` и `D2TESTDRV_BLACKSCREEN_FIX`
-(headless-загрузка), `D2TESTDRV_ROLE` (ключ-роль у рилея). Чтобы запустить возможность вручную, задайте
+(boot-фиксы), `D2TESTDRV_ROLE` (ключ-роль у рилея). Чтобы запустить возможность вручную, задайте
 те же переменные перед запуском `Discipl2.exe`.
 
 ## Настройка
@@ -467,7 +467,7 @@ CI находится в [`../../.github/workflows`](../../.github/workflows). �
 перекомпиляции.
 
 Чтобы добавить тест в CI, скопируйте один из тест-джобов в `tests.yml` (например,
-`multiplayer-two-instance-strategic`) и замените его последний шаг на запуск вашего скрипта с
+`multiplayer-strategic`) и замените его последний шаг на запуск вашего скрипта с
 `-GameDir "$env:GAME_DIR" -Kill`. Каждый тест-джоб скачивает артефакт `mss32-debugtest`, восстанавливает
 игру из кэша, разворачивает `mss32.dll` и запускает скрипт. Конфига в CI нет, поэтому `-GameDir`
 передаётся явно, а `-Kill` обеспечивает уборку после прогона.

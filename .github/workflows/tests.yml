@@ -61,8 +61,8 @@ jobs:
           key: slasher-min-v1
           enableCrossOsArchive: true
 
-  headless-boot-smoke:
-    name: Headless boot, smoke (1x)
+  boot-smoke:
+    name: Boot to the main menu (1x smoke)
     needs: prep-game
     runs-on: windows-2025-vs2026
     defaults:
@@ -97,8 +97,8 @@ jobs:
       - name: Boot once -> DLG_MAIN_MENU
         run: ./tools/test/reliability_test.ps1 -N 1 -Boot 1 -TimeoutSec 60 -GameDir "$env:GAME_DIR"
 
-  headless-boot-reliability:
-    name: Headless boot, reliability (5x)
+  boot-reliability:
+    name: Boot to the main menu (5x reliability)
     needs: prep-game
     runs-on: windows-2025-vs2026
     defaults:
@@ -135,8 +135,8 @@ jobs:
   # drives both through the menus into a started game over native DirectPlay TCP/IP on
   # localhost, entirely over the node relay (read each agent's live UI, send invoke/
   # select commands, no files), and confirms both reach the strategic map.
-  multiplayer-two-instance-strategic:
-    name: Multiplayer, two instances reach the strategic map
+  multiplayer-strategic:
+    name: Multiplayer game reaches the strategic map (2p)
     needs: prep-game
     runs-on: windows-2025-vs2026
     env:
