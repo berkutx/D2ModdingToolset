@@ -100,8 +100,10 @@ function readName(code) {
 
 const dir = process.argv[2];
 if (!dir) { console.error('usage: node list-templates.js <TemplatesDir>'); process.exit(2); }
+// Match the generator's order: scenariotemplates.cpp reads via std::filesystem::directory_iterator,
+// i.e. the on-disk (NTFS) order, which is the upcased ordinal filename order.
 const files = fs.readdirSync(dir).filter(f => f.toLowerCase().endsWith('.lua'))
-  .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  .sort((a, b) => { const x = a.toUpperCase(), y = b.toUpperCase(); return x < y ? -1 : x > y ? 1 : 0; });
 const list = files.map((file, index) => {
   let name = path.basename(file, '.lua');
   try { const n = readName(fs.readFileSync(path.join(dir, file), 'latin1')); if (n) name = n; }

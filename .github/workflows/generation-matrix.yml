@@ -6,6 +6,12 @@ name: generation-matrix
 # tools/test/list-templates.js; each job runs scenario-generation.ps1 with -WaitGenerationSec.
 
 on:
+  push:
+    # Runs when the matrix workflow or the parser changes (workflow_dispatch needs the default
+    # branch, so a push trigger lets it run from feature branches too).
+    paths:
+      - ".github/workflows/generation-matrix.yml"
+      - "tools/test/list-templates.js"
   workflow_dispatch:
     inputs:
       dll_run_id:
@@ -154,4 +160,4 @@ jobs:
       - name: Generate template ${{ matrix.template.index }} (${{ matrix.template.name }})
         run: |
           node --version
-          ./tools/test/scenario-generation.ps1 -GameDir "$env:GAME_DIR" -Template ${{ matrix.template.index }} -WaitGenerationSec ${{ inputs.wait_sec }} -Kill
+          ./tools/test/scenario-generation.ps1 -GameDir "$env:GAME_DIR" -Template ${{ matrix.template.index }} -WaitGenerationSec ${{ inputs.wait_sec || '600' }} -Kill
