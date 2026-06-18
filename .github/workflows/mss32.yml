@@ -9,6 +9,7 @@ on:
   push:
     paths:
       - "mss32/**"
+      - "D2RSG"
       - ".github/workflows/mss32.yml"
   workflow_dispatch:
 
