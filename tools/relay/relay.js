@@ -36,6 +36,7 @@ const Op = {
     SetEditText: 0x0303,    // -> client: set an edit-box's text
     CommandResult: 0x0304,  // <- client: outcome of a command (u32 seq | u8 found)
     UiSnapshot: 0x0410,     // <- client: current dialog + all its widgets with state (JSON)
+    WorldSnapshot: 0x0411,  // <- client: players' resources + all map stacks (JSON)
     Log: 0xff00,
 };
 
@@ -189,8 +190,8 @@ function handleMessage(socket, op, flags, payload) {
         // never returns a dead duplicate, and its late 'close' can't touch the live entry.
         const prev = state.socketByRole[role];
         if (prev && prev !== socket) { state.clients.delete(prev); try { prev.destroy(); } catch (e) { /* gone */ } }
-        state.clients.set(socket, { role, pid: h.pid, modulePath: h.modulePath, dialog: null, widgets: [], buttons: [] });
-        state.byRole[role] = { connected: true, pid: h.pid, dialog: null, widgets: [], buttons: [], reachedStrategic: false, sawBeginTurn: false };
+        state.clients.set(socket, { role, pid: h.pid, modulePath: h.modulePath, dialog: null, widgets: [], buttons: [], players: [], stacks: [] });
+        state.byRole[role] = { connected: true, pid: h.pid, dialog: null, widgets: [], buttons: [], players: [], stacks: [], reachedStrategic: false, sawBeginTurn: false };
         state.socketByRole[role] = socket;
         console.log(`[hello] role=${role} pid=${h.pid} v${h.version}`);
         const ack = Buffer.alloc(8);
@@ -222,6 +223,23 @@ function handleMessage(socket, op, flags, payload) {
             }
         }
         console.log(`[ui] ${roleOf(socket)} -> ${dialog} (${widgets.length} widgets)`);
+        break;
+    }
+    case Op.WorldSnapshot: {
+        // JSON: { day, players: [...], stacks: [...] }. Same DLL escaping guarantees as UiSnapshot,
+        // so a parse failure means a torn frame: log and skip, never crash the relay.
+        let snap;
+        try { snap = JSON.parse(payload.toString('utf8')); }
+        catch (e) { console.error(`[world] ${roleOf(socket)} bad snapshot JSON: ${e.message}`); break; }
+        const players = Array.isArray(snap.players) ? snap.players : [];
+        const stacks = Array.isArray(snap.stacks) ? snap.stacks : [];
+        const c = state.clients.get(socket);
+        if (c) {
+            c.day = snap.day; c.players = players; c.stacks = stacks;
+            const r = state.byRole[c.role];
+            if (r) { r.day = snap.day; r.players = players; r.stacks = stacks; }
+        }
+        console.log(`[world] ${roleOf(socket)} -> day ${snap.day}, ${players.length} players, ${stacks.length} stacks`);
         break;
     }
     case Op.Log: {
@@ -322,6 +340,17 @@ const httpServer = http.createServer(async (req, res) => {
         }
         const roles = {};
         for (const [name, r] of Object.entries(state.byRole)) roles[name] = { dialog: r.dialog, widgets: r.widgets };
+        return sendJson(res, 200, { roles });
+    }
+    // The live world snapshot. With ?role=, one role's { role, day, players, stacks }; without, every role.
+    if (req.method === 'GET' && path === '/api/world') {
+        const role = q.get('role');
+        if (role) {
+            const r = state.byRole[role];
+            return sendJson(res, 200, { role, day: r ? r.day : null, players: r ? (r.players || []) : [], stacks: r ? (r.stacks || []) : [] });
+        }
+        const roles = {};
+        for (const [name, r] of Object.entries(state.byRole)) roles[name] = { day: r.day, players: r.players || [], stacks: r.stacks || [] };
         return sendJson(res, 200, { roles });
     }
     if (req.method === 'GET' && path === '/api/log') return sendJson(res, 200, { logs: state.logs.slice(-100), packets: state.packets.slice(-100) });

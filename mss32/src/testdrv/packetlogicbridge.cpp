@@ -17,6 +17,7 @@
 #include "testdrv/nettracehooks.h"
 #include "testdrv/testenv.h"
 #include "testdrv/uistatereporter.h"
+#include "testdrv/worldreporter.h"
 #include <atomic>
 #include <cstring>
 #include <deque>
@@ -54,6 +55,7 @@ enum class Op : uint16_t
     SetEditText = 0x0303,    // <- dispatcher: set an edit-box's text (autonav executor)
     CommandResult = 0x0304,  // -> relay: outcome of a dispatcher command (u32 seq | u8 found)
     UiSnapshot = 0x0410,     // -> relay: current dialog + all its widgets with state (JSON)
+    WorldSnapshot = 0x0411,  // -> relay: players' resources + all map stacks (JSON, world reporter)
     Log = 0xFF00,
 };
 
@@ -377,6 +379,7 @@ void bridge_thread_main()
     write_message(Op::Log, msg, (uint32_t)strlen(msg));
 
     uint32_t last_ui_epoch = 0;
+    uint32_t last_world_epoch = 0;
     while (g_running.load()) {
         // 0. Forward the live UI snapshot (current dialog + every widget with its state) to the
         //    relay whenever it changes, so the dispatcher can scan/verify the UI without scraping
@@ -388,6 +391,17 @@ void bridge_thread_main()
             if (uistatereporter::copyUiSnapshot(snap, epoch) && epoch != last_ui_epoch) {
                 last_ui_epoch = epoch;
                 write_message(Op::UiSnapshot, snap.data(), (uint32_t)snap.size());
+            }
+        }
+
+        // 0b. Forward the live WORLD snapshot (players' resources + every map stack) the same way:
+        //     the reporter rebuilds it on the UI thread (throttled) and bumps its epoch on change.
+        {
+            std::string snap;
+            uint32_t epoch = 0;
+            if (worldreporter::copyWorldSnapshot(snap, epoch) && epoch != last_world_epoch) {
+                last_world_epoch = epoch;
+                write_message(Op::WorldSnapshot, snap.data(), (uint32_t)snap.size());
             }
         }
 

@@ -17,6 +17,7 @@
 #include "testdrv/packetlogicbridge.h"
 #include "testdrv/testenv.h"
 #include "testdrv/uistatereporter.h"
+#include "testdrv/worldreporter.h"
 #include "button.h"
 #include "dialoginterf.h"
 #include "editboxinterf.h"
@@ -498,6 +499,17 @@ void onDialogBound()
     spdlog::info("[testdrv] nav armed");
 }
 
+// worldreporter::rebuildSnapshot() reads live game objects through ScenarioView (which allocates), so
+// it cannot host __try itself (MSVC C2712). Guard it here, in a frame with no unwinding locals, so a
+// bad read during a scenario teardown can never crash the game (reporting is best-effort).
+void safeRebuildWorld()
+{
+    __try {
+        worldreporter::rebuildSnapshot();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 // Ticked per screen-loop iteration on the dialog-owning thread (hook5629CA). Reentrancy-guarded.
 void tick()
 {
@@ -508,6 +520,7 @@ void tick()
         return;
     s_inTick = true;
     uistatereporter::refreshCurrentDialog(); // report the REAL topmost dialog (catch modal closes)
+    safeRebuildWorld();                      // report players' resources + map stacks (world snapshot)
     drainRemoteCommands();
     if (g_navScript)
         navStep();

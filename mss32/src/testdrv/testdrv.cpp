@@ -15,6 +15,7 @@
 #include "testdrv/testenv.h"
 #include "testdrv/uistatereporter.h"
 #include "testdrv/windowtag.h"
+#include "testdrv/worldreporter.h"
 #include "version.h"
 #include <spdlog/spdlog.h>
 #include <crtdbg.h>
@@ -112,7 +113,8 @@ void install(HMODULE self)
     // + buttons and arms the auto-nav executor (onUiReady reads D2TESTDRV_SELFNAV /
     // D2TESTDRV_RELAY_BRIDGE to pick self-driven vs dispatcher-driven).
     uistatereporter::install();
-    windowtag::start(); // [HOST]/[CLIENT] caption tag for host/join roles
+    worldreporter::install(); // world-state snapshot (D2TESTDRV_WORLD): players' resources + map stacks
+    windowtag::start();       // [HOST]/[CLIENT] caption tag for host/join roles
 
     // Network interception layer: RX/TX hooks = logging AND the pass/drop/defer + TX-gate
     // seams the secret sim-turns branch registers its policy on. Independent of the relay.

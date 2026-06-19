@@ -49,13 +49,25 @@ function Start-GameClient {
     param(
         [Parameter(Mandatory)][string]$GameDir,
         [Parameter(Mandatory)][string]$Role,
-        [string[]]$Flags = @('SKIP_INTRO', 'BLACKSCREEN_FIX', 'UI_REPORTER', 'RELAY_BRIDGE')
+        [string[]]$Flags = @('SKIP_INTRO', 'BLACKSCREEN_FIX', 'UI_REPORTER', 'WORLD', 'RELAY_BRIDGE')
     )
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "$GameDir\Discipl2.exe"; $psi.WorkingDirectory = $GameDir; $psi.UseShellExecute = $false
     foreach ($f in $Flags) { $psi.EnvironmentVariables["D2TESTDRV_$f"] = "1" }
     $psi.EnvironmentVariables["D2TESTDRV_ROLE"] = $Role
     return [System.Diagnostics.Process]::Start($psi)
+}
+
+# Resolve a random-scenario template's listbox index BY NAME (e.g. 'Diligence'). The generator lists
+# Templates\*.lua in case-insensitive filename order (std::filesystem), so we mirror that sort; this
+# avoids a brittle hardcoded index that breaks when templates are added or removed.
+function Resolve-TemplateIndex([string]$GameDir, [string]$Name) {
+    $files = @(Get-ChildItem (Join-Path $GameDir 'Templates') -Filter *.lua -ErrorAction SilentlyContinue |
+        Sort-Object { $_.Name.ToUpperInvariant() })
+    for ($i = 0; $i -lt $files.Count; $i++) {
+        if ($files[$i].BaseName -ieq $Name) { return $i }
+    }
+    throw "template '$Name' not found in $GameDir\Templates"
 }
 
 # ---- the dispatcher's eyes (read UI) ----------------------------------------------------------
@@ -76,6 +88,14 @@ function Get-Dialog([string]$Role) {
 function Get-GameUi([string]$Role) {
     try { return Invoke-RestMethod "$script:RelayBase/api/ui?role=$([uri]::EscapeDataString($Role))" -TimeoutSec 3 } catch { return $null }
 }
+# The world snapshot for a role: { role, day, players:[{id,relation,human,race,gold,...mana}],
+# stacks:[{id,x,y,owner,relation,movement,units,subrace}] }. Populated only once a scenario is loaded.
+function Get-World([string]$Role) {
+    try { return Invoke-RestMethod "$script:RelayBase/api/world?role=$([uri]::EscapeDataString($Role))" -TimeoutSec 3 } catch { return $null }
+}
+# Convenience views over the world snapshot: the local player's resources, and the map's stacks.
+function Get-Resources([string]$Role) { (Get-World $Role).players | Where-Object { $_.relation -eq 'self' } | Select-Object -First 1 }
+function Get-Stacks([string]$Role) { (Get-World $Role).stacks }
 # Wait until <Dialog> is the current dialog for <Role>; $true if it appeared, $false on timeout.
 function Wait-Dialog([string]$Role, [string]$Dialog, [int]$TimeoutSec = 60) {
     $t0 = Get-Date
