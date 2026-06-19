@@ -1,15 +1,18 @@
 name: mss32
 
 # Build orchestrator: Debug + Release are compile checks; DebugTest builds the publishable
-# D2_TESTDRV DLL and hands it to tests.yml. Deps come from the latest "deps" run's deps-libs.
+# D2_TESTDRV DLL and hands it to tests.yml. Deps come from the latest "deps" run's deps-libs;
+# a submodule bump (D2RSG/SLikeNet/Detours) auto-rebuilds deps, and the freshness guard below
+# fails loud if the downloaded deps-libs predates the current D2RSG (no silent stale link).
 # Triggers only on mss32/**, test-script changes (tools/**) go through tests-only.yml, which
 # REUSES this DLL instead of rebuilding (skips the ~10-min compile).
 
 on:
   push:
+    # A D2RSG bump rebuilds the generator lib via deps.yml, not here; this job links the
+    # prebuilt deps-libs and the freshness guard below ties it back to the submodule.
     paths:
       - "mss32/**"
-      - "D2RSG"
       - ".github/workflows/mss32.yml"
   workflow_dispatch:
 
@@ -62,6 +65,17 @@ jobs:
           $rid = (gh run list --workflow deps.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId').Trim()
           if (-not $rid) { Write-Error "No successful 'deps' run found; run the 'deps' workflow once."; exit 1 }
           gh run download $rid -n deps-libs -D mss32/Lib
+      - name: Guard deps-libs freshness vs D2RSG
+        # The deps-libs ScenarioGenerator is compiled from D2RSG; if it predates the current
+        # submodule the DLL would link a stale generator. Fail loud instead of shipping green.
+        run: |
+          $want = (git -C D2RSG rev-parse HEAD).Trim()
+          $have = if (Test-Path mss32\Lib\D2RSG.sha) { (Get-Content mss32\Lib\D2RSG.sha -Raw).Trim() } else { '' }
+          if ($have -ne $want) {
+            Write-Error "deps-libs was built from D2RSG '$have' but this checkout is '$want'. The 'deps' workflow auto-rebuilds on a D2RSG bump; let it finish, then re-run mss32."
+            exit 1
+          }
+          Write-Host "deps-libs matches D2RSG $want"
       - name: Build ${{ matrix.configuration }} (compile check)
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
@@ -98,6 +112,17 @@ jobs:
           $rid = (gh run list --workflow deps.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId').Trim()
           if (-not $rid) { Write-Error "No successful 'deps' run found; run the 'deps' workflow once."; exit 1 }
           gh run download $rid -n deps-libs -D mss32/Lib
+      - name: Guard deps-libs freshness vs D2RSG
+        # The deps-libs ScenarioGenerator is compiled from D2RSG; if it predates the current
+        # submodule the DLL would link a stale generator. Fail loud instead of shipping green.
+        run: |
+          $want = (git -C D2RSG rev-parse HEAD).Trim()
+          $have = if (Test-Path mss32\Lib\D2RSG.sha) { (Get-Content mss32\Lib\D2RSG.sha -Raw).Trim() } else { '' }
+          if ($have -ne $want) {
+            Write-Error "deps-libs was built from D2RSG '$have' but this checkout is '$want'. The 'deps' workflow auto-rebuilds on a D2RSG bump; let it finish, then re-run mss32."
+            exit 1
+          }
+          Write-Host "deps-libs matches D2RSG $want"
       - name: Build DebugTest (D2_TESTDRV)
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
