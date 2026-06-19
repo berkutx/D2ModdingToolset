@@ -208,10 +208,18 @@ jobs:
           {
             echo "## Random-scenario generation, per template"
             echo ""
-            echo "| # | Template | Outcome |"
-            echo "|--:|---|---|"
+            echo "| | # | Template | Outcome |"
+            echo "|:--:|--:|---|---|"
             cat outcomes/*.tsv 2>/dev/null | sort -n | while IFS=$'\t' read -r idx name status; do
-              [ -n "$name" ] && echo "| $idx | $name | $status |"
+              [ -z "$name" ] && continue
+              mode="${status%% | *}"                          # the part before the first " | "
+              case "$mode" in
+                generated)    icon='✅' ;;                    # built a map
+                "no result"*) icon='⏳' ;;                    # never finished in the budget
+                *)            icon='❌' ;;                    # crashed / sol3 / error box
+              esac
+              detail=$(printf '%s' "$status" | tr '|' '/')    # a literal | would split the table cell
+              echo "| $icon | $idx | $name | ${detail:0:150} |"
             done
           } >> "$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"

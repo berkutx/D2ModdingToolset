@@ -150,7 +150,11 @@ try {
         if (Test-Path $log) {
             $err = Get-Content $log -ErrorAction SilentlyContinue |
                 Select-String '\[testdrv\]\[(crt-assert|crt-error|stderr)\]' | Select-Object -Last 1
-            if ($err) { $outcome = "$outcome | " + (($err.Line -replace '^.*?\[testdrv\]\[', '[') -replace '[\r\n\t]+', ' ') }
+            if ($err) {
+                # keep from "[crt-assert]/[stderr]" onward, collapse whitespace, drop the noisy UCRT path
+                $d = ($err.Line -replace '^.*?\[testdrv\]\[', '[') -replace '[\r\n\t]+', ' ' -replace 'minkernel\\[^ ]*\\', ''
+                $outcome = "$outcome | $d"
+            }
         }
     }
     Write-Output "GEN_OUTCOME=$outcome"   # machine-readable result line the matrix summary parses
