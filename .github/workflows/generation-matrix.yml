@@ -176,9 +176,11 @@ jobs:
           $out | ForEach-Object { Write-Host $_ }
           $oc = $out | Select-String '^GEN_OUTCOME=' | Select-Object -Last 1
           $status = if ($oc) { ($oc.Line -replace '^GEN_OUTCOME=', '') } else { "failed (exit $code, no outcome line)" }
+          $sc = $out | Select-String '^GEN_SECONDS=' | Select-Object -Last 1
+          $secs = if ($sc) { ($sc.Line -replace '^GEN_SECONDS=', '') } else { '' }
           New-Item -ItemType Directory -Force outcome | Out-Null
-          # index<TAB>name<TAB>outcome; the summarize job concatenates these into one table
-          ("{0}`t{1}`t{2}`n" -f $env:T_INDEX, $env:T_NAME, $status) | Set-Content "outcome/$($env:T_INDEX).tsv" -Encoding utf8 -NoNewline
+          # index<TAB>name<TAB>outcome<TAB>generation-seconds; the summarize job assembles the table
+          ("{0}`t{1}`t{2}`t{3}`n" -f $env:T_INDEX, $env:T_NAME, $status, $secs) | Set-Content "outcome/$($env:T_INDEX).tsv" -Encoding utf8 -NoNewline
           Write-Host "::notice title=$($env:T_NAME)::$status"
           exit $code
       - name: Upload this template's outcome
@@ -208,9 +210,9 @@ jobs:
           {
             echo "## Random-scenario generation, per template"
             echo ""
-            echo "| | # | Template | Outcome |"
-            echo "|:--:|--:|---|---|"
-            cat outcomes/*.tsv 2>/dev/null | sort -n | while IFS=$'\t' read -r idx name status; do
+            echo "| | # | Template | Time | Outcome |"
+            echo "|:--:|--:|---|--:|---|"
+            cat outcomes/*.tsv 2>/dev/null | sort -n | while IFS=$'\t' read -r idx name status secs; do
               [ -z "$name" ] && continue
               mode="${status%% | *}"                          # the part before the first " | "
               case "$mode" in
@@ -218,8 +220,10 @@ jobs:
                 "no result"*) icon='⏳' ;;                    # never finished in the budget
                 *)            icon='❌' ;;                    # crashed / sol3 / error box
               esac
+              # generation seconds, capped at two digits (99+s) per the requested format
+              if [ -z "$secs" ]; then t='-'; elif [ "$secs" -gt 99 ] 2>/dev/null; then t='99+s'; else t="${secs}s"; fi
               detail=$(printf '%s' "$status" | tr '|' '/')    # a literal | would split the table cell
-              echo "| $icon | $idx | $name | ${detail:0:150} |"
+              echo "| $icon | $idx | $name | $t | ${detail:0:150} |"
             done
           } >> "$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"

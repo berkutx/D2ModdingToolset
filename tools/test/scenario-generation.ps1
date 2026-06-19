@@ -46,7 +46,7 @@ Start-Sleep -Milliseconds 1000
 
 $relay = Start-TestRelay
 Write-Host "[gen] relay up; launching host..." -ForegroundColor Cyan
-$client = $null; $ok = $false; $outcome = 'not-run'   # canonical per-template result for the matrix summary
+$client = $null; $ok = $false; $outcome = 'not-run'; $genSec = $null   # per-template result + generation seconds for the matrix summary
 try {
     $client = Start-GameClient -GameDir $GameDir -Role host
     if (-not (Wait-Dialog host DLG_MAIN_MENU 90)) { throw "host never reached DLG_MAIN_MENU" }
@@ -102,7 +102,8 @@ try {
             if (-not $started -and $d -eq $D -and (((Get-Date) - $t0).TotalSeconds) -ge 8) { break }
             Start-Sleep -Milliseconds 1000
         }
-        if ($done) { $outcome = 'generated'; Write-Host "[gen] generation finished (DLG_GENERATION_RESULT)" -ForegroundColor Green }
+        $genSec = [int]((Get-Date) - $t0).TotalSeconds   # seconds spent generating (from BTN_GENERATE), for the summary
+        if ($done) { $outcome = 'generated'; Write-Host "[gen] generation finished (DLG_GENERATION_RESULT) in ${genSec}s" -ForegroundColor Green }
         elseif ($crashed) { $outcome = 'crashed (generator assert)'; throw "the game crashed during generation (template $Template; see the captured assert)" }
         elseif ($errbox) {
             $msg = ((((Get-GameUi host).widgets | Where-Object { $_.type -eq 'text' }).state.text) -join ' | ') -replace '[\r\n\t]+', ' '
@@ -157,6 +158,7 @@ try {
             }
         }
     }
+    if ($null -ne $genSec) { Write-Output "GEN_SECONDS=$genSec" }
     Write-Output "GEN_OUTCOME=$outcome"   # machine-readable result line the matrix summary parses
     Write-Host "`n==== RESULT: $(if ($ToMap) { 'generate+reach-map' } else { 'generator-form-driven' })=$ok ====" -ForegroundColor $(if ($ok) { 'Green' } else { 'Yellow' })
     if ($Keep) {
