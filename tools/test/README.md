@@ -248,8 +248,8 @@ explicitly and `-Kill` makes the run clean up after itself.
 |---|---|
 | `_relay.ps1` | the toolkit: config, relay, clients, and the commands above |
 | `test.config.sample.psd1` | per-machine config template; copy to `test.config.psd1` |
-| `scenario-generation.ps1` | single-instance form-driving example |
-| `multiplayer-two-instance.ps1` | two clients into a started multiplayer game (host and joiner) |
+| `scenario-generation.ps1` | single-instance generator example: drive the form, and with `-ToMap` play the generated map into the strategic screen |
+| `multiplayer-two-instance.ps1` | two clients into a started game (a skirmish, or with `-RandomMap` a generated map); `-EndHostTurn` adds the honest turn-pass |
 | `reliability_test.ps1` | boot N times to the main menu (the CI boot test) |
 | `walk-menu.ps1` | one self-nav client, left running for manual inspection |
 | `_show-window.ps1`, `_capture.ps1` | bring a window forward, capture a PNG (diagnostics only) |
@@ -503,8 +503,8 @@ CI находится в [`../../.github/workflows`](../../.github/workflows). �
 |---|---|
 | `_relay.ps1` | тулкит: конфиг, рилей, клиенты и команды выше |
 | `test.config.sample.psd1` | шаблон конфига машины; копируется в `test.config.psd1` |
-| `scenario-generation.ps1` | пример драйва формы одним экземпляром |
-| `multiplayer-two-instance.ps1` | два клиента в начатую мультиплеерную игру (хост и присоединяющийся) |
+| `scenario-generation.ps1` | одиночный пример генератора: прогон по форме, а с `-ToMap` доиграть сгенерированную карту до стратегического экрана |
+| `multiplayer-two-instance.ps1` | два клиента в начатую игру (скирмиш или с `-RandomMap` сгенерированная карта); `-EndHostTurn` добавляет честный пропуск хода |
 | `reliability_test.ps1` | загрузка N раз до главного меню (бут-тест CI) |
 | `walk-menu.ps1` | один self-nav клиент, оставленный запущенным для ручного осмотра |
 | `_show-window.ps1`, `_capture.ps1` | поднять окно, снять PNG (только диагностика) |
