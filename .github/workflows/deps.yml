@@ -2,10 +2,18 @@ name: deps
 
 # Builds the rarely-changing dependency libs (Detours, SLikeNet LibStatic,
 # ScenarioGenerator) and publishes them as the "deps-libs" artifact that mss32
-# downloads. Manual dispatch: a dep submodule was bumped, or the 90-day artifact
-# lapsed.
+# downloads. Runs automatically when a dependency submodule is bumped (so mss32 never
+# links a stale lib), and on manual dispatch (e.g. the 90-day artifact lapsed).
 
 on:
+  push:
+    # A dependency-submodule bump must rebuild these libs so mss32 links the fresh deps-libs.
+    # (A D2RSG bump that skipped this is exactly what once shipped a stale ScenarioGenerator.)
+    paths:
+      - "D2RSG"
+      - "SLikeNet"
+      - "Detours"
+      - ".github/workflows/deps.yml"
   workflow_dispatch:
 
 permissions:
@@ -50,6 +58,13 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           Get-ChildItem mss32\Lib
+
+      - name: Stamp deps-libs with its source D2RSG commit
+        # mss32's freshness guard compares this against its own D2RSG checkout, turning a
+        # stale-lib link (green but wrong) into a loud, actionable failure.
+        run: |
+          (git -C D2RSG rev-parse HEAD).Trim() | Set-Content -Path mss32\Lib\D2RSG.sha -NoNewline
+          Write-Host "stamped D2RSG $(Get-Content mss32\Lib\D2RSG.sha)"
 
       - name: Upload dependency libs
         uses: actions/upload-artifact@v7
