@@ -164,8 +164,13 @@ jobs:
           T_NAME: ${{ matrix.template.name }}
         run: |
           node --version
-          # Capture every stream so the GEN_OUTCOME line is readable; the script still exits non-zero on
-          # failure. (The sol3 panic itself prints to the game's stderr and stays in the raw job log.)
+          # A failing template makes the script Write-Error + exit 1; under the step default
+          # ErrorActionPreference=Stop that terminates the *>&1 capture before the outcome row is
+          # written, so the failing rows vanished from the summary. Continue lets the capture finish;
+          # the template's exit code is still propagated below, so the job (and the matrix) stays red.
+          $ErrorActionPreference = 'Continue'
+          # Capture every stream so the GEN_OUTCOME line is readable. (The sol3 panic prints to the
+          # game's stderr and stays in the raw job log.)
           $out = & ./tools/test/scenario-generation.ps1 -GameDir "$env:GAME_DIR" -Template $env:T_INDEX -WaitGenerationSec ${{ inputs.wait_sec || '60' }} *>&1
           $code = $LASTEXITCODE
           $out | ForEach-Object { Write-Host $_ }
