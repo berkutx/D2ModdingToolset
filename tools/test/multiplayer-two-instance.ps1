@@ -26,6 +26,7 @@ param(
     [int]$GenWaitSec = 60,     # with -RandomMap: seconds to wait for the host's generation only (not the whole test)
     [switch]$Kill,
     [switch]$EndHostTurn,   # after both reach the map, end the host's turn -> the joiner's begins
+    [switch]$MeasureIncome, # close each role's DLG_BEGIN_TURN with a before/after self-gold snapshot (income delta)
     [string]$GameDir,
     [string]$ProcDump = "",
     [string]$DumpDir = ""
@@ -75,6 +76,27 @@ $Dismiss = @{
     'DLG_SCENARIO_BRIEFING' = 'BTN_CONTINUE'; 'DLG_BEGIN_TURN' = 'BTN_OK'; 'DLG_GETINFO_BOX' = 'BTN_CLOSE'
     'DLG_MESSAGE_BOX' = 'BTN_OK'; 'DLG_EVENT_POPUP' = 'BTN_RIGHTSIDE'
 }
+# With -MeasureIncome: DLG_BEGIN_TURN is the new-day resource-income dialog, but the treasury is
+# credited when the turn ACTIVATES (after the start dialogs), not on the dialog's close. So snapshot
+# the self gold at DLG_BEGIN_TURN (before), and again once the role is on its actionable map (after);
+# the delta is the day's income. A deterministic two-point measure, not a poller race.
+$script:incomeBefore = @{ host = $null; join = $null }
+$script:incomeLogged = @{ host = $false; join = $false }
+function DismissWithIncome([string]$role, [string]$dlg, [string]$btn) {
+    if ($MeasureIncome -and $dlg -eq 'DLG_BEGIN_TURN' -and $null -eq $script:incomeBefore[$role]) {
+        $script:incomeBefore[$role] = (Get-Resources $role).gold   # BEFORE: snapshot at the income dialog
+    }
+    $null = Invoke-Button $role $dlg $btn
+}
+# AFTER: once the role reaches its actionable map (treasury credited by then). Logs the delta once.
+function MeasureIncomeAfter([string]$role) {
+    if (-not $MeasureIncome -or $null -eq $script:incomeBefore[$role] -or $script:incomeLogged[$role]) { return }
+    $script:incomeLogged[$role] = $true
+    Start-Sleep -Milliseconds 1000   # let the turn-activation income land in the throttled world snapshot
+    $after = (Get-Resources $role).gold
+    Write-Host ("[income] {0}: gold at DLG_BEGIN_TURN={1} -> on actionable map={2} (delta {3})" -f `
+            $role, $script:incomeBefore[$role], $after, ($after - $script:incomeBefore[$role])) -ForegroundColor Magenta
+}
 # Dismiss first-turn popups until the role reaches the map (relay-latched reachedStrategic). Paced
 # (~2.5s/popup): the custom menus tick slowly, so rapid re-clicks just coalesce and waste time.
 function DriveToStrategic([string]$role, [int]$timeoutSec) {
@@ -85,7 +107,7 @@ function DriveToStrategic([string]$role, [int]$timeoutSec) {
         $d = if ($r) { $r.dialog } else { $null }
         if ($d -and $Dismiss.ContainsKey($d) -and ($d -ne $lastDlg -or ((Get-Date) - $lastFire).TotalSeconds -ge 2.5)) {
             if ($d -ne $lastDlg) { Write-Host "[disp]   $role dialog appeared: $d -> click $($Dismiss[$d])" }
-            $null = Invoke-Button $role $d $Dismiss[$d]; $lastDlg = $d; $lastFire = Get-Date
+            DismissWithIncome $role $d $Dismiss[$d]; $lastDlg = $d; $lastFire = Get-Date
         }
         Start-Sleep -Milliseconds 700
     }
@@ -201,10 +223,11 @@ function Run-Pairing {
                 if (-not $d -or ((Get-Date) - $last[$role]).TotalSeconds -lt 2.0) { continue }   # pace ~2s/click
                 if ($Dismiss.ContainsKey($d)) {
                     if ($seen[$role] -ne $d) { Write-Host "[disp]   $role dialog appeared: $d -> click $($Dismiss[$d])"; $seen[$role] = $d }
-                    $null = Invoke-Button $role $d $Dismiss[$d]; $last[$role] = Get-Date
+                    DismissWithIncome $role $d $Dismiss[$d]; $last[$role] = Get-Date
                 } elseif ($role -eq 'host' -and $s.host.sawBeginTurn -and ($BareMap -contains $d)) {
                     if (-not $endLogged) {
                         Write-Host "[disp]   host dialogs closed, on bare map ($d) -> end turn (BTN_END_TURN)"
+                        MeasureIncomeAfter host
                         if ($DumpDir) { CaptureWindow $h "host_pre_endturn" }
                         $endLogged = $true
                     }
@@ -223,11 +246,11 @@ function Run-Pairing {
         $t1 = Get-Date; $jlast = (Get-Date).AddSeconds(-10); $jseen = ''
         while ((((Get-Date) - $t1).TotalSeconds) -lt 60) {
             $jd = Get-Dialog join
-            if ($jd -eq 'DLG_ISO_PAL' -or $jd -eq 'DLG_STRATEGIC') { break }   # overlays closed -> its own map
+            if ($jd -eq 'DLG_ISO_PAL' -or $jd -eq 'DLG_STRATEGIC') { MeasureIncomeAfter join; break }   # overlays closed -> its own map
             if (((Get-Date) - $jlast).TotalSeconds -ge 2.0) {
                 if ($Dismiss.ContainsKey($jd)) {
                     if ($jseen -ne $jd) { Write-Host "[disp]   join dialog appeared: $jd -> click $($Dismiss[$jd])"; $jseen = $jd }
-                    $null = Invoke-Button join $jd $Dismiss[$jd]
+                    DismissWithIncome join $jd $Dismiss[$jd]
                 }
                 $jlast = Get-Date
             }
