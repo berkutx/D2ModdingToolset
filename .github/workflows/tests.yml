@@ -241,6 +241,7 @@ jobs:
           "PROCDUMP=$pd"   | Out-File -FilePath $env:GITHUB_ENV -Append
           "DUMPDIR=$dumps" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Install OBS Studio (portable) for the run video
+        continue-on-error: true   # recording is best-effort; never fail the test on an OBS hiccup
         run: |
           . ./tools/test/_obs.ps1
           Install-Obs
@@ -250,7 +251,7 @@ jobs:
           . ./tools/test/_obs.ps1
           $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
           "REC_DIR=$rec" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Start-ObsRecording -OutDir $rec | Out-Null
+          try { Start-ObsRecording -OutDir $rec | Out-Null } catch { Write-Host "::warning::OBS start failed: $($_.Exception.Message)" }
           $code = 1
           try {
             ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -Kill -ProcDump "$env:PROCDUMP" -DumpDir "$env:DUMPDIR"
@@ -258,8 +259,8 @@ jobs:
           } catch {
             Write-Host "::warning::two-instance test threw: $($_.Exception.Message)"; $code = 1
           } finally {
-            $mkv = Stop-ObsRecording
-            if ($mkv) { "VIDEO_FILE=$mkv" | Out-File -FilePath $env:GITHUB_ENV -Append }
+            try { $mkv = Stop-ObsRecording; if ($mkv) { "VIDEO_FILE=$mkv" | Out-File -FilePath $env:GITHUB_ENV -Append } }
+            catch { Write-Host "::warning::OBS stop failed: $($_.Exception.Message)" }
           }
           exit $code
       - name: Upload the run video (single file, uncompressed)
