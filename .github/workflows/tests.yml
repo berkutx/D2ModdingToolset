@@ -132,11 +132,12 @@ jobs:
         run: ./tools/test/reliability_test.ps1 -N 5 -Boot 1 -TimeoutSec 60 -GameDir "$env:GAME_DIR"
 
   # Two-instance multiplayer: a PowerShell dispatcher launches a host + a joiner and
-  # drives both through the menus into a started game over native DirectPlay TCP/IP on
-  # localhost, entirely over the node relay (read each agent's live UI, send invoke/
-  # select commands, no files), and confirms both reach the strategic map.
+  # drives both through the menus into a started skirmish over native DirectPlay TCP/IP on
+  # localhost, entirely over the node relay (read each agent's live UI, send invoke/select
+  # commands, no files). Both reach the map, then the host closes its first-turn dialogs and
+  # legitimately ends its turn, and the joiner sees + clicks through its OWN new day.
   multiplayer-strategic:
-    name: Multiplayer game reaches the strategic map (2p)
+    name: Multiplayer skirmish, host + joiner, honest turn-pass (2p)
     needs: prep-game
     runs-on: windows-2025-vs2026
     env:
@@ -245,7 +246,7 @@ jobs:
         run: |
           . ./tools/test/_obs.ps1
           Install-Obs
-      - name: Host + joiner (dispatcher over the relay) -> both reach the strategic map [recorded]
+      - name: Host + joiner (relay) -> skirmish, both reach the map, host ends turn -> joiner's new day [recorded]
         run: |
           node --version  # the dispatcher starts tools/relay/relay.js; GitHub runners ship Node
           $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
@@ -254,23 +255,28 @@ jobs:
           try { . ./tools/test/_obs.ps1; Start-ObsRecording -OutDir $rec | Out-Null } catch { Write-Host "::warning::OBS start failed: $($_.Exception.Message)" }
           $code = 1
           try {
-            ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -Kill -ProcDump "$env:PROCDUMP" -DumpDir "$env:DUMPDIR"
+            ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -EndHostTurn -Kill -ProcDump "$env:PROCDUMP" -DumpDir "$env:DUMPDIR"
             $code = $LASTEXITCODE
           } catch {
             Write-Host "::warning::two-instance test threw: $($_.Exception.Message)"; $code = 1
           } finally {
-            try { $mkv = Stop-ObsRecording; if ($mkv) { "VIDEO_FILE=$mkv" | Out-File -FilePath $env:GITHUB_ENV -Append } }
-            catch { Write-Host "::warning::OBS stop failed: $($_.Exception.Message)" }
+            try {
+              $mkv = Stop-ObsRecording
+              if ($mkv) {
+                $named = Join-Path (Split-Path $mkv -Parent) 'multiplayer-strategic.mkv'   # archive:false names the artifact after the file
+                Move-Item -LiteralPath $mkv -Destination $named -Force
+                "VIDEO_FILE=$named" | Out-File -FilePath $env:GITHUB_ENV -Append
+              }
+            } catch { Write-Host "::warning::OBS stop failed: $($_.Exception.Message)" }
           }
           exit $code
-      - name: Upload the run video (single file, uncompressed)
+      - name: Upload the run video (raw single file, no zip)
         if: always() && env.VIDEO_FILE != ''   # skip (don't fail) when OBS made no .mkv: an empty path hard-fails upload-artifact before if-no-files-found
         id: video
         uses: actions/upload-artifact@v7
         with:
-          name: multiplayer-video
           path: ${{ env.VIDEO_FILE }}
-          compression-level: 0
+          archive: false   # upload the .mkv raw (downloads as the .mkv, not a .zip); with archive:false the file name IS the artifact name
           if-no-files-found: warn
       - name: Upload the OBS log (diagnostics)
         if: always()
@@ -424,18 +430,23 @@ jobs:
           } catch {
             Write-Host "::warning::generated-map test threw: $($_.Exception.Message)"; $code = 1
           } finally {
-            try { $mkv = Stop-ObsRecording; if ($mkv) { "VIDEO_FILE=$mkv" | Out-File -FilePath $env:GITHUB_ENV -Append } }
-            catch { Write-Host "::warning::OBS stop failed: $($_.Exception.Message)" }
+            try {
+              $mkv = Stop-ObsRecording
+              if ($mkv) {
+                $named = Join-Path (Split-Path $mkv -Parent) 'generated-map-turn-pass.mkv'   # archive:false names the artifact after the file
+                Move-Item -LiteralPath $mkv -Destination $named -Force
+                "VIDEO_FILE=$named" | Out-File -FilePath $env:GITHUB_ENV -Append
+              }
+            } catch { Write-Host "::warning::OBS stop failed: $($_.Exception.Message)" }
           }
           exit $code
-      - name: Upload the run video (single file, uncompressed)
+      - name: Upload the run video (raw single file, no zip)
         if: always() && env.VIDEO_FILE != ''   # skip (don't fail) when OBS made no .mkv: an empty path hard-fails upload-artifact before if-no-files-found
         id: video
         uses: actions/upload-artifact@v7
         with:
-          name: generated-map-video
           path: ${{ env.VIDEO_FILE }}
-          compression-level: 0
+          archive: false   # upload the .mkv raw (downloads as the .mkv, not a .zip); with archive:false the file name IS the artifact name
           if-no-files-found: warn
       - name: Upload the OBS log (diagnostics)
         if: always()
