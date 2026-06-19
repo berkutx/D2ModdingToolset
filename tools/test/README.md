@@ -81,8 +81,10 @@ by hand, set the same variables before launching `Discipl2.exe`.
 ## Running a test
 
 ```powershell
-.\scenario-generation.ps1             # single instance
-.\multiplayer-two-instance.ps1 -Kill  # host and joiner reach the strategic map
+.\scenario-generation.ps1                         # single instance: drive the generator form
+.\scenario-generation.ps1 -Template 7 -ToMap      # single instance: generate, then play into the strategic map
+.\multiplayer-two-instance.ps1 -Kill              # host and joiner reach the strategic map
+.\multiplayer-two-instance.ps1 -Kill -RandomMap -EndHostTurn -Scenario 7   # host GENERATES the map, then an honest turn-pass
 ```
 
 ## Example: scenario-generation.ps1
@@ -113,6 +115,16 @@ Invoke-Button     host $D BTN_GENERATE
 The test passes when the generator dialog opens, each navigation step produces the expected dialog,
 the expected widgets are present, and the client is still on the generator dialog after the form is
 driven.
+
+With `-WaitGenerationSec` the test also waits for the map to generate and asserts it reaches
+`DLG_GENERATION_RESULT`; with `-ToMap` it goes on to accept the map, start the game, and reach the
+strategic map. The generator fails several ways, each reported separately: a sol3 panic that
+leaves the client on the form, a debug-CRT assert (a generator heap fault) that the DebugTest build
+routes to the log and fails the run on instead of a blocking dialog, an error box (`DLG_MESSAGE_BOX`)
+raised after the generator gives up, or a timeout still on `DLG_WAIT_GENERATION`. The two-instance
+[`multiplayer-two-instance.ps1`](multiplayer-two-instance.ps1) `-RandomMap` builds the session from a
+generated map instead of a skirmish, so with `-EndHostTurn` it runs the full honest flow: generate,
+both clients reach the map, the host ends its turn, and the joiner clicks through its own new day.
 
 ## Commands
 
@@ -326,8 +338,10 @@ Release побайтно совпадают с неизменённой DLL.
 ## Запуск теста
 
 ```powershell
-.\scenario-generation.ps1             # один экземпляр
-.\multiplayer-two-instance.ps1 -Kill  # хост и присоединяющийся доходят до стратегической карты
+.\scenario-generation.ps1                         # один экземпляр: проход по форме генератора
+.\scenario-generation.ps1 -Template 7 -ToMap      # один экземпляр: сгенерировать и доиграть до стратегической карты
+.\multiplayer-two-instance.ps1 -Kill              # хост и присоединяющийся доходят до стратегической карты
+.\multiplayer-two-instance.ps1 -Kill -RandomMap -EndHostTurn -Scenario 7   # хост ГЕНЕРИРУЕТ карту, затем честный пропуск хода
 ```
 
 ## Пример: scenario-generation.ps1
@@ -356,6 +370,17 @@ Invoke-Button     host $D BTN_GENERATE
 
 Тест проходит, когда диалог генератора открылся, каждый шаг навигации привёл к ожидаемому диалогу,
 нужные виджеты присутствуют, и клиент остаётся на диалоге генератора после прохода по форме.
+
+С `-WaitGenerationSec` тест также ждёт генерацию карты и проверяет, что дошло до
+`DLG_GENERATION_RESULT`; с `-ToMap` он идёт дальше: принимает карту, запускает игру и доходит до
+стратегической карты. Генератор падает по-разному, каждый случай сообщается отдельно: sol3-паника,
+оставляющая клиента на форме, ассерт отладочного CRT (порча кучи в генераторе), который сборка
+DebugTest пишет в лог и роняет на нём прогон вместо блокирующего диалога, месседж-бокс
+(`DLG_MESSAGE_BOX`) после того как генератор сдался, или тайм-аут всё ещё на `DLG_WAIT_GENERATION`. Двух-инстансный
+[`multiplayer-two-instance.ps1`](multiplayer-two-instance.ps1) с `-RandomMap` создаёт сессию из
+сгенерированной карты вместо скирмиша, поэтому с `-EndHostTurn` он проходит полный честный сценарий:
+сгенерировать, оба клиента доходят до карты, хост завершает ход, а присоединяющийся прокликивает свой
+новый день.
 
 ## Команды
 
