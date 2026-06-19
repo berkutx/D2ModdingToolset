@@ -189,6 +189,7 @@ jobs:
         with:
           name: gen-outcome-${{ matrix.template.index }}
           path: outcome/*.tsv
+          retention-days: 1 # ephemeral scratch (one row) the summarize job merges; do not let it linger
           if-no-files-found: warn
 
   # Aggregate every template's outcome into one table in the run summary.
