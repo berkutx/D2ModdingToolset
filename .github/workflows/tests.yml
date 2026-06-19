@@ -240,10 +240,49 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dumps | Out-Null
           "PROCDUMP=$pd"   | Out-File -FilePath $env:GITHUB_ENV -Append
           "DUMPDIR=$dumps" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Host + joiner (dispatcher over the relay) -> both reach the strategic map
+      - name: Install OBS Studio (portable) for the run video
+        run: |
+          . ./tools/test/_obs.ps1
+          Install-Obs
+      - name: Host + joiner (dispatcher over the relay) -> both reach the strategic map [recorded]
         run: |
           node --version  # the dispatcher starts tools/relay/relay.js; GitHub runners ship Node
-          ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -Kill -ProcDump "$env:PROCDUMP" -DumpDir "$env:DUMPDIR"
+          . ./tools/test/_obs.ps1
+          $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
+          "REC_DIR=$rec" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Start-ObsRecording -OutDir $rec | Out-Null
+          $code = 1
+          try {
+            ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -Kill -ProcDump "$env:PROCDUMP" -DumpDir "$env:DUMPDIR"
+            $code = $LASTEXITCODE
+          } catch {
+            Write-Host "::warning::two-instance test threw: $($_.Exception.Message)"; $code = 1
+          } finally {
+            $mkv = Stop-ObsRecording
+            if ($mkv) { "VIDEO_FILE=$mkv" | Out-File -FilePath $env:GITHUB_ENV -Append }
+          }
+          exit $code
+      - name: Upload the run video (single file, uncompressed)
+        if: always()
+        id: video
+        uses: actions/upload-artifact@v7
+        with:
+          name: multiplayer-video
+          path: ${{ env.VIDEO_FILE }}
+          compression-level: 0
+          if-no-files-found: warn
+      - name: Upload the OBS log (diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: multiplayer-obs-log
+          path: ${{ env.REC_DIR }}/obs.log
+          if-no-files-found: warn
+      - name: Link the run video in the summary on failure
+        if: failure()
+        run: |
+          "### Multiplayer run video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "[Download the recording](${{ steps.video.outputs.artifact-url }})" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Dump per-instance logs + relay state on failure
         if: failure()
