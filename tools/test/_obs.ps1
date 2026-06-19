@@ -41,9 +41,10 @@ function Install-Obs {
 function Start-ObsRecording {
     param(
         [Parameter(Mandatory)][string]$OutDir,
-        [string]$HostTitle   = 'Disciples II [HOST]',
-        [string]$ClientTitle = 'Disciples II [CLIENT]',
-        [int]$PaneW = 1024, [int]$PaneH = 768, [int]$Gap = 20, [int]$Fps = 15
+        [string]$HostTitle   = 'Disciples II  [HOST]',   # NB: two spaces before the tag (windowtag.cpp)
+        [string]$ClientTitle = 'Disciples II  [CLIENT]',
+        [int]$PaneW = 1024, [int]$PaneH = 768, [int]$Gap = 20, [int]$Fps = 15,
+        [string]$WinClass = 'MQ_UIManager', [int]$Method = 2   # the game's window class; WGC (2) captures the GL surface, an empty class fails to match
     )
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
     $script:RecDir = $OutDir
@@ -95,7 +96,7 @@ VBitrate=4000
       "name": "$name",
       "id": "window_capture",
       "versioned_id": "window_capture",
-      "settings": { "window": "$title::Discipl2.exe", "method": 2, "priority": 1, "cursor": false, "client_area": false }
+      "settings": { "window": "${title}:${WinClass}:Discipl2.exe", "method": $Method, "priority": 1, "cursor": false, "client_area": false }
     }
 "@
     }
