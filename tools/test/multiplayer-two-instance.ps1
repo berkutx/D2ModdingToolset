@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
   Drive two game clients (HOST + JOINER) into a started TCP/IP multiplayer game and verify both
-  reach the strategic map, the complex, two-instance test.
+  reach the strategic map, the complex, two-instance test. Optionally the host GENERATES the map.
 
 .DESCRIPTION
   The dispatcher is the brain; the in-DLL clients are thin (report UI, execute invoke/select). Over
@@ -10,12 +10,20 @@
   it (Invoke-Button/Set-ListSelection) and coordinates both, no files, no log scraping for state.
   Needs the DebugTest mss32 build in the game folder and Node.js. Windows are tagged [HOST]/[CLIENT].
 
+  With -RandomMap the host builds the session from a freshly GENERATED random scenario (template
+  index = -Scenario) instead of loading a skirmish; combine with -EndHostTurn for the full honest
+  flow: generate the map, both clients reach it, the host legitimately ends its turn, and the joiner
+  sees and clicks through its OWN new-day dialogs.
+
 .EXAMPLE
   .\multiplayer-two-instance.ps1 -Kill
   .\multiplayer-two-instance.ps1 -Kill -EndHostTurn   # also pass the host's turn to the joiner
+  .\multiplayer-two-instance.ps1 -Kill -EndHostTurn -RandomMap -Scenario 7   # host generates Fight!, then the honest turn-pass
 #>
 param(
-    [int]$Scenario = 0,
+    [int]$Scenario = 0,        # skirmish slot, or (with -RandomMap) the generator template index
+    [switch]$RandomMap,        # host creates the session by GENERATING a random map, not loading a skirmish
+    [int]$GenWaitSec = 60,     # with -RandomMap: seconds to wait for the host's generation only (not the whole test)
     [switch]$Kill,
     [switch]$EndHostTurn,   # after both reach the map, end the host's turn -> the joiner's begins
     [string]$GameDir,
@@ -85,6 +93,39 @@ function DriveToStrategic([string]$role, [int]$timeoutSec) {
     return $false
 }
 
+# HOST creates the multiplayer session by driving the random-scenario generator to a map and
+# accepting it into the lobby (instead of loading a skirmish). The form lives on
+# DLG_RANDOM_SCENARIO_MULTI (DLG_HOST -> BTN_RANDOM_MAP); -Scenario is the template index. A bad
+# template errors at once (stays on the form) and the wait below times out; a slow one is covered
+# by -GenWaitSec. On success the host lands in DLG_LOBBY exactly as the skirmish path would.
+function HostGenerateMap {
+    if (-not (Step-ToDialog host DLG_LOAD_NEW_MULTI BTN_HOST DLG_HOST)) { return $false }
+    if (-not (Step-ToDialog host DLG_HOST BTN_RANDOM_MAP DLG_RANDOM_SCENARIO_MULTI)) { return $false }
+    $D = 'DLG_RANDOM_SCENARIO_MULTI'
+    if (-not (Set-ListSelection host $D TLBOX_TEMPLATES $Scenario)) { return $false }
+    Start-Sleep 3
+    if (-not (Set-EditText host $D EDIT_NAME "AutoHost")) { return $false }   # BTN_GENERATE needs a name
+    Start-Sleep 3
+    if (-not (Set-SpinOption host $D SPIN_SIZE 1)) { return $false }
+    Start-Sleep 3
+    if (-not (Set-SpinOption host $D SPIN_GOAL 0)) { return $false }
+    Start-Sleep 3
+    if (-not (Invoke-Button host $D BTN_GENERATE)) { return $false }
+    Write-Host "[disp] HOST generating random map (template=$Scenario, up to ${GenWaitSec}s)..." -ForegroundColor Cyan
+    $t0 = Get-Date
+    while ((((Get-Date) - $t0).TotalSeconds) -lt $GenWaitSec) {
+        $d = Get-Dialog host
+        if ($d -eq 'DLG_GENERATION_RESULT') {
+            if (-not (Invoke-Button host DLG_GENERATION_RESULT BTN_ACCEPT)) { return $false }
+            return (Wait-Dialog host DLG_LOBBY 20)   # ACCEPT -> the session lobby
+        }
+        if ($d -eq 'DLG_MESSAGE_BOX') { Write-Host "[disp] host generation errored (template $Scenario; DLG_MESSAGE_BOX)" -ForegroundColor Red; return $false }
+        Start-Sleep -Milliseconds 1500
+    }
+    Write-Host "[disp] host generation did not finish in ${GenWaitSec}s (template $Scenario; on $(Get-Dialog host))" -ForegroundColor Red
+    return $false
+}
+
 # ---- the test (dispatcher drives both clients) --------------------------------------------------
 function Run-Pairing {
     # Both clients boot in PARALLEL (joiner 10s after the host). Only ordering constraint: the joiner
@@ -103,18 +144,23 @@ function Run-Pairing {
     if (-not (Step-ToDialog join DLG_PROTOCOL BTN_CONTINUE DLG_LOAD_NEW_MULTI)) { return $false }
     Write-Host "[disp] JOINER staged at DLG_LOAD_NEW_MULTI (waiting for the host's session)" -ForegroundColor DarkGray
 
-    # HOST: DLG_LOAD_NEW_MULTI -> skirmish -> DLG_LOBBY (creates the session). DLG_CHOOSE_SKIRMISH is
-    # co-present inside DLG_HOST (not the "current" dialog), so drive by name until the lobby.
-    $t0 = Get-Date; $hostLobby = $false; $lastFire = (Get-Date).AddSeconds(-10)
-    while ((((Get-Date) - $t0).TotalSeconds) -lt 45) {
-        $d = Get-Dialog host
-        if ($d -eq "DLG_LOBBY") { $hostLobby = $true; break }
-        if (((Get-Date) - $lastFire).TotalSeconds -ge 4) {
-            if ($d -eq "DLG_LOAD_NEW_MULTI") { $null = Invoke-Button host DLG_LOAD_NEW_MULTI BTN_HOST }
-            else { $null = Set-ListSelection host DLG_CHOOSE_SKIRMISH TLBOX_GAME_SLOT $Scenario; Start-Sleep -Milliseconds 400; $null = Invoke-Button host DLG_CHOOSE_SKIRMISH BTN_LOAD }
-            $lastFire = Get-Date
+    # HOST creates the session: GENERATE a random map (-RandomMap) or load a skirmish (default).
+    if ($RandomMap) {
+        $hostLobby = HostGenerateMap
+    } else {
+        # DLG_LOAD_NEW_MULTI -> skirmish -> DLG_LOBBY. DLG_CHOOSE_SKIRMISH is co-present inside DLG_HOST
+        # (not the "current" dialog), so drive by name until the lobby.
+        $t0 = Get-Date; $hostLobby = $false; $lastFire = (Get-Date).AddSeconds(-10)
+        while ((((Get-Date) - $t0).TotalSeconds) -lt 45) {
+            $d = Get-Dialog host
+            if ($d -eq "DLG_LOBBY") { $hostLobby = $true; break }
+            if (((Get-Date) - $lastFire).TotalSeconds -ge 4) {
+                if ($d -eq "DLG_LOAD_NEW_MULTI") { $null = Invoke-Button host DLG_LOAD_NEW_MULTI BTN_HOST }
+                else { $null = Set-ListSelection host DLG_CHOOSE_SKIRMISH TLBOX_GAME_SLOT $Scenario; Start-Sleep -Milliseconds 400; $null = Invoke-Button host DLG_CHOOSE_SKIRMISH BTN_LOAD }
+                $lastFire = Get-Date
+            }
+            Start-Sleep -Milliseconds 500
         }
-        Start-Sleep -Milliseconds 500
     }
     if (-not $hostLobby) { Write-Host "[disp] host STUCK at '$(Get-Dialog host)' (wanted DLG_LOBBY)" -ForegroundColor Red; return $false }
     Write-Host "[disp] HOST in lobby (session created)" -ForegroundColor Green
