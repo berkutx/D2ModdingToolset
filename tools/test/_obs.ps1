@@ -5,8 +5,8 @@
 # per run. The windows are matched by their [HOST]/[CLIENT] caption (set by testdrv/windowtag).
 #
 # Recording does NOT begin at Start-ObsRecording: the two games spend ~30s booting to a black screen,
-# so a background watcher holds off and starts OBS only once the host's window shows content (the relay
-# reports a dialog). A timeout fallback records anyway, so a boot failure still yields a video.
+# so a background watcher holds off and starts OBS only once BOTH windows show content (the relay
+# reports a dialog for each role). A timeout fallback records anyway, so a boot failure still yields a video.
 #
 #   Install-Obs
 #   $rec = Start-ObsRecording -OutDir $dir   # arms the watcher; recording starts on first host content
@@ -137,9 +137,9 @@ $(itemJson 'client' ($PaneW + $Gap))
 
     # Defer the real launch. From t=0 the two games spend ~30s booting to their first rendered dialog,
     # so recording immediately would just capture a black screen. A background watcher polls the relay
-    # and launches OBS only once the HOST reports a dialog (its window shows content); if that never
-    # happens (a boot failure) the ReadyTimeoutSec fallback records anyway, so the run still produces a
-    # diagnostic video. OBS launched with --startrecording keeps capturing until Stop-ObsRecording.
+    # and launches OBS only once BOTH roles report a dialog (both windows show content, so neither pane
+    # is black); if that never happens (a boot failure) the ReadyTimeoutSec fallback records anyway, so
+    # the run still produces a diagnostic video. OBS with --startrecording captures until Stop-ObsRecording.
     Write-Host "[obs] watcher armed (canvas ${canvasW}x${PaneH} -> $OutDir; records when the host renders, fallback ${ReadyTimeoutSec}s)"
     $script:ObsWatcher = Start-Job -Name obswatch `
         -ArgumentList $script:ObsExe, $script:ObsBin, $RelayBase, $ReadyTimeoutSec `
@@ -150,7 +150,7 @@ $(itemJson 'client' ($PaneW + $Gap))
             while ((Get-Date) -lt $deadline) {
                 try {
                     $st = Invoke-RestMethod "$relayBase/api/state" -TimeoutSec 2
-                    if ($st.roles.host.dialog) { break }   # host window rendered the menu -> content is up
+                    if ($st.roles.host.dialog -and $st.roles.join.dialog) { break }   # BOTH windows rendered -> neither pane is black
                 } catch {}   # relay not up yet, or a transient miss; keep polling
                 Start-Sleep -Milliseconds 1000
             }
