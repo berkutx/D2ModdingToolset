@@ -248,10 +248,10 @@ jobs:
       - name: Host + joiner (dispatcher over the relay) -> both reach the strategic map [recorded]
         run: |
           node --version  # the dispatcher starts tools/relay/relay.js; GitHub runners ship Node
-          . ./tools/test/_obs.ps1
           $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
           "REC_DIR=$rec" | Out-File -FilePath $env:GITHUB_ENV -Append
-          try { Start-ObsRecording -OutDir $rec | Out-Null } catch { Write-Host "::warning::OBS start failed: $($_.Exception.Message)" }
+          # dot-source INSIDE the try so a parse error in _obs.ps1 can never fail the test (recording is best-effort)
+          try { . ./tools/test/_obs.ps1; Start-ObsRecording -OutDir $rec | Out-Null } catch { Write-Host "::warning::OBS start failed: $($_.Exception.Message)" }
           $code = 1
           try {
             ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -Kill -ProcDump "$env:PROCDUMP" -DumpDir "$env:DUMPDIR"
@@ -264,7 +264,7 @@ jobs:
           }
           exit $code
       - name: Upload the run video (single file, uncompressed)
-        if: always()
+        if: always() && env.VIDEO_FILE != ''   # skip (don't fail) when OBS made no .mkv: an empty path hard-fails upload-artifact before if-no-files-found
         id: video
         uses: actions/upload-artifact@v7
         with:
@@ -280,7 +280,7 @@ jobs:
           path: ${{ env.REC_DIR }}/obs.log
           if-no-files-found: warn
       - name: Link the run video in the summary on failure
-        if: failure()
+        if: failure() && steps.video.outputs.artifact-url != ''   # only when a video was actually uploaded (else no dead link)
         run: |
           "### Multiplayer run video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           "[Download the recording](${{ steps.video.outputs.artifact-url }})" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
@@ -405,10 +405,50 @@ jobs:
           if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
           & $sevenzip x $z "-o$ex" -y "x86" | Out-Null
           Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
-      - name: Host generates the map, both reach it, host ends turn -> joiner's new day
+      - name: Install OBS Studio (portable) for the run video
+        continue-on-error: true   # recording is best-effort; never fail the test on an OBS hiccup
+        run: |
+          . ./tools/test/_obs.ps1
+          Install-Obs
+      - name: Host generates the map, both reach it, host ends turn -> joiner's new day [recorded]
         run: |
           node --version
-          ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -RandomMap -EndHostTurn -Scenario 7 -GenWaitSec 60 -Kill
+          $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
+          "REC_DIR=$rec" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # dot-source INSIDE the try so a parse error in _obs.ps1 can never fail the test (recording is best-effort)
+          try { . ./tools/test/_obs.ps1; Start-ObsRecording -OutDir $rec | Out-Null } catch { Write-Host "::warning::OBS start failed: $($_.Exception.Message)" }
+          $code = 1
+          try {
+            ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -RandomMap -EndHostTurn -Scenario 7 -GenWaitSec 60 -Kill
+            $code = $LASTEXITCODE
+          } catch {
+            Write-Host "::warning::generated-map test threw: $($_.Exception.Message)"; $code = 1
+          } finally {
+            try { $mkv = Stop-ObsRecording; if ($mkv) { "VIDEO_FILE=$mkv" | Out-File -FilePath $env:GITHUB_ENV -Append } }
+            catch { Write-Host "::warning::OBS stop failed: $($_.Exception.Message)" }
+          }
+          exit $code
+      - name: Upload the run video (single file, uncompressed)
+        if: always() && env.VIDEO_FILE != ''   # skip (don't fail) when OBS made no .mkv: an empty path hard-fails upload-artifact before if-no-files-found
+        id: video
+        uses: actions/upload-artifact@v7
+        with:
+          name: generated-map-video
+          path: ${{ env.VIDEO_FILE }}
+          compression-level: 0
+          if-no-files-found: warn
+      - name: Upload the OBS log (diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: generated-map-obs-log
+          path: ${{ env.REC_DIR }}/obs.log
+          if-no-files-found: warn
+      - name: Link the run video in the summary on failure
+        if: failure() && steps.video.outputs.artifact-url != ''   # only when a video was actually uploaded (else no dead link)
+        run: |
+          "### Generated-map run video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "[Download the recording](${{ steps.video.outputs.artifact-url }})" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
       - name: Dump per-instance logs on failure
         if: failure()
         run: |

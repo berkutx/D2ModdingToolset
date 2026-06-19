@@ -4,8 +4,12 @@
 # always keeps as an artifact. Portable OBS (a release .zip, no install); a fresh config is written
 # per run. The windows are matched by their [HOST]/[CLIENT] caption (set by testdrv/windowtag).
 #
+# Recording does NOT begin at Start-ObsRecording: the two games spend ~30s booting to a black screen,
+# so a background watcher holds off and starts OBS only once the host's window shows content (the relay
+# reports a dialog). A timeout fallback records anyway, so a boot failure still yields a video.
+#
 #   Install-Obs
-#   $rec = Start-ObsRecording -OutDir $dir
+#   $rec = Start-ObsRecording -OutDir $dir   # arms the watcher; recording starts on first host content
 #   ... run the test ...
 #   Stop-ObsRecording        # -> finalizes; the .mkv + obs log are in $dir
 #
@@ -17,7 +21,7 @@ $script:ObsRoot    = Join-Path $env:TEMP 'obs-portable'
 $script:ObsBin     = Join-Path $script:ObsRoot 'bin\64bit'
 $script:ObsExe     = Join-Path $script:ObsBin 'obs64.exe'
 $script:ObsCfg     = Join-Path $script:ObsRoot 'config\obs-studio'
-$script:ObsProc    = $null
+$script:ObsWatcher = $null
 $script:RecDir     = $null
 
 # Download + extract the portable OBS release once; portable_mode.txt keeps its config local.
@@ -44,7 +48,9 @@ function Start-ObsRecording {
         [string]$HostTitle   = 'Disciples II  [HOST]',   # NB: two spaces before the tag (windowtag.cpp)
         [string]$ClientTitle = 'Disciples II  [CLIENT]',
         [int]$PaneW = 1024, [int]$PaneH = 768, [int]$Gap = 20, [int]$Fps = 15,
-        [string]$WinClass = 'MQ_UIManager', [int]$Method = 2   # the game's window class; WGC (2) captures the GL surface, an empty class fails to match
+        [string]$WinClass = 'MQ_UIManager', [int]$Method = 2,   # the game's window class; WGC (2) captures the GL surface, an empty class fails to match
+        [string]$RelayBase = 'http://127.0.0.1:8077',   # the test relay; recording waits until the host reports a dialog (content on screen)
+        [int]$ReadyTimeoutSec = 120                      # ... but records anyway after this, so a boot failure still yields a video
     )
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
     $script:RecDir = $OutDir
@@ -129,25 +135,51 @@ $(itemJson 'client' ($PaneW + $Gap))
 }
 "@ | Set-Content (Join-Path $scn 'CI.json') -Encoding UTF8
 
-    Write-Host "[obs] launching (canvas ${canvasW}x${PaneH}, recording to $OutDir) ..."
-    $script:ObsProc = Start-Process -FilePath $script:ObsExe `
-        -WorkingDirectory $script:ObsBin -PassThru `
-        -ArgumentList '--portable', '--multi', '--minimize-to-tray', '--startrecording', `
-                      '--profile', 'CI', '--collection', 'CI', '--scene', 'CI'
-    Start-Sleep -Seconds 6   # let OBS init its renderer + start the recording before the test drives
-    Write-Host "[obs] pid=$($script:ObsProc.Id)"
+    # Defer the real launch. From t=0 the two games spend ~30s booting to their first rendered dialog,
+    # so recording immediately would just capture a black screen. A background watcher polls the relay
+    # and launches OBS only once the HOST reports a dialog (its window shows content); if that never
+    # happens (a boot failure) the ReadyTimeoutSec fallback records anyway, so the run still produces a
+    # diagnostic video. OBS launched with --startrecording keeps capturing until Stop-ObsRecording.
+    Write-Host "[obs] watcher armed (canvas ${canvasW}x${PaneH} -> $OutDir; records when the host renders, fallback ${ReadyTimeoutSec}s)"
+    $script:ObsWatcher = Start-Job -Name obswatch `
+        -ArgumentList $script:ObsExe, $script:ObsBin, $RelayBase, $ReadyTimeoutSec `
+        -ScriptBlock {
+            param($exe, $bin, $relayBase, $timeoutSec)
+            if (-not (Test-Path $exe)) { return }
+            $deadline = (Get-Date).AddSeconds($timeoutSec)
+            while ((Get-Date) -lt $deadline) {
+                try {
+                    $st = Invoke-RestMethod "$relayBase/api/state" -TimeoutSec 2
+                    if ($st.roles.host.dialog) { break }   # host window rendered the menu -> content is up
+                } catch {}   # relay not up yet, or a transient miss; keep polling
+                Start-Sleep -Milliseconds 1000
+            }
+            Start-Process -FilePath $exe -WorkingDirectory $bin -ArgumentList @(
+                '--portable', '--multi', '--minimize-to-tray', '--startrecording',
+                '--profile', 'CI', '--collection', 'CI', '--scene', 'CI') | Out-Null
+        }
     return $OutDir
 }
 
 # Stop recording and finalize: there is no clean CLI stop, but mkv tolerates a kill, so close OBS and
 # let it flush. Returns the recorded .mkv path (or $null). Also copies OBS's own log next to it.
 function Stop-ObsRecording {
-    if (-not $script:ObsProc) { return $null }
+    # Tear the watcher down first so it cannot launch OBS after we have decided to stop; the brief
+    # settle below then covers the race where it launched OBS just before being removed.
+    if ($script:ObsWatcher) {
+        Stop-Job   $script:ObsWatcher -ErrorAction SilentlyContinue
+        Remove-Job $script:ObsWatcher -Force -ErrorAction SilentlyContinue
+        $script:ObsWatcher = $null
+    }
+    Start-Sleep -Seconds 1
+    # The watcher started OBS in its own runspace, so find it by process name (only our portable
+    # instance runs on the runner). No OBS means the host never rendered before we stopped.
+    $obs = @(Get-Process obs64 -ErrorAction SilentlyContinue)
+    if (-not $obs) { Write-Host "[obs] OBS never started (host never rendered before stop) -> no video"; return $null }
     Write-Host "[obs] stopping ..."
-    # Ask politely first (lets OBS finalize), then force.
-    $script:ObsProc.CloseMainWindow() | Out-Null
+    foreach ($p in $obs) { $p.CloseMainWindow() | Out-Null }   # ask politely so OBS finalizes the mkv
     Start-Sleep -Seconds 4
-    if (-not $script:ObsProc.HasExited) { Stop-Process -Id $script:ObsProc.Id -Force -ErrorAction SilentlyContinue }
+    Get-Process obs64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
     # OBS keeps its own log; copy the newest into the artifact dir for debugging.
     $log = Get-ChildItem (Join-Path $script:ObsCfg 'logs') -Filter *.txt -ErrorAction SilentlyContinue |
@@ -156,6 +188,5 @@ function Stop-ObsRecording {
     $mkv = Get-ChildItem $script:RecDir -Filter *.mkv -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
     if ($mkv) { Write-Host "[obs] recording: $($mkv.Name) ($([int]($mkv.Length/1KB)) KB)" }
     else { Write-Host "[obs] NO .mkv produced (see obs.log)" }
-    $script:ObsProc = $null
     return $(if ($mkv) { $mkv.FullName } else { $null })
 }

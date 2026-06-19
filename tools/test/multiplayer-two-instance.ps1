@@ -305,4 +305,6 @@ try {
     }
 }
 
-if (-not $ok) { Write-Error "two-instance MP did not reach the strategic map"; exit 1 }
+# -ErrorAction Continue so this does NOT throw under the CI shell's ErrorActionPreference=Stop (a throw
+# would surface to the caller as a caught exception); exit 1 is the clean signal callers read via $LASTEXITCODE.
+if (-not $ok) { Write-Error "two-instance MP did not reach the strategic map" -ErrorAction Continue; exit 1 }
