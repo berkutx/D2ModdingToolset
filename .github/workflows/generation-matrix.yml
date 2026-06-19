@@ -1,8 +1,9 @@
 name: generation-matrix
 
 # On-demand: generate every random-scenario template, one job per template, and report which
-# generate vs error. Dispatch only (it is slow and the generator is heavy) and available once this
-# workflow is on the default branch. The matrix axis is parsed from the game's Templates/*.lua by
+# generate vs error (the harness distinguishes a sol3 panic, a mid-generation error box, and a
+# timeout). Dispatch only (it is slow and the generator is heavy) and available once this workflow
+# is on the default branch. The matrix axis is parsed from the game's Templates/*.lua by
 # tools/test/list-templates.js; each job runs scenario-generation.ps1 with -WaitGenerationSec.
 
 on:
@@ -20,10 +21,10 @@ on:
         required: false
         default: ""
       wait_sec:
-        description: "seconds to wait for each template's generation to finish"
+        description: "seconds to wait for each template's generation (a real one finishes well under a minute)"
         type: string
         required: false
-        default: "600"
+        default: "60"
 
 permissions:
   contents: read
@@ -158,6 +159,54 @@ jobs:
           & $sevenzip x $z "-o$ex" -y "x86" | Out-Null
           Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
       - name: Generate template ${{ matrix.template.index }} (${{ matrix.template.name }})
+        env:
+          T_INDEX: ${{ matrix.template.index }}
+          T_NAME: ${{ matrix.template.name }}
         run: |
           node --version
-          ./tools/test/scenario-generation.ps1 -GameDir "$env:GAME_DIR" -Template ${{ matrix.template.index }} -WaitGenerationSec ${{ inputs.wait_sec || '600' }} -Kill
+          # Capture every stream so the GEN_OUTCOME line is readable; the script still exits non-zero on
+          # failure. (The sol3 panic itself prints to the game's stderr and stays in the raw job log.)
+          $out = & ./tools/test/scenario-generation.ps1 -GameDir "$env:GAME_DIR" -Template $env:T_INDEX -WaitGenerationSec ${{ inputs.wait_sec || '60' }} *>&1
+          $code = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host $_ }
+          $oc = $out | Select-String '^GEN_OUTCOME=' | Select-Object -Last 1
+          $status = if ($oc) { ($oc.Line -replace '^GEN_OUTCOME=', '') } else { "failed (exit $code, no outcome line)" }
+          New-Item -ItemType Directory -Force outcome | Out-Null
+          # index<TAB>name<TAB>outcome; the summarize job concatenates these into one table
+          ("{0}`t{1}`t{2}`n" -f $env:T_INDEX, $env:T_NAME, $status) | Set-Content "outcome/$($env:T_INDEX).tsv" -Encoding utf8 -NoNewline
+          Write-Host "::notice title=$($env:T_NAME)::$status"
+          exit $code
+      - name: Upload this template's outcome
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gen-outcome-${{ matrix.template.index }}
+          path: outcome/*.tsv
+          if-no-files-found: warn
+
+  # Aggregate every template's outcome into one table in the run summary.
+  summarize:
+    name: Results summary
+    needs: generate
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect per-template outcomes
+        uses: actions/download-artifact@v8
+        with:
+          pattern: gen-outcome-*
+          path: outcomes
+          merge-multiple: true
+      - name: Build the results table
+        shell: bash
+        run: |
+          {
+            echo "## Random-scenario generation, per template"
+            echo ""
+            echo "| # | Template | Outcome |"
+            echo "|--:|---|---|"
+            cat outcomes/*.tsv 2>/dev/null | sort -n | while IFS=$'\t' read -r idx name status; do
+              [ -n "$name" ] && echo "| $idx | $name | $status |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$GITHUB_STEP_SUMMARY"
