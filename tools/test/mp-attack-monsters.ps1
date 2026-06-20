@@ -206,14 +206,14 @@ try {
     Write-Host "[mp] HOST day-1 gold = $goldH1" -ForegroundColor DarkCyan
 
     # HOST turn: attack the nearest free neutral monster (the host is the active player first).
-    $rh = Invoke-HeroAttack -Role host -Client $h -ReconMove
+    $rh = Invoke-HeroAttack -Role host -Client $h
     if (-not $rh.ok) { throw "host attack: $($rh.reason)" }
     $vh = Test-AttackResult $rh
     Write-Host ("[mp] HOST battle: {0}; monster {1} hp {2} -> {3}; hero hp {4}->{5}{6}" -f `
             $vh.note, $rh.monId, $rh.before.monHp, $rh.after.monHp,
             $rh.before.heroHp, $rh.after.heroHp, $(if ($rh.after.heroGone) { ' GONE' } else { '' })) -ForegroundColor Cyan
-    $rhMv = if ($rh.reconMvBefore -ge 0) { "recon step $($rh.reconMvBefore) -> $($rh.reconMvAfter) (spent $($rh.reconMvBefore - $rh.reconMvAfter))" } else { "no recon step (monster within 2 tiles of exit)" }
-    Write-Host ("[mp] HOST hero MOVEMENT: garrison {0}; {1}" -f $rh.before.heroMv, $rhMv) -ForegroundColor DarkCyan
+    $rhMv = if ($rh.mvBefore -ge 0) { "$($rh.mvBefore) -> $($rh.mvAfter) (spent $($rh.mvBefore - $rh.mvAfter) walking to the monster)" } else { "garrison $($rh.before.heroMv), walk not captured" }
+    Write-Host ("[mp] HOST hero MOVEMENT: $rhMv") -ForegroundColor DarkCyan
     if (-not $vh.ok) { throw "host battle did not resolve: $($vh.note)" }
 
     # HOST passes its turn to the joiner: presses the host's END_TURN AND drives the joiner's new-day
@@ -224,14 +224,14 @@ try {
     Write-Host "[mp] JOINER day-1 gold = $goldJ1" -ForegroundColor DarkCyan
 
     # JOINER turn: the same attack flow (its activate loop dismisses the new-day popup first).
-    $rj = Invoke-HeroAttack -Role join -Client $j -ReconMove
+    $rj = Invoke-HeroAttack -Role join -Client $j
     if (-not $rj.ok) { throw "join attack: $($rj.reason)" }
     $vj = Test-AttackResult $rj
     Write-Host ("[mp] JOINER battle: {0}; hero hp {1}->{2}{3}; monster {4} hp {5}->{6}{7}" -f `
             $vj.note, $rj.before.heroHp, $rj.after.heroHp, $(if ($rj.after.heroGone) { ' GONE' } else { '' }),
             $rj.monId, $rj.before.monHp, $rj.after.monHp, $(if ($rj.after.monGone) { ' GONE' } else { '' })) -ForegroundColor Cyan
-    $rjMv = if ($rj.reconMvBefore -ge 0) { "recon step $($rj.reconMvBefore) -> $($rj.reconMvAfter) (spent $($rj.reconMvBefore - $rj.reconMvAfter))" } else { "no recon step (monster within 2 tiles of exit)" }
-    Write-Host ("[mp] JOINER hero MOVEMENT: garrison {0}; {1}" -f $rj.before.heroMv, $rjMv) -ForegroundColor DarkCyan
+    $rjMv = if ($rj.mvBefore -ge 0) { "$($rj.mvBefore) -> $($rj.mvAfter) (spent $($rj.mvBefore - $rj.mvAfter) walking to the monster)" } else { "garrison $($rj.before.heroMv), walk not captured" }
+    Write-Host ("[mp] JOINER hero MOVEMENT: $rjMv") -ForegroundColor DarkCyan
     if (-not $vj.ok) { throw "join battle did not resolve: $($vj.note)" }
 
     # JOINER ends its turn -> the day rolls over (the world snapshot's `day` increments once everyone,

@@ -30,8 +30,7 @@ function Invoke-HeroAttack {
     param(
         [Parameter(Mandatory)][string]$Role,
         [System.Diagnostics.Process]$Client,
-        [int]$ActivateTimeoutSec = 60,
-        [switch]$ReconMove   # take ONE plain step toward the monster first, to surface a numeric movement-point spend
+        [int]$ActivateTimeoutSec = 60
     )
 
     # Find the hero (garrisoned in the capital at this point).
@@ -82,29 +81,12 @@ function Invoke-HeroAttack {
     Write-Host ("[battle:$Role] target monster {0} ({1},{2}) units={3} hp={4} (adjacent={5})" -f `
             $mon.id, $mon.x, $mon.y, $monUnits0, $monHp0, $adjacent) -ForegroundColor Cyan
 
-    # Optional reconnaissance move: one plain step toward the monster BEFORE attacking, so the movement
-    # spend is observable on a LIVE hero (the attack itself usually kills the lone leader, leaving no
-    # post-move snapshot). Requires the monster to be >= 3 tiles away: the 1-tile step then leaves the hero
-    # still >= 2 tiles from the monster, so the following attack is a normal multi-tile walk. At distance 2
-    # the step would land the hero ADJACENT to the monster and the attack would route from an adjacent tile
-    # (a degenerate move that crashed the host in MP), so it is skipped. The hero's EXIT tile ($ex,$ey)
-    # stays the approach reference, so the recon step counts as the approach in the verification.
-    $reconMvBefore = -1; $reconMvAfter = -1
-    if ($ReconMove -and [Math]::Max([Math]::Abs([int]$mon.x - $ex), [Math]::Abs([int]$mon.y - $ey)) -ge 3) {
-        $rx = $ex + [Math]::Sign([int]$mon.x - $ex); $ry = $ey + [Math]::Sign([int]$mon.y - $ey)
-        if (Move-Stack $Role $hero.id $rx $ry) {
-            $t0 = Get-Date
-            while ((((Get-Date) - $t0).TotalSeconds) -lt 12) {
-                $h = Get-StackId $Role $hero.id
-                if ($h -and ($h.x -ne $ex -or $h.y -ne $ey)) { $reconMvBefore = $heroMv0; $reconMvAfter = [int]$h.movement; break }
-                Start-Sleep 1
-            }
-            if ($reconMvAfter -ge 0) {
-                Write-Host ("[battle:$Role] recon step to ({0},{1}): movement {2} -> {3} (spent {4})" -f `
-                        $h.x, $h.y, $reconMvBefore, $reconMvAfter, ($reconMvBefore - $reconMvAfter)) -ForegroundColor DarkCyan
-            }
-        }
-    }
+    # The movement-point spend is read from the ATTACK itself: the hero walks to the monster (spending
+    # movement) and the battle opens while it is still alive, so the spend is captured at DLG_BATTLE_A
+    # below. No separate recon move is issued - one right next to the just-exited fort proved fragile (it
+    # re-entered the garrison, landed adjacent to the monster making the attack a degenerate move, or
+    # desynced the two MP clients into a battle crash). $mvBefore/$mvAfter hold garrison -> at-battle.
+    $mvBefore = -1; $mvAfter = -1
 
     # Attack: Move-Stack onto the monster's tile -> routed adjacent, end=monster -> the server starts the battle.
     if (-not (Move-Stack $Role $hero.id $mon.x $mon.y)) { return [pscustomobject]@{ ok = $false; reason = "attack move was not issued" } }
@@ -116,6 +98,20 @@ function Invoke-HeroAttack {
     }
     if (-not $inBattle) { return [pscustomobject]@{ ok = $false; reason = "no battle started (DLG_BATTLE_A; on $(Get-Dialog $Role))" } }
     Write-Host "[battle:$Role] battle started (DLG_BATTLE_A)." -ForegroundColor Green
+
+    # Movement spent reaching the monster: the hero walked from its exit tile to the monster and is now
+    # alive in the battle, so read its movement (poll briefly for the throttled snapshot to reflect the
+    # deduction). If the monster was adjacent the walk is 0 and the value stays at the garrison full.
+    $t0 = Get-Date
+    while ((((Get-Date) - $t0).TotalSeconds) -lt 5) {
+        $hb = Get-StackId $Role $hero.id
+        if ($hb) { $mvBefore = $heroMv0; $mvAfter = [int]$hb.movement; if ($mvAfter -lt $heroMv0) { break } }
+        Start-Sleep 1
+    }
+    if ($mvAfter -ge 0) {
+        Write-Host ("[battle:$Role] movement to reach the monster: {0} -> {1} (spent {2})" -f `
+                $mvBefore, $mvAfter, ($mvBefore - $mvAfter)) -ForegroundColor DarkCyan
+    }
 
     # Auto-battle (the AI plays every round; not an instant resolve).
     if (-not (Invoke-Toggle $Role DLG_BATTLE_A TOG_AUTOBATTLE)) { return [pscustomobject]@{ ok = $false; reason = "TOG_AUTOBATTLE not toggled" } }
@@ -160,8 +156,8 @@ function Invoke-HeroAttack {
         ex       = $ex; ey = $ey
         monId    = $mon.id; monX = [int]$mon.x; monY = [int]$mon.y
         adjacent = $adjacent
-        reconMvBefore = $reconMvBefore   # -1 if no recon step taken; else the hero's movement before/after one plain step
-        reconMvAfter  = $reconMvAfter
+        mvBefore = $mvBefore   # hero movement: garrison-full -> at battle start (the walk to the monster). -1 if unread.
+        mvAfter  = $mvAfter
         before   = [pscustomobject]@{ monHp = $monHp0; monUnits = $monUnits0; heroHp = $heroHp0; heroUnits = $heroUnits0; heroMv = $heroMv0 }
         after    = [pscustomobject]@{
             heroGone  = ($null -eq $heroAfter)
