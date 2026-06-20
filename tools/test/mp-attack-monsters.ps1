@@ -212,7 +212,7 @@ try {
     Write-Host ("[mp] HOST battle: {0}; monster {1} hp {2} -> {3}; hero hp {4}->{5}{6}" -f `
             $vh.note, $rh.monId, $rh.before.monHp, $rh.after.monHp,
             $rh.before.heroHp, $rh.after.heroHp, $(if ($rh.after.heroGone) { ' GONE' } else { '' })) -ForegroundColor Cyan
-    $rhMv = if ($rh.reconMvBefore -ge 0) { "recon step $($rh.reconMvBefore) -> $($rh.reconMvAfter) (spent $($rh.reconMvBefore - $rh.reconMvAfter))" } else { "no recon step (monster within reach)" }
+    $rhMv = if ($rh.reconMvBefore -ge 0) { "recon step $($rh.reconMvBefore) -> $($rh.reconMvAfter) (spent $($rh.reconMvBefore - $rh.reconMvAfter))" } else { "no recon step (monster within 2 tiles of exit)" }
     Write-Host ("[mp] HOST hero MOVEMENT: garrison {0}; {1}" -f $rh.before.heroMv, $rhMv) -ForegroundColor DarkCyan
     if (-not $vh.ok) { throw "host battle did not resolve: $($vh.note)" }
 
@@ -230,7 +230,7 @@ try {
     Write-Host ("[mp] JOINER battle: {0}; hero hp {1}->{2}{3}; monster {4} hp {5}->{6}{7}" -f `
             $vj.note, $rj.before.heroHp, $rj.after.heroHp, $(if ($rj.after.heroGone) { ' GONE' } else { '' }),
             $rj.monId, $rj.before.monHp, $rj.after.monHp, $(if ($rj.after.monGone) { ' GONE' } else { '' })) -ForegroundColor Cyan
-    $rjMv = if ($rj.reconMvBefore -ge 0) { "recon step $($rj.reconMvBefore) -> $($rj.reconMvAfter) (spent $($rj.reconMvBefore - $rj.reconMvAfter))" } else { "no recon step (monster within reach)" }
+    $rjMv = if ($rj.reconMvBefore -ge 0) { "recon step $($rj.reconMvBefore) -> $($rj.reconMvAfter) (spent $($rj.reconMvBefore - $rj.reconMvAfter))" } else { "no recon step (monster within 2 tiles of exit)" }
     Write-Host ("[mp] JOINER hero MOVEMENT: garrison {0}; {1}" -f $rj.before.heroMv, $rjMv) -ForegroundColor DarkCyan
     if (-not $vj.ok) { throw "join battle did not resolve: $($vj.note)" }
 

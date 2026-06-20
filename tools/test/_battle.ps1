@@ -77,25 +77,31 @@ function Invoke-HeroAttack {
         return [pscustomobject]@{ ok = $false; reason = "no free neutral monster to attack (fog of war?)" }
     }
     [int]$monHp0 = $mon.hp; [int]$monUnits0 = $mon.units
-    [int]$heroHp0 = $hero.hp; [int]$heroUnits0 = $hero.units
+    [int]$heroHp0 = $hero.hp; [int]$heroUnits0 = $hero.units; [int]$heroMv0 = $hero.movement   # full movement at the exit tile
     $adjacent = ([Math]::Max([Math]::Abs([int]$mon.x - $ex), [Math]::Abs([int]$mon.y - $ey)) -le 1)
     Write-Host ("[battle:$Role] target monster {0} ({1},{2}) units={3} hp={4} (adjacent={5})" -f `
             $mon.id, $mon.x, $mon.y, $monUnits0, $monHp0, $adjacent) -ForegroundColor Cyan
 
     # Optional reconnaissance move: one plain step toward the monster BEFORE attacking, so the movement
     # spend is observable on a LIVE hero (the attack itself usually kills the lone leader, leaving no
-    # post-move snapshot). Skipped if the monster is within 2 tiles (the step would land on/adjacent it).
+    # post-move snapshot). Requires the monster to be >= 3 tiles away: the 1-tile step then leaves the hero
+    # still >= 2 tiles from the monster, so the following attack is a normal multi-tile walk. At distance 2
+    # the step would land the hero ADJACENT to the monster and the attack would route from an adjacent tile
+    # (a degenerate move that crashed the host in MP), so it is skipped. The hero's EXIT tile ($ex,$ey)
+    # stays the approach reference, so the recon step counts as the approach in the verification.
     $reconMvBefore = -1; $reconMvAfter = -1
     if ($ReconMove -and [Math]::Max([Math]::Abs([int]$mon.x - $ex), [Math]::Abs([int]$mon.y - $ey)) -ge 3) {
         $rx = $ex + [Math]::Sign([int]$mon.x - $ex); $ry = $ey + [Math]::Sign([int]$mon.y - $ey)
-        $mvB = [int]$hero.movement
         if (Move-Stack $Role $hero.id $rx $ry) {
-            $moved = $false; $t0 = Get-Date
-            while ((((Get-Date) - $t0).TotalSeconds) -lt 12) { $h = Get-StackId $Role $hero.id; if ($h -and ($h.x -ne $ex -or $h.y -ne $ey)) { $hero = $h; $moved = $true; break }; Start-Sleep 1 }
-            if ($moved) {
-                $reconMvBefore = $mvB; $reconMvAfter = [int]$hero.movement; $ex = [int]$hero.x; $ey = [int]$hero.y
+            $t0 = Get-Date
+            while ((((Get-Date) - $t0).TotalSeconds) -lt 12) {
+                $h = Get-StackId $Role $hero.id
+                if ($h -and ($h.x -ne $ex -or $h.y -ne $ey)) { $reconMvBefore = $heroMv0; $reconMvAfter = [int]$h.movement; break }
+                Start-Sleep 1
+            }
+            if ($reconMvAfter -ge 0) {
                 Write-Host ("[battle:$Role] recon step to ({0},{1}): movement {2} -> {3} (spent {4})" -f `
-                        $ex, $ey, $reconMvBefore, $reconMvAfter, ($reconMvBefore - $reconMvAfter)) -ForegroundColor DarkCyan
+                        $h.x, $h.y, $reconMvBefore, $reconMvAfter, ($reconMvBefore - $reconMvAfter)) -ForegroundColor DarkCyan
             }
         }
     }
@@ -156,7 +162,7 @@ function Invoke-HeroAttack {
         adjacent = $adjacent
         reconMvBefore = $reconMvBefore   # -1 if no recon step taken; else the hero's movement before/after one plain step
         reconMvAfter  = $reconMvAfter
-        before   = [pscustomobject]@{ monHp = $monHp0; monUnits = $monUnits0; heroHp = $heroHp0; heroUnits = $heroUnits0; heroMv = [int]$hero.movement }
+        before   = [pscustomobject]@{ monHp = $monHp0; monUnits = $monUnits0; heroHp = $heroHp0; heroUnits = $heroUnits0; heroMv = $heroMv0 }
         after    = [pscustomobject]@{
             heroGone  = ($null -eq $heroAfter)
             monGone   = ($null -eq $monAfter)
