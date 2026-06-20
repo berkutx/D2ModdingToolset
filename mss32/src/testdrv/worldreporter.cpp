@@ -16,7 +16,11 @@
 
 #include "testdrv/worldreporter.h"
 #include "testdrv/testenv.h"
+#include "testdrv/uistatereporter.h"
+#include "phasegame.h"
+#include "phasegamehooks.h"
 #include "bindings/currencyview.h"
+#include "bindings/fortview.h"
 #include "bindings/groupview.h"
 #include "bindings/idview.h"
 #include "bindings/playerview.h"
@@ -30,6 +34,7 @@
 #include "utils.h"
 #include "version.h"
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <spdlog/spdlog.h>
 #include <string>
@@ -48,6 +53,7 @@ std::mutex g_snapMutex;
 std::string g_snapJson;
 std::uint32_t g_snapEpoch = 0;
 bool g_enabled = false;
+bool g_mapSeen = false;    // latched once the strategic map is up (see the load-window gate below)
 DWORD g_lastBuildTick = 0; // GetTickCount of the last rebuild (the walk is heavier than the UI one)
 constexpr DWORD kThrottleMs = 500;
 
@@ -125,6 +131,14 @@ void buildJson(std::string& json, const game::IMidgardObjectMap* objectMap)
     auto* midgard = game::CMidgardApi::get().instance();
     if (midgard && midgard->data && midgard->data->netPlayerClientPtr)
         localId = midgard->data->netPlayerClientPtr->second;
+    // Single-instance games (skirmish/hotseat) have no network client, so netPlayerClientPtr does not
+    // identify "self"; fall back to the player whose turn it is, taken from the live CPhaseGame the
+    // object-lock hook latches. That is the local player for a single-instance, sequential-turn game.
+    if (localId == game::emptyId) {
+        if (auto* phaseGame = hooks::getStashedPhaseGame())
+            if (phaseGame->data)
+                localId = phaseGame->data->currentPlayerId;
+    }
 
     game::CMidgardID neutralId = game::emptyId;
     if (auto* neutral = hooks::getNeutralPlayer(objectMap))
@@ -175,7 +189,11 @@ void buildJson(std::string& json, const game::IMidgardObjectMap* objectMap)
         game::CMidgardID ownerId = game::emptyId;
         if (auto owner = s.getOwner())
             ownerId = owner->getId().id;
-        const int units = (int)s.getGroup().getUnits().size();
+        const auto unitViews = s.getGroup().getUnits();
+        const int units = (int)unitViews.size();
+        int hp = 0; // total current HP of the group; a battle drops it (damage) even with no unit killed
+        for (const auto& u : unitViews)
+            hp += u.getHp();
         if (!firstStack)
             json += ',';
         firstStack = false;
@@ -194,7 +212,14 @@ void buildJson(std::string& json, const game::IMidgardObjectMap* objectMap)
         json += ',';
         kvInt(json, "units", units);
         json += ',';
+        kvInt(json, "hp", hp);
+        json += ',';
         kvInt(json, "subrace", s.getSubrace());
+        json += ',';
+        // A stack INSIDE a fort/city/village (getInside() set) is a garrison: its reported position is
+        // the fort CENTRE (offset, like the player's own capital), and it cannot be attacked as a free
+        // monster (that is a siege). The move/attack test must skip these and target free stacks only.
+        kvBool(json, "inside", s.getInside().has_value());
         json += '}';
     });
     json += ']';
@@ -208,6 +233,18 @@ void rebuildSnapshot()
     if (!g_enabled)
         return;
 
+    // Only report once the strategic map has come up. On a single-instance game (skirmish/hotseat)
+    // the client object map is built IN PLACE during the initial scenario load, and reading it from
+    // the tick mid-build crashed the load in a way the outer SEH guard cannot catch. The UI reporter
+    // already tracks the live dialog; latch on the map so we never touch the object map during that
+    // initial-load window. (In MP the client map is populated atomically per net message, so this
+    // only changes single-instance behaviour and the pre-map load, which no test reads.)
+    const char* dlg = uistatereporter::currentDialogName();
+    if (dlg && (std::strcmp(dlg, "DLG_ISO_PAL") == 0 || std::strcmp(dlg, "DLG_STRATEGIC") == 0))
+        g_mapSeen = true;
+    if (!g_mapSeen)
+        return;
+
     // Throttle: the object-map walk is heavier than the per-dialog UI snapshot, so rebuild at most
     // ~every 500ms instead of every frame.
     const DWORD now = GetTickCount();
@@ -216,8 +253,14 @@ void rebuildSnapshot()
     g_lastBuildTick = now;
 
     const game::IMidgardObjectMap* objectMap = hooks::getObjectMap();
-    if (!objectMap)
-        return; // no scenario loaded yet (menus) -> nothing to report
+    if (!objectMap) {
+        // No scenario loaded (menus, or BETWEEN scenarios) -> nothing to report. Clear the load-window
+        // latch so a SECOND scenario load in the same process re-gates: g_mapSeen is a one-shot, and
+        // without this reset a return-to-menu-then-new-skirmish would let the next in-place client-map
+        // build be read mid-build again (the very crash the latch prevents on the first load).
+        g_mapSeen = false;
+        return;
+    }
 
     std::string json;
     json.reserve(2048);

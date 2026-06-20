@@ -89,7 +89,8 @@ function Get-GameUi([string]$Role) {
     try { return Invoke-RestMethod "$script:RelayBase/api/ui?role=$([uri]::EscapeDataString($Role))" -TimeoutSec 3 } catch { return $null }
 }
 # The world snapshot for a role: { role, day, players:[{id,relation,human,race,gold,...mana}],
-# stacks:[{id,x,y,owner,relation,movement,units,subrace}] }. Populated only once a scenario is loaded.
+# stacks:[{id,x,y,owner,relation,movement,units,hp,subrace,inside}] }. `hp` is the group's total current
+# HP, `inside` is true for a garrisoned stack. Populated only once a scenario is loaded.
 function Get-World([string]$Role) {
     try { return Invoke-RestMethod "$script:RelayBase/api/world?role=$([uri]::EscapeDataString($Role))" -TimeoutSec 3 } catch { return $null }
 }
@@ -125,6 +126,19 @@ function Set-SpinOption([string]$Role, [string]$Dialog, [string]$Spin, [int]$Ind
 }
 function Set-EditText([string]$Role, [string]$Dialog, [string]$Edit, [string]$Text) {
     [bool](script:Post "edit?role=$([uri]::EscapeDataString($Role))&dlg=$([uri]::EscapeDataString($Dialog))&edit=$([uri]::EscapeDataString($Edit))&text=$([uri]::EscapeDataString($Text))")
+}
+# Move stack <Id> (from Get-Stacks) toward tile (X, Y). The agent builds the path with the game's own
+# cost/passability and issues sendStackMoveMsg, the same call a map click makes. Returns the client's
+# `found` flag: $true if the move was ISSUED (own stack, our turn, some reachable tile toward the
+# target). It does NOT confirm the exact tile was reached: an unreachable target moves the stack as far
+# as it can, so verify the outcome (position, a started battle) via Get-World afterward.
+function Move-Stack([string]$Role, [string]$Id, [int]$X, [int]$Y) {
+    [bool](script:Post "move?role=$([uri]::EscapeDataString($Role))&id=$([uri]::EscapeDataString($Id))&x=$X&y=$Y")
+}
+# Flip a toggle button (e.g. DLG_BATTLE_A::TOG_AUTOBATTLE). invokeButton matches only buttons, so toggles
+# (auto-battle, etc.) need their own verb. Returns the client's `found` flag.
+function Invoke-Toggle([string]$Role, [string]$Dialog, [string]$Toggle) {
+    [bool](script:Post "toggle?role=$([uri]::EscapeDataString($Role))&dlg=$([uri]::EscapeDataString($Dialog))&tog=$([uri]::EscapeDataString($Toggle))")
 }
 
 # Click <Button> on <Dialog> until <Role> reaches <ToDialog>. Returns $true on arrival, $false on

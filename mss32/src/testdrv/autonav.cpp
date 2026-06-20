@@ -17,6 +17,7 @@
 #include "testdrv/packetlogicbridge.h"
 #include "testdrv/testenv.h"
 #include "testdrv/uistatereporter.h"
+#include "testdrv/worldactions.h"
 #include "testdrv/worldreporter.h"
 #include "button.h"
 #include "dialoginterf.h"
@@ -24,6 +25,7 @@
 #include "listbox.h"
 #include "smartptr.h"
 #include "spinbuttoninterf.h"
+#include "togglebutton.h"
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -152,6 +154,40 @@ bool invokeButton(const char* dlgName, const char* btnName, std::uint32_t seq = 
     return invoked;
 }
 
+// Toggle a CToggleButton (e.g. DLG_BATTLE_A::TOG_AUTOBATTLE) the way a click does: flip `checked` then
+// fire its onClicked callback. invokeButton's findButton does not match toggles, hence a separate verb.
+bool invokeToggle(const char* dlgName, const char* togName, std::uint32_t seq = kNoSeq)
+{
+    game::CDialogInterf* dlg = uistatereporter::findDialog(dlgName);
+    // The battle viewer (DLG_BATTLE_A) is not assignFunctor-registered, so findDialog misses it; it IS
+    // the topmost interface though, so fall back to the current dialog when the name matches.
+    if (!dlg) {
+        const char* cur = uistatereporter::currentDialogName();
+        if (cur && lstrcmpA(cur, dlgName) == 0)
+            dlg = uistatereporter::currentDialog();
+    }
+    game::CToggleButton* tog = nullptr;
+    __try {
+        tog = dlg ? game::CDialogInterfApi::get().findToggleButton(dlg, togName) : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        tog = nullptr;
+    }
+    reportFound(seq, tog != nullptr);
+    if (!tog)
+        return false;
+    bool ok = false;
+    __try {
+        const bool newChecked = tog->data ? !tog->data->checked : true;
+        game::CToggleButtonApi::get().setChecked(tog, newChecked);
+        if (tog->vftable && tog->vftable->callOnClicked)
+            tog->vftable->callOnClicked(tog);
+        spdlog::info("[testdrv] nav toggle {}::{} -> {}", dlgName, togName, newChecked);
+        ok = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return ok;
+}
+
 bool setListSelection(const char* dlgName, const char* lbName, int index, std::uint32_t seq = kNoSeq)
 {
     game::CDialogInterf* dlg = uistatereporter::findDialog(dlgName);
@@ -224,12 +260,13 @@ bool setEditText(const char* dlgName, const char* editName, const char* text, st
 // drains them on the UI thread, where invoking a functor is safe.
 struct RemoteCmd
 {
-    int type; // 0 = invoke button, 1 = listbox selection, 2 = spin option, 3 = edit-box text
+    int type; // 0 = invoke button, 1 = listbox selection, 2 = spin option, 3 = edit-box text, 4 = move stack
     std::uint32_t seq; // echoed in the CommandResult so the relay can match the waiting POST
-    char dlg[48];
+    char dlg[48];    // for move (type 4): the stack id string
     char widget[48];
     int param;       // index (listbox / spin)
     char value[64];  // text (edit box)
+    int x, y;        // target tile (move stack)
 };
 std::mutex g_remoteMutex; // guards g_remoteCmds, g_inFlight, g_hasInFlight
 std::deque<RemoteCmd> g_remoteCmds;
@@ -238,7 +275,8 @@ bool g_hasInFlight = false; // whether g_inFlight is valid
 
 void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size)
 {
-    if (op != 0x0300 && op != 0x0301 && op != 0x0302 && op != 0x0303)
+    if (op != 0x0300 && op != 0x0301 && op != 0x0302 && op != 0x0303 && op != 0x0305
+        && op != 0x0306)
         return; // not a command we own
     size_t off = 0;
     auto readStr = [&](char* out, size_t outsz) -> bool {
@@ -259,10 +297,10 @@ void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size
         return;
     cmd.seq = *reinterpret_cast<const std::uint32_t*>(p + off);
     off += 4;
-    if (op == 0x0300) { // InvokeButton: u16 dlgLen|dlg | u16 btnLen|btn
+    if (op == 0x0300 || op == 0x0306) { // InvokeButton / InvokeToggle: u16 dlgLen|dlg | u16 nameLen|name
         if (!readStr(cmd.dlg, sizeof(cmd.dlg)) || !readStr(cmd.widget, sizeof(cmd.widget)))
             return;
-        cmd.type = 0;
+        cmd.type = (op == 0x0300) ? 0 : 5;
     } else if (op == 0x0301 || op == 0x0302) {
         // SetSelection (listbox) / SetSpin (spin button): u16 dlg | u16 widget | u32 index
         if (!readStr(cmd.dlg, sizeof(cmd.dlg)) || !readStr(cmd.widget, sizeof(cmd.widget)))
@@ -271,14 +309,22 @@ void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size
             return;
         cmd.param = *reinterpret_cast<const int*>(p + off);
         cmd.type = (op == 0x0301) ? 1 : 2;
-    } else { // 0x0303 SetEditText: u16 dlg | u16 edit | u16 text
+    } else if (op == 0x0303) { // SetEditText: u16 dlg | u16 edit | u16 text
         if (!readStr(cmd.dlg, sizeof(cmd.dlg)) || !readStr(cmd.widget, sizeof(cmd.widget))
             || !readStr(cmd.value, sizeof(cmd.value)))
             return;
         cmd.type = 3;
+    } else { // 0x0305 MoveStack: u16 stackId | u32 x | u32 y
+        if (!readStr(cmd.dlg, sizeof(cmd.dlg)))
+            return;
+        if (off + 8 > size)
+            return;
+        cmd.x = *reinterpret_cast<const int*>(p + off);
+        cmd.y = *reinterpret_cast<const int*>(p + off + 4);
+        cmd.type = 4;
     }
     auto sameCmd = [&](const RemoteCmd& q) {
-        return q.type == cmd.type && q.param == cmd.param
+        return q.type == cmd.type && q.param == cmd.param && q.x == cmd.x && q.y == cmd.y
                && lstrcmpA(q.dlg, cmd.dlg) == 0 && lstrcmpA(q.widget, cmd.widget) == 0
                && lstrcmpA(q.value, cmd.value) == 0;
     };
@@ -298,6 +344,21 @@ void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size
             return;
         }
     g_remoteCmds.push_back(cmd);
+}
+
+// worldactions::moveStack reads live game objects and issues a net message; like safeRebuildWorld it
+// allocates, so it cannot host __try itself (C2712). Guard the call here, in a frame with no unwinding
+// locals, then report the outcome. (A move on the strategic map does not block like a DPlay join, so
+// reporting after the issue is fine.)
+void safeMoveStack(const RemoteCmd& cmd)
+{
+    bool ok = false;
+    __try {
+        ok = worldactions::moveStack(cmd.dlg, cmd.x, cmd.y);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    reportFound(cmd.seq, ok);
 }
 
 void drainRemoteCommands()
@@ -321,8 +382,12 @@ void drainRemoteCommands()
             setListSelection(cmd.dlg, cmd.widget, cmd.param, cmd.seq);
         else if (cmd.type == 2)
             setSpinOption(cmd.dlg, cmd.widget, cmd.param, cmd.seq);
-        else
+        else if (cmd.type == 3)
             setEditText(cmd.dlg, cmd.widget, cmd.value, cmd.seq);
+        else if (cmd.type == 4)
+            safeMoveStack(cmd);
+        else if (cmd.type == 5)
+            invokeToggle(cmd.dlg, cmd.widget, cmd.seq);
     }
 }
 
@@ -501,12 +566,23 @@ void onDialogBound()
 
 // worldreporter::rebuildSnapshot() reads live game objects through ScenarioView (which allocates), so
 // it cannot host __try itself (MSVC C2712). Guard it here, in a frame with no unwinding locals, so a
-// bad read during a scenario teardown can never crash the game (reporting is best-effort).
-void safeRebuildWorld()
+// bad read during a scenario load/teardown can never crash the game (reporting is best-effort).
+void rebuildWorldGuardedSeh()
 {
     __try {
         worldreporter::rebuildSnapshot();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// A single-instance (skirmish/hotseat) scenario load can also THROW a C++ exception while building an
+// STL container over a half-built object map, which the SEH __except above does not catch, so wrap
+// the guarded call in a C++ try/catch as well (the in-DLL CRT-report capture would otherwise fail-fast).
+void safeRebuildWorld()
+{
+    try {
+        rebuildWorldGuardedSeh();
+    } catch (...) {
     }
 }
 

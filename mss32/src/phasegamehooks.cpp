@@ -23,12 +23,56 @@
 #include "midobjectlock.h"
 #include "phasegame.h"
 #include "stackmovemsg.h"
+#include <cstddef>
 #include <spdlog/spdlog.h>
 
 namespace hooks {
 
+#ifdef D2_TESTDRV
+// Latched on the UI thread by the object-lock check (called while the iso/strategic phase is up), so
+// a testdrv move can reach sendStackMoveMsg with the live receiver. Gated so vanilla stays identical.
+static game::CPhaseGame* g_stashedPhaseGame = nullptr;
+
+// The live game phase, resolved from the client the SAME reliable way getObjectMap() does:
+// CMidgard -> client -> client->data->phase. CMidClientData::phase is a CPhase* that points at the
+// CPhase MEMBER embedded inside the active CPhaseGame (CPhaseGame first inherits INotifyCQ, so its
+// CPhase lives at offset 8), so step back by that offset to recover the CPhaseGame. Validate by the
+// back-pointer pg->data->midClient == client: a real game phase points back to this client, which both
+// confirms the pointer arithmetic and rejects a non-game CPhase (a menu/other phase). NULL off-game.
+static game::CPhaseGame* resolvePhaseGameFromClient()
+{
+    auto* midgard = game::CMidgardApi::get().instance();
+    if (!midgard || !midgard->data || !midgard->data->client)
+        return nullptr;
+    game::CMidClient* client = midgard->data->client;
+    if (!client->data || !client->data->phase)
+        return nullptr;
+    auto* pg = reinterpret_cast<game::CPhaseGame*>(
+        reinterpret_cast<char*>(client->data->phase) - offsetof(game::CPhaseGame, phase));
+    if (!pg->data || pg->data->midClient != client)
+        return nullptr; // not the game phase (menu/other), or stale
+    return pg;
+}
+
+game::CPhaseGame* getStashedPhaseGame()
+{
+    // Prefer resolving from the client: it VALIDATES via the midClient back-pointer, so it never hands
+    // back a phase from a different or torn-down scenario. The object-lock-latched pointer is only a
+    // fallback for the rare case the resolve fails - it is unvalidated and is never reset on teardown, so
+    // returning it first could dangle across a scenario change. (The resolve also covers the idle
+    // strategic map where the object-lock hook may not have fired - the case that made a just-loaded
+    // move find null.)
+    if (auto* pg = resolvePhaseGameFromClient())
+        return pg;
+    return g_stashedPhaseGame;
+}
+#endif
+
 bool __fastcall phaseGameCheckObjectLockHooked(game::CPhaseGame* thisptr, int /*%edx*/)
 {
+#ifdef D2_TESTDRV
+    g_stashedPhaseGame = thisptr;
+#endif
     const auto* lock = thisptr->data->midObjectLock;
     if (lock->patched.exportingLeader) {
         spdlog::debug(__FUNCTION__ ": unlocked due to exportingLeader");

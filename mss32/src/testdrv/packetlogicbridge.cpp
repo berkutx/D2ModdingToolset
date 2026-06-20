@@ -54,6 +54,9 @@ enum class Op : uint16_t
     SetSpin = 0x0302,        // <- dispatcher: set a spin-button option (autonav executor)
     SetEditText = 0x0303,    // <- dispatcher: set an edit-box's text (autonav executor)
     CommandResult = 0x0304,  // -> relay: outcome of a dispatcher command (u32 seq | u8 found)
+    MoveStack = 0x0305,      // <- dispatcher: move a stack to a tile (autonav -> worldactions); forwarded by number
+    InvokeToggle = 0x0306,   // <- dispatcher: flip a toggle button (e.g. TOG_AUTOBATTLE); forwarded by number
+
     UiSnapshot = 0x0410,     // -> relay: current dialog + all its widgets with state (JSON)
     WorldSnapshot = 0x0411,  // -> relay: players' resources + all map stacks (JSON, world reporter)
     Log = 0xFF00,

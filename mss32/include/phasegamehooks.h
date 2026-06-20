@@ -31,6 +31,18 @@ struct CPhaseGame;
 
 namespace hooks {
 
+#ifdef D2_TESTDRV
+/**
+ * testdrv: the live CPhaseGame, so a programmatic test move can reach sendStackMoveMsg without walking
+ * the iso-view task tree. Returns the pointer latched by phaseGameCheckObjectLockHooked when available,
+ * otherwise resolves it fresh from CMidgard->client->data->phase (the same path getObjectMap() uses) and
+ * validates it by the midClient back-pointer. NULL off-game. The fresh resolve is what makes a move work
+ * on the idle strategic map, where the object-lock hook may not have fired (the latch alone was racy).
+ * Call on the UI thread only (the client/phase are UI-thread-affine).
+ */
+game::CPhaseGame* getStashedPhaseGame();
+#endif
+
 bool __fastcall phaseGameCheckObjectLockHooked(game::CPhaseGame* thisptr, int /*%edx*/);
 
 void __fastcall phaseGameSendStackMoveMsgHooked(

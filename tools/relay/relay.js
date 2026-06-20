@@ -35,6 +35,8 @@ const Op = {
     SetSpin: 0x0302,        // -> client: set a spin-button option
     SetEditText: 0x0303,    // -> client: set an edit-box's text
     CommandResult: 0x0304,  // <- client: outcome of a command (u32 seq | u8 found)
+    MoveStack: 0x0305,      // -> client: move a stack to a tile (u16 stackId | i32 x | i32 y)
+    InvokeToggle: 0x0306,   // -> client: flip a toggle button (u16 dlg | u16 toggle)
     UiSnapshot: 0x0410,     // <- client: current dialog + all its widgets with state (JSON)
     WorldSnapshot: 0x0411,  // <- client: players' resources + all map stacks (JSON)
     Log: 0xff00,
@@ -389,6 +391,24 @@ const httpServer = http.createServer(async (req, res) => {
         const dlg = q.get('dlg') || '', edit = q.get('edit') || '', text = q.get('text') || '';
         const found = await sendCommand(sock, Op.SetEditText, Buffer.concat([encodeStr(dlg), encodeStr(edit), encodeStr(text)]));
         return sendJson(res, 200, { role: roleOf(sock), edit: { dlg, edit, text }, found });
+    }
+    // Move a stack: resolve the role's agent, forward { stackId, x, y }; the agent builds the path
+    // with the game's own cost/passability and issues sendStackMoveMsg. `found` = the move was issued.
+    if (req.method === 'POST' && path === '/api/ui/move') {
+        const sock = clientByRole(q.get('role'));
+        if (!sock) return sendJson(res, 503, { error: 'no client for role ' + q.get('role') });
+        const id = q.get('id') || '', x = parseInt(q.get('x') || '0', 10), y = parseInt(q.get('y') || '0', 10);
+        const bx = Buffer.alloc(4); bx.writeInt32LE(x, 0);
+        const by = Buffer.alloc(4); by.writeInt32LE(y, 0);
+        const found = await sendCommand(sock, Op.MoveStack, Buffer.concat([encodeStr(id), bx, by]));
+        return sendJson(res, 200, { role: roleOf(sock), move: { id, x, y }, found });
+    }
+    if (req.method === 'POST' && path === '/api/ui/toggle') {
+        const sock = clientByRole(q.get('role'));
+        if (!sock) return sendJson(res, 503, { error: 'no client for role ' + q.get('role') });
+        const dlg = q.get('dlg') || '', tog = q.get('tog') || '';
+        const found = await sendCommand(sock, Op.InvokeToggle, Buffer.concat([encodeStr(dlg), encodeStr(tog)]));
+        return sendJson(res, 200, { role: roleOf(sock), toggle: { dlg, tog }, found });
     }
     sendJson(res, 404, { error: 'not found' });
 });

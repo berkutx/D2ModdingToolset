@@ -667,6 +667,7 @@ call ..\buildDetours.bat ..\Detours
     <ClCompile Include="src\testdrv\testdrv.cpp" />
     <ClCompile Include="src\testdrv\uistatereporter.cpp" />
     <ClCompile Include="src\testdrv\windowtag.cpp" />
+    <ClCompile Include="src\testdrv\worldactions.cpp" />
     <ClCompile Include="src\testdrv\worldreporter.cpp" />
     <ClCompile Include="src\mainview2.cpp" />
     <ClCompile Include="src\mainview2hooks.cpp" />
@@ -1653,6 +1654,7 @@ call ..\buildDetours.bat ..\Detours
     <ClInclude Include="include\testdrv\testenv.h" />
     <ClInclude Include="include\testdrv\uistatereporter.h" />
     <ClInclude Include="include\testdrv\windowtag.h" />
+    <ClInclude Include="include\testdrv\worldactions.h" />
     <ClInclude Include="include\testdrv\worldreporter.h" />
     <ClInclude Include="include\viewexportedleaderinterf.h" />
     <ClInclude Include="include\visitors.h" />

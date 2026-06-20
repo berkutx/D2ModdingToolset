@@ -58,6 +58,39 @@ next frame.
 A message box is an ordinary dialog (`DLG_MESSAGE_BOX`); its body is the `text` of a text widget, so
 it appears in the snapshot like any other dialog.
 
+## The world snapshot
+
+Beyond the interface, a DebugTest client also reports live game state once a scenario is loaded. With
+the `D2TESTDRV_WORLD` flag (set by `Start-GameClient`), the client walks the scenario on the
+strategic-map tick (throttled to at most about twice a second, not every frame) and publishes a second
+snapshot the dispatcher reads with `Get-World <role>` (`GET /api/world`):
+
+```json
+{ "day": 1,
+  "players": [
+    { "id": "...", "relation": "self", "human": true, "race": 1, "gold": 200, "lifeMana": 0 } ],
+  "stacks": [
+    { "id": "S143KC0001", "x": 38, "y": 38, "owner": "...", "relation": "self",
+      "movement": 33, "units": 1, "hp": 95, "subrace": 1, "inside": true } ] }
+```
+
+`relation` tags each player and stack `self`, `neutral`, or `enemy`. In a single-instance game `self`
+is the player whose turn it is (the reporter has no network client to name the local human), so read
+the world only on your own turn; in multiplayer it is the local client's own player. `Get-Resources
+<role>` returns the local player's row; `Get-Stacks <role>` returns the stack list. The stack fields a
+movement or battle test relies on:
+
+| Field | Meaning |
+|---|---|
+| `x`, `y` | the stack's tile. For a garrisoned stack (`inside` true) this is the fort ANCHOR (its top-left reference cell), not the hero's real cell. |
+| `movement` | movement points left this turn; a move decrements them. |
+| `units` | number of units in the group. |
+| `hp` | total current HP of the group. A battle drops it (damage) even when no unit is killed, so it is the finest signal that a fight took place. |
+| `inside` | true when the stack is INSIDE a fort, city, or village (a garrison). Such a stack reports the fort anchor and is attacked as a siege, so the monster test skips it. |
+
+The snapshot only appears once the strategic map is up; in the menus and during the initial scenario
+load it is empty, so a test POLLS `Get-Stacks` after reaching the map until the stacks are present.
+
 ## Enabling the harness
 
 The harness is compiled into `mss32.dll` only in the **DebugTest** configuration (the `D2_TESTDRV`
@@ -144,7 +177,13 @@ the client's `D2TESTDRV_ROLE`.
 | `Set-ListSelection <role> <dlg> <listbox> <i>` | set a list selection | `POST /api/ui/select` |
 | `Set-SpinOption <role> <dlg> <spin> <i>` | set a spin-button option | `POST /api/ui/spin` |
 | `Set-EditText <role> <dlg> <edit> <text>` | set an edit-box's text | `POST /api/ui/edit` |
+| `Invoke-Toggle <role> <dlg> <toggle>` | flip a toggle button (e.g. auto-battle) | `POST /api/ui/toggle` |
 | `Step-ToDialog <role> <dlg> <btn> <toDlg> [sec]` | click `<btn>` until the client reaches `<toDlg>` | none |
+| `Get-World <role>` | the world snapshot `{ day, players, stacks }` | `GET /api/world` |
+| `Get-Resources <role>` | the local player's resource row | `GET /api/world` |
+| `Get-Stacks <role>` | every stack on the map | `GET /api/world` |
+| `Move-Stack <role> <id> <x> <y>` | move a stack to a tile, or onto a monster to attack | `POST /api/ui/move` |
+| `Resolve-TemplateIndex <gameDir> <name>` | the 0-based generator-template index for a template name | none |
 
 For interactive use, dot-source [`../relay/drive-game-relay.ps1`](../relay/drive-game-relay.ps1): it
 provides the same commands plus the read-only inspectors `Get-GameStatus`, `Get-GameLog`,
@@ -218,6 +257,73 @@ lord's default name, so do not call `Set-EditText` on it: setting the text reset
 prevents the close from committing. `DriveToStrategic` in
 [`multiplayer-two-instance.ps1`](multiplayer-two-instance.ps1) is the complete implementation.
 
+## Battle testing
+
+A battle test drives the whole "approach a monster and fight it" flow through the same native paths a
+real player uses, with no input emulation: it reads the world snapshot, issues one move command per
+step, and asserts against the snapshot. [`attack-monster.ps1`](attack-monster.ps1) is the canonical
+template. Its steps, in order:
+
+1. Reach the map. Generate a random skirmish (Single Player -> New Skirmish -> Random Map) and drive
+   the first-turn popups to `DLG_STRATEGIC`/`DLG_ISO_PAL`, the way `scenario-generation.ps1 -ToMap`
+   does. Skirmish is the single-instance, sequential-turn mode, so the local player is the one whose
+   turn it is.
+2. Exit the garrison. The starting hero sits INSIDE its capital, so the snapshot reports the fort
+   anchor, not the hero's tile, and the first action is always a free exit step. Issue it with
+   `Move-Stack <role> <heroId> (cx+5) (cy+5)`, where `(cx,cy)` is the reported anchor position: the
+   client detects the garrisoned stack and replicates the game's exact 0-cost exit move. Retry the move
+   until it is accepted: the first-day begin-turn popup (`DLG_BEGIN_TURN`) can appear a beat after the
+   iso view and the engine refuses moves until it is confirmed (that activates the turn), so dismiss any
+   lingering popup between attempts. Then wait for the reported position to change to a real tile and
+   treat that as the hero's starting tile.
+3. Pick the target. From `Get-Stacks`, take the nearest stack whose `relation` is `neutral` and whose
+   `inside` is false: a free neutral monster. Filter on `neutral` specifically, not just non-self, so
+   an enemy AI player's roaming stack is never chosen as the "monster"; skip `inside` stacks, which are
+   garrisons (a city, fort, or village) reported at the fort anchor and fought as a siege.
+4. Snapshot BEFORE. Record the monster's and the hero's `x`/`y`, `units`, and `hp`, and whether the
+   monster is already adjacent to the hero (Chebyshev distance of 1 or less).
+5. Attack. `Move-Stack <role> <heroId> <monX> <monY>` onto the monster's tile. The client routes the
+   hero adjacent and sets the move message's `end` to the monster tile, so the server starts the
+   battle exactly as clicking the enemy stack would: `DLG_BATTLE_A` opens, and the UI reporter sees it.
+6. Auto-battle. `Invoke-Toggle <role> DLG_BATTLE_A TOG_AUTOBATTLE` hands the fight to the game's AI,
+   which plays every round (this is the in-game auto-battle, not the instant resolve), and the battle
+   ends on its own. Auto-battle is a toggle, not a button, so it needs `Invoke-Toggle`, not
+   `Invoke-Button`.
+7. Dismiss the post-battle dialogs. A battle is followed by a result screen and, often, one or more
+   reward or dropped-item dialogs. Click the forward button (any of `BTN_CLOSE`, `BTN_OK`,
+   `BTN_TAKEALL`, `BTN_TAKE`, `BTN_CONTINUE`, `BTN_RIGHTSIDE`) on each, the same way the first-turn
+   sequence is driven, until `DLG_STRATEGIC`/`DLG_ISO_PAL` returns. Do not blind-click a generic
+   `BTN_YES` here, and do not treat the battle viewer (`DLG_BATTLE_A`) as stuck while it is still up
+   (a long auto-battle keeps it open); bound the rest with a no-progress guard so an unrecognized
+   reward dialog fails fast instead of spinning the whole timeout.
+8. Verify by reading one clean post-battle snapshot, then comparing. Poll `Get-World` until the GET
+   succeeds, so an absent stack means a real removal and not a dropped request; then look up the hero
+   and the monster by id. The run passes when both of these hold:
+   - The fight resolved: the monster is gone from the census, OR its `hp` or `units` dropped, OR the
+     hero's `hp` or `units` dropped, OR the hero itself is gone (a lost battle that destroyed the
+     party). Someone usually dies, but at the least a fought battle deals damage, so the group `hp` is
+     the key signal: a lone leader against a two-unit monster may kill nobody yet still show HP loss on
+     both sides.
+   - The hero approached: if the hero still exists, its position differs from its post-exit tile. The
+     one exception is a monster already adjacent at step 4, where no approach step is expected; if the
+     hero was destroyed, the approach check is moot.
+
+The moves in a real fight always differ from the starting position (the approach check); the only case
+where they do not is a monster directly adjacent to the garrison exit, which almost never happens.
+Pace the post-battle dialog loop like any other dialog sequence: about one click every 0.7 to 2
+seconds, tracking the last dialog so the same one is not clicked twice before it advances.
+
+This battle flow is factored into [`_battle.ps1`](_battle.ps1) (`Invoke-HeroAttack`) and reused by the
+multiplayer test [`mp-attack-monsters.ps1`](mp-attack-monsters.ps1): the host generates a map (so both
+starts have a nearby neutral; a fixed skirmish can be too sparse), then each player in turn takes one
+plain step (to surface a movement-point spend), attacks its nearest monster, and ends its turn. After
+the day rolls over the test logs each player's daily income (gold change) and the regeneration of every
+damaged survivor (a winning hero that took hits, or a surviving monster). Regeneration is unit and
+timing-dependent (a unit without the Regeneration ability heals 0%; a monster damaged late has not had a
+full day to heal), so it is printed for observation rather than hard-gated; pass `-MinRegenPct 5` for a
+strict floor. The two clients exchange the real game messages over DirectPlay (begin-turn, stack-move,
+battle), so the run exercises turn-pass, movement points, income, and combat HP end to end.
+
 ## Adding a test
 
 Write `tools/test/<name>.ps1`. Take `param([string]$GameDir, [switch]$Kill)`, dot-source `_relay.ps1`,
@@ -247,12 +353,17 @@ explicitly and `-Kill` makes the run clean up after itself.
 | File | Role |
 |---|---|
 | `_relay.ps1` | the toolkit: config, relay, clients, and the commands above |
+| `_battle.ps1` | the shared battle flow (`Invoke-HeroAttack`): exit, approach + attack the nearest free neutral, auto-battle, dismiss dialogs, report before/after; used by both battle tests |
 | `test.config.sample.psd1` | per-machine config template; copy to `test.config.psd1` |
 | `scenario-generation.ps1` | single-instance generator example: drive the form, and with `-ToMap` play the generated map into the strategic screen |
+| `world-snapshot.ps1` | single-instance world-snapshot example: reach the map and read the live world state (player resources + map stacks) |
+| `move-hero.ps1` | single-instance move example: exit the garrison and move the hero with the game's own pathfinding cost, verified through the world snapshot |
+| `attack-monster.ps1` | single-instance battle template: exit, approach a free monster, attack, auto-battle, dismiss post-battle dialogs, and verify by HP / units / position |
+| `mp-attack-monsters.ps1` | multiplayer battle test: host generates a map, both players attack their nearest monster and pass turns, then a damaged survivor's regeneration is verified after the day rolls over |
 | `multiplayer-two-instance.ps1` | two clients into a started game (a skirmish, or with `-RandomMap` a generated map); `-EndHostTurn` adds the honest turn-pass |
 | `reliability_test.ps1` | boot N times to the main menu (the CI boot test) |
 | `walk-menu.ps1` | one self-nav client, left running for manual inspection |
-| `_show-window.ps1`, `_capture.ps1` | bring a window forward, capture a PNG (diagnostics only) |
+| `_show-window.ps1`, `_capture.ps1`, `_obs.ps1` | bring a window forward, capture a PNG, drive OBS video recording (diagnostics only) |
 | `../relay/relay.js` | the relay |
 | `../relay/drive-game-relay.ps1` | interactive console over the relay |
 
@@ -314,6 +425,39 @@ explicitly and `-Kill` makes the run clean up after itself.
 
 Месседж-бокс является обычным диалогом (`DLG_MESSAGE_BOX`); его текст хранится в поле `text` текстового виджета,
 поэтому в снапшоте он виден так же, как любой другой диалог.
+
+## Снапшот мира
+
+Помимо интерфейса, клиент DebugTest сообщает и живое состояние игры, как только загружен сценарий. С
+флагом `D2TESTDRV_WORLD` (его задаёт `Start-GameClient`) клиент на тике стратегической карты (с
+троттлингом не чаще примерно двух раз в секунду, не каждый кадр) обходит сценарий и публикует второй
+снапшот, который диспетчер читает через `Get-World <role>` (`GET /api/world`):
+
+```json
+{ "day": 1,
+  "players": [
+    { "id": "...", "relation": "self", "human": true, "race": 1, "gold": 200, "lifeMana": 0 } ],
+  "stacks": [
+    { "id": "S143KC0001", "x": 38, "y": 38, "owner": "...", "relation": "self",
+      "movement": 33, "units": 1, "hp": 95, "subrace": 1, "inside": true } ] }
+```
+
+`relation` помечает каждого игрока и каждый стек как `self`, `neutral` или `enemy`. В одиночной игре
+`self` это игрок, чей сейчас ход (у репортёра нет сетевого клиента, чтобы назвать локального человека),
+поэтому читайте мир только на своём ходу; в мультиплеере это собственный игрок локального клиента.
+`Get-Resources <role>` возвращает строку локального игрока; `Get-Stacks <role>` возвращает список
+стеков. Поля стека, на которые опирается тест перемещения или боя:
+
+| Поле | Значение |
+|---|---|
+| `x`, `y` | клетка стека. Для стека в гарнизоне (`inside` истинно) это ЯКОРЬ форта (его верхняя-левая опорная клетка), а не реальная клетка героя. |
+| `movement` | оставшиеся очки хода на этом ходу; перемещение их уменьшает. |
+| `units` | число юнитов в отряде. |
+| `hp` | суммарные текущие ХП отряда. Бой их снижает (урон), даже если никто не убит, поэтому это самый тонкий признак того, что бой состоялся. |
+| `inside` | истинно, когда стек находится ВНУТРИ форта, города или деревни (гарнизон). Такой стек сообщает якорь форта и атакуется как осада, поэтому тест на монстра его пропускает. |
+
+Снапшот появляется только после выхода стратегической карты; в меню и во время начальной загрузки
+сценария он пуст, поэтому тест ОПРАШИВАЕТ `Get-Stacks` после выхода на карту, пока стеки не появятся.
 
 ## Включение тестовой системы
 
@@ -400,7 +544,13 @@ DebugTest пишет в лог и роняет на нём прогон вмес
 | `Set-ListSelection <role> <dlg> <listbox> <i>` | выбрать элемент списка | `POST /api/ui/select` |
 | `Set-SpinOption <role> <dlg> <spin> <i>` | задать опцию спин-кнопки | `POST /api/ui/spin` |
 | `Set-EditText <role> <dlg> <edit> <text>` | задать текст поля ввода | `POST /api/ui/edit` |
+| `Invoke-Toggle <role> <dlg> <toggle>` | переключить toggle-кнопку (например, автобой) | `POST /api/ui/toggle` |
 | `Step-ToDialog <role> <dlg> <btn> <toDlg> [sec]` | нажимать `<btn>`, пока клиент не дойдёт до `<toDlg>` | нет |
+| `Get-World <role>` | снапшот мира `{ day, players, stacks }` | `GET /api/world` |
+| `Get-Resources <role>` | строка ресурсов локального игрока | `GET /api/world` |
+| `Get-Stacks <role>` | все стеки на карте | `GET /api/world` |
+| `Move-Stack <role> <id> <x> <y>` | переместить стек на клетку или на монстра для атаки | `POST /api/ui/move` |
+| `Resolve-TemplateIndex <gameDir> <name>` | 0-базовый индекс шаблона генератора по его имени | нет |
 
 Для интерактивной работы подключите [`../relay/drive-game-relay.ps1`](../relay/drive-game-relay.ps1):
 он даёт те же команды плюс инспекторы только для чтения `Get-GameStatus`, `Get-GameLog`,
@@ -473,6 +623,73 @@ while (-not (Get-RoleState $role).reachedStrategic) {
 зафиксироваться. Полную реализацию содержит `DriveToStrategic` в
 [`multiplayer-two-instance.ps1`](multiplayer-two-instance.ps1).
 
+## Тестирование боя
+
+Тест боя проводит весь сценарий «подойти к монстру и сразиться» теми же нативными путями, что и живой
+игрок, без эмуляции ввода: он читает снапшот мира, шлёт по одной команде перемещения на шаг и проверяет
+снапшот. [`attack-monster.ps1`](attack-monster.ps1) - канонический шаблон. Его шаги по порядку:
+
+1. Выйти на карту. Сгенерировать случайный скирмиш (Single Player -> New Skirmish -> Random Map) и
+   провести popup-ы первого хода до `DLG_STRATEGIC`/`DLG_ISO_PAL`, как делает `scenario-generation.ps1
+   -ToMap`. Скирмиш - одиночный режим с последовательными ходами, поэтому локальный игрок и есть тот,
+   чей ход.
+2. Выйти из гарнизона. Стартовый герой сидит ВНУТРИ столицы, поэтому снапшот сообщает якорь форта, а
+   не клетку героя, и первое действие - всегда бесплатный шаг выхода. Подайте его через
+   `Move-Stack <role> <heroId> (cx+5) (cy+5)`, где `(cx,cy)` - сообщённая позиция якоря: клиент
+   распознаёт стек в гарнизоне и воспроизводит точный 0-стоимостный выход игры. Повторяйте команду, пока
+   она не будет принята: popup начала первого дня (`DLG_BEGIN_TURN`) может появиться чуть позже изо-вида,
+   и движок отклоняет ходы, пока его не подтвердят (это активирует ход), поэтому между попытками
+   закрывайте любой задержавшийся popup. Затем дождитесь смены сообщённой позиции на реальную клетку и
+   считайте её стартовой клеткой героя.
+3. Выбрать цель. Из `Get-Stacks` возьмите ближайший стек, у которого `relation` равно `neutral`, а
+   `inside` ложно: свободного нейтрального монстра. Фильтруйте именно по `neutral`, а не просто по
+   не-`self`, чтобы бродячий стек вражеского ИИ-игрока никогда не был выбран как «монстр»; стеки с
+   `inside` пропускайте - это гарнизоны (город, форт, деревня), сообщаемые в якоре форта и атакуемые
+   как осада.
+4. Снимок ДО. Запишите `x`/`y`, `units` и `hp` монстра и героя, а также находится ли монстр уже рядом
+   с героем (расстояние Чебышёва 1 или меньше).
+5. Атаковать. `Move-Stack <role> <heroId> <monX> <monY>` на клетку монстра. Клиент проводит героя
+   вплотную и ставит `end` сообщения о перемещении в клетку монстра, поэтому сервер начинает бой
+   ровно так же, как клик по вражескому стеку: открывается `DLG_BATTLE_A`, и репортёр интерфейса его
+   видит.
+6. Автобой. `Invoke-Toggle <role> DLG_BATTLE_A TOG_AUTOBATTLE` передаёт бой ИИ игры, который отыгрывает
+   каждый раунд (это внутриигровой автобой, а не мгновенное разрешение), и бой завершается сам. Автобой
+   - переключатель, а не кнопка, поэтому нужен `Invoke-Toggle`, а не `Invoke-Button`.
+7. Закрыть послебоевые диалоги. За боем следует экран результата и нередко один или несколько диалогов
+   награды или выпавших предметов. Нажимайте кнопку-вперёд (любую из `BTN_CLOSE`, `BTN_OK`,
+   `BTN_TAKEALL`, `BTN_TAKE`, `BTN_CONTINUE`, `BTN_RIGHTSIDE`) на каждом так же, как ведут
+   последовательность первого хода, пока не вернётся `DLG_STRATEGIC`/`DLG_ISO_PAL`. Не прожимайте вслепую
+   общий `BTN_YES` здесь и не считайте окно боя (`DLG_BATTLE_A`) зависшим, пока оно ещё открыто (долгий
+   автобой держит его открытым); остальное ограничьте сторожем «нет прогресса», чтобы нераспознанный
+   диалог награды быстро падал, а не крутил весь тайм-аут.
+8. Проверить, прочитав один чистый послебоевой снапшот, затем сравнив. Опрашивайте `Get-World`, пока
+   GET не удастся, чтобы отсутствие стека означало реальное удаление, а не потерянный запрос; затем
+   найдите героя и монстра по id. Прогон проходит, когда выполнены обе проверки:
+   - Бой разрешился: монстра нет в переписи, ЛИБО его `hp` или `units` упали, ЛИБО `hp` или `units`
+     героя упали, ЛИБО самого героя нет (проигранный бой уничтожил отряд). Кто-то обычно гибнет, но как
+     минимум состоявшийся бой наносит урон, поэтому ключевой признак - `hp` отряда: одинокий лидер
+     против монстра из двух юнитов может никого не убить, но всё равно покажет потерю ХП с обеих сторон.
+   - Герой подошёл: если герой ещё существует, его позиция отличается от клетки после выхода.
+     Единственное исключение - монстр, уже стоявший рядом на шаге 4, где шаг подхода не ожидается; если
+     герой уничтожен, проверка подхода неприменима.
+
+Ходы в настоящем бою всегда отличаются от стартовой позиции (проверка подхода); единственный случай,
+когда нет, - монстр прямо вплотную к выходу из гарнизона, что почти не случается. Выдерживайте темп
+цикла послебоевых диалогов как у любой последовательности диалогов: примерно одно нажатие в 0.7-2
+секунды, запоминая последний диалог, чтобы не нажать один и тот же дважды до того, как он продвинется.
+
+Этот сценарий боя вынесен в [`_battle.ps1`](_battle.ps1) (`Invoke-HeroAttack`) и переиспользуется
+мультиплеерным тестом [`mp-attack-monsters.ps1`](mp-attack-monsters.ps1): хост генерирует карту (чтобы
+у обоих стартов был ближний нейтрал; фиксированный скирмиш бывает слишком разрежённым), затем каждый
+игрок по очереди делает один обычный шаг (чтобы проявить трату очков движения), атакует ближайшего
+монстра и завершает ход. После смены дня тест логирует дневной инком каждого игрока (изменение золота)
+и регенерацию каждого повреждённого выжившего (победивший герой, получивший урон, или выживший монстр).
+Реген зависит от юнита и тайминга (юнит без способности «Регенерация» лечит 0%; монстр, повреждённый
+поздно, не успел залечиться за полный день), поэтому он печатается для наблюдения, а не жёстко гейтится;
+для строгого порога передайте `-MinRegenPct 5`. Два клиента обмениваются реальными игровыми сообщениями
+по DirectPlay (начало хода, перемещение стека, бой), так что прогон сквозь проверяет пас хода, очки
+движения, инком и боевое ХП.
+
 ## Добавление теста
 
 Создайте `tools/test/<имя>.ps1`. Возьмите `param([string]$GameDir, [switch]$Kill)`, подключите
@@ -502,11 +719,16 @@ CI находится в [`../../.github/workflows`](../../.github/workflows). �
 | Файл | Роль |
 |---|---|
 | `_relay.ps1` | тулкит: конфиг, рилей, клиенты и команды выше |
+| `_battle.ps1` | общий сценарий боя (`Invoke-HeroAttack`): выход, подход + атака ближайшего свободного нейтрала, автобой, закрытие диалогов, отчёт до/после; используется обоими боевыми тестами |
 | `test.config.sample.psd1` | шаблон конфига машины; копируется в `test.config.psd1` |
 | `scenario-generation.ps1` | одиночный пример генератора: прогон по форме, а с `-ToMap` доиграть сгенерированную карту до стратегического экрана |
+| `world-snapshot.ps1` | одиночный пример снапшота мира: выйти на карту и прочитать живое состояние мира (ресурсы игрока + стеки карты) |
+| `move-hero.ps1` | одиночный пример перемещения: выйти из гарнизона и переместить героя с родной стоимостью пути игры, проверка через снапшот мира |
+| `attack-monster.ps1` | одиночный шаблон боя: выход, подход к свободному монстру, атака, автобой, закрытие послебоевых диалогов и проверка по ХП / юнитам / позиции |
+| `mp-attack-monsters.ps1` | мультиплеерный боевой тест: хост генерирует карту, оба игрока атакуют ближайшего монстра и пропускают ход, затем после смены дня проверяется регенерация повреждённого выжившего |
 | `multiplayer-two-instance.ps1` | два клиента в начатую игру (скирмиш или с `-RandomMap` сгенерированная карта); `-EndHostTurn` добавляет честный пропуск хода |
 | `reliability_test.ps1` | загрузка N раз до главного меню (бут-тест CI) |
 | `walk-menu.ps1` | один self-nav клиент, оставленный запущенным для ручного осмотра |
-| `_show-window.ps1`, `_capture.ps1` | поднять окно, снять PNG (только диагностика) |
+| `_show-window.ps1`, `_capture.ps1`, `_obs.ps1` | поднять окно, снять PNG, управлять видеозаписью OBS (только диагностика) |
 | `../relay/relay.js` | рилей |
 | `../relay/drive-game-relay.ps1` | интерактивная консоль над рилеем |
