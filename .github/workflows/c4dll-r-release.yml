@@ -1,0 +1,107 @@
+name: c4dll-r release
+
+# Publishes C4dll-R as a downloadable GitHub Release (a ready-to-drop-in zip), so users get it from
+# the Releases page instead of digging through Actions artifacts. This is INDEPENDENT of the mss32
+# mod: it has its own tag namespace (c4dll-r-v*), so the renderer and the mod are versioned and
+# released separately - it is fine for their version numbers to diverge.
+#
+#   Cut a release:  git tag c4dll-r-v1.0 && git push origin c4dll-r-v1.0
+#   Test build:     run this workflow manually (Actions -> "c4dll-r release" -> Run workflow);
+#                   it publishes a *prerelease* tagged c4dll-r-dev-<sha> (or your label).
+
+on:
+  push:
+    tags:
+      - "c4dll-r-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Label for a manual prerelease (e.g. v1.0-rc1); blank = dev-<sha>"
+        required: false
+        default: ""
+
+permissions:
+  contents: write # create releases + upload assets
+
+concurrency:
+  group: c4dll-r-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build + publish C4dll-R
+    runs-on: windows-2025-vs2026
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Build C4dll-R.dll + timer.c4p
+        run: |
+          # Same build a dev runs: build.ps1 produces the monolith (step 1-6) and timer.c4p (step 7).
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
+          ./c4ddraw/build.ps1
+          if (-not (Test-Path "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll")) { Write-Error "C4dll-R.dll missing"; exit 1 }
+          if (-not (Test-Path "c4ddraw/plugins/timer/bin/Release/timer.c4p")) { Write-Error "timer.c4p missing"; exit 1 }
+
+      - name: Package drop-in zip
+        id: pkg
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $tag = $env:GITHUB_REF_NAME
+            $ver = $tag -replace '^c4dll-r-', ''
+            $pre = "false"
+          } else {
+            $label = "${{ github.event.inputs.version }}".Trim()
+            if (-not $label) { $label = "dev-$(git rev-parse --short HEAD)" }
+            $ver = $label
+            $tag = "c4dll-r-$ver"
+            $pre = "true"
+          }
+          $stage = "pkg/C4dll-R-$ver"
+          New-Item -ItemType Directory -Force -Path "$stage/Mods" | Out-Null
+          Copy-Item "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll" "$stage/C4dll-R.dll"
+          Copy-Item "c4ddraw/plugins/timer/bin/Release/timer.c4p" "$stage/Mods/timer.c4p"
+          Copy-Item "c4ddraw/release/INSTALL.txt" "$stage/INSTALL.txt"
+          Copy-Item "c4ddraw/release/C4plugins.ini" "$stage/C4plugins.ini"
+          $zip = "C4dll-R-$ver.zip"
+          Compress-Archive -Path "$stage" -DestinationPath $zip -Force
+          "tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append
+          "ver=$ver" | Out-File $env:GITHUB_OUTPUT -Append
+          "zip=$zip" | Out-File $env:GITHUB_OUTPUT -Append
+          "pre=$pre" | Out-File $env:GITHUB_OUTPUT -Append
+          Write-Host "packaged $zip (tag $tag, prerelease=$pre)"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ steps.pkg.outputs.tag }}"
+          $ver = "${{ steps.pkg.outputs.ver }}"
+          $zip = "${{ steps.pkg.outputs.zip }}"
+          $pre = "${{ steps.pkg.outputs.pre }}" -eq "true"
+
+          # Release notes from the committed template (avoids a here-string, which cannot close at
+          # column 0 inside a YAML run block). Substitute the version + zip name.
+          $notes = (Get-Content "c4ddraw/release/RELEASE_NOTES.md" -Raw) -replace '__VER__', $ver -replace '__ZIP__', $zip
+          Set-Content -Path notes.md -Value $notes -Encoding utf8
+
+          # Create the release if it does not exist yet (tag push: tag exists; dispatch: gh makes it).
+          gh release view $tag 1>$null 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            $createArgs = @('release', 'create', $tag, '--title', "C4dll-R $ver", '--notes-file', 'notes.md', '--target', $env:GITHUB_SHA)
+            if ($pre) { $createArgs += '--prerelease' }
+            gh @createArgs
+            if ($LASTEXITCODE -ne 0) { Write-Error "gh release create failed"; exit 1 }
+          }
+
+          # Attach the zip and the loose files (clobber so re-runs replace assets).
+          gh release upload $tag $zip "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll" "c4ddraw/plugins/timer/bin/Release/timer.c4p" --clobber
+          if ($LASTEXITCODE -ne 0) { Write-Error "gh release upload failed"; exit 1 }
+          Write-Host "published release $tag"

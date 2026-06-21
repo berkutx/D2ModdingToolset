@@ -1,0 +1,9 @@
+# Reproducible build working copy (regenerated from upstream/ + patches/ by build.ps1) and the
+# collected artifact dir. Everything else here (upstream/, patches/, forwarder/, features/,
+# build.ps1, README.md) is source and IS committed.
+build/
+out/
+*.log
+# native plugin build outputs (timer.cpp/.rc/.def/.ttf/.vcxproj ARE source and committed)
+plugins/*/bin/
+plugins/*/obj/

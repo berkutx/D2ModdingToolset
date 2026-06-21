@@ -1,0 +1,69 @@
+diff --git a/exports.def b/exports.def
+index 1e25f0f..ddae71c 100644
+--- a/exports.def
++++ b/exports.def
+@@ -23,3 +23,5 @@ EXPORTS
+     DDIsWindowed
+     DDGetProcAddress
+     DDEnableZoom
++    DDReloadConfig
++    DDTakeScreenshot
+diff --git a/src/dllmain.c b/src/dllmain.c
+index 8832177..afa060a 100644
+--- a/src/dllmain.c
++++ b/src/dllmain.c
+@@ -14,6 +14,7 @@
+ #include "versionhelpers.h"
+ #include "delay_imports.h"
+ #include "keyboard.h"
++#include "screenshot.h"
+ 
+ 
+ /* export for cncnet cnc games */
+@@ -217,6 +218,46 @@ FARPROC WINAPI DDGetProcAddress(HMODULE hModule, LPCSTR lpProcName)
+     return real_GetProcAddress(hModule, lpProcName);
+ }
+ 
++/*
++ * Re-read ddraw.ini and re-apply the current video settings LIVE (no game restart).
++ * Added for the mss32 in-game Options menu (D2ModdingToolset). dd_SetDisplayMode re-applies
++ * shader / maintas / boxing / vsync / resolution (width,height) / windowed-fullscreen-border
++ * from the freshly-read g_config. (A renderer backend switch still needs a restart: the active
++ * g_ddraw.renderer pointer is resolved once at init, not here.) Call from the game's GUI thread.
++ */
++void DDReloadConfig()
++{
++    TRACE("%s [%p]\n", __FUNCTION__, _ReturnAddress());
++
++    if (!g_ddraw.ref || !g_ddraw.hwnd || !g_ddraw.width)
++        return;
++
++    /* Keep the current window position across the re-read (ini posX/posY default to centered). */
++    LONG saved_left = g_config.window_rect.left;
++    LONG saved_top = g_config.window_rect.top;
++
++    cfg_load();
++
++    if (g_config.window_rect.left == -32000)
++        g_config.window_rect.left = saved_left;
++    if (g_config.window_rect.top == -32000)
++        g_config.window_rect.top = saved_top;
++
++    dd_SetDisplayMode(0, 0, 0, 0);
++}
++
++/*
++ * Take a screenshot of the current frame (identical to the PrintScreen hotkey) -> timestamped
++ * PNG in the screenshot dir (default .\Screenshots\). Added for the mss32 in-game menu.
++ */
++void DDTakeScreenshot()
++{
++    TRACE("%s [%p]\n", __FUNCTION__, _ReturnAddress());
++
++    if (g_ddraw.ref && g_ddraw.primary)
++        ss_take_screenshot(g_ddraw.primary);
++}
++
+ HRESULT WINAPI DirectDrawCreate(GUID FAR* lpGUID, LPDIRECTDRAW FAR* lplpDD, IUnknown FAR* pUnkOuter)
+ {
+     TRACE("-> %s(lpGUID=%p, lplpDD=%p, pUnkOuter=%p) [%p]\n", __FUNCTION__, lpGUID, lplpDD, pUnkOuter, _ReturnAddress());

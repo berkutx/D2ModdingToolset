@@ -1,0 +1,7 @@
+# Preserve the EXACT bytes (and line endings) of the vendored upstream and our patch, so that
+# build.ps1's `git apply` always matches regardless of the checkout platform's autocrlf setting.
+# Without this, a CRLF<->LF normalization on a CI checkout can make the patch context mismatch.
+upstream/** -text
+patches/** -text
+# the embedded clock font (extracted from timer.mod) is binary - never normalize it
+*.ttf binary

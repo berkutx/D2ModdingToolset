@@ -1,0 +1,90 @@
+name: c4ddraw
+
+# Builds the monolith C4dll-R.dll in ONE swappable assembly (DisciplesGL-style), from:
+#   - pristine upstream cnc-ddraw (c4ddraw/upstream, vendored)
+#   - our patch (c4ddraw/patches): DirectDraw embed (hook the game's DirectDrawCreate, so NO
+#     separate ddraw.dll) + the DDReloadConfig/DDTakeScreenshot exports + the in-game menu install
+#   - the in-game menu (c4ddraw/features/featuremenu.cpp), self-contained, no mss32 dependency
+#   - the CB63 export forwarder (c4ddraw/forwarder/C4dll-R.cb63.def): all 483 CB63 exports
+#   - the native timer plugin (c4ddraw/plugins/timer -> timer.c4p), reconstructed from the legacy
+#     timer.mod; the host drives its per-turn reset. Built by build.ps1 step [7/7].
+# Everything is driven by c4ddraw/build.ps1 (same script a dev runs locally). See c4ddraw/README.md.
+
+on:
+  push:
+    paths:
+      - "c4ddraw/**"
+      - ".github/workflows/c4ddraw.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: c4ddraw-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build C4dll-R.dll (MSVC x86, v143)
+    runs-on: windows-2025-vs2026
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Build monolith C4dll-R.dll
+        run: |
+          # Load the MSVC x86 env natively (vswhere + Enter-VsDevShell) so dumpbin is on PATH;
+          # build.ps1 finds MSBuild itself. Same approach as mss32.yml.
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
+
+          ./c4ddraw/build.ps1
+
+          $dll = "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll"
+          if (-not (Test-Path $dll)) { Write-Error "C4dll-R.dll was not produced"; exit 1 }
+
+          # Sanity: it must forward the CB63 exports AND export our 2 renderer/menu hooks, and must
+          # NOT export DirectDrawCreate (that one is internal + IAT-hooked, the whole point).
+          $exp  = & dumpbin /exports $dll
+          $fwd  = ($exp | Select-String 'forwarded to CB63').Count
+          $ours = ($exp | Select-String 'DDReloadConfig|DDTakeScreenshot').Count
+          $ddc  = ($exp | Select-String '\bDirectDrawCreate\b').Count
+          Write-Host "C4dll-R.dll: $fwd CB63 forwards, $ours custom exports, DirectDrawCreate exported=$ddc, $((Get-Item $dll).Length) bytes"
+          if ($fwd -lt 480) { Write-Error "expected >=480 CB63 forwards, got $fwd"; exit 1 }
+          if ($ours -lt 2)  { Write-Error "DDReloadConfig/DDTakeScreenshot exports missing"; exit 1 }
+
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item $dll out/C4dll-R.dll
+
+          # the native timer plugin (built by build.ps1 step [7/7]) - verify its c4p_* exports too.
+          $c4p = "c4ddraw/plugins/timer/bin/Release/timer.c4p"
+          if (-not (Test-Path $c4p)) { Write-Error "timer.c4p was not produced"; exit 1 }
+          $pexp = (& dumpbin /exports $c4p | Select-String 'c4p_query|c4p_init|c4p_tick|c4p_draw|c4p_shutdown').Count
+          Write-Host "timer.c4p: $pexp/5 c4p exports, $((Get-Item $c4p).Length) bytes"
+          if ($pexp -lt 5) { Write-Error "timer.c4p missing c4p_* exports ($pexp/5)"; exit 1 }
+          Copy-Item $c4p out/timer.c4p
+
+      - name: Upload C4dll-R.dll
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: C4dll-R.dll
+          path: out/C4dll-R.dll
+          if-no-files-found: warn
+          archive: false
+
+      - name: Upload timer.c4p
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: timer.c4p
+          path: out/timer.c4p
+          if-no-files-found: warn
+          archive: false

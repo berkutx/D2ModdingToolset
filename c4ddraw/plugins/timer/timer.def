@@ -1,0 +1,9 @@
+LIBRARY
+EXPORTS
+    c4p_query
+    c4p_init
+    c4p_tick
+    c4p_draw
+    c4p_shutdown
+    c4p_menu
+    c4p_command
