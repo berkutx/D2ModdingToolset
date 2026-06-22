@@ -1,5 +1,5 @@
 /*
- * timer.c4p - native (C4dll-R plugin API v2) reconstruction of the legacy DisciplesGL turn timer
+ * timer.c4p - native (C4dll-R plugin API v2) reconstruction of the legacy turn-timer mod
  * (Mods\timer.mod). Rebuilt from a full decompile of timer.mod so the MENU and behaviour match the
  * original 1-to-1. The fragile per-version game hooks live in the HOST (C4dll-R), not here: the host
  * drives turn detection (host->get_turn_serial) and - for the advanced Force-Turn behaviours that need
@@ -11,7 +11,7 @@
  *   Simple Mode { Enabled; On Day Start{Pause/Unpause/Reset}; On Day End{Pause/Unpause/Reset} }
  *   Force Turn Mode { Enabled; Animation Pause; Combat Pause{Off/PvP/PvAny}; On Elapse{End Day/Retreat};
  *                     Reset Extra Time; Timetable... }
- *   Pause(Alt+P); Reset(Alt+R); Set...; Always Visible; Position...; About...
+ *   Pause(Alt+P); Reset(Alt+R); Set...; Always Visible; About...
  */
 
 #include <windows.h>
@@ -41,6 +41,7 @@ int g_pauseOn = 0;      // Combat Pause: 0 = Off, 1 = Player vs Player, 2 = Play
 int g_pauseAnim = 1;    // Animation Pause
 int g_turnDay = 1;      // On Elapse -> End Day
 int g_retreat = 1;      // On Elapse -> Retreat
+int g_elapseFired = 0;  // latch: the on-elapse action fired this turn (re-armed when the clock is positive)
 int g_resetExtra = 0;   // Reset Extra Time
 int g_alwaysVisible = 1;
 int g_durBase = 300;    // TableDuration_0 (seconds) - the per-turn budget in Force Turn Mode (day-1 base)
@@ -60,8 +61,10 @@ int g_running = 0;      // a real turn has started (active) -> the clock counts.
                         // begins (you reach the strategic view), NOT from launch / the main menu.
 DWORD g_baseline = 0;   // tick the current count started from
 DWORD g_pausedAt = 0;   // tick we paused at (clock frozen here while paused)
-int g_extra = 0;        // carried "extra" time (ms) added to the Force-mode budget; Set/Reset clear it,
-                        // the host-event keystone accumulates it per-player on turn change (legacy dword_10008068)
+int g_extra = 0;        // the CURRENT player's carried extra time (ms), added to the Force budget
+int g_bank[16] = {0};   // per-player Force time bank (ms); Fischer-increment (legacy dword_10008070..88)
+int g_lastPlayer = -1;  // player whose turn it was last (to bank their remaining on turn change)
+int g_curDayBudget = 0; // the day captured at the current turn-start (for the previous turn's budget)
 uint32_t g_lastSerial = 0; // last host turn serial seen (a change while in-game = a turn (re)started)
 
 // Guards config + clock shared between c4p_command (game UI thread) and c4p_tick (worker thread).
@@ -157,6 +160,17 @@ int hostAnimating()
     return (g_host && g_host->struct_size >= sizeof(C4P_Host) && g_host->is_animating)
                ? g_host->is_animating()
                : 0;
+}
+// On-Elapse actions: queue an auto End-Day / Retreat in the host (the host presses on the game thread).
+void hostEndDay()
+{
+    if (g_host && g_host->struct_size >= sizeof(C4P_Host) && g_host->end_day)
+        g_host->end_day();
+}
+void hostRetreat()
+{
+    if (g_host && g_host->struct_size >= sizeof(C4P_Host) && g_host->retreat)
+        g_host->retreat();
 }
 int hostBattleKind()
 {
@@ -348,12 +362,42 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         g_running = 0;
         g_lastSerial = serial;
     } else if (serial != g_lastSerial) {
-        // A real turn (re)started while in a game -> start/reset the count from here (like timer.mod's
-        // off[6] resetting the baseline once the strategic turn is active).
+        // A real turn (re)started. Mirror the legacy off[6]/off[7] turn handlers: Force mode is a
+        // Fischer time-bank (each turn +budget, unused carries per player); Simple mode is a count-up
+        // stopwatch with optional On-Day pause/unpause/reset bits.
+        const int newPlayer = g_host->get_turn_player();
+        const int firstTurn = !g_running; // 0->1 transition = the first real turn of this game
         g_lastSerial = serial;
-        g_baseline = now_ms;
-        g_pausedAt = now_ms;
+        if (firstTurn) {
+            for (int i = 0; i < 16; ++i) g_bank[i] = 0; // fresh game
+            g_extra = 0;
+            g_baseline = now_ms;
+            g_pausedAt = now_ms;
+            g_curDayBudget = dayNow;
+        } else if (g_state == 2) {
+            // Force: bank the PREVIOUS player's remaining (budget + their extra - elapsed), then load
+            // the NEW player's bank and start a fresh budget. ResetExtraTime drops the carry.
+            if (g_lastPlayer >= 0 && g_lastPlayer < 16) {
+                const int elapsedPrev = (int)(now_ms - g_baseline);
+                const int budgetPrev = budgetSecForDay(g_curDayBudget) * 1000;
+                g_bank[g_lastPlayer] = g_resetExtra ? 0 : (budgetPrev + g_extra - elapsedPrev);
+            }
+            g_curDayBudget = dayNow;
+            g_extra = (newPlayer >= 0 && newPlayer < 16) ? g_bank[newPlayer] : 0;
+            g_baseline = now_ms;
+            g_pausedAt = now_ms;
+        } else if (g_state == 1) {
+            // Simple (count-up): apply On-Day-End then On-Day-Start DayTurn bits; otherwise keep
+            // counting across turns (the legacy does not reset the stopwatch unless a Reset bit fires).
+            if (g_dayTurn & 0x20) restart();         // DayEnd Reset
+            if (g_dayTurn & 0x08) setPaused(1);      // DayEnd Pause
+            else if (g_dayTurn & 0x10) setPaused(0); // DayEnd Unpause
+            if (g_dayTurn & 0x04) restart();         // DayStart Reset
+            if (g_dayTurn & 0x01) setPaused(1);      // DayStart Pause
+            else if (g_dayTurn & 0x02) setPaused(0); // DayStart Unpause
+        }
         g_running = 1;
+        g_lastPlayer = newPlayer;
     }
 
     // Force-mode auto-pause: combine Animation Pause (PauseAnimation while in a battle / attack
@@ -405,6 +449,17 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         }
         formatTime(v9, text);
         pickColors(v9, state, paused, &tc, &sc);
+        // On Elapse: when a Force-mode turn's time runs out, fire the queued game action ONCE per turn.
+        // Re-armed automatically as soon as the clock is positive again (turn change / Set / Reset).
+        if (v9 >= 0) {
+            g_elapseFired = 0;
+        } else if (state == 2 && running && inGame && !g_elapseFired) {
+            g_elapseFired = 1;
+            if (g_turnDay) {
+                if (hostInBattle()) { if (g_retreat) hostRetreat(); }
+                else hostEndDay();
+            }
+        }
     }
 
     unsigned sig = visible ? 1u : 0u;
@@ -615,7 +670,6 @@ extern "C" HMENU __cdecl c4p_menu(int base_cmd_id)
     AppendMenuA(g_menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuA(g_menu, MF_STRING, b + kAlwaysVis, "&Always Visible");
     AppendMenuA(g_menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(g_menu, MF_STRING, b + kHelp, "&Help...");
     AppendMenuA(g_menu, MF_STRING, b + kAbout, "&About...");
 
     refreshMenu();
@@ -671,16 +725,10 @@ extern "C" void __cdecl c4p_command(int cmd)
         DialogBoxParamW(g_hinst, MAKEINTRESOURCEW(IDD_TIMETABLE), hwnd, timetableDlgProc, 0);
     } else if (off == kAbout) {
         MessageBoxA(hwnd,
-                    "Turn Timer (native C4dll-R plugin)\n"
-                    "Reconstruction of the DisciplesGL turn timer for Disciples II (by Verok).",
+                    "C4dll-R\n"
+                    "DirectDraw renderer for Disciples II, built on the open-source\n"
+                    "cnc-ddraw (https://github.com/FunkyFr3sh/cnc-ddraw).",
                     "About", MB_OK | MB_ICONINFORMATION);
-    } else if (off == kHelp) {
-        MessageBoxA(hwnd,
-                    "Simple Mode: counts up each turn.\n"
-                    "Force Turn Mode: a per-turn countdown (Timetable... sets the per-day budget); on\n"
-                    "elapse it can auto End Day / Retreat. Combat / Animation Pause freeze the clock.\n"
-                    "Set... adjusts the current turn's remaining time.",
-                    "Help", MB_OK | MB_ICONINFORMATION);
     } else if (off == kSet) {
         DialogBoxParamW(g_hinst, MAKEINTRESOURCEW(IDD_SET), hwnd, setDlgProc, 0);
     }

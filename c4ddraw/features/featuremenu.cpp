@@ -1,9 +1,9 @@
 /*
- * C4dll-R monolith: DisciplesGL-style in-game menu + feature toggles.
+ * C4dll-R monolith: in-game menu + feature toggles.
  *
  * Ported from the D2ModdingToolset mss32 module (featuremenu.cpp) into the embedded cnc-ddraw
  * renderer so the final C4dll-R.dll is a SELF-CONTAINED, swappable assembly (renderer + menu),
- * exactly like DisciplesGL was. It does NOT depend on mss32: the few bits it needs from the game
+ * a single swappable assembly. It does NOT depend on mss32: the few bits it needs from the game
  * (version detection, the GameSettings pointer chain) are inlined here as raw addresses/offsets,
  * the renderer's own DDReloadConfig / DDTakeScreenshot exports are called directly (same module),
  * and logging goes to a local logger instead of spdlog.
@@ -12,7 +12,7 @@
  * (https://github.com/VladimirMakeev/D2ModdingToolset). GPLv3+. See the repo LICENSE.
  *
  * cnc-ddraw renders into the game's own window but has no in-game settings menu, so we add a real
- * menu BAR below the title bar with DGL-style options.
+ * menu BAR below the title bar with the feature options.
  *   - The real title bar comes from cnc-ddraw itself (ddraw.ini border=true); we only attach the
  *     menu BAR (SetMenu) + drive it. We DETOUR the game's window procedure by address (not a
  *     SetWindowLong subclass, which cnc-ddraw clobbers) to receive WM_COMMAND.
@@ -36,6 +36,7 @@
 // saves a timestamped PNG. Both no-op safely if the renderer is not yet initialized.
 extern "C" void DDReloadConfig(void);
 extern "C" void DDTakeScreenshot(void);
+extern "C" void DDMapClientToGame(long cx, long cy, long* gx, long* gy); // Win32 client -> game coords (drag-scroll)
 
 // Plugin host (pluginhost.cpp) - used to build the "Plugins" menu (split legacy .mod / native .c4p).
 extern "C" void pluginhost_wait_ready(unsigned ms);
@@ -44,6 +45,11 @@ extern "C" const char* pluginhost_name(int i);
 extern "C" int pluginhost_is_new(int i);
 extern "C" void* pluginhost_menu(int i);
 extern "C" int pluginhost_command(unsigned id); // route a plugin-block WM_COMMAND to its c4p_command
+
+// Map drag-scroll lives in GLOBAL scope (defined after the anonymous namespace below); forward-declared
+// here so the anon-namespace wndProcHook can reach the same symbols. g_dragScrollActive = a drag is live.
+extern bool g_dragScrollActive;
+void dragScrollWndMove(int gameX, int gameY);
 
 namespace {
 
@@ -170,12 +176,12 @@ void applyAlwaysActive(bool on)
     }
 }
 
-// --- animation speed: DGL-style virtual clock over timeGetTime --------------------------
+// --- animation speed: virtual clock over timeGetTime --------------------------
 // The game drives sprite animation off timeGetTime(): it advances a frame when
 // timeGetTime() >= nextUpdate, then nextUpdate += interval (66ms slow / 33ms fast lists, plus the
-// per-unit battle intervals). DisciplesGL sped this up NOT by patching game memory, but by hooking
-// the game's imported timeGetTime and returning a VIRTUAL clock that advances factor/10 times
-// faster (this is exactly DGL's sub_10012DE0 in the .disciplesgl backup; our exe goes through DGL's
+// per-unit battle intervals). The original renderer sped this up NOT by patching game memory, but by
+// hooking the game's imported timeGetTime and returning a VIRTUAL clock that advances factor/10 times
+// faster (this is exactly sub_10012DE0 in the original-renderer backup; our exe goes through its
 // table B / else branch, so this -- not the table-A-only per-object +0x98 hook -- is the mechanism
 // that always worked for us). Every interval the game compares against then shrinks proportionally
 // -> faster animation, with ZERO game-state writes. Version-independent, race-free (no init-timing
@@ -366,6 +372,7 @@ enum : UINT
     kIdAnimMap3 = 0xA1D3,
     kIdAnimMap4 = 0xA1D4,
     kIdAnimMap5 = 0xA1D5,
+    kIdDragScroll = 0xA1E0, // toggle: grab+drag map panning (detours the iso-view mouse handler)
     kIdLast = 0xA1FF, // upper bound of our WM_COMMAND id block
 };
 
@@ -442,6 +449,7 @@ int g_mapAnimSpeed = 5;
 int g_rendererIdx = 0;  // index into kRenderers (-1 = unknown/custom)
 int g_shaderIdx = -1;   // index into kShaders   (-1 = unknown/custom)
 bool g_maintas = false, g_vsync = false, g_boxing = false;
+bool g_dragScroll = false; // grab+drag map panning (menu toggle, ini [menu] dragScroll, default off)
 int g_ticksIdx = -1;    // index into kTicksValues (-1 = custom)
 int g_resIdx = -1;      // index into kRes (-1 = custom)
 int g_fpsIdx = -1;      // index into kFpsValues (-1 = custom)
@@ -449,7 +457,7 @@ int g_battleSpeed = 2;  // native GameSettings.battleSpeed (1..4)
 int g_mapSpeed = 1;     // native GameSettings.playerSpeed/opponentSpeed (1..3)
 int g_modeIdx = 0;      // index into kModes (windowed/borderless/exclusive)
 HMENU g_bar = nullptr;
-int g_grownTo = 0; // window height we last grew to (so the menu bar does not cut the game; no re-fight)
+UINT g_relayoutMsg = 0; // registered msg: marshal the one-time menu-attach window relayout onto the GUI thread
 HMENU g_gameMenu = nullptr, g_videoMenu = nullptr, g_perfMenu = nullptr; // top-level bar menus
 HMENU g_battleAnimMenu = nullptr, g_mapAnimMenu = nullptr;
 HMENU g_rendMenu = nullptr, g_shaderMenu = nullptr;
@@ -460,6 +468,7 @@ int g_ncCursorAdded = 0;  // how many ShowCursor(TRUE) we added (to remove exact
 
 using WndProcFn = LRESULT(CALLBACK*)(HWND, UINT, WPARAM, LPARAM);
 WndProcFn g_origWndProc = nullptr;
+HWND g_gameHwnd = nullptr; // game window (drag-scroll SetCapture target so moves flow during a drag); set in wndProcHook
 
 uintptr_t gameWndProcVA()
 {
@@ -477,6 +486,7 @@ void persist()
     WritePrivateProfileStringA("menu", "mapAnimEnabled", g_mapAnimEnabled ? "1" : "0", f);
     wsprintfA(buf, "%d", g_mapAnimSpeed);
     WritePrivateProfileStringA("menu", "mapAnimSpeed", buf, f);
+    WritePrivateProfileStringA("menu", "dragScroll", g_dragScroll ? "1" : "0", f);
 }
 
 // First-run config: if C4menu.ini does not exist yet, generate a complete, COMMENTED one and convert
@@ -512,7 +522,7 @@ void seedConfigFirstRun()
         "alwaysActive=%d\r\n"
         "\r\n"
         "; Live animation-speed multiplier, separate for battle and the strategic map\r\n"
-        "; (DisciplesGL-style timeGetTime virtual clock; safe, no game-memory patch).\r\n"
+        "; (timeGetTime virtual clock; safe, no game-memory patch).\r\n"
         ";   *Enabled : 0 = vanilla, 1 = on.   *Speed : 1..5  ->  1.5x / 2x / 3x / 4x / 5x.\r\n"
         "battleAnimEnabled=%d\r\n"
         "battleAnimSpeed=%d\r\n"
@@ -804,6 +814,8 @@ void refreshChecks()
     // Game
     CheckMenuItem(g_gameMenu, kIdAlwaysActive,
                   MF_BYCOMMAND | (g_alwaysActive ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_gameMenu, kIdDragScroll,
+                  MF_BYCOMMAND | (g_dragScroll ? MF_CHECKED : MF_UNCHECKED));
     const UINT bSel = g_battleAnimEnabled ? (kIdAnim1 + static_cast<UINT>(g_battleAnimSpeed - 1)) : kIdAnimOff;
     if (g_battleAnimMenu)
         CheckMenuRadioItem(g_battleAnimMenu, kIdAnimOff, kIdAnim5, bSel, MF_BYCOMMAND);
@@ -849,6 +861,8 @@ void onMenuCommand(UINT id)
     if (id == kIdAlwaysActive) {
         g_alwaysActive = !g_alwaysActive;
         applyAlwaysActive(g_alwaysActive);
+    } else if (id == kIdDragScroll) {
+        g_dragScroll = !g_dragScroll; // live: the detour reads this flag (persist() at the tail saves it)
     } else if (id == kIdAnimOff) {
         g_battleAnimEnabled = false;
         applyAnimSpeed(0, false, g_battleAnimSpeed);
@@ -959,8 +973,25 @@ void setNonClientCursor(bool overNonClient)
     }
 }
 
+extern "C" void timerhost_pump(void); // Phase 2: perform any queued on-elapse press on the game thread
+
 LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    // Consume a queued auto-end-turn / retreat (game UI thread). Skip while a map drag is in progress:
+    // the END_TURN button is disabled while the mouse is captured/held, so the press would no-op - it
+    // fires on the next message once the drag releases.
+    if (!g_dragScrollActive)
+        timerhost_pump();
+    if (!g_gameHwnd) g_gameHwnd = hwnd; // remember the game window (drag-scroll SetCapture target)
+
+    // Drag-scroll pan: while LMB is held the game routes moves to the captured WndProc (SetCapture on
+    // drag-start), not the iso vtable handler. Map the client point to game coords and pan; consume it.
+    if (g_dragScrollActive && msg == WM_MOUSEMOVE) {
+        long gx = 0, gy = 0;
+        DDMapClientToGame((long)(short)LOWORD(lParam), (long)(short)HIWORD(lParam), &gx, &gy);
+        dragScrollWndMove((int)gx, (int)gy);
+        return 0;
+    }
     // Keep the OS pointer visible over the caption + menu bar (non-client), invisible in the
     // client where the game draws its own. WM_NCMOUSEMOVE reaches us via cnc-ddraw's default
     // message forward (wndproc.c); WM_MOUSEMOVE comes through its own forward.
@@ -974,6 +1005,14 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
     default:
         break;
+    }
+
+    // GUI-thread menu-attach relayout (posted by menuWorker after SetMenu): re-apply the renderer's
+    // window sizing WITH the menu attached so client == render area and the viewport + mouse are
+    // recomputed in one pass (replaces the old out-of-band SetWindowPos grow that raced the renderer).
+    if (g_relayoutMsg && msg == g_relayoutMsg) {
+        applyDdrawLive();
+        return 0;
     }
 
     // Menu-bar command: WM_COMMAND with HIWORD==0 AND lParam==0. The lParam check is
@@ -1011,6 +1050,7 @@ void buildMenu()
     // ===== "Game" — gameplay / animation (live; Battle/Map speed presets apply next battle/turn) =====
     g_gameMenu = CreatePopupMenu();
     AppendMenuA(g_gameMenu, MF_STRING, kIdAlwaysActive, "Always active");
+    AppendMenuA(g_gameMenu, MF_STRING, kIdDragScroll, "Map drag-scroll (left button)");
     g_battleAnimMenu = CreatePopupMenu();
     AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnimOff, "Off (vanilla)");
     AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim1, "1.5x");
@@ -1066,7 +1106,7 @@ void buildMenu()
     AppendMenuA(g_videoMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuA(g_videoMenu, MF_STRING, kIdMaintas, "Keep 4:3 aspect - no stretch on widescreen");
     AppendMenuA(g_videoMenu, MF_STRING, kIdVsync, "VSync - no tearing (caps to refresh)");
-    AppendMenuA(g_videoMenu, MF_STRING, kIdBoxing, "Integer scaling - crisp whole-pixel zoom");
+    AppendMenuA(g_videoMenu, MF_STRING, kIdBoxing, "Integer scaling (pixel-art only - keep OFF to fill window)");
     AppendMenuA(g_videoMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuA(g_videoMenu, MF_STRING, kIdScreenshot, "Take screenshot (PrintScreen)");
 
@@ -1131,24 +1171,18 @@ void ensureChrome(HWND hwnd)
     if (GetMenu(hwnd) != g_bar) {
         SetMenu(hwnd, g_bar);
         DrawMenuBar(hwnd);
-    }
-    // Keep the window tall enough that the menu bar sits ABOVE the client (game) area instead of
-    // eating into it. cnc-ddraw sizes the window without knowing about our menu, so after the menu is
-    // attached - and again after any cnc-ddraw resize (e.g. a Video-menu mode/resolution change) - the
-    // menu takes one row from the client and the top looks cut. Grow the window back by SM_CYMENU.
-    // g_grownTo guards against re-growing a size we already produced, so we never fight cnc-ddraw
-    // (verified: the window stays put after our grow, no oscillation).
-    {
-        RECT wr{};
-        GetWindowRect(hwnd, &wr);
-        const int wh = wr.bottom - wr.top;
-        const int dh = GetSystemMetrics(SM_CYMENU);
-        if (wh != g_grownTo && dh > 0 && dh < 200) {
-            g_grownTo = wh + dh;
-            SetWindowPos(hwnd, nullptr, 0, 0, wr.right - wr.left, g_grownTo,
-                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-            mlog("[menu] grew window to %dpx so the menu bar does not cut the game render area", g_grownTo);
-        }
+        // Attaching the menu takes one row from the client, so the game render area would look cut.
+        // Do NOT correct that with a raw SetWindowPos grow here: it runs on this worker thread, lands
+        // out-of-band AFTER cnc-ddraw's own dd_SetDisplayMode, and fires a Win32 WM_SIZE that cnc-ddraw
+        // treats as a geometric no-op - so render.width/height, the viewport and mouse.rc are never
+        // recomputed for the grown client and the added strip stays black (this was the live
+        // resolution-change bug). Instead re-lay the window THROUGH the renderer: with the menu now
+        // attached, DDReloadConfig -> dd_SetDisplayMode grows the window by exactly one menu row
+        // (AdjustWindowRectEx(GetMenu!=NULL)) AND recomputes the viewport + mouse in the same pass.
+        // dd_SetDisplayMode restarts the render thread, so marshal it onto the GUI thread (where the
+        // game pumps messages) via PostMessage; the WndProc detour handles g_relayoutMsg.
+        if (g_relayoutMsg)
+            PostMessageA(hwnd, g_relayoutMsg, 0, 0);
     }
     refreshChecks();
 }
@@ -1228,6 +1262,171 @@ void installWndProcDetour()
 } // namespace
 
 // Entry point called from cnc-ddraw's DllMain (DLL_PROCESS_ATTACH), after hook_init + the embed.
+// ===== Map drag-scroll (DGL-faithful grab+drag pan) =====================================
+// Detours the in-game iso-view mouse handler (CStratInterf, sub_48E8A0). While g_dragScroll is on, a
+// left-press on open map terrain grabs the tile under the cursor; dragging pans the view so that tile
+// stays under the cursor (exactly like DisciplesGL's MouseScroll). A press-release with no movement is
+// replayed to the game so a plain click still selects. Russobit addresses RE'd from the DGL backup +
+// game exe (see memory dgl-map-drag-scroll). Game calls are __thiscall via typedefs (this file is /Gd);
+// every game deref is SEH + isUserPtr guarded so a torn pointer during load/teardown just passes through.
+struct PointI { int x, y; };
+struct RectI { int left, top, right, bottom; };
+
+using IsoMouseFn    = int   (__fastcall*)(void* view, void* edx, int msgId, PointI* pt); // __thiscall target
+using ScreenToMapFn = int   (__thiscall*)(void* mg, PointI* screen, PointI* outTile, PointI* outPx);
+using ScrollTileFn  = void  (__thiscall*)(void* mg, PointI* tile, int extraDx, int extraDy);
+using GetViewRectFn = RectI*(__thiscall*)(void* mg);
+
+void* g_origIsoMouse = nullptr; // Detours trampoline to the original CStratInterf iso mouse handler
+void* g_origScrollDir = nullptr; // trampoline to the game's directional map scroll (the edge-scroll executor)
+int g_scrollDirDiag = 0;         // first-N diagnostic counter for the edge-scroll hook
+bool g_dragScrollActive = false;
+extern "C" int g_c4dll_dragActive = 0; // winapi_hooks reads this: 1 = suppress the game edge-scroll while dragging
+bool g_dragMoved = false;
+PointI g_dragAnchorTile{}; // map tile grabbed at drag start
+PointI g_dragStart{};      // cursor at drag start (to detect movement)
+bool g_dragAnchorSet = false; // anchor tile grabbed on the FIRST WndProc move (same transform as the pans)
+
+int callOrigIsoMouse(void* view, int msgId, PointI* pt)
+{
+    return reinterpret_cast<IsoMouseFn>(g_origIsoMouse)(view, nullptr, msgId, pt);
+}
+
+// MapGraphics singleton = SmartPtr<MapGraphics> { int* refCount; MapGraphics* data; } @ 0x837DA0.
+// The data field (offset 4) IS the MapGraphics - ONE deref. Verified in sub_48E701:
+// `mov ecx,[getMapGraphics_out+4]` then sub_541588. (A two-deref read lands in MapGraphics+0 = a
+// C2DEngine* and faults inside sub_5418BA - that was the "deref FAULTED" in the diag log.)
+void* mapGraphicsPtr()
+{
+    __try {
+        void* mg = *reinterpret_cast<void**>(0x837DA4);
+        return isUserPtr(mg) ? mg : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
+{
+    if (!g_dragScroll)
+        return callOrigIsoMouse(view, msgId, pt);
+
+    __try {
+        if (!pt)
+            return callOrigIsoMouse(view, msgId, pt);
+
+        if (msgId == WM_LBUTTONDOWN) {
+            void* mg = mapGraphicsPtr();
+            PointI tile{};
+            // screen->map returns false over the ~160px minimap/resource corner -> only grab real map
+            if (mg && reinterpret_cast<ScreenToMapFn>(0x5418BA)(mg, pt, &tile, nullptr)) {
+                // Over the map -> start a drag. The anchor tile is grabbed on the first WndProc move so it
+                // uses the SAME client->game transform as the pans (no 1-2 tile jump on the first move).
+                g_dragStart = *pt;
+                g_dragScrollActive = true;
+                // NOTE: g_c4dll_dragActive (centering fake_GetCursorPos to kill edge-scroll) made the
+                // pan jerk - the game reacts to the centered cursor every frame. Left OFF for now; a
+                // surgical edge-scroll disable needs the game's edge-scroll fn, not the cursor read.
+                g_dragMoved = false;
+                g_dragAnchorSet = false;
+                // Capture the mouse so WM_MOUSEMOVE keeps reaching this handler while the button is held -
+                // the game stops routing moves to the iso handler during a held button (DGL captured too).
+                if (g_gameHwnd)
+                    SetCapture(g_gameHwnd);
+                return 1; // consume the down so the game does not select yet
+            }
+        } else if (g_dragScrollActive && msgId == WM_MOUSEMOVE) {
+            if (pt->x != g_dragStart.x || pt->y != g_dragStart.y)
+                g_dragMoved = true;
+            void* mg = mapGraphicsPtr();
+            if (mg) {
+                RectI* vr = reinterpret_cast<GetViewRectFn>(0x56B8DF)(mg);
+                if (isUserPtr(vr)) {
+                    // place the grabbed tile under the cursor: tileScreen = viewLeft + halfW - 32 - extraDx
+                    const int cx = vr->left + (vr->right - vr->left) / 2 - 32;
+                    const int cy = vr->top + (vr->bottom - vr->top) / 2 - 16;
+                    reinterpret_cast<ScrollTileFn>(0x541588)(mg, &g_dragAnchorTile, cx - pt->x, cy - pt->y);
+                }
+            }
+            return 1; // consume moves while panning
+        } else if (g_dragScrollActive && msgId == WM_LBUTTONUP) {
+            g_dragScrollActive = false;
+            g_c4dll_dragActive = 0; // re-enable edge-scroll
+            ReleaseCapture();
+            if (!g_dragMoved)
+                callOrigIsoMouse(view, WM_LBUTTONDOWN, pt); // plain click -> replay down so it still selects
+            return callOrigIsoMouse(view, msgId, pt);       // forward the up
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_dragScrollActive = false;
+        g_c4dll_dragActive = 0;
+    }
+    return callOrigIsoMouse(view, msgId, pt);
+}
+
+// WndProc-driven pan (called from wndProcHook with the cursor already mapped to GAME coords). The iso
+// vtable handler stops receiving moves while the button is held, but the captured WndProc does not.
+void dragScrollWndMove(int gameX, int gameY)
+{
+    g_dragMoved = true; // a real drag (the button-up will not replay a select-click)
+    __try {
+        void* mg = mapGraphicsPtr();
+        if (!mg)
+            return;
+        if (!g_dragAnchorSet) {
+            // Grab the anchor from the FIRST move's mapped cursor, so the anchor and every pan use the
+            // identical client->game transform -> the grabbed tile stays put (no first-move jump).
+            PointI gp{ gameX, gameY }, tile{};
+            if (reinterpret_cast<ScreenToMapFn>(0x5418BA)(mg, &gp, &tile, nullptr)) {
+                g_dragAnchorTile = tile;
+                g_dragAnchorSet = true;
+            }
+            return; // first move only establishes the anchor; do not pan yet
+        }
+        RectI* vr = reinterpret_cast<GetViewRectFn>(0x56B8DF)(mg);
+        if (!isUserPtr(vr))
+            return;
+        // place the grabbed tile under the cursor: tileScreen = viewLeft + halfW - 32 - extraDx
+        const int cx = vr->left + (vr->right - vr->left) / 2 - 32;
+        const int cy = vr->top + (vr->bottom - vr->top) / 2 - 16;
+        reinterpret_cast<ScrollTileFn>(0x541588)(mg, &g_dragAnchorTile, cx - gameX, cy - gameY);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// The game's iso DIRECTIONAL map scroll: sub_54249C -> sub_541BC1 (8 compass directions) -> by-pixel
+// sub_54301B + iso-scroll-list notify. This is the single choke point for the window-EDGE scroll (cursor
+// near a border auto-scrolls the map): sub_541BC1 is reached ONLY through here. Programmatic centering
+// uses a different path (sub_541588), so gating this kills edge-scroll without touching click-to-center
+// or our drag-pan. Per the user: while the map drag-scroll feature is ON, edge-scroll must be OFF.
+// __thiscall(self, dir) -> reached via __fastcall(ecx=self, edx, dir). Installed unconditionally; the
+// gate is live, so toggling the menu item enables/disables edge-scroll without a restart.
+char __fastcall scrollDirHook(void* self, void* /*edx*/, int dir)
+{
+    if (g_scrollDirDiag < 12) { ++g_scrollDirDiag; mlog("[edge] scrollDir dir=%d toggle=%d", dir, g_dragScroll ? 1 : 0); }
+    if (g_dragScroll)
+        return 0; // drag-scroll toggle ON -> suppress the game's edge-scroll entirely
+    return reinterpret_cast<char(__fastcall*)(void*, void*, int)>(g_origScrollDir)(self, nullptr, dir);
+}
+
+void installDragScrollDetour()
+{
+    g_origIsoMouse = reinterpret_cast<void*>(0x48E8A0);
+    g_origScrollDir = reinterpret_cast<void*>(0x54249C);
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(&g_origIsoMouse, reinterpret_cast<void*>(isoMouseHook));
+    DetourAttach(&g_origScrollDir, reinterpret_cast<void*>(scrollDirHook));
+    if (DetourTransactionCommit() != NO_ERROR) {
+        g_origIsoMouse = reinterpret_cast<void*>(0x48E8A0);
+        g_origScrollDir = reinterpret_cast<void*>(0x54249C);
+        mlog("[menu] drag-scroll/edge-scroll detours FAILED (0x48E8A0/0x54249C)");
+    } else {
+        mlog("[menu] drag-scroll + edge-scroll detours installed (0x48E8A0 iso, 0x54249C edge; default %s)",
+             g_dragScroll ? "on" : "off");
+    }
+}
+
 extern "C" void timerhost_install(void); // timer keystone (features/timerhost.cpp)
 
 extern "C" void featuremenu_install(void)
@@ -1256,6 +1455,7 @@ extern "C" void featuremenu_install(void)
     g_battleAnimSpeed = GetPrivateProfileIntA("menu", "battleAnimSpeed", 5, f);
     g_mapAnimEnabled = GetPrivateProfileIntA("menu", "mapAnimEnabled", 0, f) != 0;
     g_mapAnimSpeed = GetPrivateProfileIntA("menu", "mapAnimSpeed", 5, f);
+    g_dragScroll = GetPrivateProfileIntA("menu", "dragScroll", 0, f) != 0;
 
     // Apply now (DllMain context — before the game's main loop and anim init run). The IAT is
     // already populated by the loader at this point, so the time-scale hook installs cleanly here.
@@ -1264,8 +1464,15 @@ extern "C" void featuremenu_install(void)
     installTimeScaleHook();
     installBattleDiscriminator();
     timerhost_install(); // timer keystone: capture dialog/battle buttons + combat/animation state
+    installDragScrollDetour(); // map grab+drag panning (gated by g_dragScroll; pure pass-through when off)
     applyAnimSpeed(0, g_battleAnimEnabled, g_battleAnimSpeed);
     applyAnimSpeed(1, g_mapAnimEnabled, g_mapAnimSpeed);
+
+    // Registered window message: menuWorker posts it after attaching the menu so the one-time window
+    // relayout (DDReloadConfig -> dd_SetDisplayMode, which restarts the render thread) runs on the GUI
+    // thread, not the worker thread. RegisterWindowMessage yields a process-unique id. Register BEFORE
+    // the detour + worker so both the WndProc hook and menuWorker observe the same non-zero id.
+    g_relayoutMsg = RegisterWindowMessageA("C4dllR_MenuRelayout");
 
     installWndProcDetour();
 

@@ -7,19 +7,25 @@ the fidelity audit. Approach agreed with the user: **transcribe the working lega
 (addresses already extracted), not redesign.
 
 ## Known bugs (renderer / menu)
-- `[!]` **Resolution not applied live** (cnc-ddraw `width`/`height` via the Video menu): the window
-  grows but the render is not rescaled (black expansion border) and the game's edge-scroll / mouse
-  mapping stays on the OLD boundaries.
-  - Cause (from `dd.c` `dd_SetDisplayMode`): `DDReloadConfig` calls `dd_SetDisplayMode(0,0,0,0)` which
-    keeps the game's internal res and sets `g_ddraw.render.width/height` to the new window size, then
-    restarts the render thread — but the windowed upscale viewport + mouse coord scale are not fully
-    recomputed live, AND cnc-ddraw subtracts the menu-bar height (`SM_CYMENU`) from the render area
-    ONLY in fullscreen-windowed (dd.c:748), not in normal windowed. Our added menu bar therefore
-    throws off the windowed render/input geometry when the window is resized.
-  - Fix (needs in-game testing): recompute the windowed upscale viewport + mouse scale in
-    `DDReloadConfig`, and account for the menu bar in the windowed render area; OR, as an honest
-    interim, relabel Resolution "(restart)" like Renderer / Frame cap. Verify edge-scroll boundaries
-    and that the render fills the client area after a live change.
+- `[x]` **Resolution not applied live** (black expansion border + edge-scroll on old bounds) - FIXED
+  (pending the user's visual confirm). The BACKLOG's original guess (menu-height/viewport not
+  recomputed) was WRONG: a multi-agent source audit proved `dd_SetDisplayMode` IS coherent and DOES
+  rescale render+viewport+mouse+swapchain in one pass. The real cause was OUR OWN `featuremenu.cpp`
+  `menuWorker`/`ensureChrome`: it grew the window by `SM_CYMENU` via a raw `SetWindowPos` on a 1500ms
+  poll, OUT-OF-BAND and ~1.5s AFTER `dd_SetDisplayMode`. That async grow fires a Win32 `WM_SIZE` which
+  cnc-ddraw treats as a geometric no-op (wndproc.c recompute is IsLinux-gated), so render/viewport/
+  mouse.rc were never recomputed for the grown client and the added strip stayed black; the game's
+  edge-scroll kept the old `g_ddraw.width/height`-derived bounds. A restart worked because everything
+  settled in one pass.
+  - Fix (implemented): (1) DELETE the async grow; `ensureChrome` now attaches the menu then posts a
+    registered message (`C4dllR_MenuRelayout`) so the menu-aware re-lay runs THROUGH the renderer on
+    the GUI thread (`DDReloadConfig` -> `dd_SetDisplayMode` grows by one menu row via
+    `AdjustWindowRectEx(GetMenu!=NULL)` AND recomputes viewport+mouse in the same pass). (2) Hardened
+    `DDReloadConfig` (patch): re-clip the cursor (`mouse_unlock/lock` when locked) + force a
+    renderer-owned `clear_screen`+`RedrawWindow` so no region is left black by the game's DefWindowProc.
+  - NOTE: with `maintas=true`+`boxing=true` (our ddraw.ini) the image is integer-boxed/centered by
+    design; "fills the window" then means "boxed to the largest integer multiple, centered". If the
+    user wants true stretch-to-fill, that is a separate scaling-mode choice (turn boxing/maintas off).
 
 ## Timer — host-event layer (the keystone)
 Ported into the HOST module `features/timerhost.cpp` (installed from `featuremenu_install`, Russobit).
@@ -35,14 +41,20 @@ capture/observe (done) -> turn/day -> gated game-CALL actions.
   playing); plugin freezes the Force clock per PauseAnimation, mirroring `sub_100034A0`.
 - `[ ]` **Precise turn-start + player id (Phase 1b)** — off[6]=`0x48A69A` (verify callee sig) → set
   `turn_active`/`turn_player_id`; off[7]=`0x48FDFE` per-frame clear. Refines the `currentPlayerIndex` poll.
-- `[ ]` **On Day Start/End + extra-time accumulation (Phase 1b)** — off[7] DayTurn bits + off[16]=
-  `0x489AB3` day-reset; the per-player extra-time bank keyed on `turn_player_id` (plugin owns durations).
+- `[x]` **On Day Start/End + extra-time accumulation** — DONE in the plugin (exact formula from
+  sub_10001B90/sub_10001DC0, keyed on get_turn_player): Force mode = Fischer time-bank (each turn
+  +budget, unused carries per player; ResetExtraTime drops it); Simple mode = count-up + On-Day
+  pause/unpause/reset bits. No new game hook needed (uses get_turn_player + get_day).
 - `[ ]` **inCombat refinement (Phase 1b)** — off[14]=`0x48D162` / off[15]=`0x540B48` for the precise
   in-combat-for-our-player flag (currently approximated by is_in_battle).
-- `[ ]` **On Elapse — End Day / Retreat (Phase 2, RISKY game vtable CALLS, gated)** — `timerhost_end_day`
-  presses the first enabled captured button via CButtonInterf vtable+0xB0; `timerhost_retreat` via
-  AUTOBATTLE +0x8C / RESOLVE +0xA0. Guards: `[obj+8]+4` enabled byte, re-entry guard, SEH, game-thread
-  marshal (pending flag consumed in off[7]), `actionsEnabled` gate default OFF. Stubs return 0 today.
+- `[x]` **On Elapse — End Day / Retreat (Phase 2)** — IMPLEMENTED (pending in-game test). Verified the
+  legacy press in sub_10004D40 (the WndProc): End-Day presses the first ENABLED captured button in
+  priority close->briefCont->capBack->diploBack->endTurn, gated on btnRetreat NOT present (not in
+  combat); Retreat presses btnRetreat; press = `(*(*(btn)+0xB0))(btn)` __thiscall, enabled guard
+  `*([btn+8]+4)!=0`. Plugin latches v9<0 once per turn (re-armed when v9>=0) and calls host end_day/
+  retreat; timerhost queues a pending flag; timerhost_pump() (called from the featuremenu WndProc detour,
+  game thread) does the guarded press with a re-entry latch + SEH. The +0x8C/+0xA0 note was wrong - all
+  presses use +0xB0.
 
 ## Timer — dialogs (resource ports)
 - `[x]` **Timetable dialog** (legacy **res 5** / sub_100044E0) — DONE: Day/Duration grid (timer.rc
@@ -68,8 +80,10 @@ decompile, so the rest is direct transcription.
   legacy float 0.0..1.0 anchors, our `AnchorX/Y` are int 0..100. Cosmetic / config-format only.
 
 ## DGL features
-- `[ ]` **Map drag-scroll** (faithful) — DGL `MouseScroll` = grab + drag pan (`sub_10017020` hooks the
-  iso-view mouse handler). After the timer. See memory `dgl-map-drag-scroll`.
+- `[x]` **Map drag-scroll** (faithful) — IMPLEMENTED (pending in-game test). Detours the Russobit iso-view
+  mouse handler sub_48E8A0; left-drag on open terrain pans via sub_541588 (screen->map sub_5418BA,
+  MapGraphics singleton 0x837DA0). Menu: Game -> "Map drag-scroll (left button)", ini dragScroll default
+  off. v1 may need pan-direction/feel tuning. See memory `dgl-map-drag-scroll`.
 
 ## Release / CI
 - `[ ]` **Push C4dll-R** — the whole `c4ddraw/` + workflows are uncommitted (user chose local for now).

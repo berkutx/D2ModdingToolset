@@ -84,7 +84,9 @@ Write-Host "[3/6] apply our patch (exports + DirectDraw embed)" -ForegroundColor
 Push-Location $build
 try {
     & git init -q
-    & git -c core.autocrlf=false apply "$patch"
+    # --ignore-whitespace: tolerate trailing-whitespace differences in context lines (the patch is
+    # hand-edited; cnc-ddraw sources have some trailing spaces we don't want to track exactly).
+    & git -c core.autocrlf=false apply --ignore-whitespace "$patch"
     if ($LASTEXITCODE -ne 0) { throw "git apply failed (exit $LASTEXITCODE)" }
 }
 finally { Pop-Location }

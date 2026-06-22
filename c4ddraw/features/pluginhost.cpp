@@ -1,9 +1,9 @@
 /*
- * C4dll-R plugin host. DisciplesGL hosted plugins in <game>\mods\ and composited their overlay
- * into the game frame. Replacing DGL with C4dll-R removed that host, so plugins (e.g. the turn
- * timer) stopped working. This module restores hosting inside C4dll-R for BOTH formats:
+ * C4dll-R plugin host. The game's original renderer hosted plugins in <game>\mods\ and composited
+ * their overlay into the game frame. Replacing it with C4dll-R removed that host, so plugins (e.g. the
+ * turn timer) stopped working. This module restores hosting inside C4dll-R for BOTH formats:
  *   - the NEW 32bpp-native format (c4plugin.h, "*.c4p"): draws on demand (only when it invalidates);
- *   - the LEGACY DisciplesGL format ("*.mod"): GetName/SetHWND/Launch/DrawFrame, redrawn periodically.
+ *   - the LEGACY format ("*.mod"): GetName/SetHWND/Launch/DrawFrame, redrawn periodically.
  *
  * Rendering: instead of patching cnc-ddraw's renderer (D2 is 8bpp palettized with an in-shader
  * palette, and there are 3 backends OGL/D3D9/GDI), we composite via a transparent, click-through,
@@ -183,7 +183,7 @@ C4P_Host g_host = {sizeof(C4P_Host),     host_get_hwnd,        host_invalidate,
                    host_turn_player_id,  host_retreat,         host_end_day};
 
 // --- plugin records --------------------------------------------------------------------
-using ModGetId = const void*(__stdcall*)(); // 12-byte plugin id (DGL used it for dedup)
+using ModGetId = const void*(__stdcall*)(); // 12-byte plugin id (used for dedup)
 using ModGetName = const char*(__stdcall*)();
 using ModGetMenu = HMENU(__stdcall*)(int baseCmdId); // builds + returns the plugin's config submenu
 using ModSetHWND = void(__stdcall*)(HWND);
@@ -203,7 +203,7 @@ struct Plugin
     bool isNew;
     bool hwndSet;
     bool hasId;
-    char id[12]; // legacy plugin id (GetId), used to dedup like DGL did
+    char id[12]; // legacy plugin id (GetId), used to dedup
     bool hasSupersede;     // new plugin: declares a legacy id it replaces
     char supersedeId[12];  // the 12-byte legacy GetId this .c4p supersedes
     char name[64];
@@ -281,7 +281,7 @@ void loadOne(const char* path, const char* fileName, bool isNew)
             FreeLibrary(m);
             return;
         }
-        // Dedup by the 12-byte GetId, exactly as the DisciplesGL host did, so the same plugin
+        // Dedup by the 12-byte GetId, exactly as the original host did, so the same plugin
         // dropped in twice (e.g. .mod + a renamed copy) is not loaded/hooked twice.
         if (getId) {
             const void* idp = getId();
@@ -313,7 +313,7 @@ void loadOne(const char* path, const char* fileName, bool isNew)
         const char* nm = getName ? getName() : nullptr;
         lstrcpynA(p.name, nm ? nm : fileName, sizeof(p.name));
         p.launch();
-        // Build the plugin's config submenu (DGL did this); we graft it under our "Plugins" menu.
+        // Build the plugin's config submenu (legacy plugins provide one); we graft it under "Plugins".
         // Use a command-id base well clear of featuremenu's 0xA1xx range.
         p.menuBase = 0xB000 + g_pluginCount * 0x100;
         if (getMenu)
@@ -533,7 +533,7 @@ DWORD WINAPI overlayWorker(LPVOID)
     // buildMenu) waits on g_pluginsReady before reading the plugin list, since it can no longer rely
     // on the loader lock to serialize loading before the menu thread runs.
     loadFolder("*.c4p", true);  // our native format first
-    loadFolder("*.mod", false); // legacy DisciplesGL plugins (minimal compatibility)
+    loadFolder("*.mod", false); // legacy *.mod plugins (minimal compatibility)
     if (g_pluginCount)
         plog("[plugins] %d plugin(s) loaded (legacy present: %d)", g_pluginCount, g_hasLegacy ? 1 : 0);
     if (g_pluginsReady)

@@ -15,7 +15,7 @@
  * every turn change, including a skipped turn). A reconstructed turn timer just resets its countdown
  * when the serial changes - it never touches the game itself.
  *
- * We build our own plugins (e.g. the reconstructed turn timer) to this format. The legacy DGL .mod
+ * We build our own plugins (e.g. the reconstructed turn timer) to this format. The legacy .mod
  * format is still loaded for backward compatibility, but redraws every frame and is meant only for
  * users who do not update their plugins. A new plugin may declare supersedes_legacy_id to replace a
  * specific legacy .mod when both are present (the host then drops the legacy one - no double draw).

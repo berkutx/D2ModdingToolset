@@ -8,8 +8,8 @@
  * (re-encodes on save with CharToOemA). Those USER32 calls use the SYSTEM ANSI codepage (CP_ACP);
  * on a non-Russian Windows (ACP=1252) they corrupt every string before it reaches the cp-1251
  * .mft bitmap fonts -> mojibake. The game also upper-cases via the locale-sensitive CRT
- * _strupr/toupper (from msvcrt.dll), which needs LC_CTYPE = cp-1251. DisciplesGL masked both; with
- * it replaced by the embedded cnc-ddraw we restore them here, with NO system-locale change:
+ * _strupr/toupper (from msvcrt.dll), which needs LC_CTYPE = cp-1251. The original renderer masked
+ * both; with it replaced by the embedded cnc-ddraw we restore them here, with NO system-locale change:
  *   (1) force msvcrt's OWN LC_CTYPE = cp-1251 (the game's ctype resolves to msvcrt, not this DLL's CRT);
  *   (2) detour OemToCharA/CharToOemA to convert with EXPLICIT cp866<->cp1251 instead of CP_ACP.
  * cp-1251 is identical to ASCII for English text, so this is safe for non-RU builds.

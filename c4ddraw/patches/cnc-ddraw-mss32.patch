@@ -47,7 +47,7 @@
          break;
      }
      case DLL_PROCESS_DETACH:
-@@ -217,6 +250,46 @@
+@@ -217,6 +250,87 @@
      return real_GetProcAddress(hModule, lpProcName);
  }
  
@@ -77,6 +77,28 @@
 +        g_config.window_rect.top = saved_top;
 +
 +    dd_SetDisplayMode(0, 0, 0, 0);
++
++    /* mouse_lock / mouse_unlock / g_mouse_locked live in mouse.h, not included here -> forward-declare. */
++    extern void mouse_lock(void);
++    extern void mouse_unlock(void);
++    extern BOOL g_mouse_locked;
++
++    /* Re-push the cursor clip so map edge-scroll / mouse map onto the NEW render area immediately
++     * (mouse.rc was just recomputed inside dd_SetDisplayMode). Only meaningful while the cursor is
++     * locked; when unlocked the recomputed mouse.unscale (adjmouse) already maps the next move. */
++    if (g_mouse_locked)
++    {
++        mouse_unlock();
++        mouse_lock();
++    }
++
++    /* Force the WHOLE client (including any region a resize just added) to be cleared BY THE RENDERER
++     * and repainted before the next frame, instead of being left black by the game's DefWindowProc
++     * erase brush. Harmless when the render size did not change (one black-then-redraw frame). */
++    InterlockedExchange(&g_ddraw.render.clear_screen, TRUE);
++    if (g_ddraw.render.sem)
++        ReleaseSemaphore(g_ddraw.render.sem, 1, NULL);
++    RedrawWindow(g_ddraw.hwnd, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_UPDATENOW);
 +}
 +
 +/*
@@ -91,12 +113,31 @@
 +        ss_take_screenshot(g_ddraw.primary);
 +}
 +
++/* Map a Win32 CLIENT point to the game's render coord space via cnc-ddraw's mouse transform (mirrors
++ * fake_GetCursorPos in winapi_hooks.c). For the C4dll-R map drag-scroll: while LMB is held the game
++ * stops routing WM_MOUSEMOVE to the iso vtable handler, so the captured WndProc (featuremenu) pans -
++ * but it gets client coords while the iso scroll fns use game coords. g_ddraw lives here, so this does. */
++void DDMapClientToGame(long cx, long cy, long* gx, long* gy)
++{
++    int x = (int)cx - g_ddraw.mouse.x_adjust;
++    int y = (int)cy - g_ddraw.mouse.y_adjust;
++    if (g_config.adjmouse && !g_ddraw.child_window_exists)
++    {
++        x = (int)(x * g_ddraw.mouse.unscale_x + (x >= 0 ? 0.5f : -0.5f));
++        y = (int)(y * g_ddraw.mouse.unscale_y + (y >= 0 ? 0.5f : -0.5f));
++    }
++    if (x < 0) x = 0; else if (x > (int)g_ddraw.width - 1) x = (int)g_ddraw.width - 1;
++    if (y < 0) y = 0; else if (y > (int)g_ddraw.height - 1) y = (int)g_ddraw.height - 1;
++    if (gx) *gx = x;
++    if (gy) *gy = y;
++}
++
  HRESULT WINAPI DirectDrawCreate(GUID FAR* lpGUID, LPDIRECTDRAW FAR* lplpDD, IUnknown FAR* pUnkOuter)
  {
      TRACE("-> %s(lpGUID=%p, lplpDD=%p, pUnkOuter=%p) [%p]\n", __FUNCTION__, lpGUID, lplpDD, pUnkOuter, _ReturnAddress());
 --- a/src/winapi_hooks.c
 +++ b/src/winapi_hooks.c
-@@ -40,17 +40,34 @@
+@@ -40,17 +40,35 @@
      if ((g_mouse_locked || g_config.devmode || g_ddraw.bnet_active) && 
          (!g_config.windowed || real_ScreenToClient(g_ddraw.hwnd, &pt)))
      {
@@ -122,8 +163,9 @@
 +         * or the window lost focus, report a centered position so no edge is touched. Within the
 +         * margin the edge clamp below still allows normal edge-scrolling. */
 +        {
++            extern int g_c4dll_dragActive; /* featuremenu: 1 while a map drag-scroll is in progress */
 +            const int margin = 50;
-+            if (x < -margin || x > (int)g_ddraw.width - 1 + margin ||
++            if (g_c4dll_dragActive || x < -margin || x > (int)g_ddraw.width - 1 + margin ||
 +                y < -margin || y > (int)g_ddraw.height - 1 + margin ||
 +                real_GetForegroundWindow() != g_ddraw.hwnd)
 +            {

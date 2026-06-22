@@ -1,10 +1,10 @@
 # C4dll-R monolith (cnc-ddraw renderer + in-game menu, one assembly)
 
-This folder builds a single **`C4dll-R.dll`** that replaces the lost-source DisciplesGL renderer
-for Disciples II, in the same drop-in, swappable way DisciplesGL worked. It is one self-contained
+This folder builds a single **`C4dll-R.dll`** that replaces the game's original third-party
+DirectDraw renderer for Disciples II, in the same drop-in, swappable way. It is one self-contained
 assembly: the [cnc-ddraw](https://github.com/FunkyFr3sh/cnc-ddraw) renderer is **embedded** (no
-separate `ddraw.dll` to ship), the original CodeBase exports are **forwarded** to `CB63.dll`, and a
-DisciplesGL-style in-game **menu** is included. It does **not** depend on, modify, or require the
+separate `ddraw.dll` to ship), the original CodeBase exports are **forwarded** to `CB63.dll`, and an
+in-game **menu** is included. It does **not** depend on, modify, or require the
 `mss32` mod: `mss32.dll` keeps calling `Mss23.dll` and is never touched.
 
 ## Layout
@@ -26,7 +26,7 @@ DisciplesGL-style in-game **menu** is included. It does **not** depend on, modif
 3. From cnc-ddraw's `DllMain` we patch the **game exe's IAT** for `DirectDrawCreate`/`DirectDrawCreateEx`
    to the embedded cnc-ddraw implementation. The game's static `DDRAW.dll` import still loads the
    system `ddraw.dll`, but its create entry points are bypassed, so the embedded renderer is used.
-   No separate `ddraw.dll` is shipped. (DisciplesGL did exactly this from inside `C4dll-R`.)
+   No separate `ddraw.dll` is shipped. (Everything stays inside the single `C4dll-R.dll`.)
 4. `featuremenu_install()` then adds the in-game menu: it detours the game window procedure by
    address to receive `WM_COMMAND` and attaches a real menu bar (Game / Video / Performance / Plugins)
    under cnc-ddraw's title bar. Renderer settings are written to `ddraw.ini` and re-applied live via the
@@ -79,11 +79,11 @@ from `upstream/` + the patch, so the upstream original is never edited in place.
 
 # Монолит C4dll-R (рендерер cnc-ddraw + внутриигровое меню, одна сборка)
 
-Эта папка собирает единый **`C4dll-R.dll`**, заменяющий рендерер DisciplesGL (исходники которого
-утеряны) для Disciples II, тем же подключаемым/заменяемым способом, как работал DisciplesGL. Это одна
+Эта папка собирает единый **`C4dll-R.dll`**, заменяющий оригинальный сторонний рендерер DirectDraw
+для Disciples II, тем же подключаемым/заменяемым способом. Это одна
 самодостаточная сборка: рендерер [cnc-ddraw](https://github.com/FunkyFr3sh/cnc-ddraw) **встроен**
 (отдельный `ddraw.dll` не нужен), оригинальные экспорты CodeBase **форвардятся** в `CB63.dll`, и
-включено внутриигровое **меню** в стиле DisciplesGL. Сборка **не** зависит от мода `mss32`, не меняет
+включено внутриигровое **меню**. Сборка **не** зависит от мода `mss32`, не меняет
 его и не требует: `mss32.dll` так же зовёт `Mss23.dll` и не трогается.
 
 ## Структура
@@ -105,7 +105,7 @@ from `upstream/` + the patch, so the upstream original is never edited in place.
 3. Из `DllMain` cnc-ddraw мы патчим **IAT exe игры** для `DirectDrawCreate`/`DirectDrawCreateEx` на
    встроенную реализацию cnc-ddraw. Статический импорт `DDRAW.dll` всё ещё грузит системный
    `ddraw.dll`, но его точки создания обходятся, поэтому используется встроенный рендерер. Отдельный
-   `ddraw.dll` не поставляется. (DisciplesGL делал ровно это изнутри `C4dll-R`.)
+   `ddraw.dll` не поставляется. (Всё остаётся внутри единого `C4dll-R.dll`.)
 4. Далее `featuremenu_install()` добавляет меню: детурит оконную процедуру игры по адресу, чтобы
    получать `WM_COMMAND`, и крепит настоящий меню-бар (Game / Video / Performance / Plugins) под
    заголовком cnc-ddraw. Настройки рендерера пишутся в `ddraw.ini` и применяются вживую через собственный

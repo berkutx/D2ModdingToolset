@@ -82,6 +82,9 @@ struct State
     LONG volatile pvpFlag;    // human-vs-human battle
     LONG volatile anyCombat;  // any battle present
     LONG volatile actionsEnabled; // gate for the on-elapse vtable CALLs (Phase 2; default 0)
+    LONG volatile pendingEndDay;  // queued by the plugin on elapse; consumed on the game thread (pump)
+    LONG volatile pendingRetreat;
+    LONG volatile inAction;       // re-entry guard around the game-thread press (legacy dword_10008388)
     // saved originals / trampolines
     void* g_orig_dlgCreate;
     void* g_orig_btnDtor;
@@ -169,6 +172,27 @@ int __fastcall hook_scenarioInit(void* self, void* /*edx*/, int a2)
     return reinterpret_cast<int(__thiscall*)(void*, int)>(g.g_orig_scenInit)(self, a2);
 }
 
+// CButtonInterf enabled flag (legacy *([btn+8]+4) != 0) + the press action (vtable+0xB0), SEH-guarded.
+bool btnEnabled(void* btn)
+{
+    __try {
+        void* f8 = *reinterpret_cast<void**>(reinterpret_cast<char*>(btn) + 8);
+        return f8 && (*(reinterpret_cast<unsigned char*>(f8) + 4) != 0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void pressBtn(void* btn)
+{
+    __try {
+        void* vtable = *reinterpret_cast<void**>(btn);
+        void* method = *reinterpret_cast<void**>(reinterpret_cast<char*>(vtable) + 0xB0);
+        reinterpret_cast<void(__thiscall*)(void*)>(method)(btn); // CButtonInterf "press" (legacy +0xB0)
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 } // namespace
 
 // --- exported read accessors (lock-free single-word volatile reads; called by pluginhost thunks) ---
@@ -176,8 +200,54 @@ extern "C" int timerhost_is_animating(void) { return g.animFlag ? 1 : 0; }
 extern "C" int timerhost_battle_kind(void) { return g.pvpFlag ? 1 : (g.anyCombat ? 2 : 0); }
 extern "C" int timerhost_turn_active(void) { return 0; }    // set by off[6] (Phase 1b)
 extern "C" int timerhost_turn_player_id(void) { return -1; } // set by off[6] (Phase 1b)
-extern "C" int timerhost_retreat(void) { return 0; }         // gated action (Phase 2)
-extern "C" int timerhost_end_day(void) { return 0; }         // gated action (Phase 2)
+// Phase 2 on-elapse actions: the plugin (overlay worker thread) QUEUES the press; timerhost_pump()
+// performs it on the game UI thread (from the featuremenu WndProc detour), exactly like the legacy
+// posted a message to its WndProc which pressed the captured button (sub_10004D40 press = vtable+0xB0).
+extern "C" int timerhost_retreat(void) { InterlockedExchange(&g.pendingRetreat, 1); return 1; }
+extern "C" int timerhost_end_day(void) { InterlockedExchange(&g.pendingEndDay, 1); tlog("[timer] end_day QUEUED by plugin"); return 1; }
+
+extern "C" void timerhost_pump(void)
+{
+    if (!g.pendingEndDay && !g.pendingRetreat)
+        return;
+    // SAFETY GATE (crash fix). Only fire the press when the user is NOT mid-interaction. Pressing
+    // END_TURN is a heavy turn-transition dispatch; doing it while the left button is physically held,
+    // or while the mouse is captured (our map drag-scroll OR a game modal), raced the game's deferred
+    // UI teardown and crashed with a use-after-free - Discipl2 sub_4D9A73+0x49 does a virtual call
+    // (this->vtbl[5]) on a dialog object that the press had already destroyed. Defer until idle: the
+    // pending flag persists and the next message retries. Mirrors the legacy timer, which pressed from
+    // a POSTED message (dispatched at a clean, non-input point), never inline on a live mouse message.
+    if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || GetCapture() != nullptr)
+        return;
+    if (InterlockedCompareExchange(&g.inAction, 1, 0) != 0)
+        return; // re-entry guard: the press pumps messages; never recurse into a second press
+    __try {
+        if (InterlockedExchange(&g.pendingRetreat, 0)) {
+            void* b = g.btnRetreat; // in-combat: press the captured RETREAT button
+            if (isUserPtr(b) && btnEnabled(b))
+                pressBtn(b);
+        }
+        if (InterlockedExchange(&g.pendingEndDay, 0)) {
+            // End-Day only OUTSIDE combat (no RETREAT button up); press the first enabled advance button
+            // in the legacy priority: close -> briefing-continue -> capital/diplomacy-back -> end-turn.
+            tlog("[timer] pump end_day: retreat=%p close=%p brief=%p cap=%p diplo=%p endTurn=%p en=%d",
+                 g.btnRetreat, g.btnClose, g.briefCont, g.capBack, g.diploBack, g.endTurn,
+                 isUserPtr(g.endTurn) ? (btnEnabled(g.endTurn) ? 1 : 0) : -1);
+            if (!isUserPtr(g.btnRetreat)) {
+                void* order[5] = { g.btnClose, g.briefCont, g.capBack, g.diploBack, g.endTurn };
+                for (int i = 0; i < 5; ++i) {
+                    if (isUserPtr(order[i]) && btnEnabled(order[i])) {
+                        tlog("[timer] pressing btn[%d]=%p", i, order[i]);
+                        pressBtn(order[i]);
+                        break;
+                    }
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    InterlockedExchange(&g.inAction, 0);
+}
 
 // --- install (called from featuremenu_install on Russobit, after installBattleDiscriminator) ---
 extern "C" void timerhost_install(void)

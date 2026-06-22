@@ -1,4 +1,4 @@
-; C4dll-R.dll  ? pure CodeBase forwarder to CB63.dll (DisciplesGL stripped)
+; C4dll-R.dll  ? pure CodeBase forwarder to CB63.dll (original renderer stripped)
 EXPORTS
     ??4l4linkSt@@QAEAAU0@ABU0@@Z=CB63.??4l4linkSt@@QAEAAU0@ABU0@@Z @1
     _area4add_object@8=CB63._area4add_object@8 @2
