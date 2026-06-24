@@ -1,0 +1,76 @@
+================================================================================
+ C4dll-R  -  standalone renderer + turn timer for Disciples II (Russobit)
+================================================================================
+
+WHAT THIS IS
+  C4dll-R.dll replaces the lost-source DisciplesGL renderer with cnc-ddraw,
+  embedded in one drop-in DLL. It does NOT depend on or modify the mss32 mod.
+  Included plugin: Mods\timer.c4p - the reconstructed turn timer (the host
+  resets it on every turn, including a skipped turn).
+
+REQUIREMENTS
+  - Disciples II, Russobit build (Mortling's mod exe).
+  - The game's existing CB63.dll, Mss23.dll and mss32.dll stay as they are.
+
+INSTALL
+  1. Make a backup of your current C4dll-R.dll (if you have one).
+  2. Copy C4dll-R.dll next to Discipl2.exe (replace the existing one).
+  3. Copy Mods\timer.c4p into the game's Mods\ folder.
+  4. (Optional) Copy C4plugins.ini next to Discipl2.exe to configure the timer.
+  5. Delete any standalone ddraw.dll in the game folder (the renderer is built
+     into C4dll-R.dll - a separate ddraw.dll would shadow it).
+  6. Launch the game.
+
+USING IT
+  - In-game menu (under the title bar): Game / Video / Performance / Plugins.
+    Renderer, shader, windowed/fullscreen etc. are in Video / Performance.
+  - Game holds the gameplay options: Always active (keeps running while
+    unfocused), Battle animation and Map animation (live x1.5..x5 speed-up),
+    plus Battle speed / Map turn speed (engine presets, saved per game).
+  - The turn timer is configured in C4plugins.ini, section [Timer]
+    (Enabled, Duration, position, font size). It is ON by default in the
+    bundled C4plugins.ini (5-minute countdown).
+
+UNINSTALL / REVERT
+  - Restore your backed-up C4dll-R.dll and remove Mods\timer.c4p.
+
+This package is independent of the mss32 mod and is versioned separately.
+
+================================================================================
+ C4dll-R  -  обособленный рендерер + таймер хода для Disciples II (Русобит)
+================================================================================
+
+ЧТО ЭТО
+  C4dll-R.dll заменяет рендерер DisciplesGL (исходники утеряны) на cnc-ddraw,
+  встроенный в одну подключаемую DLL. Не зависит от мода mss32 и не меняет его.
+  В комплекте плагин Mods\timer.c4p - воссозданный таймер хода (хост сбрасывает
+  его на каждой смене хода, включая пропуск).
+
+ТРЕБОВАНИЯ
+  - Disciples II, сборка Русобит (exe мода Mortling).
+  - Имеющиеся CB63.dll, Mss23.dll и mss32.dll игры остаются как есть.
+
+УСТАНОВКА
+  1. Сделайте резервную копию текущего C4dll-R.dll (если он есть).
+  2. Скопируйте C4dll-R.dll рядом с Discipl2.exe (заменив существующий).
+  3. Скопируйте Mods\timer.c4p в папку Mods\ игры.
+  4. (Необязательно) Скопируйте C4plugins.ini рядом с Discipl2.exe для настройки
+     таймера.
+  5. Удалите отдельный ddraw.dll в папке игры (рендерер встроен в C4dll-R.dll,
+     отдельный ddraw.dll его перекроет).
+  6. Запустите игру.
+
+КАК ПОЛЬЗОВАТЬСЯ
+  - Внутриигровое меню (под заголовком окна): Game / Video / Performance /
+    Plugins. Рендерер, шейдер, окно/полный экран - в Video / Performance.
+  - В меню Game собраны игровые опции: Always active (работает без фокуса),
+    Battle animation и Map animation (живое ускорение x1.5..x5), а также
+    Battle speed / Map turn speed (пресеты движка, хранятся в сейве).
+  - Таймер хода настраивается в C4plugins.ini, секция [Timer] (Enabled,
+    Duration, позиция, размер шрифта). В комплектном C4plugins.ini он включён
+    по умолчанию (обратный отсчёт 5 минут).
+
+УДАЛЕНИЕ / ОТКАТ
+  - Верните сохранённый C4dll-R.dll и удалите Mods\timer.c4p.
+
+Пакет независим от мода mss32 и версионируется отдельно.

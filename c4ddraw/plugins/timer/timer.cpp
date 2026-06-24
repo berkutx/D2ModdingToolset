@@ -1,11 +1,7 @@
 /*
- * timer.c4p - native (C4dll-R plugin API v2) reconstruction of the legacy turn-timer mod
- * (Mods\timer.mod). Rebuilt from a full decompile of timer.mod so the MENU and behaviour match the
- * original 1-to-1. The fragile per-version game hooks live in the HOST (C4dll-R), not here: the host
- * drives turn detection (host->get_turn_serial) and - for the advanced Force-Turn behaviours that need
- * game events (combat pause, on-elapse auto end-day/retreat, day boundaries) - will expose those via
- * C4P_Host. This file owns the exact menu, all config + persistence, the menu check/enable refresh,
- * the count-up / count-down clock with pause, and the GDI+ draw.
+ * timer.c4p - native C4dll-R plugin port of the legacy turn-timer mod (Mods\timer.mod).
+ * Owns the menu, config/persistence, clock, and GDI+ draw; fragile per-version game hooks live in
+ * the HOST (turn detection, combat/anim pause, day boundaries) and are reached via C4P_Host.
  *
  * Menu (legacy resource id 3, command ids base+1..base+0x16):
  *   Simple Mode { Enabled; On Day Start{Pause/Unpause/Reset}; On Day End{Pause/Unpause/Reset} }
@@ -34,18 +30,18 @@ PrivateFontCollection* g_fonts = nullptr;
 FontFamily* g_family = nullptr;
 Font* g_font = nullptr;
 
-// ---- config (mirrors timer.mod's globals + Disciple.ini [TIMER] keys) ----
-int g_state = 0;        // Enabled: 0 = off, 1 = Simple Mode (count up), 2 = Force Turn Mode (count down)
+// ---- config (C4plugins.ini [Timer] keys) ----
+int g_state = 0;        // 0 = off, 1 = Simple (count up), 2 = Force Turn (count down)
 int g_dayTurn = 10;     // bitmask: b0/1/2 = On Day Start Pause/Unpause/Reset; b3/4/5 = On Day End ...
-int g_pauseOn = 0;      // Combat Pause: 0 = Off, 1 = Player vs Player, 2 = Player vs Any
+int g_pauseOn = 0;      // Combat Pause: 0 = Off, 1 = PvP, 2 = PvAny
 int g_pauseAnim = 1;    // Animation Pause
 int g_turnDay = 1;      // On Elapse -> End Day
 int g_retreat = 1;      // On Elapse -> Retreat
-int g_elapseFired = 0;  // latch: the on-elapse action fired this turn (re-armed when the clock is positive)
+int g_elapseFired = 0;  // latch: on-elapse action fired this turn (re-armed when clock is positive)
 int g_resetExtra = 0;   // Reset Extra Time
 int g_alwaysVisible = 1;
-int g_durBase = 300;    // TableDuration_0 (seconds) - the per-turn budget in Force Turn Mode (day-1 base)
-// Timetable: up to 3 per-day overrides. From day TableDay_i (when active), the budget = TableDuration_i.
+int g_durBase = 300;    // TableDuration_0 (seconds): per-turn budget in Force mode (day-1 base)
+// Timetable: up to 3 per-day overrides. From day TableDay_i the budget = TableDuration_i.
 int g_tblActive[3] = {0, 0, 0};
 int g_tblDay[3] = {0, 0, 0};
 int g_tblDur[3] = {300, 300, 300};
@@ -54,18 +50,35 @@ int g_anchorY = 0;
 REAL g_fontSize = 28.0f;
 
 // ---- runtime clock ----
-int g_paused = 0;       // manual pause (Pause / Alt+P) OR combat-pause (both freeze the clock)
+int g_paused = 0;       // manual pause OR combat-pause (both freeze the clock)
 int g_combatPausing = 0; // 1 if WE auto-paused for Combat Pause (so we only auto-resume our own pause)
-int g_running = 0;      // a real turn has started (active) -> the clock counts. Like timer.mod's
-                        // dword_10008050: the legacy countdown does NOT run until the turn actually
-                        // begins (you reach the strategic view), NOT from launch / the main menu.
+int g_running = 0;      // a real turn has started -> the clock counts. Does NOT run at launch / main
+                        // menu, only once the turn begins (strategic view reached).
 DWORD g_baseline = 0;   // tick the current count started from
 DWORD g_pausedAt = 0;   // tick we paused at (clock frozen here while paused)
-int g_extra = 0;        // the CURRENT player's carried extra time (ms), added to the Force budget
-int g_bank[16] = {0};   // per-player Force time bank (ms); Fischer-increment (legacy dword_10008070..88)
+int g_extra = 0;        // current player's carried extra time (ms), added to the Force budget
+// Per-player Force time bank {playerId, accumMs}, searched by id (not indexed): the id is the turn-info
+// player byte and need not be a small index. id == -1 marks a free slot (so player id 0 is valid).
+// 8 slots is ample (<=4 players + neutral/NPC).
+struct BankSlot { int id; int accum; };
+BankSlot g_bank[8] = {{-1, 0}, {-1, 0}, {-1, 0}, {-1, 0}, {-1, 0}, {-1, 0}, {-1, 0}, {-1, 0}};
+void bankClear() { for (int i = 0; i < 8; ++i) { g_bank[i].id = -1; g_bank[i].accum = 0; } }
+int* bankAccum(int playerId) // &accum for playerId; claims a free slot the first time the id is seen
+{
+    int freeSlot = -1;
+    for (int i = 0; i < 8; ++i) {
+        if (g_bank[i].id == playerId) return &g_bank[i].accum;
+        if (freeSlot < 0 && g_bank[i].id < 0) freeSlot = i;
+    }
+    if (freeSlot < 0) freeSlot = 0; // table full (impossible with <=5 players): reuse first slot
+    g_bank[freeSlot].id = playerId;
+    g_bank[freeSlot].accum = 0;
+    return &g_bank[freeSlot].accum;
+}
 int g_lastPlayer = -1;  // player whose turn it was last (to bank their remaining on turn change)
-int g_curDayBudget = 0; // the day captured at the current turn-start (for the previous turn's budget)
-uint32_t g_lastSerial = 0; // last host turn serial seen (a change while in-game = a turn (re)started)
+int g_wasActive = 0;    // previous tick's turn_active, to detect the 0->1 (my turn started) edge
+int g_curDayBudget = 0; // day captured at the current turn-start (for the previous turn's budget)
+uint32_t g_lastSerial = 0; // last processed turn serial; a bump = a real turn change (off[6] turn-info)
 
 // Guards config + clock shared between c4p_command (game UI thread) and c4p_tick (worker thread).
 CRITICAL_SECTION g_lock;
@@ -73,14 +86,13 @@ CRITICAL_SECTION g_lock;
 // ---- menu ----
 HMENU g_menu = nullptr; // our top-level popup (grafted under Plugins -> Native -> Timer)
 int g_base = 0;         // base command id the host gave us (our 0x100 block)
-// command offsets, identical to the legacy resource ids
+// command offsets = legacy resource-3 ids (decompiled sub_10004D40 WndProc):
+// +0x13 Timetable (res 5), +0x15 Help (msgbox), +0x16 About (res 4)
 enum {
     kSimpleOn = 1, kPause = 2, kReset = 3, kSet = 4,
     kDayStartPause = 5, kDayStartUnpause = 6, kDayStartReset = 7,
     kDayEndPause = 8, kDayEndUnpause = 9, kDayEndReset = 10,
     kForceOn = 0xB, kCombatOff = 0xC, kCombatPvP = 0xD, kCombatPvAny = 0xE, kAnimPause = 0xF,
-    // tail IDs = legacy timer.mod resource-3 command offsets (decompiled sub_10004D40 WndProc):
-    // +0x13 Timetable (Day/Duration grid, res 5), +0x15 Help (msgbox), +0x16 About (res 4)
     kElapseEndDay = 0x10, kElapseRetreat = 0x11, kResetExtra = 0x12, kTimetable = 0x13,
     kAlwaysVis = 0x14, kHelp = 0x15, kAbout = 0x16
 };
@@ -92,7 +104,7 @@ DWORD g_shadowColor = 0xFF660000;
 bool g_visible = false;
 unsigned g_sig = 0;
 
-// timer.mod's exact GetId (12 bytes) - so the host drops the legacy .mod when this plugin is present.
+// timer.mod's exact GetId (12 bytes) so the host drops the legacy .mod when this plugin is present.
 const uint8_t kLegacyId[12] = {0xd5, 0x0e, 0x9b, 0xfd, 0xc8, 0x89, 0x67, 0x49, 0x8c, 0x31, 0xac, 0x64};
 
 // ---- time formatting + colours (faithful to timer.mod DrawFrame) ----
@@ -136,8 +148,7 @@ void pickColors(int v9, int state, int paused, DWORD* text, DWORD* shadow)
 const char* iniSection() { return "Timer"; }
 void persist(const char* key, int val) { if (g_host) g_host->set_config_int(iniSection(), key, val); }
 
-// Host battle state for Combat Pause. Guarded by struct_size so an older host (without the appended
-// is_in_battle callback) is handled gracefully (returns 0 = never combat-pause).
+// Host battle state for Combat Pause. struct_size-guarded so an older host (no is_in_battle) returns 0.
 int hostInBattle()
 {
     return (g_host && g_host->struct_size >= sizeof(C4P_Host) && g_host->is_in_battle)
@@ -145,7 +156,17 @@ int hostInBattle()
                : 0;
 }
 
-// Current scenario day from the host (for the Timetable); -1 if unavailable. struct_size-guarded.
+// LOCAL player's turn is "active" when the client's strategic END_TURN button exists and is enabled.
+// Per-client, so it is valid on an MP joiner where the server turn serial (host-only) never changes.
+// Defaults to 1 on an older host (no callback), preserving prior single-player behavior.
+int hostTurnActive()
+{
+    return (g_host && g_host->struct_size >= sizeof(C4P_Host) && g_host->turn_active)
+               ? g_host->turn_active()
+               : 1;
+}
+
+// Current scenario day (for the Timetable); -1 if unavailable. struct_size-guarded.
 int hostDay()
 {
     return (g_host && g_host->struct_size >= sizeof(C4P_Host) && g_host->get_day)
@@ -153,15 +174,14 @@ int hostDay()
                : -1;
 }
 
-// Host keystone signals (struct_size-guarded). is_animating: a battle attack animation is playing.
-// battle_kind: 0 none, 1 PvP (human-vs-human), 2 any combat.
+// is_animating: a battle attack animation is playing. battle_kind: 0 none, 1 PvP, 2 any combat.
 int hostAnimating()
 {
     return (g_host && g_host->struct_size >= sizeof(C4P_Host) && g_host->is_animating)
                ? g_host->is_animating()
                : 0;
 }
-// On-Elapse actions: queue an auto End-Day / Retreat in the host (the host presses on the game thread).
+// On-Elapse actions: queue an auto End-Day / Retreat in the host (host presses on the game thread).
 void hostEndDay()
 {
     if (g_host && g_host->struct_size >= sizeof(C4P_Host) && g_host->end_day)
@@ -179,8 +199,8 @@ int hostBattleKind()
                : 0;
 }
 
-// Per-turn budget (seconds) for a scenario day: the day-1 base (TableDuration_0) until the first
-// active Timetable entry, then the duration of the active entry with the largest TableDay <= day.
+// Per-turn budget (seconds) for a day: day-1 base until the first active Timetable entry, then the
+// duration of the active entry with the largest TableDay <= day.
 int budgetSecForDay(int day)
 {
     if (day < 1) day = 1;
@@ -248,7 +268,7 @@ bool loadFont()
     return g_font->GetLastStatus() == Ok;
 }
 
-// ---- menu check/enable refresh (sub_10004010 + sub_10003B20, case 0) ----
+// ---- menu check/enable refresh ----
 void chk(int off, bool on) { if (g_menu) CheckMenuItem(g_menu, g_base + off, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED)); }
 void ena(int off, bool on) { if (g_menu) EnableMenuItem(g_menu, g_base + off, MF_BYCOMMAND | (on ? MF_ENABLED : MF_GRAYED)); }
 
@@ -256,17 +276,16 @@ void refreshMenu()
 {
     if (!g_menu)
         return;
-    // legacy greys Pause/Reset/Set in Force mode until a real strategic turn is active (the ACTIVE
-    // flag = our g_running). Simple mode is always active when enabled.
+    // legacy greys Pause/Reset/Set in Force mode until a real turn is active (g_running). Simple mode
+    // is always active when enabled.
     const bool active = (g_state == 1) || (g_state == 2 && g_running != 0);
-    // mode enables
     chk(kSimpleOn, g_state == 1);
     chk(kForceOn, g_state == 2);
     ena(kPause, active);
     chk(kPause, g_paused != 0);
     ena(kReset, active);
     ena(kSet, active);
-    // On Day Start (b0 Pause radio / b1 Unpause radio / b2 Reset toggle)
+    // On Day Start (b0 Pause / b1 Unpause / b2 Reset)
     chk(kDayStartPause, (g_dayTurn & 1) != 0);
     chk(kDayStartUnpause, (g_dayTurn & 2) != 0);
     chk(kDayStartReset, (g_dayTurn & 4) != 0);
@@ -274,7 +293,6 @@ void refreshMenu()
     chk(kDayEndPause, (g_dayTurn & 8) != 0);
     chk(kDayEndUnpause, (g_dayTurn & 0x10) != 0);
     chk(kDayEndReset, (g_dayTurn & 0x20) != 0);
-    // Combat Pause radio
     chk(kCombatOff, g_pauseOn == 0);
     chk(kCombatPvP, g_pauseOn == 1);
     chk(kCombatPvAny, g_pauseOn == 2);
@@ -286,7 +304,7 @@ void refreshMenu()
     chk(kAlwaysVis, g_alwaysVisible != 0);
 }
 
-// ---- pause helpers (freeze/resume the clock by adjusting baseline, like timer.mod) ----
+// ---- pause helpers (freeze/resume the clock by adjusting baseline) ----
 void setPaused(int on)
 {
     if (g_paused == on)
@@ -352,43 +370,50 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
 
     const int inGame = g_host->is_in_game();
     const int dayNow = hostDay(); // read outside the lock; -1 (unknown) falls back to the day-1 base
+    const int active = inGame ? hostTurnActive() : 0; // 1 = the LOCAL player's turn (per-client, MP-safe)
     int state, durMs, alwaysVis, paused, running, extra;
     DWORD baseline, pausedAt;
     EnterCriticalSection(&g_lock);
     const uint32_t serial = g_host->get_turn_serial();
     if (!inGame) {
-        // At the main menu / between games the timer does NOT run (no self-start). Keep g_lastSerial
-        // synced so the first real turn-start inside a game is detected as a change.
+        // Main menu / between games: timer does NOT run. Keep g_lastSerial synced so the first real
+        // turn-start inside a game is seen as a change.
         g_running = 0;
         g_lastSerial = serial;
-    } else if (serial != g_lastSerial) {
-        // A real turn (re)started. Mirror the legacy off[6]/off[7] turn handlers: Force mode is a
-        // Fischer time-bank (each turn +budget, unused carries per player); Simple mode is a count-up
-        // stopwatch with optional On-Day pause/unpause/reset bits.
+    } else if (active && !g_wasActive) {
+        // MY turn just started (turn_active 0->1) - the reliable per-CLIENT trigger that fires EVERY
+        // turn. (off[6]/serial fires only ONCE per client at game start, so it cannot gate per-turn;
+        // gating the rebank on a serial change left every turn after the first un-reset.) Force =
+        // Fischer bank (each turn +budget, unused carries per player); Simple = count-up + On-Day bits.
         const int newPlayer = g_host->get_turn_player();
-        const int firstTurn = !g_running; // 0->1 transition = the first real turn of this game
+        const int firstTurn = !g_running;
         g_lastSerial = serial;
+        g_elapseFired = 0; // re-arm the on-elapse latch (even an out-of-time turn auto-skips)
         if (firstTurn) {
-            for (int i = 0; i < 16; ++i) g_bank[i] = 0; // fresh game
+            bankClear(); // fresh game
             g_extra = 0;
             g_baseline = now_ms;
             g_pausedAt = now_ms;
-            g_curDayBudget = dayNow;
+            if (dayNow >= 0) g_curDayBudget = dayNow;
         } else if (g_state == 2) {
-            // Force: bank the PREVIOUS player's remaining (budget + their extra - elapsed), then load
-            // the NEW player's bank and start a fresh budget. ResetExtraTime drops the carry.
-            if (g_lastPlayer >= 0 && g_lastPlayer < 16) {
-                const int elapsedPrev = (int)(now_ms - g_baseline);
+            // Force: bank the PREVIOUS player's remaining (budget + extra - elapsed), then load the NEW
+            // player's bank and start a fresh budget. ResetExtraTime drops the carry.
+            if (g_lastPlayer >= 0) {
+                // FROZEN clock: the not-my-turn pause set g_pausedAt without advancing g_baseline, and
+                // this runs BEFORE the resume below. Clamp >=0 so a Set-future baseline or a GetTickCount
+                // wrap can't bank a huge negative-elapsed (= inflated carry).
+                int elapsedPrev = (int)((g_paused ? g_pausedAt : now_ms) - g_baseline);
+                if (elapsedPrev < 0) elapsedPrev = 0;
                 const int budgetPrev = budgetSecForDay(g_curDayBudget) * 1000;
-                g_bank[g_lastPlayer] = g_resetExtra ? 0 : (budgetPrev + g_extra - elapsedPrev);
+                *bankAccum(g_lastPlayer) = g_resetExtra ? 0 : (budgetPrev + g_extra - elapsedPrev);
             }
-            g_curDayBudget = dayNow;
-            g_extra = (newPlayer >= 0 && newPlayer < 16) ? g_bank[newPlayer] : 0;
+            if (dayNow >= 0) g_curDayBudget = dayNow; // keep last-known-good day if get_day == -1
+            g_extra = (newPlayer >= 0) ? *bankAccum(newPlayer) : 0;
             g_baseline = now_ms;
             g_pausedAt = now_ms;
         } else if (g_state == 1) {
-            // Simple (count-up): apply On-Day-End then On-Day-Start DayTurn bits; otherwise keep
-            // counting across turns (the legacy does not reset the stopwatch unless a Reset bit fires).
+            // Simple (count-up): apply On-Day-End then On-Day-Start DayTurn bits; otherwise keep counting
+            // across turns (legacy resets the stopwatch only if a Reset bit fires).
             if (g_dayTurn & 0x20) restart();         // DayEnd Reset
             if (g_dayTurn & 0x08) setPaused(1);      // DayEnd Pause
             else if (g_dayTurn & 0x10) setPaused(0); // DayEnd Unpause
@@ -399,14 +424,17 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         g_running = 1;
         g_lastPlayer = newPlayer;
     }
+    g_wasActive = active;
 
-    // Force-mode auto-pause: combine Animation Pause (PauseAnimation while in a battle / attack
-    // animation) with Combat Pause (PauseOn: PvP-only vs any combat), mirroring the legacy
-    // sub_100034A0. battle_kind/is_animating come from the host keystone capture (off[9] BTN_DEFEND).
-    // Routed through setPaused so it composes with a manual pause without double-counting the frozen
-    // span; g_combatPausing remembers whether WE auto-paused so we never clear a pause the user set.
+    // Force-mode auto-pause: combine Animation Pause (while in a battle / attack animation) with Combat
+    // Pause (PvP-only vs any combat). Routed through setPaused so it composes with a manual pause without
+    // double-counting; g_combatPausing remembers WE auto-paused so we never clear a user-set pause.
     int wantPause = 0;
-    if (g_running && g_state == 2) {
+    if (g_running && inGame && !active) {
+        // NOT the local player's turn: freeze so a client never counts another player's time (MP: waiting
+        // for the other player; SP: the AI / between turns).
+        wantPause = 1;
+    } else if (g_running && g_state == 2) {
         const int kind = hostBattleKind();
         if (g_pauseAnim && (hostInBattle() || hostAnimating()))
             wantPause = 1;
@@ -425,7 +453,7 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
     }
 
     state = g_state;
-    durMs = budgetSecForDay(dayNow) * 1000; // Timetable: per-day budget (base until the first active entry)
+    durMs = budgetSecForDay(g_curDayBudget) * 1000; // captured-day budget (matches the bank; no mid-turn jump)
     alwaysVis = g_alwaysVisible;
     paused = g_paused;
     running = g_running;
@@ -443,21 +471,25 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         if (running) {
             const DWORD effNow = paused ? pausedAt : now_ms; // clock frozen while paused
             const int elapsed = (int)(effNow - baseline);
-            v9 = (state == 2) ? (durMs + extra - elapsed) : elapsed; // Force: budget + carried extra - elapsed
+            v9 = (state == 2) ? (durMs + extra - elapsed) : elapsed; // Force: budget + extra - elapsed
         } else {
-            v9 = 0; // not started yet: timer.mod shows 00:00 until the turn is active
+            v9 = 0; // not started yet: show 00:00 until the turn is active
         }
         formatTime(v9, text);
         pickColors(v9, state, paused, &tc, &sc);
-        // On Elapse: when a Force-mode turn's time runs out, fire the queued game action ONCE per turn.
-        // Re-armed automatically as soon as the clock is positive again (turn change / Set / Reset).
+        // On Elapse: when a Force-mode turn runs out, fire the queued action ONCE per turn. Re-armed as
+        // soon as the clock is positive again (turn change / Set / Reset).
         if (v9 >= 0) {
             g_elapseFired = 0;
         } else if (state == 2 && running && inGame && !g_elapseFired) {
             g_elapseFired = 1;
             if (g_turnDay) {
-                if (hostInBattle()) { if (g_retreat) hostRetreat(); }
-                else hostEndDay();
+                // Queue BOTH and let the HOST decide by the captured RETREAT button (authoritative
+                // battle-dialog state), NOT by g_inBattle: g_inBattle is the anim-speed discriminator and
+                // can stick at 1 after a battle, silently routing every elapse to a no-op retreat so the
+                // turn never skips. Host presses End-Turn only when NOT in battle, Retreat only when in.
+                hostEndDay();
+                if (g_retreat) hostRetreat();
             }
         }
     }
@@ -512,10 +544,9 @@ extern "C" void __cdecl c4p_shutdown(void)
 }
 
 // ---- the exact legacy menu (resource id 3), built programmatically ----
-// Timetable dialog (port of legacy resource 5 / sub_100044E0): edit the per-day turn budget. Row 0 is
-// the day-1 base (TableDuration_0); rows 1..3 are checkable "from day N -> duration D" overrides. A
-// checkbox enables/greys its row. OK saves to config + applies live; Cancel discards. Runs modal on
-// the game UI thread (from c4p_command).
+// Timetable dialog (legacy resource 5): edit the per-day turn budget. Row 0 is the day-1 base
+// (TableDuration_0); rows 1..3 are checkable "from day N -> duration D" overrides. OK saves to config +
+// applies live; Cancel discards. Modal on the game UI thread (from c4p_command).
 INT_PTR CALLBACK timetableDlgProc(HWND h, UINT m, WPARAM w, LPARAM)
 {
     switch (m) {
@@ -577,30 +608,31 @@ INT_PTR CALLBACK timetableDlgProc(HWND h, UINT m, WPARAM w, LPARAM)
     return FALSE;
 }
 
-// Set dialog (port of legacy resource 6 / DialogFunc): set the current turn's displayed time to N
-// minutes. Simple mode sets the count-up elapsed; Force mode sets the count-down remaining within the
-// current day's budget and clears the carried extra. Modal on the game UI thread (from c4p_command).
+// Set dialog (legacy resource 6): set the current turn's displayed time to N seconds (legacy DialogFunc
+// uses 1000*value, and the Timetable budget is in seconds too). Simple sets the count-up elapsed; Force
+// sets the count-down remaining within the day's budget and clears extra. Modal on the game UI thread.
 INT_PTR CALLBACK setDlgProc(HWND h, UINT m, WPARAM w, LPARAM)
 {
     switch (m) {
     case WM_INITDIALOG:
-        SetDlgItemInt(h, IDC_SET_MIN, 0, FALSE);
+        SetDlgItemInt(h, IDC_SET_SEC, 0, FALSE);
         return TRUE;
     case WM_COMMAND:
         switch (LOWORD(w)) {
         case IDOK: {
             BOOL ok;
-            int mins = (int)GetDlgItemInt(h, IDC_SET_MIN, &ok, FALSE);
-            if (mins < 0) mins = 0;
+            int secs = (int)GetDlgItemInt(h, IDC_SET_SEC, &ok, FALSE);
+            if (secs < 0) secs = 0;
             const int day = hostDay();
             const DWORD now = GetTickCount();
             EnterCriticalSection(&g_lock);
             if (g_state == 2) {
                 const int budgetMs = budgetSecForDay(day) * 1000;
-                g_baseline = now - (DWORD)(budgetMs - mins * 1000); // remaining = mins
+                if (secs * 1000 > budgetMs) secs = budgetMs / 1000; // remaining can't exceed the budget
+                g_baseline = now - (DWORD)(budgetMs - secs * 1000); // remaining = secs
                 g_extra = 0;
             } else if (g_state == 1) {
-                g_baseline = now - (DWORD)(mins * 1000); // elapsed = mins
+                g_baseline = now - (DWORD)(secs * 1000); // elapsed = secs
             } else {
                 g_baseline = now;
             }
@@ -676,7 +708,7 @@ extern "C" HMENU __cdecl c4p_menu(int base_cmd_id)
     return g_menu;
 }
 
-// ---- menu command handling (sub_10004D40), faithful to the legacy bit/radio/toggle logic ----
+// ---- menu command handling (sub_10004D40): legacy bit/radio/toggle logic ----
 extern "C" void __cdecl c4p_command(int cmd)
 {
     if (!g_host)

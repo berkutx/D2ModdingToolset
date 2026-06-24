@@ -1,16 +1,7 @@
 /*
- * C4dll-R plugin host. The game's original renderer hosted plugins in <game>\mods\ and composited
- * their overlay into the game frame. Replacing it with C4dll-R removed that host, so plugins (e.g. the
- * turn timer) stopped working. This module restores hosting inside C4dll-R for BOTH formats:
- *   - the NEW 32bpp-native format (c4plugin.h, "*.c4p"): draws on demand (only when it invalidates);
- *   - the LEGACY format ("*.mod"): GetName/SetHWND/Launch/DrawFrame, redrawn periodically.
- *
- * Rendering: instead of patching cnc-ddraw's renderer (D2 is 8bpp palettized with an in-shader
- * palette, and there are 3 backends OGL/D3D9/GDI), we composite via a transparent, click-through,
- * topmost LAYERED window sitting over the game's client area and updated with UpdateLayeredWindow.
- * This is renderer-agnostic and pairs with the new format's draw-on-dirty (we only repaint when the
- * overlay actually changes). Plugins draw straight (non-premultiplied) BGRA; the host premultiplies
- * once for the layered-window alpha blend.
+ * C4dll-R plugin host: restores hosting of mods\*.c4p (new 32bpp) and *.mod (legacy) plugins
+ * that the original renderer used to composite. Renderer-agnostic: composites via a transparent,
+ * click-through, topmost LAYERED window over the game client area (UpdateLayeredWindow).
  */
 
 #include "c4plugin.h"
@@ -22,7 +13,7 @@
 
 namespace {
 
-// --- logging (-> OutputDebugString + C4plugins.log next to the exe) --------------------
+// logging -> OutputDebugString + C4plugins.log next to the exe
 const char* exeDirFile(const char* leaf)
 {
     static char base[MAX_PATH] = {};
@@ -62,7 +53,7 @@ void plog(const char* fmt, ...)
     }
 }
 
-// --- game window discovery (the game's main MQ_UIManager window) -----------------------
+// find the game's main MQ_UIManager window
 struct FindCtx
 {
     DWORD pid;
@@ -98,8 +89,8 @@ HWND gameHwnd()
     return g_gameHwnd;
 }
 
-// --- host services exposed to new-format plugins ---------------------------------------
-volatile LONG g_dirty = 1; // a new plugin asked for a redraw (start dirty for the first frame)
+// host services exposed to new-format plugins
+volatile LONG g_dirty = 1; // a plugin asked for a redraw (start dirty for first frame)
 
 HWND __cdecl host_get_hwnd(void)
 {
@@ -128,14 +119,13 @@ void __cdecl host_set_config_int(const char* section, const char* key, int value
     WritePrivateProfileStringA(section, key, b, hostConfigPath());
 }
 
-// --- host-driven turn detection -------------------------------------------------------------------
-// The host watches the game's current-turn player and exposes it to new plugins. The timer resets its
-// countdown whenever g_turnSerial changes (the host bumps it on every turn change, incl. a skipped
-// turn). pollServerTurn() (in the overlay worker) updates these; the plugin reads them on the SAME
-// worker thread, so a plain read is fine. featuremenu owns the game-struct walk (SEH-guarded).
+// host-driven turn detection. g_turnSerial/g_turnPlayer are WRITTEN on the game thread (off[6]
+// turn-info hook) and READ on the overlay worker (the plugin), so both are volatile and published
+// together (player first, then the InterlockedIncrement serial). featuremenu owns the game-struct walk.
 extern "C" int featuremenu_server_player(int* outInGame);
 extern "C" int featuremenu_in_battle(void);
 extern "C" int featuremenu_current_day(void);
+extern "C" void featuremenu_refresh_day(void); // recompute the cached day on the game thread
 extern "C" int timerhost_turn_active(void);
 extern "C" int timerhost_is_animating(void);
 extern "C" int timerhost_battle_kind(void);
@@ -143,10 +133,12 @@ extern "C" int timerhost_turn_player_id(void);
 extern "C" int timerhost_retreat(void);
 extern "C" int timerhost_end_day(void);
 
-volatile LONG g_turnSerial = 0; // bumped on every detected turn change (including a skipped turn)
-int g_turnPlayer = -1;          // current turn player index, -1 if unknown / not in a game
-int g_turnMiss = 0;             // consecutive -1 polls (debounce transient/torn reads)
-int g_inGame = 0;               // 1 while a turn is in progress
+volatile LONG g_turnSerial = 0; // bumped on every detected turn change (including a skip)
+volatile LONG g_turnPlayer = -1; // current turn player index, -1 if unknown / not in a game (cross-thread)
+int g_turnMiss = 0;             // consecutive -1 polls (debounce torn reads)
+int g_inGame = 0;               // 1 while a turn is in progress (server poll; reliable on HOST)
+volatile LONG g_hasServer = 0;  // 1 once in-process server seen -> trust g_inGame over off[6] (written
+                                // on the worker poll AND the game thread via pluginhost_turn_reset)
 
 uint32_t __cdecl host_get_turn_serial(void)
 {
@@ -154,11 +146,34 @@ uint32_t __cdecl host_get_turn_serial(void)
 }
 int __cdecl host_get_turn_player(void)
 {
-    return g_turnPlayer;
+    return (int)g_turnPlayer;
 }
+volatile LONG g_inGameOff6 = 0; // set by off[6] turn-info hook (fires on BOTH MP clients); cleared on scenario change
+
+// timerhost detours the off[6] turn-info handler (CCmdTurnInfoMsg, sub_48A680), a NETWORK message
+// processed on every client, and calls these - so a pure client (MP joiner, no in-process server)
+// still sees turn-starts and "in a game".
+extern "C" void pluginhost_bump_turn(int player)
+{
+    featuremenu_refresh_day(); // off[6] runs on the game thread: refresh the cached day so it is current
+                               // the instant the serial bumps (the worker rebanks the budget on serial)
+    g_inGameOff6 = 1;
+    g_turnPlayer = player; // publish the player BEFORE the serial bump (the worker keys off the serial)
+    InterlockedIncrement(&g_turnSerial);
+}
+extern "C" void pluginhost_turn_reset(void)
+{
+    g_inGameOff6 = 0;
+    g_turnPlayer = -1;
+    g_hasServer = 0; // new scenario/game: re-decide host-vs-client so a joined client (no in-process
+                     // server) does not keep trusting a stale g_inGame from a previously-hosted game
+}
+
 int __cdecl host_is_in_game(void)
 {
-    return g_inGame;
+    // HOST -> trust g_inGame (drops reliably on leaving). CLIENT -> off[6] flag (cleared by off[5]).
+    // The split keeps the HOST from staying "in game" at the menu if off[5] is missed.
+    return (g_hasServer ? g_inGame : g_inGameOff6) ? 1 : 0;
 }
 int __cdecl host_is_in_battle(void)
 {
@@ -182,10 +197,10 @@ C4P_Host g_host = {sizeof(C4P_Host),     host_get_hwnd,        host_invalidate,
                    host_turn_active,     host_is_animating,    host_battle_kind,
                    host_turn_player_id,  host_retreat,         host_end_day};
 
-// --- plugin records --------------------------------------------------------------------
-using ModGetId = const void*(__stdcall*)(); // 12-byte plugin id (used for dedup)
+// plugin records
+using ModGetId = const void*(__stdcall*)(); // 12-byte plugin id (for dedup)
 using ModGetName = const char*(__stdcall*)();
-using ModGetMenu = HMENU(__stdcall*)(int baseCmdId); // builds + returns the plugin's config submenu
+using ModGetMenu = HMENU(__stdcall*)(int baseCmdId); // builds the plugin's config submenu
 using ModSetHWND = void(__stdcall*)(HWND);
 using ModLaunch = void(__stdcall*)();
 // DrawFrame(originX, originY, width, height, stride, formatFlags, scan0). flags bit0=1 -> 32bpp ARGB.
@@ -203,12 +218,12 @@ struct Plugin
     bool isNew;
     bool hwndSet;
     bool hasId;
-    char id[12]; // legacy plugin id (GetId), used to dedup
+    char id[12]; // legacy plugin id (GetId), for dedup
     bool hasSupersede;     // new plugin: declares a legacy id it replaces
     char supersedeId[12];  // the 12-byte legacy GetId this .c4p supersedes
     char name[64];
-    UINT menuBase; // the base command id we passed to GetMenu (the plugin's WM_COMMAND base)
-    HMENU menu; // legacy plugin's config submenu (from GetMenu), grafted into the bar; null if none
+    UINT menuBase; // base command id passed to GetMenu (plugin's WM_COMMAND base)
+    HMENU menu; // plugin's config submenu, grafted into the bar; null if none
     ModSetHWND setHwnd;
     ModLaunch launch;
     ModDrawFrame drawFrame;
@@ -220,9 +235,9 @@ struct Plugin
 Plugin g_plugins[16];
 int g_pluginCount = 0;
 bool g_hasLegacy = false;
-HANDLE g_pluginsReady = nullptr; // manual-reset event: signaled by the worker once plugins are loaded
+HANDLE g_pluginsReady = nullptr; // manual-reset event: signaled by the worker once plugins loaded
 
-// --- loading ---------------------------------------------------------------------------
+// loading
 void loadOne(const char* path, const char* fileName, bool isNew)
 {
     if (g_pluginCount >= (int)(sizeof(g_plugins) / sizeof(g_plugins[0])))
@@ -264,8 +279,8 @@ void loadOne(const char* path, const char* fileName, bool isNew)
             return;
         }
         plog("[plugins] loaded NEW '%s' (%s)", p.name, fileName);
-        // Optional config submenu (grafted under the "Plugins" menu by featuremenu) + its command
-        // handler. Reserve a 0x100-wide WM_COMMAND id block per plugin, same scheme as legacy.
+        // optional config submenu (grafted under "Plugins" by featuremenu) + command handler;
+        // reserve a 0x100-wide WM_COMMAND id block per plugin (same scheme as legacy)
         p.menuBase = 0xB000 + g_pluginCount * 0x100;
         p.command = (C4pCommand)GetProcAddress(m, "c4p_command");
         if (auto buildPluginMenu = (C4pMenu)GetProcAddress(m, "c4p_menu"))
@@ -281,8 +296,8 @@ void loadOne(const char* path, const char* fileName, bool isNew)
             FreeLibrary(m);
             return;
         }
-        // Dedup by the 12-byte GetId, exactly as the original host did, so the same plugin
-        // dropped in twice (e.g. .mod + a renamed copy) is not loaded/hooked twice.
+        // dedup by the 12-byte GetId (as the original host did): same plugin dropped in twice
+        // is not loaded/hooked twice
         if (getId) {
             const void* idp = getId();
             if (idp) {
@@ -296,9 +311,8 @@ void loadOne(const char* path, const char* fileName, bool isNew)
                     }
             }
         }
-        // If a NEW .c4p already loaded declares it replaces this legacy id, drop the legacy one (no
-        // double timer): this is how the new format ships "alongside legacy" cleanly - new supersedes
-        // old. (.c4p are loaded before .mod, so the superseding plugin is already present.)
+        // if an already-loaded .c4p declares it replaces this legacy id, drop the legacy one (no
+        // double timer). .c4p load before .mod, so the superseding plugin is already present.
         if (p.hasId) {
             for (int i = 0; i < g_pluginCount; ++i)
                 if (g_plugins[i].isNew && g_plugins[i].hasSupersede &&
@@ -313,8 +327,7 @@ void loadOne(const char* path, const char* fileName, bool isNew)
         const char* nm = getName ? getName() : nullptr;
         lstrcpynA(p.name, nm ? nm : fileName, sizeof(p.name));
         p.launch();
-        // Build the plugin's config submenu (legacy plugins provide one); we graft it under "Plugins".
-        // Use a command-id base well clear of featuremenu's 0xA1xx range.
+        // build config submenu, grafted under "Plugins"; id base kept clear of featuremenu's 0xA1xx
         p.menuBase = 0xB000 + g_pluginCount * 0x100;
         if (getMenu)
             p.menu = getMenu(p.menuBase);
@@ -347,14 +360,11 @@ void loadFolder(const char* pattern, bool isNew)
     FindClose(h);
 }
 
-// --- Path A: drive the legacy turn timer's per-turn RESET, incl. on a SKIPPED turn -------------
-// timer.mod resets its countdown on a NORMAL turn change via its own off[7] game hook, but a SKIP
-// takes a game path it does not hook -> the next player keeps the previous countdown ("time
-// continued"). We drive the reset: detour the timer's per-frame turn callback (RVA 0x1B90 = its
-// off[6] handler, which reads the current player from the game every frame, including right after a
-// skip) and, when the player index changes, post the timer its RESET menu command (base+3 = the
-// same thing the timer does itself on a normal turn). This RVA/layout is specific to the user's
-// timer.mod build; it is gated on the plugin being the "Timer" with a valid off_10008000 table.
+// Drive the legacy timer's per-turn RESET, including on a SKIPPED turn. timer.mod resets on a normal
+// turn via its own off[7] hook, but a skip takes an unhooked path, so the next player keeps the old
+// countdown. We detour the timer's per-frame turn callback (RVA 0x1B90 = its off[6] handler, which
+// reads the current player every frame) and post its RESET command (base+3) on a player change.
+// RVA/layout is specific to the user's timer.mod; gated on name "Timer" + a valid off_10008000 table.
 using TimerTurnFn = unsigned char*(__cdecl*)();
 TimerTurnFn g_realTimerTurn = nullptr;
 HWND g_timerHwnd = nullptr;
@@ -364,9 +374,9 @@ bool g_timerFixDone = false;
 
 unsigned char* __cdecl timerTurnHook()
 {
-    unsigned char* obj = g_realTimerTurn(); // run the timer's own callback (tracks per-player time)
+    unsigned char* obj = g_realTimerTurn(); // run the timer's own callback
     if (obj) {
-        const int player = obj[0]; // the turn-controller object's first byte = current player index
+        const int player = obj[0]; // turn-controller object's first byte = current player index
         if (g_lastTurnPlayer >= 0 && player != g_lastTurnPlayer && g_timerHwnd)
             PostMessageA(g_timerHwnd, WM_COMMAND, g_timerResetCmd, 0); // reset for the new player
         g_lastTurnPlayer = player;
@@ -383,9 +393,8 @@ void installTimerTurnFix(HWND gameHwnd)
         if (p.isNew || lstrcmpiA(p.name, "Timer") != 0)
             continue;
         const uintptr_t base = (uintptr_t)p.mod;
-        // sanity: off_10008000 (RVA 0x8000) must hold the matched per-version table whose off[6] is
-        // a game code address (the game's preferred base is 0x400000), else this is not the known
-        // timer and we must not patch a wrong RVA.
+        // sanity: off_10008000 (RVA 0x8000) must hold a table whose off[6] is a game code address
+        // (game base 0x400000), else this is not the known timer - do not patch a wrong RVA
         uint32_t* table = *reinterpret_cast<uint32_t**>(base + 0x8000);
         if (!table)
             continue;
@@ -410,7 +419,7 @@ void installTimerTurnFix(HWND gameHwnd)
     }
 }
 
-// --- transparent layered overlay window + BGRA32 DIB -----------------------------------
+// transparent layered overlay window + BGRA32 DIB
 HWND g_overlayWnd = nullptr;
 HDC g_memDC = nullptr;
 HBITMAP g_dibBmp = nullptr;
@@ -418,7 +427,7 @@ HBITMAP g_oldBmp = nullptr;
 uint8_t* g_dib = nullptr; // BGRA32, top-down
 int g_ovW = 0, g_ovH = 0;
 
-// (re)create the DIB surface for size w x h; returns true if it was (re)created.
+// (re)create the DIB surface for w x h; returns true if (re)created
 bool ensureSurface(int w, int h)
 {
     if (g_memDC && g_ovW == w && g_ovH == h)
@@ -468,15 +477,14 @@ HWND createOverlayWindow(HWND owner)
         registered = true;
     }
     // Layered (per-pixel alpha) + transparent (click-through) + no-activate, OWNED by the game
-    // window. An owned, NON-topmost window is always kept just above its owner in z-order and goes
-    // to the background WITH it - so the overlay is glued to the game window, never floats over other
-    // apps, and needs no focus logic.
+    // window so it stays glued just above its owner in z-order, never floats over other apps,
+    // and needs no focus logic.
     return CreateWindowExA(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                            "C4dllROverlay", "", WS_POPUP, 0, 0, 16, 16, owner, nullptr,
                            GetModuleHandleA(nullptr), nullptr);
 }
 
-// Draw every plugin into g_dib (cleared transparent), then premultiply for the layered alpha blend.
+// draw every plugin into g_dib (cleared transparent), then premultiply for the layered alpha blend
 void rebuildOverlay(int w, int h)
 {
     memset(g_dib, 0, (size_t)w * h * 4);
@@ -495,12 +503,11 @@ void rebuildOverlay(int w, int h)
             p.drawFrame(0, 0, w, h, w * 4, 1, g_dib); // 32bpp ARGB (flags bit0=1), full area
         }
     }
-    // Once the legacy plugins have their HWND (subclass active), arm the turn timer's skip fix.
+    // once legacy plugins have their HWND (subclass active), arm the timer skip fix
     if (game)
         installTimerTurnFix(game);
 
-    // Diagnostic: C4PLUGINS_TESTMARK=1 draws a visible box, to confirm the overlay composites over
-    // the renderer (a turn timer is blank outside an active turn). Off by default.
+    // diagnostic: C4PLUGINS_TESTMARK=1 draws a visible box to confirm the overlay composites
     if (GetEnvironmentVariableA("C4PLUGINS_TESTMARK", nullptr, 0)) {
         for (int yy = 8; yy < 56 && yy < h; ++yy)
             for (int xx = 8; xx < 178 && xx < w; ++xx) {
@@ -509,7 +516,7 @@ void rebuildOverlay(int w, int h)
             }
     }
 
-    // straight alpha -> premultiplied (UpdateLayeredWindow / ULW_ALPHA expects premultiplied)
+    // straight alpha -> premultiplied (ULW_ALPHA expects premultiplied)
     uint8_t* px = g_dib;
     const int count = w * h;
     for (int i = 0; i < count; ++i, px += 4) {
@@ -526,14 +533,11 @@ void rebuildOverlay(int w, int h)
 
 DWORD WINAPI overlayWorker(LPVOID)
 {
-    // Load plugins HERE, on the worker thread, NOT in DllMain. LoadLibrary of arbitrary plugin DLLs +
-    // their c4p_init (which calls GdiplusStartup, owning a background notification thread) + legacy
-    // Launch() are all loader-lock-unsafe in DLL_PROCESS_ATTACH (a classic loader-lock deadlock). This
-    // runs after DllMain has returned and the lock is released. The menu builder (featuremenu
-    // buildMenu) waits on g_pluginsReady before reading the plugin list, since it can no longer rely
-    // on the loader lock to serialize loading before the menu thread runs.
-    loadFolder("*.c4p", true);  // our native format first
-    loadFolder("*.mod", false); // legacy *.mod plugins (minimal compatibility)
+    // Load plugins HERE on the worker thread, NOT in DllMain: LoadLibrary + c4p_init (GdiplusStartup)
+    // + legacy Launch() are loader-lock-unsafe in DLL_PROCESS_ATTACH (deadlock). featuremenu buildMenu
+    // waits on g_pluginsReady before reading the list (loading no longer serialized by the loader lock).
+    loadFolder("*.c4p", true);  // native format first
+    loadFolder("*.mod", false); // legacy *.mod
     if (g_pluginCount)
         plog("[plugins] %d plugin(s) loaded (legacy present: %d)", g_pluginCount, g_hasLegacy ? 1 : 0);
     if (g_pluginsReady)
@@ -579,36 +583,24 @@ DWORD WINAPI overlayWorker(LPVOID)
             if (w > 0 && h > 0) {
                 bool sizeChanged = ensureSurface(w, h);
                 const DWORD now = GetTickCount();
-                // Host-driven turn detection: poll the game's current-turn player and bump the turn
-                // serial on a change, so new plugins (the timer) reset - including on a skipped turn.
                 {
+                    // Turn detection (player + serial + in-game) is driven by the off[6] turn-info
+                    // hook (cross-client). This host-only server-player poll stays ONLY as an in-game
+                    // cross-check so the HOST notices it left even if the off[5] hook is missed.
                     int tp = featuremenu_server_player(nullptr);
-                    if (tp < 0) {
-                        // Do NOT drop the tracked player on a single transient/torn -1 (the
-                        // SEH-guarded chain read can momentarily fail off the game thread). Only
-                        // clear after a few consecutive misses = genuinely out of game. This avoids
-                        // both a spurious mid-turn reset and swallowing a change that straddles a
-                        // one-off -1.
-                        if (g_turnPlayer >= 0 && ++g_turnMiss >= 4)
-                            g_turnPlayer = -1;
-                    } else {
+                    if (tp >= 0) {
                         g_turnMiss = 0;
-                        if (tp != g_turnPlayer) {
-                            // first observation, re-acquire after out-of-game (a NEW scenario/load),
-                            // or a real turn change incl. a skip: bump the serial so the timer
-                            // (re)starts its countdown for this turn.
-                            g_turnPlayer = tp;
-                            InterlockedIncrement(&g_turnSerial);
-                        }
+                        g_inGame = 1;
+                        g_hasServer = 1; // this client runs the in-process server (host)
+                    } else if (++g_turnMiss >= 4) {
+                        g_inGame = 0;
                     }
-                    g_inGame = (g_turnPlayer >= 0) ? 1 : 0;
                 }
                 for (int i = 0; i < g_pluginCount; ++i)
                     if (g_plugins[i].isNew && g_plugins[i].tick)
                         g_plugins[i].tick(now);
                 const bool dirty = InterlockedExchange(&g_dirty, 0) != 0;
-                // legacy plugins redraw periodically (~6 fps is plenty for a clock; it blinks when
-                // time runs low, still readable at this rate).
+                // legacy plugins redraw periodically (~6 fps is plenty for a clock)
                 const bool legacyDue = g_hasLegacy && (now - lastRebuild >= 160);
                 if (g_dib && (sizeChanged || dirty || legacyDue)) {
                     rebuildOverlay(w, h);
@@ -624,8 +616,7 @@ DWORD WINAPI overlayWorker(LPVOID)
                         announced = true;
                     }
                 } else {
-                    // follow window moves without repainting the content or changing z-order (the
-                    // owned window stays just above the game on its own).
+                    // follow window moves without repainting or changing z-order
                     SetWindowPos(g_overlayWnd, nullptr, tl.x, tl.y, 0, 0,
                                  SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
                 }
@@ -637,28 +628,21 @@ DWORD WINAPI overlayWorker(LPVOID)
 
 } // namespace
 
-// Called from cnc-ddraw's DllMain (after the embed + featuremenu). Loads plugins and starts the
-// overlay compositor thread. Zero cost if there are no plugins.
-//
-// Lifetime: C4dll-R is the renderer, loaded for the whole process; loaded plugins live until the
-// process exits, when the OS reclaims everything. We intentionally do NOT tear plugins down from
-// DllMain or atexit - a c4p_shutdown there would run under the loader lock and would have to join the
-// overlay worker thread and call GdiplusShutdown (which owns its own thread), both unsafe at process
-// termination (deadlock / use-after-teardown), so process-exit cleanup is left to the OS. c4p_shutdown
-// is still exercised where it is safe and matters: a plugin whose c4p_init fails calls it itself to
-// unwind its GDI+ state before the host FreeLibrary's the module (see timer.cpp c4p_init).
+// Called from cnc-ddraw's DllMain (after embed + featuremenu). Starts the overlay worker; zero cost
+// with no plugins. No teardown: a c4p_shutdown from DllMain/atexit would run under the loader lock
+// and join the worker / call GdiplusShutdown (unsafe at process exit), so cleanup is left to the OS.
+// c4p_shutdown is still called where safe: a plugin whose c4p_init fails calls it itself (see timer.cpp).
 extern "C" void pluginhost_install(void)
 {
-    // DllMain context: only create the worker thread (CreateThread is loader-lock-safe). The actual
-    // plugin loading (LoadLibrary + c4p_init/GdiplusStartup + legacy Launch) happens at the start of
-    // overlayWorker, after DllMain returns and the loader lock is released - see the note there.
+    // DllMain context: only create the thread (CreateThread is loader-lock-safe); the actual loading
+    // happens at the start of overlayWorker after the loader lock is released (see note there).
     g_pluginsReady = CreateEventA(nullptr, TRUE, FALSE, nullptr); // manual-reset; signaled once loaded
     HANDLE t = CreateThread(nullptr, 0, &overlayWorker, nullptr, 0, nullptr);
     if (t)
         CloseHandle(t);
 }
 
-// --- list accessors for the menu bar (featuremenu builds a "Plugins" menu from these) ----
+// list accessors for the menu bar (featuremenu builds a "Plugins" menu from these)
 extern "C" int pluginhost_count(void)
 {
     return g_pluginCount;
@@ -671,14 +655,13 @@ extern "C" int pluginhost_is_new(int i)
 {
     return (i >= 0 && i < g_pluginCount && g_plugins[i].isNew) ? 1 : 0;
 }
-extern "C" void* pluginhost_menu(int i) // plugin config submenu HMENU (legacy GetMenu / new c4p_menu), or null
+extern "C" void* pluginhost_menu(int i) // plugin config submenu HMENU, or null
 {
     return (i >= 0 && i < g_pluginCount) ? g_plugins[i].menu : nullptr;
 }
 
-// Route a menu WM_COMMAND to the owning NEW plugin's c4p_command (featuremenu calls this for ids in
-// the plugin id block 0xB000+). Returns 1 if a new plugin handled it; 0 otherwise (legacy plugin ids
-// reach the legacy plugin via the WndProc forward chain, so the caller passes those through).
+// Route a menu WM_COMMAND to the owning NEW plugin's c4p_command (ids in the 0xB000+ plugin block).
+// Returns 1 if handled; 0 otherwise (legacy ids reach the plugin via the WndProc forward chain).
 extern "C" int pluginhost_command(unsigned id)
 {
     for (int i = 0; i < g_pluginCount; ++i) {
@@ -691,9 +674,8 @@ extern "C" int pluginhost_command(unsigned id)
     return 0;
 }
 
-// Block until the worker has finished loading plugins (or the timeout elapses), so featuremenu's
-// buildMenu reads a complete plugin list. Needed because loading moved off the loader-lock-serialized
-// DllMain onto the worker thread: without this the menu could be built before plugins finish loading.
+// Block until the worker finished loading plugins (or timeout), so featuremenu's buildMenu reads a
+// complete list (needed since loading moved off the loader-lock-serialized DllMain to the worker).
 extern "C" void pluginhost_wait_ready(unsigned ms)
 {
     if (g_pluginsReady)

@@ -1,26 +1,7 @@
 /*
- * C4dll-R monolith: in-game menu + feature toggles.
- *
- * Ported from the D2ModdingToolset mss32 module (featuremenu.cpp) into the embedded cnc-ddraw
- * renderer so the final C4dll-R.dll is a SELF-CONTAINED, swappable assembly (renderer + menu),
- * a single swappable assembly. It does NOT depend on mss32: the few bits it needs from the game
- * (version detection, the GameSettings pointer chain) are inlined here as raw addresses/offsets,
- * the renderer's own DDReloadConfig / DDTakeScreenshot exports are called directly (same module),
- * and logging goes to a local logger instead of spdlog.
- *
- * Original file is part of the modding toolset for Disciples 2.
- * (https://github.com/VladimirMakeev/D2ModdingToolset). GPLv3+. See the repo LICENSE.
- *
- * cnc-ddraw renders into the game's own window but has no in-game settings menu, so we add a real
- * menu BAR below the title bar with the feature options.
- *   - The real title bar comes from cnc-ddraw itself (ddraw.ini border=true); we only attach the
- *     menu BAR (SetMenu) + drive it. We DETOUR the game's window procedure by address (not a
- *     SetWindowLong subclass, which cnc-ddraw clobbers) to receive WM_COMMAND.
- *   - Live toggles (always-active, animation speed) patch the game in-process and persist to
- *     C4menu.ini next to the exe.
- *   - Renderer / shader / mode / resolution / vsync / boxing settings are cnc-ddraw settings: the
- *     menu writes them to ddraw.ini and re-applies them LIVE via the renderer's DDReloadConfig
- *     (a few init-once ones still say "(restart)").
+ * C4dll-R monolith: in-game menu bar + feature toggles, embedded in the cnc-ddraw renderer.
+ * Self-contained: no mss32 dependency; game version + GameSettings chain inlined as raw addresses.
+ * Russobit-only patch sites. Original from D2ModdingToolset (GPLv3+, see repo LICENSE).
  */
 
 #include <cstdarg>
@@ -31,14 +12,13 @@
 #include <Windows.h>
 #include <detours.h>
 
-// The renderer's own exports (defined in dllmain.c, same module). Called directly: no GetProcAddress,
-// no separate ddraw.dll. DDReloadConfig re-reads ddraw.ini + dd_SetDisplayMode; DDTakeScreenshot
-// saves a timestamped PNG. Both no-op safely if the renderer is not yet initialized.
+// Renderer exports (dllmain.c, same module): DDReloadConfig re-reads ddraw.ini + dd_SetDisplayMode;
+// DDTakeScreenshot saves a PNG. Both no-op safely before the renderer is initialized.
 extern "C" void DDReloadConfig(void);
 extern "C" void DDTakeScreenshot(void);
-extern "C" void DDMapClientToGame(long cx, long cy, long* gx, long* gy); // Win32 client -> game coords (drag-scroll)
+extern "C" void DDMapClientToGame(long cx, long cy, long* gx, long* gy); // Win32 client -> game coords
 
-// Plugin host (pluginhost.cpp) - used to build the "Plugins" menu (split legacy .mod / native .c4p).
+// Plugin host (pluginhost.cpp): builds the "Plugins" menu (legacy .mod / native .c4p).
 extern "C" void pluginhost_wait_ready(unsigned ms);
 extern "C" int pluginhost_count(void);
 extern "C" const char* pluginhost_name(int i);
@@ -46,14 +26,13 @@ extern "C" int pluginhost_is_new(int i);
 extern "C" void* pluginhost_menu(int i);
 extern "C" int pluginhost_command(unsigned id); // route a plugin-block WM_COMMAND to its c4p_command
 
-// Map drag-scroll lives in GLOBAL scope (defined after the anonymous namespace below); forward-declared
-// here so the anon-namespace wndProcHook can reach the same symbols. g_dragScrollActive = a drag is live.
+// Map drag-scroll lives in global scope (defined after the anon namespace); forward-declared here.
 extern bool g_dragScrollActive;
 void dragScrollWndMove(int gameX, int gameY);
 
 namespace {
 
-// --- minimal logger (replaces spdlog) -> OutputDebugStringA + C4menu.log next to the exe -------
+// --- minimal logger -> OutputDebugStringA + C4menu-<pid>.log next to the exe ---
 const char* exeDirFile(const char* leaf)
 {
     static char base[MAX_PATH] = {};
@@ -71,6 +50,14 @@ const char* exeDirFile(const char* leaf)
     return path;
 }
 
+// Per-process log leaf so the two MP instances write separate files (no interleaved lines).
+const char* logLeaf()
+{
+    static char leaf[32] = {0};
+    if (!leaf[0]) wsprintfA(leaf, "C4menu-%lu.log", GetCurrentProcessId());
+    return leaf;
+}
+
 void mlog(const char* fmt, ...)
 {
     char buf[600];
@@ -83,7 +70,7 @@ void mlog(const char* fmt, ...)
     buf[n] = '\n';
     buf[n + 1] = 0;
     OutputDebugStringA(buf);
-    HANDLE h = CreateFileA(exeDirFile("C4menu.log"), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    HANDLE h = CreateFileA(exeDirFile(logLeaf()), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h != INVALID_HANDLE_VALUE) {
         DWORD w = 0;
@@ -92,7 +79,7 @@ void mlog(const char* fmt, ...)
     }
 }
 
-// --- game version detection (inlined from D2ModdingToolset version.cpp: by exe file size) -------
+// --- game version detection (by exe file size) ---
 enum GameVer
 {
     VerUnknown,
@@ -143,8 +130,8 @@ bool writeBytes(uintptr_t va, const std::uint8_t* bytes, size_t len)
     return true;
 }
 
-// --- always-active: force the foreground-flag store to 1 (no pause on focus loss) -----
-// Russobit only for now (same site/bytes as testdrv/bootfixes.cpp 0x5628BE). Toggles live.
+// --- always-active: force the foreground-flag store to 1 (no pause on focus loss) ---
+// Russobit only, site/bytes from bootfixes.cpp 0x5628BE. Toggles live.
 const std::uint8_t kFgOriginal[10] = {0x2B, 0xC3, 0xF7, 0xD8, 0x1B, 0xC0, 0x40, 0x88, 0x47, 0x18};
 const std::uint8_t kFgPatched[10] = {0xC6, 0x47, 0x18, 0x01, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
 
@@ -176,26 +163,17 @@ void applyAlwaysActive(bool on)
     }
 }
 
-// --- animation speed: virtual clock over timeGetTime --------------------------
-// The game drives sprite animation off timeGetTime(): it advances a frame when
-// timeGetTime() >= nextUpdate, then nextUpdate += interval (66ms slow / 33ms fast lists, plus the
-// per-unit battle intervals). The original renderer sped this up NOT by patching game memory, but by
-// hooking the game's imported timeGetTime and returning a VIRTUAL clock that advances factor/10 times
-// faster (this is exactly sub_10012DE0 in the original-renderer backup; our exe goes through its
-// table B / else branch, so this -- not the table-A-only per-object +0x98 hook -- is the mechanism
-// that always worked for us). Every interval the game compares against then shrinks proportionally
-// -> faster animation, with ZERO game-state writes. Version-independent, race-free (no init-timing
-// crash like the old 66/33 const-patch), adjustable LIVE. We patch only the game exe's
-// WINMM!timeGetTime IAT slot, so cnc-ddraw's own fps-limiter timeGetTime is left untouched.
+// --- animation speed: virtual clock over timeGetTime ---
+// The game advances anim frames when timeGetTime() >= nextUpdate (66ms slow / 33ms fast lists). We
+// hook the game exe's WINMM!timeGetTime IAT slot and return a virtual clock running factor/10 faster:
+// every interval shrinks proportionally -> faster animation, zero game-state writes, race-free, live.
+// Only the game's IAT slot is patched, so cnc-ddraw's own fps-limiter timeGetTime is untouched.
 //
-// factor: 10 = x1.0 (identity, vanilla) ... 50 = x5.0. The clock re-anchors whenever the factor
-// changes so virtual time stays continuous (no jump) across a live speed change.
+// factor: 10 = x1.0 (identity) .. 50 = x5.0. Re-anchors on factor change so virtual time stays continuous.
 using TimeGetTimeFn = DWORD(WINAPI*)(void);
 TimeGetTimeFn g_realTimeGetTime = nullptr;
 
-// Two independent live multipliers (x10 fixed-point: 10 = x1.0 ... 50 = x5.0). The hook picks the
-// battle one vs the map one by g_inBattle (set by the battle-viewer discriminator below). 10 is
-// identity, so an "off" knob leaves that context at vanilla speed.
+// Two live multipliers (x10 fixed-point); hook picks battle vs map by g_inBattle. 10 = identity (off).
 volatile LONG g_battleFactor = 10;
 volatile LONG g_mapFactor = 10;
 volatile LONG g_inBattle = 0;
@@ -211,7 +189,7 @@ DWORD WINAPI timeGetTimeHook(void)
     DWORD factor = static_cast<DWORD>(g_inBattle ? g_battleFactor : g_mapFactor);
     if (factor < 1)
         factor = 1;
-    if (g_vcLastFactor != factor) { // factor changed (incl. a battle<->map switch) -> re-anchor
+    if (g_vcLastFactor != factor) { // factor changed (incl. battle<->map switch) -> re-anchor
         g_vcLastFactor = factor;
         g_vcRealAnchor = g_vcRealNow;
         g_vcVirtAnchor = g_vcVirtNow;
@@ -222,9 +200,7 @@ DWORD WINAPI timeGetTimeHook(void)
     return result;
 }
 
-// Patch the game exe's WINMM!timeGetTime import thunk -> our virtual clock. Russobit IAT slot
-// 0x6CE420 (verified: Discipl2.exe import, module WINMM). At factor 10 the clock is identity, so we
-// install it unconditionally and harmlessly; the menu just moves the factor live.
+// Russobit timeGetTime IAT slot 0x6CE420 (Discipl2.exe import, WINMM). At factor 10 it's identity.
 uintptr_t timeGetTimeIatVA()
 {
     return g_ver == VerRussobit ? 0x6CE420 : 0;
@@ -245,17 +221,11 @@ void installTimeScaleHook()
         mlog("[menu] anim time-scale hook FAILED at IAT %#x", (unsigned)va);
 }
 
-// --- battle vs map discriminator: g_inBattle --------------------------------------------
-// To split the multipliers we must know whether the LOCAL client is currently showing a battle.
-// The battle viewer (IBatViewer) has a fixed vftable @0x6F4294 on Russobit (from the D2 modding
-// toolset); its method slots are [0] destructor, [1] update, [2] showAttackEffect, [3] battleEnd
-// (verified in our exe: 0x645900 / 0x630DE3 / 0x63203B / 0x631FFC). update + showAttackEffect fire
-// throughout every battle; battleEnd + destructor fire when it closes. We overwrite the 4 vftable
-// slots with naked thunks that just latch g_inBattle and tail-jump the saved original -> can't miss
-// a battle, and it is calling-convention agnostic (ECX/this and the stack pass through untouched;
-// only a memory store + an indirect jmp, no registers clobbered). No Detours, no prologue patching;
-// the vftable is patched once at install when no battle is live. Battles are never nested, so a
-// plain flag suffices.
+// --- battle vs map discriminator: g_inBattle ---
+// IBatViewer vftable @0x6F4294 (Russobit); slots [0] dtor 0x645900, [1] update 0x630DE3,
+// [2] showAttackEffect 0x63203B, [3] battleEnd 0x631FFC. We overwrite the 4 slots with naked thunks
+// that latch g_inBattle then tail-jump the original: calling-convention agnostic (only a store + jmp,
+// no registers clobbered). Patched once at install with no battle live; battles never nest.
 void* g_batDtorOrig = nullptr;
 void* g_batUpdateOrig = nullptr;
 void* g_batShowOrig = nullptr;
@@ -307,9 +277,8 @@ void installBattleDiscriminator()
         mlog("[menu] battle anim discriminator install FAILED");
 }
 
-// Map menu "Speed N" (1..5) to a live virtual-clock factor for battle (which=0) or map (which=1).
-// Off = x1.0 (vanilla). Range is 1.5x..5x (the user asked to raise the old 1.5x cap to 5x). Runs on
-// the game UI thread (menu WM_COMMAND).
+// Map "Speed N" (1..5) to a virtual-clock factor for battle (which=0) or map (which=1). Off = x1.0.
+// Runs on the game UI thread (menu WM_COMMAND).
 void applyAnimSpeed(int which, bool enabled, int speed)
 {
     static const int kFactor[5] = {15, 20, 30, 40, 50}; // 1.5x, 2x, 3x, 4x, 5x
@@ -324,17 +293,17 @@ void applyAnimSpeed(int which, bool enabled, int speed)
         g_mapFactor = f;
 }
 
-// --- persistence (a small ini next to the exe) ------------------------------------------
+// --- persistence (C4menu.ini next to the exe) ---
 const char* iniFile()
 {
     return exeDirFile("C4menu.ini");
 }
 
-// --- menu state + command IDs (WM_COMMAND from the menu bar) ---------------------------
+// --- menu state + command IDs (WM_COMMAND from the menu bar) ---
 enum : UINT
 {
     kIdAlwaysActive = 0xA100,
-    kIdAnimOff = 0xA110, // BATTLE animation multiplier (live virtual clock): off / 1.5x..5x
+    kIdAnimOff = 0xA110, // BATTLE anim multiplier: off / 1.5x..5x
     kIdAnim1 = 0xA111,
     kIdAnim2 = 0xA112,
     kIdAnim3 = 0xA113,
@@ -344,7 +313,7 @@ enum : UINT
     kIdRendOpenGL = 0xA130,
     kIdRendGdi = 0xA131,
     kIdRendAuto = 0xA132,
-    kIdShaderBase = 0xA140, // kIdShaderBase + index into kShaders[]
+    kIdShaderBase = 0xA140, // + index into kShaders[]
     kIdMaintas = 0xA150,
     kIdVsync = 0xA151,
     kIdBoxing = 0xA152,
@@ -352,9 +321,9 @@ enum : UINT
     kIdTicks30 = 0xA161,
     kIdTicks60 = 0xA162,
     kIdTicks100 = 0xA163,
-    kIdResBase = 0xA170, // + index into kRes[]  (window output size: width/height)
-    kIdFpsBase = 0xA180, // + index into kFpsValues[] (maxfps frame cap)
-    // native game speeds (GameSettings + Disciple.ini); apply on the next battle / turn
+    kIdResBase = 0xA170, // + index into kRes[]
+    kIdFpsBase = 0xA180, // + index into kFpsValues[]
+    // native game speeds (GameSettings + Disciple.ini); apply next battle / turn
     kIdBattle1 = 0xA190, // battleSpeed 1..4 (slow/normal/fast/instant)
     kIdBattle2 = 0xA191,
     kIdBattle3 = 0xA192,
@@ -362,21 +331,21 @@ enum : UINT
     kIdMap1 = 0xA1A0, // playerSpeed/opponentSpeed 1..3 (normal/fast/very fast)
     kIdMap2 = 0xA1A1,
     kIdMap3 = 0xA1A2,
-    kIdModeWindowed = 0xA1B0, // ddraw.ini windowed/fullscreen pair (live via DDReloadConfig)
+    kIdModeWindowed = 0xA1B0, // ddraw.ini windowed/fullscreen pair
     kIdModeBorderless = 0xA1B1,
     kIdModeExclusive = 0xA1B2,
-    kIdScreenshot = 0xA1C0, // action: take a screenshot (cnc-ddraw DDTakeScreenshot)
-    kIdAnimMapOff = 0xA1D0, // MAP animation multiplier (live virtual clock): off / 1.5x..5x
+    kIdScreenshot = 0xA1C0, // action: take a screenshot
+    kIdAnimMapOff = 0xA1D0, // MAP anim multiplier: off / 1.5x..5x
     kIdAnimMap1 = 0xA1D1,
     kIdAnimMap2 = 0xA1D2,
     kIdAnimMap3 = 0xA1D3,
     kIdAnimMap4 = 0xA1D4,
     kIdAnimMap5 = 0xA1D5,
-    kIdDragScroll = 0xA1E0, // toggle: grab+drag map panning (detours the iso-view mouse handler)
+    kIdDragScroll = 0xA1E0, // toggle: grab+drag map panning
     kIdLast = 0xA1FF, // upper bound of our WM_COMMAND id block
 };
 
-// cnc-ddraw renderer + shader/filter tables (menu label + the exact ddraw.ini value).
+// cnc-ddraw renderer + shader tables (menu label + exact ddraw.ini value).
 struct NameVal
 {
     const char* label;
@@ -387,7 +356,7 @@ const NameVal kRenderers[] = {
     {"GDI - software, max compatibility (slower)", "gdi"},
     {"Auto - pick D3D9/OpenGL automatically", "auto"}};
 const int kRendererCount = 3;
-// Image filters, ranked best->basic for D2's hand-painted art (see hints).
+// Image filters, ranked best->basic for D2's hand-painted art.
 const NameVal kShaders[] = {
     {"Lanczos - sharp, detailed (best for D2 art)", "Shaders\\interpolation\\lanczos2-sharp.glsl"},
     {"xBRZ - pixel-art scaler, clean sprite edges", "Shaders\\xbrz\\xbrz-freescale-multipass.glsl"},
@@ -400,8 +369,7 @@ const NameVal kShaders[] = {
 const int kShaderCount = 8;
 const int kTicksValues[] = {0, 30, 60, 100};
 const int kTicksCount = 4;
-// Output window size (ddraw.ini width/height). 0,0 = native game size (1024x768); larger
-// values upscale the render via the selected shader. cnc-ddraw centres the window.
+// Output window size (ddraw.ini width/height). 0,0 = native game size (1024x768); larger upscales.
 struct ResOpt
 {
     const char* label;
@@ -421,13 +389,12 @@ const ResOpt kRes[] = {
     {"1920 x 1080 (16:9)", 1920, 1080},
     {"2560 x 1440 (16:9)", 2560, 1440},
     {"3840 x 2160 (16:9)", 3840, 2160}};
-const int kResCount = 13; // 0xA170..0xA17C (room up to 0xA17F before kIdFpsBase)
+const int kResCount = 13; // 0xA170..0xA17C (room before kIdFpsBase)
 const int kFpsValues[] = {-1, 30, 60, 144};
 const char* kFpsLabels[] = {"VSync / refresh", "30", "60", "144"};
 const int kFpsCount = 4;
-// Display mode = the ddraw.ini windowed/fullscreen pair. Windowed keeps the caption + menu;
-// the fullscreen modes are borderless (caption goes away, the menu bar stays). Exclusive does a
-// real mode change locally and falls back to borderless where that's disallowed (e.g. RDP).
+// Display mode = ddraw.ini windowed/fullscreen pair. Windowed keeps caption + menu; fullscreen modes
+// are borderless (menu bar stays). Exclusive does a real mode change, falls back to borderless (RDP).
 struct ModeOpt
 {
     const char* label;
@@ -441,23 +408,23 @@ const ModeOpt kModes[] = {
 const int kModeCount = 3;
 
 bool g_alwaysActive = false;
-bool g_battleAnimEnabled = false; // BATTLE live anim multiplier (virtual clock)
+bool g_battleAnimEnabled = false; // BATTLE live anim multiplier
 int g_battleAnimSpeed = 5;
-bool g_mapAnimEnabled = false;    // MAP live anim multiplier (virtual clock)
+bool g_mapAnimEnabled = false;    // MAP live anim multiplier
 int g_mapAnimSpeed = 5;
-// cnc-ddraw (ddraw.ini) state, read at startup so the menu shows the current values
-int g_rendererIdx = 0;  // index into kRenderers (-1 = unknown/custom)
-int g_shaderIdx = -1;   // index into kShaders   (-1 = unknown/custom)
+// cnc-ddraw (ddraw.ini) state, read at startup so the menu shows current values (-1 = unknown/custom)
+int g_rendererIdx = 0;  // index into kRenderers
+int g_shaderIdx = -1;   // index into kShaders
 bool g_maintas = false, g_vsync = false, g_boxing = false;
-bool g_dragScroll = false; // grab+drag map panning (menu toggle, ini [menu] dragScroll, default off)
-int g_ticksIdx = -1;    // index into kTicksValues (-1 = custom)
-int g_resIdx = -1;      // index into kRes (-1 = custom)
-int g_fpsIdx = -1;      // index into kFpsValues (-1 = custom)
+bool g_dragScroll = false; // grab+drag map panning (ini [menu] dragScroll, default off)
+int g_ticksIdx = -1;    // index into kTicksValues
+int g_resIdx = -1;      // index into kRes
+int g_fpsIdx = -1;      // index into kFpsValues
 int g_battleSpeed = 2;  // native GameSettings.battleSpeed (1..4)
 int g_mapSpeed = 1;     // native GameSettings.playerSpeed/opponentSpeed (1..3)
-int g_modeIdx = 0;      // index into kModes (windowed/borderless/exclusive)
+int g_modeIdx = 0;      // index into kModes
 HMENU g_bar = nullptr;
-UINT g_relayoutMsg = 0; // registered msg: marshal the one-time menu-attach window relayout onto the GUI thread
+UINT g_relayoutMsg = 0; // registered msg: marshal the one-time menu-attach relayout onto the GUI thread
 HMENU g_gameMenu = nullptr, g_videoMenu = nullptr, g_perfMenu = nullptr; // top-level bar menus
 HMENU g_battleAnimMenu = nullptr, g_mapAnimMenu = nullptr;
 HMENU g_rendMenu = nullptr, g_shaderMenu = nullptr;
@@ -468,7 +435,9 @@ int g_ncCursorAdded = 0;  // how many ShowCursor(TRUE) we added (to remove exact
 
 using WndProcFn = LRESULT(CALLBACK*)(HWND, UINT, WPARAM, LPARAM);
 WndProcFn g_origWndProc = nullptr;
-HWND g_gameHwnd = nullptr; // game window (drag-scroll SetCapture target so moves flow during a drag); set in wndProcHook
+HWND g_gameHwnd = nullptr; // game window (drag-scroll SetCapture target); set in wndProcHook
+const UINT_PTR kPressTimerId = 0xC4D7; // our WM_TIMER source: on-elapse END_TURN press fires ONLY on
+                                       // WM_TIMER (idle-gated), like legacy SetTimer(hWnd,0,0x20,0)
 
 uintptr_t gameWndProcVA()
 {
@@ -489,25 +458,22 @@ void persist()
     WritePrivateProfileStringA("menu", "dragScroll", g_dragScroll ? "1" : "0", f);
 }
 
-// First-run config: if C4menu.ini does not exist yet, generate a complete, COMMENTED one and convert
-// any settings carried over from the old mss32-track mss32menu.ini. This never touches the game's own
-// Disciple.ini / Scripts\settings.lua (those stay the player's; the native Battle/Map speed menu
-// writes Disciple.ini only when the user actually changes it). We write the file directly (the
-// WritePrivateProfileStringA API cannot emit comments), so the user gets a self-documenting config.
+// First run: if C4menu.ini is absent, generate a commented one (converting any old mss32menu.ini).
+// Never touches the game's own Disciple.ini / settings.lua. Written directly since
+// WritePrivateProfileStringA cannot emit comments.
 void seedConfigFirstRun()
 {
     const char* f = iniFile();
     if (GetFileAttributesA(f) != INVALID_FILE_ATTRIBUTES)
-        return; // already present -> the user owns it; leave it untouched
+        return; // already present -> the user owns it
 
-    // Convert from the old single-global anim config, if an mss32menu.ini is present next to the exe.
+    // Convert from the old single-global anim config if mss32menu.ini is present.
     const char* old = exeDirFile("mss32menu.ini");
     const int aa = GetPrivateProfileIntA("menu", "alwaysActive", 0, old) ? 1 : 0;
     const int oldAnimOn = GetPrivateProfileIntA("menu", "animationSpeedEnabled", 0, old);
-    // The old animationSpeed (1..5) topped out near 1.5x; the new per-context scale STARTS at 1.5x
-    // (= speed 1), so an old "on" maps to speed 1 on BOTH contexts (the old global affected all anim).
+    // Old animationSpeed topped near 1.5x; the new scale STARTS at 1.5x (=speed 1), so old "on" -> speed 1.
     const int en = oldAnimOn ? 1 : 0;
-    const int bSp = oldAnimOn ? 1 : 2; // sensible default when later enabled: 2x
+    const int bSp = oldAnimOn ? 1 : 2; // default when later enabled: 2x
     const int mSp = oldAnimOn ? 1 : 2;
 
     char buf[1024];
@@ -540,7 +506,7 @@ void seedConfigFirstRun()
     }
 }
 
-// --- cnc-ddraw settings live in ddraw.ini next to the exe (same dir as C4menu.ini) ----
+// --- cnc-ddraw settings live in ddraw.ini (same dir as C4menu.ini) ---
 const char* ddrawIni()
 {
     return exeDirFile("ddraw.ini");
@@ -555,8 +521,8 @@ bool readDdrawBool(const char* key, bool def)
 
 void writeDdrawStr(const char* key, const char* value)
 {
-    // WritePrivateProfileString preserves the file's comment lines and writes a clean
-    // key=value (no inline comment) -- exactly what cnc-ddraw's strict parser needs.
+    // Preserves comment lines and writes a clean key=value (no inline comment), as cnc-ddraw's
+    // strict parser needs.
     WritePrivateProfileStringA("ddraw", key, value, ddrawIni());
 }
 
@@ -565,21 +531,19 @@ void writeDdrawBool(const char* key, bool on)
     writeDdrawStr(key, on ? "true" : "false");
 }
 
-// Re-apply cnc-ddraw settings live: we ARE the renderer, so call DDReloadConfig directly (it
-// re-reads ddraw.ini + dd_SetDisplayMode). Runs on the UI thread (the menu WM_COMMAND thread).
+// Re-apply ddraw settings live: we ARE the renderer, so call DDReloadConfig directly. Runs on the UI thread.
 void applyDdrawLive()
 {
     DDReloadConfig();
 }
 
-// Take a screenshot via the renderer's DDTakeScreenshot (timestamped PNG in .\Screenshots\,
-// same as the PrintScreen hotkey).
+// Take a screenshot via the renderer (timestamped PNG in .\Screenshots\).
 void takeScreenshot()
 {
     DDTakeScreenshot();
 }
 
-// Read the current ddraw.ini values into menu state so the checks reflect reality.
+// Read current ddraw.ini values into menu state so the checks reflect reality.
 void readDdrawState()
 {
     char r[32] = {};
@@ -634,18 +598,16 @@ void readDdrawState()
     g_modeIdx = !wnd ? 2 : (fs ? 1 : 0); // !windowed=exclusive; windowed+fullscreen=borderless
 }
 
-// --- native game speeds: battle vs map (the engine's own split) -------------------------
-// These live in the GameSettings struct (read at battle/turn start) and Disciple.ini [Settings].
-// Battle = battleSpeed (1 slow .. 4 instant); map turns = playerSpeed/opponentSpeed (1..3).
+// --- native game speeds: battle vs map (the engine's own split) ---
+// In GameSettings (read at battle/turn start) and Disciple.ini [Settings].
 const char* discipleIni()
 {
     return exeDirFile("Disciple.ini");
 }
 
-// In-memory GameSettings access, inlined from D2ModdingToolset (midgard.h / gamesettings.h).
-// Russobit only. CMidgardApi::instance() @ 0x401d35 (__cdecl, returns CMidgard*); CMidgard.data
-// @ +8; CMidgardData.settings @ +60 is a GameSettings**; GameSettings fields: playerSpeed @ +360,
-// opponentSpeed @ +364, battleSpeed @ +372 (String=16B layout, struct size 468).
+// In-memory GameSettings (Russobit). CMidgardApi::instance() @0x401d35 (__cdecl) -> CMidgard.data @+8
+// -> CMidgardData.settings @+60 is GameSettings**; fields: playerSpeed @+360, opponentSpeed @+364,
+// battleSpeed @+372 (struct size 468).
 char* gameSettings()
 {
     if (g_ver != VerRussobit)
@@ -669,70 +631,121 @@ static bool isUserPtr(const void* p)
     return v >= 0x10000 && v < 0x7FFF0000;
 }
 
-// Current turn player, for the plugin host's host-driven turn detection (pluginhost.cpp calls this).
-// Reads the game's in-process server logic: CMidgard (instance @0x401d35) -> data @+8 ->
-// CMidServer @+44 -> CMidServerData @+12 -> CMidServerLogic @+28 -> currentPlayerIndex @+244. The
-// index advances on every turn change, including a SKIPPED turn (the server moves it itself), which
-// is exactly the signal the timer needs. Present for host/hotseat games (server runs in-process); a
-// pure network client has no server here and returns -1. Struct offsets are from the D2 modding
-// toolset and are stable across the localized builds; only the singleton anchor is version-specific
-// (Russobit). SEH-guarded and runs off the game thread (polled by the overlay worker): a transient
-// or torn pointer chain just yields -1, never a crash. *outInGame is set to 1 when a player is read.
-// Battle state for the timer plugin's Combat Pause (pluginhost exposes it via C4P_Host.is_in_battle).
-// g_inBattle is the battle-viewer-vftable (0x6F4294) discriminator set in the anim section above.
+// Battle state for the timer plugin's Combat Pause (g_inBattle = the 0x6F4294 vftable discriminator).
 extern "C" int featuremenu_in_battle(void)
 {
     return g_inBattle ? 1 : 0;
 }
 
-// Current scenario day (= CScenarioInfo.currentTurn) for the timer's Timetable (per-day duration).
-// Reads the in-process server's object map and looks up the ScenarioInfo object. Russobit-only,
-// SEH-guarded, READ-ONLY. Chain: CMidgard(instance)->data@+8 -> server@+44 -> CMidServer.data@+12 ->
-// CMidServerLogic@+28 -> CMidServerLogicCore::coreData@+4 -> CMidServerLogicCoreData::objectMap@+20.
-// Then objectMap->vftable[1] getId() -> scenario id; build the ScenarioInfo id from its parts
-// (CMidgardID bits: category=v>>30, categoryIndex=(v>>22)&0xff, type=(v>>16)&0x3f; IdType
-// ScenarioInfo=27); objectMap->vftable[5] findScenarioObjectById() -> CScenarioInfo;
-// currentTurn@+32. Returns -1 when unavailable (e.g. a pure network client with no in-process server).
-extern "C" int featuremenu_current_day(void)
+// Read CScenarioInfo.currentTurn from an IMidgardObjectMap: vftable[1] getId() -> scenario id, force
+// id type to ScenarioInfo (27), vftable[5] findScenarioObjectById() -> CScenarioInfo, currentTurn @+32.
+// Returns -1 on any bad pointer / out-of-range day. Caller is SEH-guarded.
+static int dayFromObjectMap(void** objectMap)
+{
+    if (!isUserPtr(objectMap)) return -1;
+    void** vft = *reinterpret_cast<void***>(objectMap); // IMidgardObjectMap::vftable
+    if (!isUserPtr(vft)) return -1;
+    using GetIdFn = const int*(__thiscall*)(void*);                  // vftable[1] getId
+    const int* scenarioId = reinterpret_cast<GetIdFn>(vft[1])(objectMap);
+    if (!isUserPtr(scenarioId)) return -1;
+    const unsigned sv = static_cast<unsigned>(*scenarioId);
+    const int infoId = static_cast<int>((sv & 0xFFC00000u) | 0x001B0000u); // keep cat+catIdx, type=27
+    using FindFn = char*(__thiscall*)(void*, const int*);            // vftable[5] findScenarioObjectById
+    char* obj = reinterpret_cast<FindFn>(vft[5])(objectMap, &infoId);
+    if (!isUserPtr(obj)) return -1;
+    const int day = *reinterpret_cast<int*>(obj + 32); // CScenarioInfo.currentTurn
+    return (day < 0 || day > 100000) ? -1 : day;
+}
+
+// Heavy walk: read CScenarioInfo.currentTurn. SERVER map FIRST (authoritative; on the host the client
+// cache can lag a day at a boundary), then the CLIENT map (the only one a pure-network joiner has).
+// Russobit-only, SEH-guarded, READ-ONLY. MUST run on the GAME thread (calls game virtuals on the live
+// object map); the result is cached. From CMidgard(instance)->data@+8:
+//   server: CMidgardData.server@+44 -> data@+12 -> CMidServerLogic@+28 -> coreData@+4 -> objectMap@+20
+//   client: CMidgardData.client@+40 -> CMidClientCore.data@+8 -> dataCache@+8 (core@+4 so core.data == client+8)
+static int computeCurrentDay()
 {
     if (g_ver != VerRussobit)
         return -1;
     int day = -1;
     __try {
-        auto instance = reinterpret_cast<char*(__cdecl*)()>(0x401d35);
-        char* mid = instance();
+        char* mid = reinterpret_cast<char*(__cdecl*)()>(0x401d35)();
         if (!isUserPtr(mid)) return -1;
         char* data = *reinterpret_cast<char**>(mid + 8);
         if (!isUserPtr(data)) return -1;
-        char* server = *reinterpret_cast<char**>(data + 44);
-        if (!isUserPtr(server)) return -1;
-        char* sdata = *reinterpret_cast<char**>(server + 12);
-        if (!isUserPtr(sdata)) return -1;
-        char* logic = *reinterpret_cast<char**>(sdata + 28); // CMidServerLogic
-        if (!isUserPtr(logic)) return -1;
-        char* coreData = *reinterpret_cast<char**>(logic + 4); // CMidServerLogicCore::coreData
-        if (!isUserPtr(coreData)) return -1;
-        void** objectMap = *reinterpret_cast<void***>(coreData + 20); // CMidServerLogicCoreData::objectMap
-        if (!isUserPtr(objectMap)) return -1;
-        void** vft = *reinterpret_cast<void***>(objectMap); // IMidgardObjectMap::vftable
-        if (!isUserPtr(vft)) return -1;
-        using GetIdFn = const int*(__thiscall*)(void*);                  // vftable[1] getId
-        const int* scenarioId = reinterpret_cast<GetIdFn>(vft[1])(objectMap);
-        if (!isUserPtr(scenarioId)) return -1;
-        const unsigned sv = static_cast<unsigned>(*scenarioId);
-        const int infoId = static_cast<int>((sv & 0xFFC00000u) | 0x001B0000u); // keep cat+catIdx, type=27
-        using FindFn = char*(__thiscall*)(void*, const int*);            // vftable[5] findScenarioObjectById
-        char* obj = reinterpret_cast<FindFn>(vft[5])(objectMap, &infoId);
-        if (!isUserPtr(obj)) return -1;
-        day = *reinterpret_cast<int*>(obj + 32); // CScenarioInfo.currentTurn
+
+        // SERVER chain first (host): authoritative, no client-cache lag.
+        char* server = *reinterpret_cast<char**>(data + 44); // CMidgardData.server
+        if (isUserPtr(server)) {
+            char* sdata = *reinterpret_cast<char**>(server + 12);
+            if (isUserPtr(sdata)) {
+                char* logic = *reinterpret_cast<char**>(sdata + 28); // CMidServerLogic
+                if (isUserPtr(logic)) {
+                    char* coreData = *reinterpret_cast<char**>(logic + 4); // CMidServerLogicCore::coreData
+                    if (isUserPtr(coreData))
+                        day = dayFromObjectMap(*reinterpret_cast<void***>(coreData + 20)); // objectMap
+                }
+            }
+        }
+        // CLIENT chain (a pure-network joiner has no server).
+        if (day < 0) {
+            char* client = *reinterpret_cast<char**>(data + 40); // CMidgardData.client
+            if (isUserPtr(client)) {
+                char* coreData = *reinterpret_cast<char**>(client + 8); // CMidClientCore.data (core@+4 -> +4)
+                if (isUserPtr(coreData))
+                    day = dayFromObjectMap(*reinterpret_cast<void***>(coreData + 8)); // CMidClientCoreData.dataCache
+            }
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return -1;
     }
-    if (day < 0 || day > 100000)
-        return -1;
     return day;
 }
 
+static volatile LONG g_cachedDay = -1; // last computed day; refreshed on the GAME thread, read anywhere
+
+// Refresh the cached day. MUST run on the game thread (computeCurrentDay calls game virtuals; running it
+// from the worker raced the game mutating the map). Called from the WM_TIMER pump.
+extern "C" void featuremenu_refresh_day(void) { g_cachedDay = computeCurrentDay(); }
+// Cheap cross-thread accessor for the cached day.
+extern "C" int featuremenu_current_day(void) { return (int)g_cachedDay; }
+
+// Is it the LOCAL player's turn? Reads CPhaseGameData.clientTakesTurn - the game's own "this client acts
+// now" flag, set per turn and IMMUNE to sub-dialogs (city/diplomacy/spellbook/etc.). 1/0, or -1 if
+// unavailable (menu/loading/layout mismatch) so the caller falls back. Russobit-only, SEH-guarded, raw
+// reads only (no game calls). Chain: CMidgard(0x401d35)->data@+8 -> client@+40 -> CMidClientData@+12 ->
+// CPhase@+0 -> CPhaseGame.data (phase == CPhaseGame+8, so data == *(phase+8)) -> clientTakesTurn@+40;
+// validated by CPhaseGameData.midClient@+36 == client (confirms the phase really is the CPhaseGame).
+extern "C" int featuremenu_my_turn(void)
+{
+    if (g_ver != VerRussobit)
+        return -1;
+    int r = -1;
+    __try {
+        char* mid = reinterpret_cast<char*(__cdecl*)()>(0x401d35)();
+        if (!isUserPtr(mid)) return -1;
+        char* data = *reinterpret_cast<char**>(mid + 8);
+        if (!isUserPtr(data)) return -1;
+        char* client = *reinterpret_cast<char**>(data + 40);        // CMidgardData.client
+        if (!isUserPtr(client)) return -1;
+        char* clientData = *reinterpret_cast<char**>(client + 12);  // CMidClient.data
+        if (!isUserPtr(clientData)) return -1;
+        char* phase = *reinterpret_cast<char**>(clientData);        // CMidClientData.phase (CPhase*)
+        if (!isUserPtr(phase)) return -1;
+        char* pg = *reinterpret_cast<char**>(phase + 8);            // CPhaseGame.data
+        if (!isUserPtr(pg)) return -1;
+        if (*reinterpret_cast<char**>(pg + 36) != client) return -1; // consistency: CPhaseGameData.midClient
+        r = *reinterpret_cast<unsigned char*>(pg + 40) ? 1 : 0;     // clientTakesTurn
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+    return r;
+}
+
+// Current turn player for the timer's host-driven turn detection (pluginhost.cpp polls this off-thread).
+// CMidgard(instance@0x401d35)->data@+8 -> server@+44 -> data@+12 -> serverLogic@+28 ->
+// currentPlayerIndex@+244. Advances on every turn change incl. a SKIPPED turn. -1 for a pure network
+// client (no in-process server). SEH-guarded; *outInGame=1 when a player is read.
 extern "C" int featuremenu_server_player(int* outInGame)
 {
     if (outInGame)
@@ -768,9 +781,8 @@ extern "C" int featuremenu_server_player(int* outInGame)
     return player;
 }
 
-// Apply a native speed live to the in-memory GameSettings (takes effect next battle/turn) and
-// persist it to Disciple.ini. which: 0 = battle, 1 = map (player + opponent). Runs on the game
-// UI thread (from the menu WM_COMMAND), so touching the game struct here is safe.
+// Apply a native speed to in-memory GameSettings (takes effect next battle/turn) + persist to
+// Disciple.ini. which: 0 = battle, 1 = map (player + opponent). Runs on the game UI thread.
 void setNativeSpeed(int which, int value)
 {
     char* gs = gameSettings();
@@ -862,7 +874,7 @@ void onMenuCommand(UINT id)
         g_alwaysActive = !g_alwaysActive;
         applyAlwaysActive(g_alwaysActive);
     } else if (id == kIdDragScroll) {
-        g_dragScroll = !g_dragScroll; // live: the detour reads this flag (persist() at the tail saves it)
+        g_dragScroll = !g_dragScroll; // live: the detour reads this flag (persist() saves it)
     } else if (id == kIdAnimOff) {
         g_battleAnimEnabled = false;
         applyAnimSpeed(0, false, g_battleAnimSpeed);
@@ -923,7 +935,7 @@ void onMenuCommand(UINT id)
         writeDdrawStr("fullscreen", kModes[g_modeIdx].fullscreen);
         restartItem = true;
     } else if (id == kIdScreenshot) {
-        takeScreenshot(); // action: save a PNG now; nothing to persist or re-check
+        takeScreenshot(); // action: nothing to persist or re-check
         return;
     } else if (id >= kIdBattle1 && id <= kIdBattle4) {
         g_battleSpeed = static_cast<int>(id - kIdBattle1) + 1;
@@ -945,16 +957,15 @@ void onMenuCommand(UINT id)
         persist(); // live mod toggles -> C4menu.ini
 }
 
-// With devmode=true the game hides the OS cursor (it draws its own inside the client), so the
-// pointer is invisible over our caption + menu bar (the non-client area). Bump the OS cursor
-// visible while the mouse is over the non-client area and restore it (let the game draw its own)
-// back in the client. ShowCursor is a global counter, so keep our +1/-1 balanced.
+// With devmode the game hides the OS cursor (draws its own in the client), so it's invisible over our
+// caption + menu bar. Bump it visible over the non-client area, restore in the client. ShowCursor is a
+// global counter, so keep our +1/-1 balanced.
 void setNonClientCursor(bool overNonClient)
 {
     if (overNonClient) {
         if (!g_ncCursorShown) {
-            // Force the global show-count non-negative (the game may have hidden it well
-            // below -1), tracking how many we added so we can remove exactly that many.
+            // Force the global show-count non-negative (game may have hidden it well below -1),
+            // tracking how many we added so we can remove exactly that many.
             g_ncCursorAdded = 0;
             int c = ShowCursor(TRUE);
             ++g_ncCursorAdded;
@@ -973,28 +984,36 @@ void setNonClientCursor(bool overNonClient)
     }
 }
 
-extern "C" void timerhost_pump(void); // Phase 2: perform any queued on-elapse press on the game thread
+extern "C" void timerhost_pump(void); // perform any queued on-elapse press on the game thread
 
 LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    // Consume a queued auto-end-turn / retreat (game UI thread). Skip while a map drag is in progress:
-    // the END_TURN button is disabled while the mouse is captured/held, so the press would no-op - it
-    // fires on the next message once the drag releases.
-    if (!g_dragScrollActive)
+    if (!g_gameHwnd) {
+        g_gameHwnd = hwnd; // remember the game window (drag-scroll SetCapture target)
+        // Start our 32ms WM_TIMER on first sight of the window. The on-elapse press is WM_TIMER-driven
+        // ONLY: the OS dispatches WM_TIMER when the queue is idle, so END_TURN waits until the hero has
+        // finished moving (pressing mid-move fires onClick but the game rejects the turn-end). Legacy
+        // timer.mod did this via SetTimer(hWnd,0,0x20,0) + its WM_TIMER handler.
+        SetTimer(hwnd, kPressTimerId, 32, nullptr);
+    }
+    // Our private 32ms timer (idle WM_TIMER): refresh the cached scenario day on the GAME thread, then
+    // run the queued auto-end-turn/retreat press. Gate on OUR id and CONSUME it (return 0) so the game's
+    // own timers don't drive the pump and our id never leaks into the game's WndProc timer dispatch.
+    if (msg == WM_TIMER && wParam == kPressTimerId) {
+        featuremenu_refresh_day();
         timerhost_pump();
-    if (!g_gameHwnd) g_gameHwnd = hwnd; // remember the game window (drag-scroll SetCapture target)
+        return 0;
+    }
 
     // Drag-scroll pan: while LMB is held the game routes moves to the captured WndProc (SetCapture on
-    // drag-start), not the iso vtable handler. Map the client point to game coords and pan; consume it.
+    // drag-start), not the iso vtable handler. Map client -> game coords and pan; consume.
     if (g_dragScrollActive && msg == WM_MOUSEMOVE) {
         long gx = 0, gy = 0;
         DDMapClientToGame((long)(short)LOWORD(lParam), (long)(short)HIWORD(lParam), &gx, &gy);
         dragScrollWndMove((int)gx, (int)gy);
         return 0;
     }
-    // Keep the OS pointer visible over the caption + menu bar (non-client), invisible in the
-    // client where the game draws its own. WM_NCMOUSEMOVE reaches us via cnc-ddraw's default
-    // message forward (wndproc.c); WM_MOUSEMOVE comes through its own forward.
+    // Keep the OS pointer visible over the caption + menu bar (non-client), invisible in the client.
     switch (msg) {
     case WM_NCMOUSEMOVE:
     case WM_ENTERMENULOOP:
@@ -1007,18 +1026,17 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
     }
 
-    // GUI-thread menu-attach relayout (posted by menuWorker after SetMenu): re-apply the renderer's
-    // window sizing WITH the menu attached so client == render area and the viewport + mouse are
-    // recomputed in one pass (replaces the old out-of-band SetWindowPos grow that raced the renderer).
+    // GUI-thread menu-attach relayout (posted by menuWorker after SetMenu): re-apply renderer window
+    // sizing WITH the menu attached so client == render area and viewport + mouse are recomputed in one
+    // pass (replaces the old out-of-band SetWindowPos grow that raced the renderer).
     if (g_relayoutMsg && msg == g_relayoutMsg) {
         applyDdrawLive();
         return 0;
     }
 
-    // Menu-bar command: WM_COMMAND with HIWORD==0 AND lParam==0. The lParam check is
-    // essential — a control's WM_COMMAND (e.g. BN_CLICKED, notify code 0) also has
-    // HIWORD==0 but passes the control HWND in lParam, and would otherwise collide with
-    // our IDs and fire spuriously. Real menu commands always have lParam==0.
+    // Menu-bar command: WM_COMMAND with HIWORD==0 AND lParam==0. The lParam check is essential - a
+    // control's WM_COMMAND (BN_CLICKED) also has HIWORD==0 but passes the control HWND in lParam and
+    // would collide with our IDs. Real menu commands always have lParam==0.
     if (msg == WM_COMMAND && lParam == 0 && HIWORD(wParam) == 0) {
         const UINT id = LOWORD(wParam);
         if (id >= kIdAlwaysActive && id <= kIdLast) {
@@ -1039,15 +1057,14 @@ void buildMenu()
 {
     if (g_bar)
         return;
-    // Plugins now load on the host's worker thread (not the loader-lock-serialized DllMain), so wait
-    // until that finishes before reading the plugin list for the "Plugins" submenu. Plugins load in
-    // milliseconds (the worker starts at DllMain return); the game window we need is seconds away, so
-    // this effectively never blocks. The timeout just means "build without plugins" if loading hangs.
+    // Plugins load on the host worker thread (not loader-lock-serialized DllMain), so wait for that
+    // before reading the list. Loading takes milliseconds vs seconds to the game window, so this
+    // effectively never blocks; the timeout just means "build without plugins" if loading hangs.
     pluginhost_wait_ready(5000);
-    readDdrawState();   // reflect the current ddraw.ini in the checks/radios
-    readNativeSpeeds(); // reflect the current Disciple.ini battle/map speeds
+    readDdrawState();   // reflect current ddraw.ini in the checks/radios
+    readNativeSpeeds(); // reflect current Disciple.ini battle/map speeds
 
-    // ===== "Game" — gameplay / animation (live; Battle/Map speed presets apply next battle/turn) =====
+    // ===== "Game" - gameplay / animation (Battle/Map speed presets apply next battle/turn) =====
     g_gameMenu = CreatePopupMenu();
     AppendMenuA(g_gameMenu, MF_STRING, kIdAlwaysActive, "Always active");
     AppendMenuA(g_gameMenu, MF_STRING, kIdDragScroll, "Map drag-scroll (left button)");
@@ -1083,7 +1100,7 @@ void buildMenu()
     AppendMenuA(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_mapMenu),
                 "Map turn speed (game option, next turn)");
 
-    // ===== "Video" — look (all live except Renderer) =====
+    // ===== "Video" - look (all live except Renderer) =====
     g_videoMenu = CreatePopupMenu();
     g_modeMenu = CreatePopupMenu();
     for (int i = 0; i < kModeCount; ++i)
@@ -1110,7 +1127,7 @@ void buildMenu()
     AppendMenuA(g_videoMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuA(g_videoMenu, MF_STRING, kIdScreenshot, "Take screenshot (PrintScreen)");
 
-    // ===== "Performance" — frame/CPU caps (apply on restart) =====
+    // ===== "Performance" - frame/CPU caps (apply on restart) =====
     g_perfMenu = CreatePopupMenu();
     g_fpsMenu = CreatePopupMenu();
     for (int i = 0; i < kFpsCount; ++i)
@@ -1129,9 +1146,8 @@ void buildMenu()
     AppendMenuA(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_videoMenu), "Video");
     AppendMenuA(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_perfMenu), "Performance");
 
-    // ===== "Plugins" — hosted Mods\ plugins, split into native (.c4p) and legacy (.mod) =====
-    // (The plugin host loads them at startup; here we just surface them + graft each legacy
-    // plugin's own config submenu. Its menu commands route to the plugin via the WndProc chain.)
+    // ===== "Plugins" - hosted Mods\ plugins, split native (.c4p) / legacy (.mod) =====
+    // Surface each plugin + graft its config submenu; commands route to the plugin via the WndProc chain.
     const int pc = pluginhost_count();
     if (pc > 0) {
         HMENU plugins = CreatePopupMenu();
@@ -1164,23 +1180,19 @@ void buildMenu()
     }
 }
 
-// Attach our menu bar to the game window. The real caption comes from cnc-ddraw (ddraw.ini
-// border=true); SetMenu is not blocked, so the menu bar attaches + renders along the window top.
+// Attach our menu bar to the game window (caption comes from cnc-ddraw, ddraw.ini border=true).
 void ensureChrome(HWND hwnd)
 {
     if (GetMenu(hwnd) != g_bar) {
         SetMenu(hwnd, g_bar);
         DrawMenuBar(hwnd);
-        // Attaching the menu takes one row from the client, so the game render area would look cut.
-        // Do NOT correct that with a raw SetWindowPos grow here: it runs on this worker thread, lands
-        // out-of-band AFTER cnc-ddraw's own dd_SetDisplayMode, and fires a Win32 WM_SIZE that cnc-ddraw
-        // treats as a geometric no-op - so render.width/height, the viewport and mouse.rc are never
-        // recomputed for the grown client and the added strip stays black (this was the live
-        // resolution-change bug). Instead re-lay the window THROUGH the renderer: with the menu now
-        // attached, DDReloadConfig -> dd_SetDisplayMode grows the window by exactly one menu row
-        // (AdjustWindowRectEx(GetMenu!=NULL)) AND recomputes the viewport + mouse in the same pass.
-        // dd_SetDisplayMode restarts the render thread, so marshal it onto the GUI thread (where the
-        // game pumps messages) via PostMessage; the WndProc detour handles g_relayoutMsg.
+        // The menu takes one row from the client. Do NOT correct with a raw SetWindowPos grow here: it
+        // runs on this worker thread, lands AFTER cnc-ddraw's dd_SetDisplayMode, and fires a WM_SIZE
+        // cnc-ddraw treats as a no-op - so render size, viewport and mouse.rc are never recomputed and
+        // the added strip stays black (the live resolution-change bug). Instead re-lay THROUGH the
+        // renderer: with the menu attached, DDReloadConfig -> dd_SetDisplayMode grows by one menu row
+        // (AdjustWindowRectEx) AND recomputes viewport + mouse in one pass. dd_SetDisplayMode restarts
+        // the render thread, so marshal it onto the GUI thread via PostMessage (g_relayoutMsg).
         if (g_relayoutMsg)
             PostMessageA(hwnd, g_relayoutMsg, 0, 0);
     }
@@ -1199,9 +1211,8 @@ BOOL CALLBACK findGameWindow(HWND hwnd, LPARAM lp)
     DWORD wpid = 0;
     GetWindowThreadProcessId(hwnd, &wpid);
     if (wpid == ctx->pid && IsWindowVisible(hwnd)) {
-        // Match the game's MAIN window by class (the title can be empty); confirmed
-        // 'MQ_UIManager' for Disciples II. The game has more than one MQ_UIManager
-        // window (incl. a zero-size one) — require a real size so we pick the real one.
+        // Match the game's MAIN window by class 'MQ_UIManager' (title may be empty). Several
+        // MQ_UIManager windows exist (incl. a zero-size one) - require a real size to pick the real one.
         char cls[64] = {};
         GetClassNameA(hwnd, cls, sizeof(cls));
         if (lstrcmpA(cls, "MQ_UIManager") == 0) {
@@ -1261,14 +1272,12 @@ void installWndProcDetour()
 
 } // namespace
 
-// Entry point called from cnc-ddraw's DllMain (DLL_PROCESS_ATTACH), after hook_init + the embed.
-// ===== Map drag-scroll (DGL-faithful grab+drag pan) =====================================
-// Detours the in-game iso-view mouse handler (CStratInterf, sub_48E8A0). While g_dragScroll is on, a
-// left-press on open map terrain grabs the tile under the cursor; dragging pans the view so that tile
-// stays under the cursor (exactly like DisciplesGL's MouseScroll). A press-release with no movement is
-// replayed to the game so a plain click still selects. Russobit addresses RE'd from the DGL backup +
-// game exe (see memory dgl-map-drag-scroll). Game calls are __thiscall via typedefs (this file is /Gd);
-// every game deref is SEH + isUserPtr guarded so a torn pointer during load/teardown just passes through.
+// ===== Map drag-scroll (DGL-faithful grab+drag pan) =====
+// Detours the in-game iso-view mouse handler (CStratInterf sub_48E8A0). While g_dragScroll is on, a
+// left-press on open map terrain grabs the tile under the cursor; dragging pans so it stays put (like
+// DGL MouseScroll). A press-release with no movement is replayed so a plain click still selects.
+// Russobit addresses RE'd from the DGL backup + game exe. Game calls are __thiscall via typedefs
+// (this file is /Gd); every game deref is SEH + isUserPtr guarded.
 struct PointI { int x, y; };
 struct RectI { int left, top, right, bottom; };
 
@@ -1278,24 +1287,23 @@ using ScrollTileFn  = void  (__thiscall*)(void* mg, PointI* tile, int extraDx, i
 using GetViewRectFn = RectI*(__thiscall*)(void* mg);
 
 void* g_origIsoMouse = nullptr; // Detours trampoline to the original CStratInterf iso mouse handler
-void* g_origScrollDir = nullptr; // trampoline to the game's directional map scroll (the edge-scroll executor)
+void* g_origScrollDir = nullptr; // trampoline to the game's directional map scroll (edge-scroll executor)
 int g_scrollDirDiag = 0;         // first-N diagnostic counter for the edge-scroll hook
 bool g_dragScrollActive = false;
-extern "C" int g_c4dll_dragActive = 0; // winapi_hooks reads this: 1 = suppress the game edge-scroll while dragging
+extern "C" int g_c4dll_dragActive = 0; // winapi_hooks reads this: 1 = suppress game edge-scroll while dragging
 bool g_dragMoved = false;
 PointI g_dragAnchorTile{}; // map tile grabbed at drag start
 PointI g_dragStart{};      // cursor at drag start (to detect movement)
-bool g_dragAnchorSet = false; // anchor tile grabbed on the FIRST WndProc move (same transform as the pans)
+bool g_dragAnchorSet = false; // anchor grabbed on the FIRST WndProc move (same transform as the pans)
 
 int callOrigIsoMouse(void* view, int msgId, PointI* pt)
 {
     return reinterpret_cast<IsoMouseFn>(g_origIsoMouse)(view, nullptr, msgId, pt);
 }
 
-// MapGraphics singleton = SmartPtr<MapGraphics> { int* refCount; MapGraphics* data; } @ 0x837DA0.
-// The data field (offset 4) IS the MapGraphics - ONE deref. Verified in sub_48E701:
-// `mov ecx,[getMapGraphics_out+4]` then sub_541588. (A two-deref read lands in MapGraphics+0 = a
-// C2DEngine* and faults inside sub_5418BA - that was the "deref FAULTED" in the diag log.)
+// MapGraphics singleton = SmartPtr<MapGraphics> { int* refCount; MapGraphics* data; } @0x837DA0.
+// data field (offset 4) IS the MapGraphics - ONE deref (verified in sub_48E701). A two-deref read
+// lands in MapGraphics+0 (a C2DEngine*) and faults in sub_5418BA.
 void* mapGraphicsPtr()
 {
     __try {
@@ -1303,6 +1311,35 @@ void* mapGraphicsPtr()
         return isUserPtr(mg) ? mg : nullptr;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return nullptr;
+    }
+}
+
+// Pan the iso view so the grabbed tile lands at the cursor, pixel-precise. The game's center-on-tile
+// (sub_541588) snaps scroll to the iso grid ctx[7]xctx[8], so a continuous drag steps by the grid (the
+// jerk). Temporarily set the grid to 1 around the pan, then restore so click-to-center keeps its snap.
+// Deref mg->engine2d->e0->ctx, grid @ctx+28/+32; isUserPtr-guarded.
+void panTileSmooth(void* mg, PointI* tile, int dx, int dy)
+{
+    void* engine2d = isUserPtr(mg) ? *reinterpret_cast<void**>(mg) : nullptr;
+    void* e0 = isUserPtr(engine2d) ? *reinterpret_cast<void**>(engine2d) : nullptr;
+    void* ctx = isUserPtr(e0) ? *reinterpret_cast<void**>(reinterpret_cast<char*>(e0) + 4) : nullptr;
+    if (isUserPtr(ctx)) {
+        int* gx = reinterpret_cast<int*>(reinterpret_cast<char*>(ctx) + 28);
+        int* gy = reinterpret_cast<int*>(reinterpret_cast<char*>(ctx) + 32);
+        const int sx = *gx, sy = *gy; // snapshot (a fault here is before any write -> caller __except, clean)
+        static int logged = 0;
+        if (!logged) { logged = 1; mlog("[drag] iso scroll grid = %d x %d", sx, sy); }
+        // __try/__finally so the LIVE game grid is ALWAYS restored: if sub_541588 faults, the callers'
+        // __except would otherwise unwind past the restore and leave the grid pinned at 1x1, killing the
+        // native scroll snap (edge-scroll / click-to-center) for the rest of the scenario.
+        __try {
+            *gx = 1; *gy = 1;
+            reinterpret_cast<ScrollTileFn>(0x541588)(mg, tile, dx, dy);
+        } __finally {
+            *gx = sx; *gy = sy;
+        }
+    } else {
+        reinterpret_cast<ScrollTileFn>(0x541588)(mg, tile, dx, dy);
     }
 }
 
@@ -1320,13 +1357,13 @@ int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
             PointI tile{};
             // screen->map returns false over the ~160px minimap/resource corner -> only grab real map
             if (mg && reinterpret_cast<ScreenToMapFn>(0x5418BA)(mg, pt, &tile, nullptr)) {
-                // Over the map -> start a drag. The anchor tile is grabbed on the first WndProc move so it
-                // uses the SAME client->game transform as the pans (no 1-2 tile jump on the first move).
+                // Over the map -> start a drag. Anchor tile is grabbed on the first WndProc move so it
+                // uses the SAME client->game transform as the pans (no jump on the first move).
                 g_dragStart = *pt;
                 g_dragScrollActive = true;
-                // NOTE: g_c4dll_dragActive (centering fake_GetCursorPos to kill edge-scroll) made the
-                // pan jerk - the game reacts to the centered cursor every frame. Left OFF for now; a
-                // surgical edge-scroll disable needs the game's edge-scroll fn, not the cursor read.
+                // NOTE: g_c4dll_dragActive (centering fake_GetCursorPos to kill edge-scroll) made the pan
+                // jerk (game reacts to the centered cursor every frame). Left OFF; a surgical edge-scroll
+                // disable needs the game's edge-scroll fn, not the cursor read.
                 g_dragMoved = false;
                 g_dragAnchorSet = false;
                 // Capture the mouse so WM_MOUSEMOVE keeps reaching this handler while the button is held -
@@ -1345,7 +1382,7 @@ int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
                     // place the grabbed tile under the cursor: tileScreen = viewLeft + halfW - 32 - extraDx
                     const int cx = vr->left + (vr->right - vr->left) / 2 - 32;
                     const int cy = vr->top + (vr->bottom - vr->top) / 2 - 16;
-                    reinterpret_cast<ScrollTileFn>(0x541588)(mg, &g_dragAnchorTile, cx - pt->x, cy - pt->y);
+                    panTileSmooth(mg, &g_dragAnchorTile, cx - pt->x, cy - pt->y);
                 }
             }
             return 1; // consume moves while panning
@@ -1353,19 +1390,25 @@ int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
             g_dragScrollActive = false;
             g_c4dll_dragActive = 0; // re-enable edge-scroll
             ReleaseCapture();
-            if (!g_dragMoved)
-                callOrigIsoMouse(view, WM_LBUTTONDOWN, pt); // plain click -> replay down so it still selects
-            return callOrigIsoMouse(view, msgId, pt);       // forward the up
+            if (!g_dragMoved) {
+                // Plain click: replay the down so it selects/opens. Do NOT then forward the up - the
+                // replayed down can open a dialog (e.g. a city) and tear down the iso view, so forwarding
+                // the up to that stale view derefs a freed child (game sub_5CA3F1, this[3]==NULL) -> crash.
+                callOrigIsoMouse(view, WM_LBUTTONDOWN, pt);
+                return 1;
+            }
+            return callOrigIsoMouse(view, msgId, pt); // a real drag: view intact, forward the up to end it
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         g_dragScrollActive = false;
         g_c4dll_dragActive = 0;
+        return 1; // transient torn-down view mid dialog-transition: swallow, do NOT re-dispatch (re-crashes)
     }
     return callOrigIsoMouse(view, msgId, pt);
 }
 
 // WndProc-driven pan (called from wndProcHook with the cursor already mapped to GAME coords). The iso
-// vtable handler stops receiving moves while the button is held, but the captured WndProc does not.
+// vtable handler stops receiving moves while the button is held; the captured WndProc does not.
 void dragScrollWndMove(int gameX, int gameY)
 {
     g_dragMoved = true; // a real drag (the button-up will not replay a select-click)
@@ -1374,8 +1417,8 @@ void dragScrollWndMove(int gameX, int gameY)
         if (!mg)
             return;
         if (!g_dragAnchorSet) {
-            // Grab the anchor from the FIRST move's mapped cursor, so the anchor and every pan use the
-            // identical client->game transform -> the grabbed tile stays put (no first-move jump).
+            // Grab the anchor from the first move's mapped cursor so anchor and pans use the identical
+            // client->game transform -> the grabbed tile stays put (no first-move jump).
             PointI gp{ gameX, gameY }, tile{};
             if (reinterpret_cast<ScreenToMapFn>(0x5418BA)(mg, &gp, &tile, nullptr)) {
                 g_dragAnchorTile = tile;
@@ -1389,23 +1432,21 @@ void dragScrollWndMove(int gameX, int gameY)
         // place the grabbed tile under the cursor: tileScreen = viewLeft + halfW - 32 - extraDx
         const int cx = vr->left + (vr->right - vr->left) / 2 - 32;
         const int cy = vr->top + (vr->bottom - vr->top) / 2 - 16;
-        reinterpret_cast<ScrollTileFn>(0x541588)(mg, &g_dragAnchorTile, cx - gameX, cy - gameY);
+        panTileSmooth(mg, &g_dragAnchorTile, cx - gameX, cy - gameY);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
 
-// The game's iso DIRECTIONAL map scroll: sub_54249C -> sub_541BC1 (8 compass directions) -> by-pixel
-// sub_54301B + iso-scroll-list notify. This is the single choke point for the window-EDGE scroll (cursor
-// near a border auto-scrolls the map): sub_541BC1 is reached ONLY through here. Programmatic centering
-// uses a different path (sub_541588), so gating this kills edge-scroll without touching click-to-center
-// or our drag-pan. Per the user: while the map drag-scroll feature is ON, edge-scroll must be OFF.
-// __thiscall(self, dir) -> reached via __fastcall(ecx=self, edx, dir). Installed unconditionally; the
-// gate is live, so toggling the menu item enables/disables edge-scroll without a restart.
+// The game's iso DIRECTIONAL scroll: sub_54249C -> sub_541BC1 -> sub_54301B. Single choke point for
+// window-EDGE scroll (sub_541BC1 reached only through here). Programmatic centering uses sub_541588, so
+// gating this kills edge-scroll without touching click-to-center or our drag-pan. While drag-scroll is
+// ON, edge-scroll must be OFF. __thiscall(self, dir) via __fastcall(ecx=self, edx, dir); installed
+// unconditionally, gate is live (toggle without restart).
 char __fastcall scrollDirHook(void* self, void* /*edx*/, int dir)
 {
     if (g_scrollDirDiag < 12) { ++g_scrollDirDiag; mlog("[edge] scrollDir dir=%d toggle=%d", dir, g_dragScroll ? 1 : 0); }
     if (g_dragScroll)
-        return 0; // drag-scroll toggle ON -> suppress the game's edge-scroll entirely
+        return 0; // drag-scroll ON -> suppress the game's edge-scroll
     return reinterpret_cast<char(__fastcall*)(void*, void*, int)>(g_origScrollDir)(self, nullptr, dir);
 }
 
@@ -1429,49 +1470,45 @@ void installDragScrollDetour()
 
 extern "C" void timerhost_install(void); // timer keystone (features/timerhost.cpp)
 
+// Entry point called from cnc-ddraw's DllMain (DLL_PROCESS_ATTACH), after hook_init + the embed.
 extern "C" void featuremenu_install(void)
 {
     detectVersion();
 
-    // The menu + in-memory byte patches use Russobit-only addresses (WndProc to detour, always-active,
-    // the timeGetTime IAT hook + battle-viewer vftable discriminator, the CMidgard chain). On any
-    // other build we simply don't install (the embedded renderer works regardless). We test on the
-    // Russobit build, so keep this dead simple.
+    // The menu + byte patches use Russobit-only addresses (WndProc, always-active, timeGetTime IAT,
+    // battle-viewer vftable, CMidgard chain). On any other build we don't install (renderer still works).
     if (g_ver != VerRussobit) {
         mlog("[menu] unsupported game version (exe %lu bytes): menu/patches disabled", g_exeSize);
         return;
     }
 
     // ---- Russobit: full menu + feature install ----
-    // First run: generate a commented C4menu.ini (converting any old mss32menu.ini values). Never
-    // touches the game's own Disciple.ini / settings.lua.
+    // First run: generate a commented C4menu.ini (converting any old mss32menu.ini); never touches
+    // the game's own Disciple.ini / settings.lua.
     seedConfigFirstRun();
 
     const char* f = iniFile();
     g_alwaysActive = GetPrivateProfileIntA("menu", "alwaysActive", 0, f) != 0;
-    // Split battle/map live-multiplier keys, default OFF (each context stays at vanilla speed until
-    // the user opts in per context via the Game menu).
+    // Split battle/map live-multiplier keys, default OFF (each context stays vanilla until opted in).
     g_battleAnimEnabled = GetPrivateProfileIntA("menu", "battleAnimEnabled", 0, f) != 0;
     g_battleAnimSpeed = GetPrivateProfileIntA("menu", "battleAnimSpeed", 5, f);
     g_mapAnimEnabled = GetPrivateProfileIntA("menu", "mapAnimEnabled", 0, f) != 0;
     g_mapAnimSpeed = GetPrivateProfileIntA("menu", "mapAnimSpeed", 5, f);
     g_dragScroll = GetPrivateProfileIntA("menu", "dragScroll", 0, f) != 0;
 
-    // Apply now (DllMain context — before the game's main loop and anim init run). The IAT is
-    // already populated by the loader at this point, so the time-scale hook installs cleanly here.
-    // The battle discriminator patches the (idle) battle-viewer vftable; no battle is live yet.
+    // Apply now (DllMain, before the game's main loop / anim init). The IAT is already populated by the
+    // loader, so the time-scale hook installs cleanly; the battle discriminator patches the idle vftable.
     applyAlwaysActive(g_alwaysActive);
     installTimeScaleHook();
     installBattleDiscriminator();
     timerhost_install(); // timer keystone: capture dialog/battle buttons + combat/animation state
-    installDragScrollDetour(); // map grab+drag panning (gated by g_dragScroll; pure pass-through when off)
+    installDragScrollDetour(); // map grab+drag panning (gated by g_dragScroll; pass-through when off)
     applyAnimSpeed(0, g_battleAnimEnabled, g_battleAnimSpeed);
     applyAnimSpeed(1, g_mapAnimEnabled, g_mapAnimSpeed);
 
-    // Registered window message: menuWorker posts it after attaching the menu so the one-time window
-    // relayout (DDReloadConfig -> dd_SetDisplayMode, which restarts the render thread) runs on the GUI
-    // thread, not the worker thread. RegisterWindowMessage yields a process-unique id. Register BEFORE
-    // the detour + worker so both the WndProc hook and menuWorker observe the same non-zero id.
+    // Registered window message: menuWorker posts it so the one-time relayout (DDReloadConfig ->
+    // dd_SetDisplayMode restarts the render thread) runs on the GUI thread, not the worker. Register
+    // BEFORE the detour + worker so both observe the same non-zero id.
     g_relayoutMsg = RegisterWindowMessageA("C4dllR_MenuRelayout");
 
     installWndProcDetour();

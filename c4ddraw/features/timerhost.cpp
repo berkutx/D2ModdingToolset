@@ -1,26 +1,25 @@
 /*
- * C4dll-R timer host keystone. Ports the legacy timer.mod off[] game-hook layer (dialog/button capture,
- * combat + animation classification, and - later - the on-elapse actions) into the in-process renderer
- * DLL, and exposes it to the timer.c4p plugin via C4P_Host. Russobit "- Copy" exe only: addresses are
- * hardcoded (image base 0x400000, reloc delta 0), same convention as featuremenu.cpp.
- *
- * Detours fire on the game UI thread; the plugin polls from the overlay worker -> shared fields are
- * volatile and every game-pointer deref is SEH-guarded. Built incrementally (keystone plan):
- *   Phase 1a (THIS): capture - off[9] dialog-create (DetourAttach 0x5C93D6, verified __stdcall 5-arg),
- *                    off[8] CButtonInterf::vftable[0] destructor (null-on-destroy), off[5] CMidClient
- *                    vftable[0] scenario-init reset. Gives is_animating + battle_kind + the captured
- *                    buttons. Observe-only (reads + null-writes); no game CALLs.
- *   Phase 1b (next): off[10]/off[11] toggle capture, off[6]/off[7] turn/ACTIVE/day.
- *   Phase 2 (next):  the gated on-elapse vtable CALLS (end_day / retreat).
+ * C4dll-R timer host: ports timer.mod's off[] game-hook layer (dialog/button capture, combat/anim
+ * classification, on-elapse actions) into the renderer DLL; exposed to timer.c4p via C4P_Host.
+ * Russobit "- Copy" exe ONLY: addresses hardcoded (base 0x400000, reloc 0), like featuremenu.cpp.
+ * Detours run on the game UI thread, plugin polls from the worker -> shared fields volatile, derefs SEH-guarded.
  */
 #include <windows.h>
 #include <cstdint>
 #include <cstdarg>
 #include <detours.h>
 
+// In pluginhost.cpp; bumped by the off[6] turn-info hook (a NETWORK msg firing on EVERY client),
+// so turn-starts are detected even on a pure client (MP joiner) with no server.
+extern "C" void pluginhost_bump_turn(int player);
+extern "C" void pluginhost_turn_reset(void);
+// Client-valid scenario-day source (featuremenu.cpp); logged per turn edge to verify the per-day budget.
+extern "C" int featuremenu_current_day(void);
+// "Is it my turn" = CPhaseGameData.clientTakesTurn (sub-dialog-immune); -1 if unavailable -> fallback.
+extern "C" int featuremenu_my_turn(void);
+
 namespace {
 
-// --- minimal self-contained helpers (mirror featuremenu.cpp's) ---
 void tlog(const char* fmt, ...)
 {
     char buf[512];
@@ -31,7 +30,9 @@ void tlog(const char* fmt, ...)
     OutputDebugStringA(buf);
     char line[600];
     int n = wsprintfA(line, "%s\r\n", buf);
-    HANDLE h = CreateFileA("C4menu.log", FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+    static char logName[40] = {0};
+    if (!logName[0]) wsprintfA(logName, "C4menu-%lu.log", GetCurrentProcessId()); // per-process (MP host/client split)
+    HANDLE h = CreateFileA(logName, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h != INVALID_HANDLE_VALUE) {
         DWORD w = 0;
@@ -57,7 +58,7 @@ bool writeBytes(uintptr_t va, const void* bytes, size_t len)
     return true;
 }
 
-// Save the existing vtable method pointer, write our detour into the slot. Returns the original.
+// Write detour into a vtable slot, return the original method pointer.
 void* patchVtableSlot(uintptr_t vtableVA, unsigned byteOff, void* detour)
 {
     void* orig = *reinterpret_cast<void**>(vtableVA + byteOff);
@@ -65,7 +66,7 @@ void* patchVtableSlot(uintptr_t vtableVA, unsigned byteOff, void* detour)
     return orig;
 }
 
-// --- captured state (volatile: written by game-thread detours, read by the worker via the accessors) ---
+// Captured state: written by game-thread detours, read by the worker via accessors.
 struct State
 {
     // CButtonInterf* captured by (dialog, button) name in off[9]; nulled in off[8] on destroy.
@@ -81,18 +82,18 @@ struct State
     LONG volatile animFlag;   // a battle attack animation is playing (BTN_DEFEND hidden)
     LONG volatile pvpFlag;    // human-vs-human battle
     LONG volatile anyCombat;  // any battle present
-    LONG volatile actionsEnabled; // gate for the on-elapse vtable CALLs (Phase 2; default 0)
-    LONG volatile pendingEndDay;  // queued by the plugin on elapse; consumed on the game thread (pump)
+    LONG volatile pendingEndDay;  // queued by plugin on elapse; consumed on game thread (pump)
     LONG volatile pendingRetreat;
     LONG volatile inAction;       // re-entry guard around the game-thread press (legacy dword_10008388)
-    // saved originals / trampolines
     void* g_orig_dlgCreate;
     void* g_orig_btnDtor;
     void* g_orig_scenInit;
+    void* g_orig_turnInfo;
+    int lastTurnPlayer;     // last off[6] player byte (debounce: ignore same-player bursts)
     int installed;
 } g;
 
-// off[9] dialog/button-create capture. Verified: int __stdcall sub_5C93D6(iface, btnName, dlgName, a4, a5).
+// off[9] dialog/button-create capture. int __stdcall sub_5C93D6(iface, btnName, dlgName, a4, a5).
 int __stdcall hook_dlgCreate(int ifaceObj, char* btnName, const char* dlgName, int cb1, int cb2)
 {
     int obj = reinterpret_cast<int(__stdcall*)(int, char*, const char*, int, int)>(g.g_orig_dlgCreate)(
@@ -101,9 +102,10 @@ int __stdcall hook_dlgCreate(int ifaceObj, char* btnName, const char* dlgName, i
         return obj;
     void* o = reinterpret_cast<void*>(obj);
 
-    if (!lstrcmpA(dlgName, "DLG_STRATEGIC") && !lstrcmpA(btnName, "BTN_END_TURN"))
+    if (!lstrcmpA(dlgName, "DLG_STRATEGIC") && !lstrcmpA(btnName, "BTN_END_TURN")) {
         g.endTurn = o;
-    else if (!lstrcmpA(dlgName, "DLG_CAPITAL") && !lstrcmpA(btnName, "BTN_BACK"))
+        tlog("[timer] END_TURN captured %p", o);
+    } else if (!lstrcmpA(dlgName, "DLG_CAPITAL") && !lstrcmpA(btnName, "BTN_BACK"))
         g.capBack = o;
     else if (!lstrcmpA(dlgName, "DLG_DIPLOMACY") && !lstrcmpA(btnName, "BTN_BACK"))
         g.diploBack = o;
@@ -119,10 +121,10 @@ int __stdcall hook_dlgCreate(int ifaceObj, char* btnName, const char* dlgName, i
         else if (!lstrcmpA(btnName, "BTN_DEFEND")) {
             g.btnDefend = o;
             __try {
-                // anim flag = the DEFEND button's hidden/disabled byte == 0 (an attack is animating)
+                // anim flag = DEFEND button's hidden/disabled byte == 0 (an attack is animating)
                 void* f8 = *reinterpret_cast<void**>(reinterpret_cast<char*>(o) + 8);
                 g.animFlag = (*(reinterpret_cast<unsigned char*>(f8) + 4) == 0) ? 1 : 0;
-                // PvP byte = *(BYTE*)[ [[ [iface+4]+8]+0x1C]+0x14F8 ]   (off[3]=0x14F8 player-struct byte)
+                // PvP byte = *(BYTE*)[[[ [iface+4]+8]+0x1C]+0x14F8 ] (off[3]=0x14F8 player-struct byte)
                 char* p0 = *reinterpret_cast<char**>(reinterpret_cast<char*>(ifaceObj) + 4);
                 char* p1 = *reinterpret_cast<char**>(p0 + 8);
                 char* p2 = *reinterpret_cast<char**>(p1 + 0x1C);
@@ -141,9 +143,10 @@ int __stdcall hook_dlgCreate(int ifaceObj, char* btnName, const char* dlgName, i
 // off[8] CButtonInterf::vftable[0] destructor. __thiscall(this, a2) retn 4 == __fastcall(ecx,edx,a2).
 int __fastcall hook_btnDestroy(void* self, void* /*edx*/, int a2)
 {
-    if (self == g.endTurn)
+    if (self == g.endTurn) {
         g.endTurn = nullptr;
-    else if (self == g.capBack)
+        tlog("[timer] END_TURN destroyed %p", self);
+    } else if (self == g.capBack)
         g.capBack = nullptr;
     else if (self == g.diploBack)
         g.diploBack = nullptr;
@@ -169,10 +172,46 @@ int __fastcall hook_scenarioInit(void* self, void* /*edx*/, int a2)
     g.endTurn = g.capBack = g.diploBack = g.briefCont = nullptr;
     g.btnRetreat = g.btnDefend = g.btnClose = g.btnResolve = nullptr;
     g.animFlag = g.pvpFlag = g.anyCombat = 0;
+    pluginhost_turn_reset();   // game/scenario change -> clear off[6] in-game flag
+    g.lastTurnPlayer = -1;     // re-arm player debounce for the new game's first turn
     return reinterpret_cast<int(__thiscall*)(void*, int)>(g.g_orig_scenInit)(self, a2);
 }
 
-// CButtonInterf enabled flag (legacy *([btn+8]+4) != 0) + the press action (vtable+0xB0), SEH-guarded.
+// off[6] turn-info handler (sub_48A680 @0x48A680 = CCmdTurnInfoMsg processor). A NETWORK message,
+// dispatched on EVERY client at turn-start -> the reliable cross-client turn signal. Bump serial +
+// mark in-game, then chain to original. __thiscall(this, a2) -> __fastcall trick.
+int __fastcall hook_turnInfo(void* self, void* /*edx*/, int a2)
+{
+    // Current turn player byte, legacy way (sub_10001B90 did v3 = *sub_404E71()). Pure client-side
+    // getter, valid on BOTH MP clients: CMidgard @0x401D35 -> data @+8 -> obj @+32 -> player id @ obj+8.
+    int player = -1;
+    __try {
+        char* mid = reinterpret_cast<char*(__cdecl*)()>(0x401D35)();
+        if (isUserPtr(mid)) {
+            char* data = *reinterpret_cast<char**>(mid + 8);
+            if (isUserPtr(data)) {
+                char* obj = *reinterpret_cast<char**>(data + 32);
+                if (isUserPtr(obj))
+                    player = *reinterpret_cast<unsigned char*>(obj + 8);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        player = -1;
+    }
+    // Debounce: sub_48A680 can fire several times per turn-info (a burst). Treat only a real PLAYER
+    // CHANGE as a new turn; otherwise the plugin re-banks+reloads the budget and the turn starts at
+    // DOUBLE time (joiner's first turn showed ~90s instead of 45s).
+    if (player >= 0 && player != g.lastTurnPlayer) {
+        g.lastTurnPlayer = player;
+        pluginhost_bump_turn(player);
+        static LONG n = 0;
+        if (InterlockedIncrement(&n) <= 60)
+            tlog("[timer] turn-info off6 player=%d (serial bump)", player);
+    }
+    return reinterpret_cast<int(__fastcall*)(void*, void*, int)>(g.g_orig_turnInfo)(self, nullptr, a2);
+}
+
+// CButtonInterf enabled flag (legacy *([btn+8]+4) != 0), SEH-guarded.
 bool btnEnabled(void* btn)
 {
     __try {
@@ -185,62 +224,88 @@ bool btnEnabled(void* btn)
 
 void pressBtn(void* btn)
 {
+    // Cold press like the legacy (sub_10004D40 -> vtable+0xB0 = CButtonInterf "press"). No arming - the
+    // gate (sub_5323C9) passes on any laid-out button; the turn-end takes only when pressed at an idle
+    // point, so the pump issues this only on a WM_TIMER (see wndProcHook), never mid hero-move.
     __try {
         void* vtable = *reinterpret_cast<void**>(btn);
         void* method = *reinterpret_cast<void**>(reinterpret_cast<char*>(vtable) + 0xB0);
-        reinterpret_cast<void(__thiscall*)(void*)>(method)(btn); // CButtonInterf "press" (legacy +0xB0)
+        reinterpret_cast<void(__thiscall*)(void*)>(method)(btn);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
 
 } // namespace
 
-// --- exported read accessors (lock-free single-word volatile reads; called by pluginhost thunks) ---
+// Exported read accessors (lock-free volatile reads; called by pluginhost thunks).
 extern "C" int timerhost_is_animating(void) { return g.animFlag ? 1 : 0; }
 extern "C" int timerhost_battle_kind(void) { return g.pvpFlag ? 1 : (g.anyCombat ? 2 : 0); }
-extern "C" int timerhost_turn_active(void) { return 0; }    // set by off[6] (Phase 1b)
+// Local player's turn is active when strategic END_TURN exists AND is enabled. Captured PER CLIENT,
+// so valid on host AND joiner - unlike the server currentPlayerIndex (host-only). Transitions logged.
+extern "C" int timerhost_turn_active(void)
+{
+    int a;
+    const int mt = featuremenu_my_turn(); // game's clientTakesTurn: true for my WHOLE turn incl. every
+    if (mt >= 0) {                        // sub-dialog (city/diplomacy/spellbook). The clean signal.
+        a = mt;
+    } else {
+        // Fallback (menu/loading or a layout mismatch): END_TURN present+enabled, or a known my-turn
+        // strategic sub-view. The pump stays END_TURN-only regardless.
+        __try {
+            a = (isUserPtr(g.endTurn) && btnEnabled(g.endTurn)) ? 1 : 0;
+            if (!a && (isUserPtr(g.capBack) || isUserPtr(g.diploBack)))
+                a = 1;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            a = 0;
+        }
+    }
+    static int last = -1;
+    if (a != last) { last = a; tlog("[timer] turn_active -> %d (mt=%d endTurn=%p day=%d)", a, mt, g.endTurn, featuremenu_current_day()); }
+    return a;
+}
 extern "C" int timerhost_turn_player_id(void) { return -1; } // set by off[6] (Phase 1b)
-// Phase 2 on-elapse actions: the plugin (overlay worker thread) QUEUES the press; timerhost_pump()
-// performs it on the game UI thread (from the featuremenu WndProc detour), exactly like the legacy
-// posted a message to its WndProc which pressed the captured button (sub_10004D40 press = vtable+0xB0).
-extern "C" int timerhost_retreat(void) { InterlockedExchange(&g.pendingRetreat, 1); return 1; }
+// Phase 2 on-elapse: plugin (worker thread) QUEUES the press; timerhost_pump() performs it on each
+// idle WM_TIMER (featuremenu's 32ms timer), retrying until the turn ends - like the legacy 0x113 case.
+extern "C" int timerhost_retreat(void) { InterlockedExchange(&g.pendingRetreat, 1); tlog("[timer] retreat QUEUED by plugin"); return 1; }
 extern "C" int timerhost_end_day(void) { InterlockedExchange(&g.pendingEndDay, 1); tlog("[timer] end_day QUEUED by plugin"); return 1; }
 
 extern "C" void timerhost_pump(void)
 {
+    // Called ONLY on WM_TIMER (featuremenu's 32ms timer) = an idle point, after the hero finished
+    // moving. Pressing END_TURN mid-move fires onClick but the game rejects the turn-end.
     if (!g.pendingEndDay && !g.pendingRetreat)
         return;
-    // SAFETY GATE (crash fix). Only fire the press when the user is NOT mid-interaction. Pressing
-    // END_TURN is a heavy turn-transition dispatch; doing it while the left button is physically held,
-    // or while the mouse is captured (our map drag-scroll OR a game modal), raced the game's deferred
-    // UI teardown and crashed with a use-after-free - Discipl2 sub_4D9A73+0x49 does a virtual call
-    // (this->vtbl[5]) on a dialog object that the press had already destroyed. Defer until idle: the
-    // pending flag persists and the next message retries. Mirrors the legacy timer, which pressed from
-    // a POSTED message (dispatched at a clean, non-input point), never inline on a live mouse message.
-    if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || GetCapture() != nullptr)
+    // Never press while the left button is physically held (END_TURN tears down UI -> use-after-free
+    // mid-drag). Pending flag persists -> retried next WM_TIMER.
+    if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0)
         return;
     if (InterlockedCompareExchange(&g.inAction, 1, 0) != 0)
         return; // re-entry guard: the press pumps messages; never recurse into a second press
     __try {
-        if (InterlockedExchange(&g.pendingRetreat, 0)) {
-            void* b = g.btnRetreat; // in-combat: press the captured RETREAT button
-            if (isUserPtr(b) && btnEnabled(b))
-                pressBtn(b);
-        }
-        if (InterlockedExchange(&g.pendingEndDay, 0)) {
-            // End-Day only OUTSIDE combat (no RETREAT button up); press the first enabled advance button
-            // in the legacy priority: close -> briefing-continue -> capital/diplomacy-back -> end-turn.
-            tlog("[timer] pump end_day: retreat=%p close=%p brief=%p cap=%p diplo=%p endTurn=%p en=%d",
-                 g.btnRetreat, g.btnClose, g.briefCont, g.capBack, g.diploBack, g.endTurn,
-                 isUserPtr(g.endTurn) ? (btnEnabled(g.endTurn) ? 1 : 0) : -1);
-            if (!isUserPtr(g.btnRetreat)) {
-                void* order[5] = { g.btnClose, g.briefCont, g.capBack, g.diploBack, g.endTurn };
-                for (int i = 0; i < 5; ++i) {
-                    if (isUserPtr(order[i]) && btnEnabled(order[i])) {
-                        tlog("[timer] pressing btn[%d]=%p", i, order[i]);
-                        pressBtn(order[i]);
-                        break;
+        // A captured RETREAT button = a real battle dialog is up. In combat RETREAT is a one-shot flee;
+        // PRESERVE pendingEndDay so an out-of-time turn still auto-ends once combat is over.
+        const bool inBattle = isUserPtr(g.btnRetreat);
+        if (inBattle) {
+            if (InterlockedExchange(&g.pendingRetreat, 0)) { // one-shot: never re-press a flee
+                if (btnEnabled(g.btnRetreat))
+                    pressBtn(g.btnRetreat);
+            }
+        } else {
+            InterlockedExchange(&g.pendingRetreat, 0); // retreat does not apply outside combat
+            if (g.pendingEndDay) {
+                // Retry each idle WM_TIMER until the turn ends (no give-up cap: dropping it would leave
+                // the turn un-skipped). Press the first enabled advance button.
+                if (isUserPtr(g.endTurn) && btnEnabled(g.endTurn)) {
+                    void* order[5] = { g.btnClose, g.briefCont, g.capBack, g.diploBack, g.endTurn };
+                    for (int i = 0; i < 5; ++i) {
+                        if (isUserPtr(order[i]) && btnEnabled(order[i])) {
+                            tlog("[timer] pressing btn[%d]=%p (WM_TIMER idle)", i, order[i]);
+                            pressBtn(order[i]);
+                            break;
+                        }
                     }
+                } else {
+                    InterlockedExchange(&g.pendingEndDay, 0); // turn ended (or no longer ours) -> done
                 }
             }
         }
@@ -249,21 +314,25 @@ extern "C" void timerhost_pump(void)
     InterlockedExchange(&g.inAction, 0);
 }
 
-// --- install (called from featuremenu_install on Russobit, after installBattleDiscriminator) ---
+// Install (called from featuremenu_install on Russobit, after installBattleDiscriminator).
 extern "C" void timerhost_install(void)
 {
     if (g.installed)
         return;
     g.installed = 1;
+    g.lastTurnPlayer = -1;
 
-    // off[9] dialog/button-create capture: DetourAttach the resolved target (verified __stdcall 5-arg).
+    // off[9] dialog/button-create capture (__stdcall 5-arg); off[6] turn-info handler (cross-client).
     g.g_orig_dlgCreate = reinterpret_cast<void*>(0x5C93D6);
+    g.g_orig_turnInfo = reinterpret_cast<void*>(0x48A680);
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(&g.g_orig_dlgCreate, reinterpret_cast<void*>(hook_dlgCreate));
+    DetourAttach(&g.g_orig_turnInfo, reinterpret_cast<void*>(hook_turnInfo));
     if (DetourTransactionCommit() != NO_ERROR) {
         g.g_orig_dlgCreate = reinterpret_cast<void*>(0x5C93D6);
-        tlog("[timer] keystone off[9] dlg-create detour FAILED");
+        g.g_orig_turnInfo = reinterpret_cast<void*>(0x48A680);
+        tlog("[timer] keystone off[9]/off[6] detour FAILED");
     }
 
     // off[8] CButtonInterf::vftable[0] destructor -> null captured buttons on destroy.
