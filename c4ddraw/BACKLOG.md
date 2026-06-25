@@ -79,6 +79,19 @@ decompile, so the rest is direct transcription.
 - `[ ]` **FontSize / Offset format** — `FontSize` is our addition (legacy has none); `OffsetX/Y` are
   legacy float 0.0..1.0 anchors, our `AnchorX/Y` are int 0..100. Cosmetic / config-format only.
 
+## Animation speed (see `docs/anim-speed.md`)
+- `[~]` **Battle idle/attack split = global burst** — DONE as a global-clock burst: vftable slot[2]
+  (`showAttackEffect` `0x63203B`) pulses `g_attackPulse`; the `WM_TIMER` pump holds the attack factor
+  ~1.2s then eases down 0.7s to the idle base. Idle is calm BETWEEN attacks, but because it drives the
+  global clock it also speeds idle units DURING the burst window. Not true per-unit isolation.
+- `[ ]` **True per-unit isolation (optional, moderate risk)** — keep the global clock at vanilla
+  (idle naturally calm) and speed up ONLY the acting units. Feasible: per-unit anims are individually
+  addressable (`BattleViewerInterfApi::getUnitAnimation` -> `CBatUnitAnim**`; one shared vftable, so
+  patchable); the acting set = `viewer->data->unitId` (attacker) + `targetData.attack` (targets), and
+  "action playing" = the slot[2]/`sub_639743` state. Blockers: patch the per-unit `CBatUnitAnim`
+  vftable `update` slot + scale only acting units' frame advance WITHOUT desync, all in the live battle
+  render path (crash surface). Neither vanilla nor DGL ever did this split. Decide before building.
+
 ## DGL features
 - `[x]` **Map drag-scroll** (faithful) — IMPLEMENTED (pending in-game test). Detours the Russobit iso-view
   mouse handler sub_48E8A0; left-drag on open terrain pans via sub_541588 (screen->map sub_5418BA,
@@ -91,7 +104,8 @@ decompile, so the rest is direct transcription.
   the drop-in zip. CI itself is clean (the mss32 track never shipped the menu — `skip-worktree`).
 
 ## Done recently (for context, not a TODO)
-- Animation speed: live + separate battle/map multipliers up to 5x (timeGetTime virtual clock).
+- Animation speed: live battle/map multipliers up to 15x; native hero/AI map speed (`playerSpeed`)
+  + battle speed (`GameSettings`); battle attack-burst (fast hits, calm idle) with 0.7s ease-down.
 - Combat Pause (any battle); fidelity fixes (DayTurn clamp, menu tail IDs, Force-mode ACTIVE gate).
 - Timetable per-day duration + the day source (`C4P_Host.get_day` → `CScenarioInfo.currentTurn`).
 - First-run `C4menu.ini` converter; mss32 featuremenu removed (the crashing const-patch); adapter cleanup.

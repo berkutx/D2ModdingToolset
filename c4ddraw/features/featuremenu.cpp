@@ -846,20 +846,27 @@ void readNativeSpeeds()
 // so waiting units don't twitch; each attack effect (vftable slot[2] -> g_attackPulse) opens a short
 // window during which the virtual clock runs at the higher attack factor. All on the game UI thread
 // (battle update sets the pulse, this runs from the WM_TIMER pump) - no game-internal pointers touched.
-const DWORD kAttackBurstMs = 1500;
+const DWORD kAttackHoldMs = 1200; // hold full attack factor while the hit plays (re-armed by each pulse)
+const DWORD kAttackRampMs = 700;  // then ease back DOWN to the idle base over this long (no instant snap)
 void updateBattleBurst(void)
 {
     if (g_attackPulse) {
         g_attackPulse = 0;
-        g_attackExpiryTick = GetTickCount() + kAttackBurstMs;
+        g_attackExpiryTick = GetTickCount() + kAttackHoldMs; // hold end; ramp runs for kAttackRampMs after it
     }
     if (!g_battleAttackEnabled)
         return; // split off: leave g_battleFactor to applyAnimSpeed (the live battle multiplier)
-    int f = g_battleAnimEnabled ? kAnimFactor[g_battleAnimSpeed - 1] : 10; // idle base
-    if (g_inBattle && g_attackExpiryTick && static_cast<int>(g_attackExpiryTick - GetTickCount()) > 0) {
+    const int idle = g_battleAnimEnabled ? kAnimFactor[g_battleAnimSpeed - 1] : 10; // idle base
+    int f = idle;
+    if (g_inBattle && g_attackExpiryTick) {
         const int atk = kAnimFactor[g_battleAttackSpeed - 1];
-        if (atk > f)
-            f = atk;
+        const int sinceHoldEnd = static_cast<int>(GetTickCount() - g_attackExpiryTick);
+        if (sinceHoldEnd < 0)
+            f = atk; // still in the hold window: full attack speed
+        else if (sinceHoldEnd < static_cast<int>(kAttackRampMs))
+            f = atk + (idle - atk) * sinceHoldEnd / static_cast<int>(kAttackRampMs); // linear ease atk->idle
+        if (f < idle)
+            f = idle; // never dip below the idle base
     }
     g_battleFactor = f;
 }
