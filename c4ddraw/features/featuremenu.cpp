@@ -178,6 +178,7 @@ volatile LONG g_battleFactor = 10;
 volatile LONG g_mapFactor = 10;
 volatile LONG g_inBattle = 0;
 volatile LONG g_attackPulse = 0; // set by batShowThunk (slot[2]) on each hit/effect; consumed by the pump
+volatile LONG g_batViewer = 0;   // IBatViewer instance, captured by batUpdateThunk; cleared on battle end
 
 DWORD g_vcLastFactor = 10;
 DWORD g_vcRealAnchor = 0, g_vcVirtAnchor = 0;
@@ -236,6 +237,7 @@ __declspec(naked) void batUpdateThunk()
 {
     __asm {
         mov dword ptr [g_inBattle], 1
+        mov dword ptr [g_batViewer], ecx   // thiscall: ecx = IBatViewer instance (for per-unit burst)
         jmp dword ptr [g_batUpdateOrig]
     }
 }
@@ -251,6 +253,7 @@ __declspec(naked) void batEndThunk()
 {
     __asm {
         mov dword ptr [g_inBattle], 0
+        mov dword ptr [g_batViewer], 0
         jmp dword ptr [g_batEndOrig]
     }
 }
@@ -258,6 +261,7 @@ __declspec(naked) void batDtorThunk()
 {
     __asm {
         mov dword ptr [g_inBattle], 0
+        mov dword ptr [g_batViewer], 0
         jmp dword ptr [g_batDtorOrig]
     }
 }
@@ -354,6 +358,7 @@ enum : UINT
     kIdAtk3 = 0xA1E4,
     kIdAtk4 = 0xA1E5,
     kIdAtk5 = 0xA1E6,
+    kIdPerUnit = 0xA1E7, // toggle: attack burst speeds ONLY acting units (experimental)
     kIdLast = 0xA1FF, // upper bound of our WM_COMMAND id block
 };
 
@@ -427,6 +432,7 @@ int g_mapAnimSpeed = 5;
 bool g_battleAttackEnabled = false; // BATTLE attack burst: speed up only while a hit/effect plays
 int g_battleAttackSpeed = 3;        // burst factor (1..5); idle stays at the battle base (vanilla unless set)
 DWORD g_attackExpiryTick = 0;       // burst window end (GetTickCount ms); 0 = no burst pending
+bool g_perUnitBurst = false;        // EXPERIMENTAL: scale only the acting animators' interval (not the global clock)
 // cnc-ddraw (ddraw.ini) state, read at startup so the menu shows current values (-1 = unknown/custom)
 int g_rendererIdx = 0;  // index into kRenderers
 int g_shaderIdx = -1;   // index into kShaders
@@ -473,6 +479,7 @@ void persist()
     WritePrivateProfileStringA("menu", "battleAttackEnabled", g_battleAttackEnabled ? "1" : "0", f);
     wsprintfA(buf, "%d", g_battleAttackSpeed);
     WritePrivateProfileStringA("menu", "battleAttackSpeed", buf, f);
+    WritePrivateProfileStringA("menu", "perUnitBurst", g_perUnitBurst ? "1" : "0", f);
     WritePrivateProfileStringA("menu", "dragScroll", g_dragScroll ? "1" : "0", f);
 }
 
@@ -848,27 +855,92 @@ void readNativeSpeeds()
 // (battle update sets the pulse, this runs from the WM_TIMER pump) - no game-internal pointers touched.
 const DWORD kAttackHoldMs = 1200; // hold full attack factor while the hit plays (re-armed by each pulse)
 const DWORD kAttackRampMs = 700;  // then ease back DOWN to the idle base over this long (no instant snap)
+
+// Eased burst factor (x10): idle base, jumps to attack during the hold window, eases linearly back over
+// kAttackRampMs. Shared by the global-clock burst and the per-unit burst so both feel the same.
+int easedBattleFactor(void)
+{
+    const int idle = g_battleAnimEnabled ? kAnimFactor[g_battleAnimSpeed - 1] : 10;
+    if (!g_inBattle || !g_attackExpiryTick)
+        return idle;
+    const int atk = kAnimFactor[g_battleAttackSpeed - 1];
+    const int since = static_cast<int>(GetTickCount() - g_attackExpiryTick);
+    int f = idle;
+    if (since < 0)
+        f = atk;
+    else if (since < static_cast<int>(kAttackRampMs))
+        f = atk + (idle - atk) * since / static_cast<int>(kAttackRampMs);
+    return f < idle ? idle : f;
+}
+
+// EXPERIMENTAL per-unit burst: instead of the global clock, shrink the interval (+0x34, 66/33ms) of ONLY
+// the battle viewer's action animators, so just the acting units play faster while idle units stay vanilla.
+// Chain (verified from IBatViewer::update 0x630DE3 + sub_62B7E0=deref): viewer -> *(+4) data ->
+// *(+4996/+5000/+5016/+5020) = animator -> +0x34 interval. Heavily guarded: a wrong field reads != 33/66
+// so it is a no-op (never corrupts), restores every frame, SEH-wrapped, logs what it finds for tuning.
+void applyPerUnitBurst(int f)
+{
+    static int* sPtr[4] = {nullptr, nullptr, nullptr, nullptr};
+    static int sOrig[4] = {0, 0, 0, 0};
+    static int sN = 0;
+    static DWORD sLastLog = 0;
+    __try {
+        for (int i = 0; i < sN; ++i) // restore last frame's scaling first
+            if (isUserPtr(sPtr[i]))
+                *sPtr[i] = sOrig[i];
+        sN = 0;
+        char* viewer = reinterpret_cast<char*>(g_batViewer);
+        if (f <= 10 || !g_inBattle || !isUserPtr(viewer))
+            return;
+        char* data = *reinterpret_cast<char**>(viewer + 4);
+        if (!isUserPtr(data))
+            return;
+        static const int kOff[4] = {4996, 5000, 5016, 5020};
+        const bool logNow = (GetTickCount() - sLastLog) > 1000;
+        for (int i = 0; i < 4; ++i) {
+            char* anim = *reinterpret_cast<char**>(data + kOff[i]);
+            if (!isUserPtr(anim))
+                continue;
+            int* pIv = reinterpret_cast<int*>(anim + 0x34);
+            const int v = *pIv;
+            if (logNow)
+                mlog("[burst] off=%d anim=%p iv@34=%d (30=%d 38=%d)", kOff[i], anim, v,
+                     *reinterpret_cast<int*>(anim + 0x30), *reinterpret_cast<int*>(anim + 0x38));
+            if ((v == 33 || v == 66) && sN < 4) { // sanity: only a real interval; else no-op
+                int nv = v * 10 / f;
+                if (nv < 1)
+                    nv = 1;
+                sPtr[sN] = pIv;
+                sOrig[sN] = v;
+                ++sN;
+                *pIv = nv;
+            }
+        }
+        if (logNow)
+            sLastLog = GetTickCount();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        sN = 0;
+    }
+}
+
 void updateBattleBurst(void)
 {
     if (g_attackPulse) {
         g_attackPulse = 0;
         g_attackExpiryTick = GetTickCount() + kAttackHoldMs; // hold end; ramp runs for kAttackRampMs after it
     }
-    if (!g_battleAttackEnabled)
-        return; // split off: leave g_battleFactor to applyAnimSpeed (the live battle multiplier)
-    const int idle = g_battleAnimEnabled ? kAnimFactor[g_battleAnimSpeed - 1] : 10; // idle base
-    int f = idle;
-    if (g_inBattle && g_attackExpiryTick) {
-        const int atk = kAnimFactor[g_battleAttackSpeed - 1];
-        const int sinceHoldEnd = static_cast<int>(GetTickCount() - g_attackExpiryTick);
-        if (sinceHoldEnd < 0)
-            f = atk; // still in the hold window: full attack speed
-        else if (sinceHoldEnd < static_cast<int>(kAttackRampMs))
-            f = atk + (idle - atk) * sinceHoldEnd / static_cast<int>(kAttackRampMs); // linear ease atk->idle
-        if (f < idle)
-            f = idle; // never dip below the idle base
+    if (!g_battleAttackEnabled) {
+        if (g_perUnitBurst)
+            applyPerUnitBurst(10); // feature off: make sure any scaled interval is restored
+        return; // global g_battleFactor left to applyAnimSpeed (the live battle multiplier)
     }
-    g_battleFactor = f;
+    const int f = easedBattleFactor();
+    if (g_perUnitBurst) {
+        g_battleFactor = g_battleAnimEnabled ? kAnimFactor[g_battleAnimSpeed - 1] : 10; // keep global at idle
+        applyPerUnitBurst(f); // speed only the acting animators
+    } else {
+        g_battleFactor = f; // global-clock burst (speeds everything in battle during the window)
+    }
 }
 
 void refreshChecks()
@@ -889,6 +961,8 @@ void refreshChecks()
     const UINT aSel = g_battleAttackEnabled ? (kIdAtk1 + static_cast<UINT>(g_battleAttackSpeed - 1)) : kIdAtkOff;
     if (g_battleAtkMenu)
         CheckMenuRadioItem(g_battleAtkMenu, kIdAtkOff, kIdAtk5, aSel, MF_BYCOMMAND);
+    if (g_gameMenu)
+        CheckMenuItem(g_gameMenu, kIdPerUnit, MF_BYCOMMAND | (g_perUnitBurst ? MF_CHECKED : MF_UNCHECKED));
     if (g_battleMenu)
         CheckMenuRadioItem(g_battleMenu, kIdBattle1, kIdBattle4,
                            kIdBattle1 + static_cast<UINT>(g_battleSpeed - 1), MF_BYCOMMAND);
@@ -951,6 +1025,11 @@ void onMenuCommand(UINT id)
         g_battleAttackEnabled = true;
         g_battleAttackSpeed = static_cast<int>(id - kIdAtk1) + 1;
         updateBattleBurst(); // apply immediately (idle base now, burst on next hit)
+    } else if (id == kIdPerUnit) {
+        g_perUnitBurst = !g_perUnitBurst;
+        if (!g_perUnitBurst)
+            applyPerUnitBurst(10); // restore any scaled intervals
+        updateBattleBurst();
     } else if (id >= kIdRendOpenGL && id <= kIdRendAuto) {
         g_rendererIdx = static_cast<int>(id - kIdRendOpenGL);
         writeDdrawStr("renderer", kRenderers[g_rendererIdx].value);
@@ -1150,6 +1229,8 @@ void buildMenu()
     AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk5, "5x");
     AppendMenuA(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_battleAtkMenu),
                 "Battle attack burst (fast hits, calm idle)");
+    AppendMenuA(g_gameMenu, MF_STRING, kIdPerUnit,
+                "  - per-unit: speed only acting units (experimental, may glitch)");
     g_mapAnimMenu = CreatePopupMenu();
     AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMapOff, "Off (vanilla)");
     AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap1, "1.5x");
@@ -1582,6 +1663,7 @@ extern "C" void featuremenu_install(void)
         g_battleAttackSpeed = 1;
     if (g_battleAttackSpeed > 5)
         g_battleAttackSpeed = 5;
+    g_perUnitBurst = GetPrivateProfileIntA("menu", "perUnitBurst", 0, f) != 0;
     g_dragScroll = GetPrivateProfileIntA("menu", "dragScroll", 0, f) != 0;
 
     // Apply now (DllMain, before the game's main loop / anim init). The IAT is already populated by the

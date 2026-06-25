@@ -84,13 +84,19 @@ decompile, so the rest is direct transcription.
   (`showAttackEffect` `0x63203B`) pulses `g_attackPulse`; the `WM_TIMER` pump holds the attack factor
   ~1.2s then eases down 0.7s to the idle base. Idle is calm BETWEEN attacks, but because it drives the
   global clock it also speeds idle units DURING the burst window. Not true per-unit isolation.
-- `[ ]` **True per-unit isolation (optional, moderate risk)** — keep the global clock at vanilla
-  (idle naturally calm) and speed up ONLY the acting units. Feasible: per-unit anims are individually
-  addressable (`BattleViewerInterfApi::getUnitAnimation` -> `CBatUnitAnim**`; one shared vftable, so
-  patchable); the acting set = `viewer->data->unitId` (attacker) + `targetData.attack` (targets), and
-  "action playing" = the slot[2]/`sub_639743` state. Blockers: patch the per-unit `CBatUnitAnim`
-  vftable `update` slot + scale only acting units' frame advance WITHOUT desync, all in the live battle
-  render path (crash surface). Neither vanilla nor DGL ever did this split. Decide before building.
+- `[~]` **True per-unit isolation (EXPERIMENTAL, default off)** — speed up ONLY the acting animators,
+  leave idle + global clock vanilla. Mechanism (RE this session): each anim object is clock-gated with a
+  per-object interval at `+0x34` (66ms idle / 33ms fast) + deadline `+0x38` (set by ctor `0x51E210`); so
+  the lever is shrinking a specific object's `+0x34` (the DGL per-object method), NOT extra-calls/freeze
+  (both fail under clock-gating). Impl in `applyPerUnitBurst` (`featuremenu.cpp`): `batUpdateThunk`
+  captures the IBatViewer instance (`g_batViewer`); chain `viewer -> *(+4) data -> *(+4996/5000/5016/5020)
+  = action animator -> +0x34`. Menu "per-unit (experimental)" toggle. SAFE: `isUserPtr` + SEH +
+  value-sanity (only writes if `+0x34` reads 33/66, else no-op so a wrong offset can't corrupt) + restores
+  every frame; logs `[burst] off=.. iv@34=..` (throttled) so an in-game test confirms the right objects.
+  - `[ ]` PENDING in-game confirm: verify the `+4996..+5020` objects ARE the acting animators and `+0x34`
+    is their interval (read the `[burst]` log from a battle). If the chain/offset is off, fix from the log.
+  - `[ ]` If confirmed: consider easing the interval (already passes the eased factor) and widening the
+    candidate set if attacker/target use more than 4 animators.
 
 ## DGL features
 - `[x]` **Map drag-scroll** (faithful) — IMPLEMENTED (pending in-game test). Detours the Russobit iso-view
