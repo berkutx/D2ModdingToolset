@@ -177,6 +177,7 @@ TimeGetTimeFn g_realTimeGetTime = nullptr;
 volatile LONG g_battleFactor = 10;
 volatile LONG g_mapFactor = 10;
 volatile LONG g_inBattle = 0;
+volatile LONG g_attackPulse = 0; // set by batShowThunk (slot[2]) on each hit/effect; consumed by the pump
 
 DWORD g_vcLastFactor = 10;
 DWORD g_vcRealAnchor = 0, g_vcVirtAnchor = 0;
@@ -242,6 +243,7 @@ __declspec(naked) void batShowThunk()
 {
     __asm {
         mov dword ptr [g_inBattle], 1
+        mov dword ptr [g_attackPulse], 1
         jmp dword ptr [g_batShowOrig]
     }
 }
@@ -277,16 +279,18 @@ void installBattleDiscriminator()
         mlog("[menu] battle anim discriminator install FAILED");
 }
 
+// Speed 1..6 -> virtual-clock factor (x1.5/x2/x3/x4/x5/x15, fixed-point /10); 10 = identity (off).
+const int kAnimFactor[6] = {15, 20, 30, 40, 50, 150};
+
 // Map "Speed N" (1..5) to a virtual-clock factor for battle (which=0) or map (which=1). Off = x1.0.
 // Runs on the game UI thread (menu WM_COMMAND).
 void applyAnimSpeed(int which, bool enabled, int speed)
 {
-    static const int kFactor[5] = {15, 20, 30, 40, 50}; // 1.5x, 2x, 3x, 4x, 5x
     if (speed < 1)
         speed = 1;
-    if (speed > 5)
-        speed = 5;
-    LONG f = enabled ? kFactor[speed - 1] : 10;
+    if (speed > 6)
+        speed = 6;
+    LONG f = enabled ? kAnimFactor[speed - 1] : 10;
     if (which == 0)
         g_battleFactor = f;
     else
@@ -309,6 +313,7 @@ enum : UINT
     kIdAnim3 = 0xA113,
     kIdAnim4 = 0xA114,
     kIdAnim5 = 0xA115,
+    kIdAnim6 = 0xA116, // 15x (test/exaggerate)
     // cnc-ddraw (ddraw.ini) settings
     kIdRendOpenGL = 0xA130,
     kIdRendGdi = 0xA131,
@@ -341,7 +346,14 @@ enum : UINT
     kIdAnimMap3 = 0xA1D3,
     kIdAnimMap4 = 0xA1D4,
     kIdAnimMap5 = 0xA1D5,
+    kIdAnimMap6 = 0xA1D6, // 15x (test/exaggerate)
     kIdDragScroll = 0xA1E0, // toggle: grab+drag map panning
+    kIdAtkOff = 0xA1E1, // BATTLE attack burst: off / 1.5x..5x (extra speed only while a hit plays)
+    kIdAtk1 = 0xA1E2,
+    kIdAtk2 = 0xA1E3,
+    kIdAtk3 = 0xA1E4,
+    kIdAtk4 = 0xA1E5,
+    kIdAtk5 = 0xA1E6,
     kIdLast = 0xA1FF, // upper bound of our WM_COMMAND id block
 };
 
@@ -412,6 +424,9 @@ bool g_battleAnimEnabled = false; // BATTLE live anim multiplier
 int g_battleAnimSpeed = 5;
 bool g_mapAnimEnabled = false;    // MAP live anim multiplier
 int g_mapAnimSpeed = 5;
+bool g_battleAttackEnabled = false; // BATTLE attack burst: speed up only while a hit/effect plays
+int g_battleAttackSpeed = 3;        // burst factor (1..5); idle stays at the battle base (vanilla unless set)
+DWORD g_attackExpiryTick = 0;       // burst window end (GetTickCount ms); 0 = no burst pending
 // cnc-ddraw (ddraw.ini) state, read at startup so the menu shows current values (-1 = unknown/custom)
 int g_rendererIdx = 0;  // index into kRenderers
 int g_shaderIdx = -1;   // index into kShaders
@@ -426,7 +441,7 @@ int g_modeIdx = 0;      // index into kModes
 HMENU g_bar = nullptr;
 UINT g_relayoutMsg = 0; // registered msg: marshal the one-time menu-attach relayout onto the GUI thread
 HMENU g_gameMenu = nullptr, g_videoMenu = nullptr, g_perfMenu = nullptr; // top-level bar menus
-HMENU g_battleAnimMenu = nullptr, g_mapAnimMenu = nullptr;
+HMENU g_battleAnimMenu = nullptr, g_mapAnimMenu = nullptr, g_battleAtkMenu = nullptr;
 HMENU g_rendMenu = nullptr, g_shaderMenu = nullptr;
 HMENU g_ticksMenu = nullptr, g_resMenu = nullptr, g_fpsMenu = nullptr;
 HMENU g_battleMenu = nullptr, g_mapMenu = nullptr, g_modeMenu = nullptr;
@@ -455,6 +470,9 @@ void persist()
     WritePrivateProfileStringA("menu", "mapAnimEnabled", g_mapAnimEnabled ? "1" : "0", f);
     wsprintfA(buf, "%d", g_mapAnimSpeed);
     WritePrivateProfileStringA("menu", "mapAnimSpeed", buf, f);
+    WritePrivateProfileStringA("menu", "battleAttackEnabled", g_battleAttackEnabled ? "1" : "0", f);
+    wsprintfA(buf, "%d", g_battleAttackSpeed);
+    WritePrivateProfileStringA("menu", "battleAttackSpeed", buf, f);
     WritePrivateProfileStringA("menu", "dragScroll", g_dragScroll ? "1" : "0", f);
 }
 
@@ -489,11 +507,16 @@ void seedConfigFirstRun()
         "\r\n"
         "; Live animation-speed multiplier, separate for battle and the strategic map\r\n"
         "; (timeGetTime virtual clock; safe, no game-memory patch).\r\n"
-        ";   *Enabled : 0 = vanilla, 1 = on.   *Speed : 1..5  ->  1.5x / 2x / 3x / 4x / 5x.\r\n"
+        ";   *Enabled : 0 = vanilla, 1 = on.   *Speed : 1..6  ->  1.5x / 2x / 3x / 4x / 5x / 15x.\r\n"
         "battleAnimEnabled=%d\r\n"
         "battleAnimSpeed=%d\r\n"
         "mapAnimEnabled=%d\r\n"
-        "mapAnimSpeed=%d\r\n",
+        "mapAnimSpeed=%d\r\n"
+        "\r\n"
+        "; Battle attack burst: speed up ONLY while a hit/effect plays, so idle units stay calm.\r\n"
+        ";   battleAttackEnabled : 0 = off, 1 = on.   battleAttackSpeed : 1..5  ->  1.5x..5x.\r\n"
+        "battleAttackEnabled=0\r\n"
+        "battleAttackSpeed=3\r\n",
         aa, en, bSp, en, mSp);
 
     HANDLE h = CreateFileA(f, GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -819,6 +842,28 @@ void readNativeSpeeds()
         g_mapSpeed = 3;
 }
 
+// Battle idle/attack split. Idle keeps the battle base factor (vanilla unless "Battle animation" is set),
+// so waiting units don't twitch; each attack effect (vftable slot[2] -> g_attackPulse) opens a short
+// window during which the virtual clock runs at the higher attack factor. All on the game UI thread
+// (battle update sets the pulse, this runs from the WM_TIMER pump) - no game-internal pointers touched.
+const DWORD kAttackBurstMs = 1500;
+void updateBattleBurst(void)
+{
+    if (g_attackPulse) {
+        g_attackPulse = 0;
+        g_attackExpiryTick = GetTickCount() + kAttackBurstMs;
+    }
+    if (!g_battleAttackEnabled)
+        return; // split off: leave g_battleFactor to applyAnimSpeed (the live battle multiplier)
+    int f = g_battleAnimEnabled ? kAnimFactor[g_battleAnimSpeed - 1] : 10; // idle base
+    if (g_inBattle && g_attackExpiryTick && static_cast<int>(g_attackExpiryTick - GetTickCount()) > 0) {
+        const int atk = kAnimFactor[g_battleAttackSpeed - 1];
+        if (atk > f)
+            f = atk;
+    }
+    g_battleFactor = f;
+}
+
 void refreshChecks()
 {
     if (!g_gameMenu)
@@ -830,10 +875,13 @@ void refreshChecks()
                   MF_BYCOMMAND | (g_dragScroll ? MF_CHECKED : MF_UNCHECKED));
     const UINT bSel = g_battleAnimEnabled ? (kIdAnim1 + static_cast<UINT>(g_battleAnimSpeed - 1)) : kIdAnimOff;
     if (g_battleAnimMenu)
-        CheckMenuRadioItem(g_battleAnimMenu, kIdAnimOff, kIdAnim5, bSel, MF_BYCOMMAND);
+        CheckMenuRadioItem(g_battleAnimMenu, kIdAnimOff, kIdAnim6, bSel, MF_BYCOMMAND);
     const UINT mSel = g_mapAnimEnabled ? (kIdAnimMap1 + static_cast<UINT>(g_mapAnimSpeed - 1)) : kIdAnimMapOff;
     if (g_mapAnimMenu)
-        CheckMenuRadioItem(g_mapAnimMenu, kIdAnimMapOff, kIdAnimMap5, mSel, MF_BYCOMMAND);
+        CheckMenuRadioItem(g_mapAnimMenu, kIdAnimMapOff, kIdAnimMap6, mSel, MF_BYCOMMAND);
+    const UINT aSel = g_battleAttackEnabled ? (kIdAtk1 + static_cast<UINT>(g_battleAttackSpeed - 1)) : kIdAtkOff;
+    if (g_battleAtkMenu)
+        CheckMenuRadioItem(g_battleAtkMenu, kIdAtkOff, kIdAtk5, aSel, MF_BYCOMMAND);
     if (g_battleMenu)
         CheckMenuRadioItem(g_battleMenu, kIdBattle1, kIdBattle4,
                            kIdBattle1 + static_cast<UINT>(g_battleSpeed - 1), MF_BYCOMMAND);
@@ -878,17 +926,24 @@ void onMenuCommand(UINT id)
     } else if (id == kIdAnimOff) {
         g_battleAnimEnabled = false;
         applyAnimSpeed(0, false, g_battleAnimSpeed);
-    } else if (id >= kIdAnim1 && id <= kIdAnim5) {
+    } else if (id >= kIdAnim1 && id <= kIdAnim6) {
         g_battleAnimEnabled = true;
         g_battleAnimSpeed = static_cast<int>(id - kIdAnim1) + 1;
         applyAnimSpeed(0, true, g_battleAnimSpeed);
     } else if (id == kIdAnimMapOff) {
         g_mapAnimEnabled = false;
         applyAnimSpeed(1, false, g_mapAnimSpeed);
-    } else if (id >= kIdAnimMap1 && id <= kIdAnimMap5) {
+    } else if (id >= kIdAnimMap1 && id <= kIdAnimMap6) {
         g_mapAnimEnabled = true;
         g_mapAnimSpeed = static_cast<int>(id - kIdAnimMap1) + 1;
         applyAnimSpeed(1, true, g_mapAnimSpeed);
+    } else if (id == kIdAtkOff) {
+        g_battleAttackEnabled = false;
+        applyAnimSpeed(0, g_battleAnimEnabled, g_battleAnimSpeed); // hand g_battleFactor back to the base
+    } else if (id >= kIdAtk1 && id <= kIdAtk5) {
+        g_battleAttackEnabled = true;
+        g_battleAttackSpeed = static_cast<int>(id - kIdAtk1) + 1;
+        updateBattleBurst(); // apply immediately (idle base now, burst on next hit)
     } else if (id >= kIdRendOpenGL && id <= kIdRendAuto) {
         g_rendererIdx = static_cast<int>(id - kIdRendOpenGL);
         writeDdrawStr("renderer", kRenderers[g_rendererIdx].value);
@@ -1001,6 +1056,7 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     // own timers don't drive the pump and our id never leaks into the game's WndProc timer dispatch.
     if (msg == WM_TIMER && wParam == kPressTimerId) {
         featuremenu_refresh_day();
+        updateBattleBurst(); // idle/attack split: drive g_battleFactor from the attack pulse
         timerhost_pump();
         return 0;
     }
@@ -1075,8 +1131,18 @@ void buildMenu()
     AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim3, "3x");
     AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim4, "4x");
     AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim5, "5x");
+    AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim6, "15x (test)");
     AppendMenuA(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_battleAnimMenu),
                 "Battle animation (live x1.5..x5)");
+    g_battleAtkMenu = CreatePopupMenu();
+    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtkOff, "Off (calm idle)");
+    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk1, "1.5x");
+    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk2, "2x");
+    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk3, "3x");
+    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk4, "4x");
+    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk5, "5x");
+    AppendMenuA(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_battleAtkMenu),
+                "Battle attack burst (fast hits, calm idle)");
     g_mapAnimMenu = CreatePopupMenu();
     AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMapOff, "Off (vanilla)");
     AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap1, "1.5x");
@@ -1084,6 +1150,7 @@ void buildMenu()
     AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap3, "3x");
     AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap4, "4x");
     AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap5, "5x");
+    AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap6, "15x (test)");
     AppendMenuA(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_mapAnimMenu),
                 "Map animation (live x1.5..x5)");
     g_battleMenu = CreatePopupMenu();
@@ -1492,8 +1559,22 @@ extern "C" void featuremenu_install(void)
     // Split battle/map live-multiplier keys, default OFF (each context stays vanilla until opted in).
     g_battleAnimEnabled = GetPrivateProfileIntA("menu", "battleAnimEnabled", 0, f) != 0;
     g_battleAnimSpeed = GetPrivateProfileIntA("menu", "battleAnimSpeed", 5, f);
+    if (g_battleAnimSpeed < 1)
+        g_battleAnimSpeed = 1;
+    if (g_battleAnimSpeed > 6)
+        g_battleAnimSpeed = 6;
     g_mapAnimEnabled = GetPrivateProfileIntA("menu", "mapAnimEnabled", 0, f) != 0;
     g_mapAnimSpeed = GetPrivateProfileIntA("menu", "mapAnimSpeed", 5, f);
+    if (g_mapAnimSpeed < 1)
+        g_mapAnimSpeed = 1;
+    if (g_mapAnimSpeed > 6)
+        g_mapAnimSpeed = 6;
+    g_battleAttackEnabled = GetPrivateProfileIntA("menu", "battleAttackEnabled", 0, f) != 0;
+    g_battleAttackSpeed = GetPrivateProfileIntA("menu", "battleAttackSpeed", 3, f);
+    if (g_battleAttackSpeed < 1)
+        g_battleAttackSpeed = 1;
+    if (g_battleAttackSpeed > 5)
+        g_battleAttackSpeed = 5;
     g_dragScroll = GetPrivateProfileIntA("menu", "dragScroll", 0, f) != 0;
 
     // Apply now (DllMain, before the game's main loop / anim init). The IAT is already populated by the
