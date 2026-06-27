@@ -28,6 +28,7 @@
 #include "bindings/point.h"
 #include "bindings/scenarioview.h"
 #include "bindings/stackview.h"
+#include "bindings/unitslotview.h" // getGroup().getSlots() yields std::vector<UnitSlotView> (slot occupancy)
 #include "bindings/unitview.h" // getGroup().getUnits() yields std::vector<UnitView>; .size() needs it complete
 #include "gameutils.h"
 #include "midbag.h" // chests: raw CMidBag via forEachScenarioObject(IdType::Bag)
@@ -222,6 +223,38 @@ void buildJson(std::string& json, const game::IMidgardObjectMap* objectMap)
         // the fort CENTRE (offset, like the player's own capital), and it cannot be attacked as a free
         // monster (that is a siege). The move/attack test must skip these and target free stacks only.
         kvBool(json, "inside", s.getInside().has_value());
+        json += ',';
+        // Group formation slots (0..5; front line = position%2==0, column = position/2). A big unit
+        // occupies a whole column pair (isBig). leaderId = the group's leader (NEVER dismiss it; that
+        // disbands the stack). Drives the slot/hire/formation management commands.
+        game::CMidgardID leaderId = game::emptyId;
+        if (auto leader = s.getLeader())
+            leaderId = leader->getId().id;
+        kvStr(json, "leaderId", hooks::idToString(&leaderId).c_str());
+        json += ",\"slots\":[";
+        bool firstSlot = true;
+        for (const auto& slot : s.getGroup().getSlots()) {
+            const auto uid = slot.getUnitId();
+            if (uid == game::emptyId)
+                continue;
+            bool big = false;
+            if (auto uv = slot.getUnitView())
+                if (auto impl = uv->getImpl())
+                    big = !impl->isSmall();
+            if (!firstSlot)
+                json += ',';
+            firstSlot = false;
+            json += '{';
+            kvInt(json, "position", slot.getPosition());
+            json += ',';
+            kvStr(json, "unitId", hooks::idToString(&uid).c_str());
+            json += ',';
+            kvInt(json, "line", slot.getLine());
+            json += ',';
+            kvBool(json, "isBig", big);
+            json += '}';
+        }
+        json += ']';
         json += '}';
     });
     json += ']';
