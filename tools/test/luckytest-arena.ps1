@@ -10,8 +10,11 @@ param(
     [string]$Mss32   = 'C:\GOG Games\DEV\_mss32_out\release-stage\mss32.dll',
     [string]$Loader  = 'C:\GOG Games\disciples2-roulette-arena-template-loader\dist\berkutx_loader.exe',
     [int]$GenWaitSec = 120,
-    [switch]$SkipChests   # go straight to the camp (beat the ~60s MP turn timer while cracking the hire)
+    [switch]$SkipChests,  # go straight to the camp (beat the ~60s MP turn timer while cracking the hire)
+    [switch]$BisectCamp   # enter ONLY the first camp, fire the hire, then STOP with DLG_MERCENARIES left
+                          # OPEN (no BTN_BACK) for manual inspection. Implies -SkipChests.
 )
+if ($BisectCamp) { $SkipChests = $true }
 . "$PSScriptRoot\_relay.ps1"
 $hookLog = Join-Path $GameDir 'berkutx_roulette.log'
 
@@ -87,7 +90,8 @@ try {
     if (-not ((Get-Content $hookLog -ErrorAction SilentlyContinue | Select-String 'build433B0B=1').Count -gt 0)) { throw "roulette hook did NOT install (gate failed)" }
     Write-Host "[lt] hook installed (gate ok)." -ForegroundColor Green
     Start-Sleep -Seconds 6
-    $jp = Start-GameClient -GameDir $GameDir -Role join
+    $joinFlags = @('SKIP_INTRO','BLACKSCREEN_FIX','UI_REPORTER','WORLD','RELAY_BRIDGE')
+    $jp = Start-GameClient -GameDir $GameDir -Role join -Flags $joinFlags
 
     # Pair: both to protocol, host generates luckytest, joiner joins.
     if (-not (Wait-Dialog join DLG_MAIN_MENU 90)) { throw "joiner never reached DLG_MAIN_MENU" }
@@ -127,8 +131,9 @@ try {
     if (-not (ClearPopups host 180)) { throw "host did not reach the arena map" }
     if (-not (ClickAndLeave join DLG_LOBBY BTN_OK 45)) { throw "joiner BTN_OK did not leave lobby" }
     if (-not (ClearPopups join 180)) { throw "joiner did not reach the arena map" }
-    Write-Host "[lt] both reached the arena. host passing turn to joiner..." -ForegroundColor Green
+    Write-Host "[lt] both reached the arena." -ForegroundColor Green
 
+    Write-Host "[lt] host passing turn to joiner..." -ForegroundColor Green
     # Host passes its turn so the JOINER plays.
     if (-not (PassTurnToJoiner 150)) { throw "host end-turn did not pass to joiner" }
     if (-not (ClearPopups join 60)) { throw "joiner not on map after turn start" }
@@ -173,42 +178,93 @@ try {
     }
     Write-Host ("[lt] collected {0} chests; chests left={1}" -f $collected, @(Get-Bags join).Count) -ForegroundColor Cyan
 
-    # Enter the NEAREST camp (short walk; the far first-by-id camp wastes the turn timer) and HIRE.
-    $h = @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
-    $unitsBefore = $h.units
-    $camp = @(Get-Camps join) | Sort-Object { [Math]::Abs($_.x-$h.x)+[Math]::Abs($_.y-$h.y) } | Select-Object -First 1
-    Write-Host ("[lt] nearest camp {0} @({1},{2}) unit={3}; hero @({4},{5}) mv={6} units={7}; approaching" -f $camp.id,$camp.x,$camp.y,($camp.units[0].impl),$h.x,$h.y,$h.movement,$unitsBefore) -ForegroundColor Cyan
-    # Step onto the camp until DLG_MERCENARIES opens (sites are entered over a few steps).
-    $merc=$false
-    for ($s=0; $s -lt 6; $s++) {
-        $null = Move-Stack join $hero.id $camp.x $camp.y
-        Start-Sleep -Milliseconds 1800
-        if ((Get-Dialog join) -eq 'DLG_MERCENARIES') { $merc=$true; break }
-        $hc=@(Get-Stacks join)|Where-Object{$_.id -eq $hero.id}|Select-Object -First 1
-        if (-not $hc -or $hc.movement -le 1) { break }
-    }
-    Write-Host "[lt] DLG_MERCENARIES opened: $merc (dialog=$(Get-Dialog join))" -ForegroundColor $(if($merc){'Green'}else{'Red'})
-    if ($merc) {
-        Dump-Ui join "merc-0"
-        # Select the (only) hireable unit, then probe what completes the hire.
-        $null = Set-ListSelection join DLG_MERCENARIES LBOX_UNIT_LIST 0; Start-Sleep -Milliseconds 1200
-        Write-Host "[lt] after selecting LBOX_UNIT_LIST[0]:" -ForegroundColor DarkCyan
-        Dump-Ui join "merc-sel"
-        # Try the common hire triggers and watch for a state change (enroll dialog / group grows).
-        foreach ($act in @('IMG_RSLOT01','LBOX_UNIT_LIST')) {
-            $null = Invoke-Button join DLG_MERCENARIES $act 2>$null
-        }
-        Start-Sleep -Milliseconds 1200
-        $d2 = Get-Dialog join
-        Write-Host "[lt] dialog now: $d2" -ForegroundColor Yellow
-        if ($d2 -ne 'DLG_MERCENARIES') { Dump-Ui join "after-trigger($d2)" }
-    }
-    $hAfter = @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
-    $hired = $hAfter -and ($hAfter.units -gt $unitsBefore)
-    Write-Host ("[lt] hero group units {0} -> {1}  HIRED={2}" -f $unitsBefore, ($hAfter.units), $hired) -ForegroundColor $(if($hired){'Green'}else{'Yellow'})
+    # Visit ALL of the joiner's own-side camps (its map half) and buy the lone merc at each into a free
+    # slot (Hire-Merc -> testdrv worldactions::hireMerc sends CSiteBuyUnitMsg; the host applies + replicates).
+    # The far host-side camps are unreachable, so filter to this half. Stop after all are visited, the
+    # hero runs out of movement, or a move is rejected (the ~60s MP turn timer rolled the turn over).
+    $myCamps = @(Get-Camps join) | Where-Object { [Math]::Abs($_.y - $hero.y) -lt 15 }
+    Write-Host ("[lt] {0} own-side camps to visit (hero half y~{1})" -f $myCamps.Count, $hero.y) -ForegroundColor Cyan
 
-    $ok = $merc
-    Write-Host "`n==== luckytest-arena: chests=$collected, mercDialog=$merc, hired=$hired ====" -ForegroundColor $(if ($ok) { 'Green' } else { 'Yellow' })
+    if ($BisectCamp) {
+        # BISECTION: first camp only -> confirm entry -> attempt hire -> STOP, leaving DLG_MERCENARIES
+        # OPEN (no BTN_BACK) for manual inspection. No auto-dismiss runs (D2TESTDRV_AUTODISMISS is off).
+        $h = @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
+        $camp = $myCamps | Sort-Object { [Math]::Abs($_.x-$h.x)+[Math]::Abs($_.y-$h.y) } | Select-Object -First 1
+        Write-Host ("[lt][BISECT] first camp {0} @({1},{2}); approaching" -f $camp.id,$camp.x,$camp.y) -ForegroundColor Cyan
+        $opened = $false
+        for ($s=0; $s -lt 8 -and -not $opened; $s++) {
+            if (-not (Move-Stack join $hero.id $camp.x $camp.y)) { Write-Host "[lt][BISECT] move rejected (turn over?)" -ForegroundColor Yellow; break }
+            for ($w=0; $w -lt 6; $w++) { if ((Get-Dialog join) -eq 'DLG_MERCENARIES') { $opened=$true; break }; Start-Sleep -Milliseconds 500 }
+            $hc = @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
+            Write-Host ("[lt][BISECT] step {0}: hero @({1},{2}) mv={3} dialog={4}" -f $s,$hc.x,$hc.y,$hc.movement,(Get-Dialog join)) -ForegroundColor DarkGray
+            if ($opened -or -not $hc -or $hc.movement -le 1) { break }
+        }
+        if ($opened) {
+            Write-Host "[lt][BISECT] CONFIRMED: DLG_MERCENARIES is OPEN. NOT closing it." -ForegroundColor Green
+            $u0 = if ($camp.units.Count -gt 0) { $camp.units[0] } else { $null }
+            if ($u0) {
+                $r = Hire-Merc join $camp.id $hero.id $u0.impl
+                Write-Host ("[lt][BISECT] hire (CSiteBuyUnitMsg): camp {0} unit {1} -> sent={2}" -f $camp.id,$u0.impl,$r) -ForegroundColor Magenta
+            }
+            $hc = @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
+            Write-Host ("[lt][BISECT] hero units now {0}; dialog still {1}. STOPPED for manual inspection." -f $hc.units,(Get-Dialog join)) -ForegroundColor Cyan
+        } else {
+            Write-Host ("[lt][BISECT] DLG_MERCENARIES did NOT open (dialog={0})" -f (Get-Dialog join)) -ForegroundColor Red
+        }
+        Write-Host "[lt] LEFT RUNNING (relay pid=$($relay.Id)) - DLG_MERCENARIES open, inspect manually. Done." -ForegroundColor Yellow
+        return
+    }
+
+    $entered = 0; $hired = 0; $seen = @{}
+    while ($true) {
+        $h = @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
+        if (-not $h) { Write-Host "[lt] hero gone -> stop" -ForegroundColor Yellow; break }
+        if ($h.movement -le 2) { Write-Host "[lt] out of movement -> stop" -ForegroundColor Yellow; break }
+        $camp = $myCamps | Where-Object { -not $seen[$_.id] } | Sort-Object { [Math]::Abs($_.x-$h.x)+[Math]::Abs($_.y-$h.y) } | Select-Object -First 1
+        if (-not $camp) { Write-Host "[lt] all own-side camps visited" -ForegroundColor Green; break }
+        $seen[$camp.id] = $true
+        # Walk onto the camp; after each step POLL ~2.5s for DLG_MERCENARIES (the entry confirmation),
+        # so the detection is robust (not a single check) and the open dialog is HELD long enough to see.
+        Write-Host ("[lt]   -> camp {0} @({1},{2}); approaching" -f $camp.id, $camp.x, $camp.y) -ForegroundColor DarkCyan
+        $opened = $false; $rejected = $false
+        for ($s=0; $s -lt 6 -and -not $opened; $s++) {
+            if (-not (Move-Stack join $hero.id $camp.x $camp.y)) { $rejected=$true; break }
+            for ($w=0; $w -lt 5; $w++) { if ((Get-Dialog join) -eq 'DLG_MERCENARIES') { $opened=$true; break }; Start-Sleep -Milliseconds 500 }
+            if ($opened) { break }
+            $hc = @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
+            if (-not $hc -or $hc.movement -le 1) { break }
+        }
+        if ($rejected) { Write-Host "[lt]   move rejected (turn over?) -> stop" -ForegroundColor Yellow; break }
+        if ($opened) {
+            Write-Host ("[lt]   CONFIRMED entered camp {0}: DLG_MERCENARIES is open (holding ~3s)" -f $camp.id) -ForegroundColor Green
+            Start-Sleep -Seconds 3   # keep the merc dialog visible so the user can see the entry
+        } else {
+            Write-Host ("[lt]   camp {0}: DLG_MERCENARIES did NOT open (current dialog: {1})" -f $camp.id, (Get-Dialog join)) -ForegroundColor Red
+        }
+        if ($opened) {
+            $entered++
+            # Buy the merc WHILE the camp dialog is open (the faithful drag-drop order), then let the host
+            # apply + replicate before closing the dialog.
+            $u0 = if ($camp.units.Count -gt 0) { $camp.units[0] } else { $null }
+            $unit = if ($u0) { $u0.impl } else { '' }
+            $r = if ($unit) { Hire-Merc join $camp.id $hero.id $unit } else { $false }
+            if ($r) { $hired++ }
+            Start-Sleep -Milliseconds 800
+            $null = Invoke-Button join DLG_MERCENARIES BTN_BACK   # close the camp dialog
+            Start-Sleep -Milliseconds 600
+            $hc = @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
+            Write-Host ("[lt]   camp {0} @({1},{2}) ENTERED; hire {3} -> sent={4}; hero now units={5} mv={6}" -f $camp.id,$camp.x,$camp.y,$unit,$r,$hc.units,$hc.movement) -ForegroundColor $(if($r){'Green'}else{'DarkGray'})
+        } else {
+            Write-Host ("[lt]   camp {0} @({1},{2}) not reached (skipped)" -f $camp.id,$camp.x,$camp.y) -ForegroundColor Yellow
+        }
+    }
+    # Final group state for the manual check.
+    $hF = @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
+    Write-Host ("[lt] DONE: entered {0} camps, hired {1} units; hero {2} now has {3} units. Slots:" -f $entered,$hired,$hero.id,$hF.units) -ForegroundColor Cyan
+    @((Get-World join).stacks) | Where-Object { $_.id -eq $hero.id } | ForEach-Object { @($_.slots) | ForEach-Object { Write-Host ("      slot {0} = {1} (big={2})" -f $_.position,$_.unitId,$_.isBig) } }
+
+    $ok = ($entered -ge 1)
+    Write-Host "`n==== luckytest-arena: chests=$collected, camps entered=$entered, hired=$hired ====" -ForegroundColor $(if ($ok) { 'Green' } else { 'Yellow' })
 } catch {
     Write-Host "[lt] FAIL: $($_.Exception.Message)" -ForegroundColor Red
 }

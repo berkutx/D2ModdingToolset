@@ -21,6 +21,7 @@
 #include "d2pair.h"
 #include "game.h"
 #include "gameutils.h"
+#include "globaldata.h"
 #include "groundcat.h"
 #include "mempool.h"
 #include "midgard.h"
@@ -29,12 +30,16 @@
 #include "midgardobjectmap.h"
 #include "midstack.h"
 #include "midunit.h"
+#include "midunitgroup.h"
 #include "mqpoint.h"
 #include "phasegame.h"
 #include "phasegamehooks.h"
 #include "ussoldier.h"
 #include "usstackleader.h"
+#include "usunit.h"
+#include "utils.h"
 #include <algorithm>
+#include <spdlog/spdlog.h>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -315,6 +320,96 @@ bool moveStack(const char* stackIdStr, int targetX, int targetY)
     reqTarget.y = targetY;
     CPhaseGameApi::get().sendStackMoveMsg(phaseGame, &stackId, &wirePath, &start, &reqTarget);
     listFree(wirePath);
+    return true;
+}
+
+// Hire the mercenary <unitId> (a camp roster entry the world reporter lists) from camp <campId> into
+// the hero stack <stackId>, at the first fitting free slot. Sends the engine's OWN CSiteBuyUnitMsg via
+// CPhaseGame::sendSiteBuyUnitMsg (Russobit 0x4067a2) - the exact call the merc-camp drag-drop makes on
+// a drop. The acting client (the joiner that walked into the camp) is NOT the server: it SENDS the
+// message; the host validates gold, removes the merc from the camp roster, adds it to the group, and
+// broadcasts the result, so the hire replicates to every player. (An earlier client-side
+// CVisitorAddUnitToGroup was the wrong layer: it is the server's apply step, returns false on a client,
+// and would not replicate.) MUST run on the UI thread, own turn. Returns true if the message was sent.
+bool hireMerc(const char* campIdStr, const char* stackIdStr, const char* unitIdStr)
+{
+    using namespace game;
+
+    CPhaseGame* phaseGame = hooks::getStashedPhaseGame();
+    if (!phaseGame || !phaseGame->data || !phaseGame->data->clientTakesTurn)
+        return false;
+
+    const IMidgardObjectMap* objectMap = hooks::getObjectMap();
+    if (!objectMap)
+        return false;
+
+    CMidgardID campId{}, stackId{}, unitId{};
+    CMidgardIDApi::get().fromString(&campId, campIdStr);
+    CMidgardIDApi::get().fromString(&stackId, stackIdStr);
+    CMidgardIDApi::get().fromString(&unitId, unitIdStr);
+    if (campId == emptyId || stackId == emptyId || unitId == emptyId)
+        return false;
+
+    CMidStack* stack = hooks::getStack(objectMap, &stackId);
+    if (!stack || stack->ownerId != localPlayerId())
+        return false; // only hire into our own stack, on our own turn
+
+    // First fitting free slot, BIG-AWARE: a big occupant on a front cell (even position) also blocks the
+    // back cell (pos+1) of its column. A big merc needs a whole free column {2c, 2c+1}; a small merc
+    // takes the first non-blocked cell. The camp drag-drop snaps a big unit to its front cell, so the
+    // front-cell position is what we send. The merc's size comes from its global unit impl.
+    const auto& fn = gameFunctions();
+    const auto& global = GlobalDataApi::get();
+    const auto globalData = *global.getGlobalData();
+    const auto* mercImpl = globalData
+                               ? static_cast<const IUsUnit*>(global.findById(globalData->units, &unitId))
+                               : nullptr;
+    auto* mercSoldier = mercImpl ? fn.castUnitImplToSoldier(mercImpl) : nullptr;
+    const bool mercIsBig = mercSoldier && !mercSoldier->vftable->getSizeSmall(mercSoldier);
+
+    auto* group = &stack->group;
+    bool blocked[6] = {false, false, false, false, false, false};
+    for (int p = 0; p < 6; ++p) {
+        const CMidgardID* uid = CMidUnitGroupApi::get().getUnitIdByPosition(group, p);
+        if (!uid || *uid == emptyId)
+            continue;
+        blocked[p] = true;
+        if (p % 2 == 0) { // front cell: a big occupant also blocks the back cell of this column
+            auto* uObj = objectMap->vftable->findScenarioObjectById(objectMap, uid);
+            auto* u = static_cast<const CMidUnit*>(uObj);
+            auto* s = (u && u->unitImpl) ? fn.castUnitImplToSoldier(u->unitImpl) : nullptr;
+            if (s && !s->vftable->getSizeSmall(s))
+                blocked[p + 1] = true;
+        }
+    }
+    int freePos = -1;
+    if (mercIsBig) {
+        for (int c = 0; c < 3; ++c)
+            if (!blocked[2 * c] && !blocked[2 * c + 1]) {
+                freePos = 2 * c;
+                break;
+            }
+    } else {
+        for (int p = 0; p < 6; ++p)
+            if (!blocked[p]) {
+                freePos = p;
+                break;
+            }
+    }
+    if (freePos < 0)
+        return false; // no fitting free slot
+
+    spdlog::info("[testdrv] hireMerc: camp={} stack={} unit={} pos={} big={}", campIdStr, stackIdStr,
+                 unitIdStr, freePos, mercIsBig);
+
+    // CPhaseGame::sendSiteBuyUnitMsg(phaseGame, &siteId, &stackId, &unitId, position): __thiscall, pushes
+    // the three ids + position into a CSiteBuyUnitMsg and sends it to the server via data->midClient,
+    // identical to the merc-camp drop handler. The server apply (CSiteBuyUnitMsg handler -> 0x5d8d93)
+    // casts the site to CMidSiteMercs, charges gold, drops the merc from the roster, adds it, broadcasts.
+    using SendSiteBuyUnitMsgFn = void(__thiscall*)(CPhaseGame*, const CMidgardID*, const CMidgardID*,
+                                                   const CMidgardID*, int);
+    auto sendSiteBuyUnitMsg = reinterpret_cast<SendSiteBuyUnitMsgFn>(0x4067a2);
+    sendSiteBuyUnitMsg(phaseGame, &campId, &stackId, &unitId, freePos);
     return true;
 }
 

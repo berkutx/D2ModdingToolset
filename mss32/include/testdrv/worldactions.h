@@ -28,6 +28,16 @@ namespace worldactions {
  */
 bool moveStack(const char* stackId, int x, int y);
 
+/**
+ * Hire the mercenary <unitId> (a camp roster entry the world reporter lists) from merc camp <campId>
+ * into the stack <stackId>'s group at its first fitting free slot. Sends the engine's OWN
+ * CSiteBuyUnitMsg via CPhaseGame::sendSiteBuyUnitMsg, the exact call the camp's drag-drop makes on a
+ * drop, so the host validates + applies + broadcasts it: the hire REPLICATES to every player (acting
+ * client and host alike). MUST be called on the UI thread. Returns true if the message was sent (own
+ * stack, our turn, a free slot); the host has final say on gold/validity.
+ */
+bool hireMerc(const char* campId, const char* stackId, const char* unitId);
+
 } // namespace worldactions
 } // namespace testdrv
 } // namespace hooks

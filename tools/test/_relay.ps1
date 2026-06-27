@@ -142,6 +142,14 @@ function Set-EditText([string]$Role, [string]$Dialog, [string]$Edit, [string]$Te
 function Move-Stack([string]$Role, [string]$Id, [int]$X, [int]$Y) {
     [bool](script:Post "move?role=$([uri]::EscapeDataString($Role))&id=$([uri]::EscapeDataString($Id))&x=$X&y=$Y")
 }
+# Buy the mercenary <Unit> from merc camp <Camp> into stack <Stack>'s first fitting free slot (testdrv
+# worldactions::hireMerc, which sends the engine's CSiteBuyUnitMsg). <Camp>/<Unit> come straight from a
+# Get-Camps entry (camp .id and units[].impl). Returns `found`: $true if the hire message was sent (own
+# stack, our turn, a free slot). The host applies + replicates, so verify via Get-World slots[] on
+# EITHER role once it settles.
+function Hire-Merc([string]$Role, [string]$Camp, [string]$Stack, [string]$Unit) {
+    [bool](script:Post "hire?role=$([uri]::EscapeDataString($Role))&camp=$([uri]::EscapeDataString($Camp))&stack=$([uri]::EscapeDataString($Stack))&unit=$([uri]::EscapeDataString($Unit))")
+}
 # Flip a toggle button (e.g. DLG_BATTLE_A::TOG_AUTOBATTLE). invokeButton matches only buttons, so toggles
 # (auto-battle, etc.) need their own verb. Returns the client's `found` flag.
 function Invoke-Toggle([string]$Role, [string]$Dialog, [string]$Toggle) {

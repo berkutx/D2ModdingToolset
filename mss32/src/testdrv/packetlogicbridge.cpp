@@ -56,6 +56,7 @@ enum class Op : uint16_t
     CommandResult = 0x0304,  // -> relay: outcome of a dispatcher command (u32 seq | u8 found)
     MoveStack = 0x0305,      // <- dispatcher: move a stack to a tile (autonav -> worldactions); forwarded by number
     InvokeToggle = 0x0306,   // <- dispatcher: flip a toggle button (e.g. TOG_AUTOBATTLE); forwarded by number
+    HireMerc = 0x0307,       // <- dispatcher: buy a merc from a camp into a stack (CSiteBuyUnitMsg, autonav -> worldactions); forwarded by number
 
     UiSnapshot = 0x0410,     // -> relay: current dialog + all its widgets with state (JSON)
     WorldSnapshot = 0x0411,  // -> relay: players' resources + all map stacks (JSON, world reporter)

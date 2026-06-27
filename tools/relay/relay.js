@@ -37,6 +37,7 @@ const Op = {
     CommandResult: 0x0304,  // <- client: outcome of a command (u32 seq | u8 found)
     MoveStack: 0x0305,      // -> client: move a stack to a tile (u16 stackId | i32 x | i32 y)
     InvokeToggle: 0x0306,   // -> client: flip a toggle button (u16 dlg | u16 toggle)
+    HireMerc: 0x0307,       // -> client: buy a merc from a camp into a stack (u16 campId | u16 stackId | u16 unitId)
     UiSnapshot: 0x0410,     // <- client: current dialog + all its widgets with state (JSON)
     WorldSnapshot: 0x0411,  // <- client: players' resources + all map stacks (JSON)
     Log: 0xff00,
@@ -412,6 +413,17 @@ const httpServer = http.createServer(async (req, res) => {
         const dlg = q.get('dlg') || '', tog = q.get('tog') || '';
         const found = await sendCommand(sock, Op.InvokeToggle, Buffer.concat([encodeStr(dlg), encodeStr(tog)]));
         return sendJson(res, 200, { role: roleOf(sock), toggle: { dlg, tog }, found });
+    }
+    // Buy a mercenary from a camp into a stack's first fitting free slot (testdrv worldactions::hireMerc,
+    // which sends the engine's CSiteBuyUnitMsg from the acting client; the host applies + replicates).
+    // `found` = the hire message was sent (own stack, our turn, a free slot).
+    if (req.method === 'POST' && path === '/api/ui/hire') {
+        const sock = clientByRole(q.get('role'));
+        if (!sock) return sendJson(res, 503, { error: 'no client for role ' + q.get('role') });
+        const camp = q.get('camp') || '', stack = q.get('stack') || '', unit = q.get('unit') || '';
+        const found = await sendCommand(sock, Op.HireMerc,
+            Buffer.concat([encodeStr(camp), encodeStr(stack), encodeStr(unit)]));
+        return sendJson(res, 200, { role: roleOf(sock), hire: { camp, stack, unit }, found });
     }
     sendJson(res, 404, { error: 'not found' });
 });

@@ -276,7 +276,7 @@ bool g_hasInFlight = false; // whether g_inFlight is valid
 void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size)
 {
     if (op != 0x0300 && op != 0x0301 && op != 0x0302 && op != 0x0303 && op != 0x0305
-        && op != 0x0306)
+        && op != 0x0306 && op != 0x0307)
         return; // not a command we own
     size_t off = 0;
     auto readStr = [&](char* out, size_t outsz) -> bool {
@@ -314,7 +314,7 @@ void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size
             || !readStr(cmd.value, sizeof(cmd.value)))
             return;
         cmd.type = 3;
-    } else { // 0x0305 MoveStack: u16 stackId | u32 x | u32 y
+    } else if (op == 0x0305) { // MoveStack: u16 stackId | u32 x | u32 y
         if (!readStr(cmd.dlg, sizeof(cmd.dlg)))
             return;
         if (off + 8 > size)
@@ -322,6 +322,11 @@ void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size
         cmd.x = *reinterpret_cast<const int*>(p + off);
         cmd.y = *reinterpret_cast<const int*>(p + off + 4);
         cmd.type = 4;
+    } else { // 0x0307 HireMerc: u16 campId | u16 stackId | u16 unitId
+        if (!readStr(cmd.dlg, sizeof(cmd.dlg)) || !readStr(cmd.widget, sizeof(cmd.widget))
+            || !readStr(cmd.value, sizeof(cmd.value)))
+            return;
+        cmd.type = 6;
     }
     auto sameCmd = [&](const RemoteCmd& q) {
         return q.type == cmd.type && q.param == cmd.param && q.x == cmd.x && q.y == cmd.y
@@ -361,6 +366,19 @@ void safeMoveStack(const RemoteCmd& cmd)
     reportFound(cmd.seq, ok);
 }
 
+// worldactions::hireMerc sends a client net-message after a group-slot scan; like safeMoveStack it
+// touches game objects, so the __try lives here (a frame with no unwinding locals), not in the action.
+void safeHireMerc(const RemoteCmd& cmd)
+{
+    bool ok = false;
+    __try {
+        ok = worldactions::hireMerc(cmd.dlg, cmd.widget, cmd.value); // dlg=campId, widget=stackId, value=unitId
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    reportFound(cmd.seq, ok);
+}
+
 void drainRemoteCommands()
 {
     for (;;) {
@@ -388,6 +406,8 @@ void drainRemoteCommands()
             safeMoveStack(cmd);
         else if (cmd.type == 5)
             invokeToggle(cmd.dlg, cmd.widget, cmd.seq);
+        else if (cmd.type == 6)
+            safeHireMerc(cmd);
     }
 }
 
