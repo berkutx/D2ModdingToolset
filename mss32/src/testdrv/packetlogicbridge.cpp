@@ -58,6 +58,7 @@ enum class Op : uint16_t
     InvokeToggle = 0x0306,   // <- dispatcher: flip a toggle button (e.g. TOG_AUTOBATTLE); forwarded by number
     HireMerc = 0x0307,       // <- dispatcher: buy a merc from a camp into a stack (CSiteBuyUnitMsg, autonav -> worldactions); forwarded by number
     MoveGroupUnit = 0x0308,  // <- dispatcher: move/swap a unit between formation slots (CStackSwapUnitMsg); forwarded by number
+    DismissUnit = 0x0309,    // <- dispatcher: dismiss a non-leader unit from a stack (CStackDismissUnitMsg); forwarded by number
 
     UiSnapshot = 0x0410,     // -> relay: current dialog + all its widgets with state (JSON)
     WorldSnapshot = 0x0411,  // -> relay: players' resources + all map stacks (JSON, world reporter)

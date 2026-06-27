@@ -49,6 +49,16 @@ bool hireMerc(const char* campId, const char* stackId, const char* unitId);
  */
 bool moveGroupUnit(const char* stackId, int sourcePos, int targetPos);
 
+/**
+ * Dismiss the unit <unitId> from stack <stackId>, freeing its slot. Sends the engine's OWN
+ * CStackDismissUnitMsg via CPhaseGame::sendStackDismissUnitMsg, the exact call the manage-stack dismiss
+ * makes, so the host applies it and broadcasts: the removal REPLICATES to every player. Use it to drop a
+ * low-value unit so a more valuable (or 2-slot) one fits. NEVER dismisses the LEADER (a leader id is
+ * rejected; the engine disbands the stack through a different message). MUST be called on the UI thread.
+ * Returns true if the message was sent (own stack, our turn, the unit is a non-leader group member).
+ */
+bool dismissUnit(const char* stackId, const char* unitId);
+
 } // namespace worldactions
 } // namespace testdrv
 } // namespace hooks

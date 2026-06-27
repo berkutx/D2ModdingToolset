@@ -201,30 +201,47 @@ try {
         }
         if ($opened) {
             Write-Host "[lt][BISECT] CONFIRMED: DLG_MERCENARIES is OPEN. NOT closing it." -ForegroundColor Green
+            $h0 = @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
+            $before = @(@($h0.slots) | ForEach-Object { $_.unitId })   # unit ids before the hire
             $u0 = if ($camp.units.Count -gt 0) { $camp.units[0] } else { $null }
             if ($u0) {
                 $r = Hire-Merc join $camp.id $hero.id $u0.impl
                 Write-Host ("[lt][BISECT] hire (CSiteBuyUnitMsg): camp {0} unit {1} -> sent={2}" -f $camp.id,$u0.impl,$r) -ForegroundColor Magenta
             }
-            # Wait for the hire to apply + replicate (the host generates the unit and broadcasts it back).
-            $hiredUnit = $null
-            for ($w=0; $w -lt 12 -and -not $hiredUnit; $w++) {
+            # Find the hired unit by diffing slots (it may land at slot 1, or slot 2 for a big 2-slot unit),
+            # waiting for the host to generate + broadcast it back.
+            $hired = $null; $hpos = -1
+            for ($w=0; $w -lt 15 -and -not $hired; $w++) {
                 Start-Sleep -Milliseconds 400
                 $sl = @((@(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1).slots)
-                $hiredUnit = ($sl | Where-Object { $_.position -eq 1 } | Select-Object -First 1).unitId
+                $new = $sl | Where-Object { $_.unitId -and ($before -notcontains $_.unitId) } | Select-Object -First 1
+                if ($new) { $hired = $new.unitId; $hpos = $new.position }
             }
-            Write-Host ("[lt][BISECT] after hire: slot 1 = {0}" -f $hiredUnit) -ForegroundColor Cyan
-            # MOVE the hired merc from slot 1 DOWN to the empty slot 2 (CStackSwapUnitMsg, move-to-empty),
-            # then verify the rearrange replicates: read slots[] on BOTH roles, they must agree (the unit
-            # is now at slot 2, slot 1 empty). Empty target = plain move; an occupied target would swap.
-            if ($hiredUnit) {
-                $mr = Move-GroupUnit join $hero.id 1 2
-                Write-Host ("[lt][BISECT] move (CStackSwapUnitMsg): slot 1 -> empty slot 2 -> sent={0}" -f $mr) -ForegroundColor Magenta
+            Write-Host ("[lt][BISECT] after hire: hired unit {0} at slot {1}" -f $hired,$hpos) -ForegroundColor Cyan
+            if ($hired) {
+                # MOVE (CStackSwapUnitMsg): slide the hired unit to the first free slot. Empty target = move;
+                # occupied = swap. Big units are column-anchored so a move may no-op - we log either way.
+                $sl = @((@(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1).slots)
+                $occ = @($sl | ForEach-Object { $_.position })
+                $dst = (0..5 | Where-Object { $occ -notcontains $_ -and $_ -ne $hpos } | Select-Object -First 1)
+                if ($null -ne $dst) {
+                    $mr = Move-GroupUnit join $hero.id $hpos $dst
+                    Write-Host ("[lt][BISECT] move (CStackSwapUnitMsg): slot {0} -> {1} -> sent={2}" -f $hpos,$dst,$mr) -ForegroundColor Magenta
+                    Start-Sleep -Seconds 2
+                    foreach ($role in 'join','host') {
+                        $ds = ((@((@(Get-Stacks $role) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1).slots) | Sort-Object position | ForEach-Object { "{0}={1}" -f $_.position,$_.unitId }) -join ' ')
+                        Write-Host ("[lt][BISECT] [{0}] slots: {1}" -f $role,$ds) -ForegroundColor Green
+                    }
+                }
+                # DISMISS (CStackDismissUnitMsg): drop the hired unit, then verify the removal replicates -
+                # BOTH roles drop back to just the leader. The leader can never be dismissed by this message.
+                $dr = Dismiss-Unit join $hero.id $hired
+                Write-Host ("[lt][BISECT] dismiss (CStackDismissUnitMsg): unit {0} -> sent={1}" -f $hired,$dr) -ForegroundColor Magenta
                 Start-Sleep -Seconds 2
                 foreach ($role in 'join','host') {
-                    $sl = @((@(Get-Stacks $role) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1).slots) | Sort-Object position
-                    $desc = (($sl | ForEach-Object { "{0}={1}" -f $_.position,$_.unitId }) -join ' ')
-                    Write-Host ("[lt][BISECT] [{0}] slots: {1}" -f $role,$desc) -ForegroundColor Green
+                    $hs = @(Get-Stacks $role) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
+                    $ds = ((@($hs.slots) | Sort-Object position | ForEach-Object { "{0}={1}" -f $_.position,$_.unitId }) -join ' ')
+                    Write-Host ("[lt][BISECT] [{0}] after dismiss: units={1} slots: {2}" -f $role,$hs.units,$ds) -ForegroundColor Green
                 }
             }
             $hc = @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1

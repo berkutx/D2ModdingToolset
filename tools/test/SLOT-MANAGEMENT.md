@@ -11,7 +11,7 @@ fields on the world snapshot. Both mirror facilities that are already in the har
 | --- | --- | --- |
 | Read slot occupancy | `GET /api/world` -> `stacks[].slots[]` + `leaderId` | per-slot `{position, unitId, isBig}` |
 | Move/swap a unit (formation) | `POST /api/ui/move-unit?role=&stack=<ID>&src=<0..5>&dst=<0..5>` (`Move-GroupUnit`) | `{found:bool}` |
-| Dismiss a unit (free a slot) | `POST /api/ui/dismiss?role=host&stackId=<ID>&unitId=<ID>` | `{found:bool}` |
+| Dismiss a unit (free a slot) | `POST /api/ui/dismiss?role=&stack=<ID>&unit=<ID>` (`Dismiss-Unit`) | `{found:bool}` |
 
 The move/swap is DONE and live-verified (replicates): `worldactions::moveGroupUnit` sends the engine's
 `CStackSwapUnitMsg` via `CPhaseGame::sendStackSwapUnitMsg` (Russobit `0x406cc7`), the host applies it
@@ -76,60 +76,39 @@ id/position/isBig; if the agent must rank occupants, also emit per-slot impl fie
 (`UnitView` / `UnitImplView`: name, level, tier, xp) the same way, or keep the ranking
 logic in C++/Lua where the bindings are richer.
 
-## WRITE: dismiss a unit
+## WRITE: dismiss a unit (DONE)
 
 Agent call (programmatic, no UI emulation):
 
 ```
-POST http://127.0.0.1:8077/api/ui/dismiss?role=host&stackId=<STACK_ID>&unitId=<UNIT_ID>
--> { "role":"host", "dismiss":{"stackId":...,"unitId":...}, "found":true }
+POST http://127.0.0.1:8077/api/ui/dismiss?role=&stack=<STACK_ID>&unit=<UNIT_ID>
+-> { "role":..., "dismiss":{"stack":...,"unit":...}, "found":true }   (Dismiss-Unit)
 ```
 
-`found:true` means the dismiss was issued. Verify by re-reading `GET /api/world`: the slot
-must now be empty and `units` decremented.
+`found:true` means the dismiss message was sent. Verify by re-reading `GET /api/world` on
+EITHER role: the slot is empty and `units` is decremented (it replicates).
 
-What backs it (reused from mss32):
+What backs it: NOT a raw `extractUnitFromGroup` (that is the server's apply step, the same
+trap the hire hit with `addUnitToGroup`). The acting player is a CLIENT; it SENDS the
+engine's own `CStackDismissUnitMsg` via `CPhaseGame::sendStackDismissUnitMsg` (Russobit
+`0x406f47`, args `(&unitId, &stackId)`), the exact call the manage-stack dismiss makes. The
+host applies it and broadcasts, so the removal replicates. `worldactions::dismissUnit`
+gates own-turn/own-stack, rejects the LEADER outright (the engine disbands the stack via a
+different message, `CStackDismissLeaderMsg`), and requires the unit to be a group member.
+(RE chain + the method to find such client messages: `HIRE-MERC.md`.)
 
-```cpp
-// host side, in the relay command handler:
-const auto& v = game::VisitorApi::get();
-// apply=0 first as a precheck, then apply=1 to commit:
-if (v.extractUnitFromGroup(&unitId, &groupId, objectMap, /*apply*/1)) { ... }
-```
-
-- `groupId` = the id of the stack/group that owns the unit (for a city garrison, the
-  fort's group id).
-- `apply=0` = can-apply check only; `apply=1` = commit. Canonical usage already in the
-  tree: `leadersforhirehooks.cpp:309`, `summonhooks.cpp`.
-
-## Wiring the dismiss command (reuse-based, one opcode end to end)
-
-Mirror the existing `MoveStack` / `InvokeToggle` path exactly:
-
-1. `tools/relay/relay.js` - add `Op.DismissUnit` (next free opcode, e.g. `0x0307`) and a
-   `POST /api/ui/dismiss` handler copied from the `/api/ui/move` block (~line 400):
-   `sendCommand(sock, Op.DismissUnit, Buffer.concat([encodeStr(stackId), encodeStr(unitId)]))`.
-2. `mss32/src/testdrv/packetlogicbridge.cpp` - add `Op::DismissUnit` to the enum
-   (lines 43-59). Unknown opcodes are already forwarded to the command callback.
-3. `mss32/src/testdrv/autonav.cpp` - in `onRemoteCommand` (line 276) parse the two strings
-   with the existing `readStr` lambda into a `RemoteCmd{ type = 6, stackId, unitId }`; in
-   `drainRemoteCommands` (line 364) add `else if (cmd.type == 6) safeDismissUnit(cmd);`.
-4. `mss32/src/testdrv/worldactions.cpp` - add `dismissUnit(stackId, unitId)` modeled on
-   `moveStack` (lines 114-319): resolve ids from the object map, validate ownership, call
-   `VisitorApi::extractUnitFromGroup(apply=1)`. Wrap in `safeDismissUnit` with the same
-   `__try/__except` + `reportFound(seq, ok)` as `safeMoveStack` (line 353).
+The chain is wired like the other commands: opcode `DismissUnit = 0x0309` (stackId | unitId)
+in `packetlogicbridge.cpp`, parsed in `autonav.cpp` `onRemoteCommand` -> `safeDismissUnit`,
+exposed as `POST /api/ui/dismiss` (`relay.js`) and `Dismiss-Unit` (`_relay.ps1`).
 
 ## MP correctness
 
-- Issue the change through the host's server-logic / visitor with `apply=1`, never a raw
-  `objectMap` edit. The visitor is what mss32 itself uses for this mutation.
-- VERIFY REPLICATION before trusting it in multiplayer: after a dismiss, read the JOINER's
-  `/api/world` too and confirm the slot is empty there. The in-game Dismiss button drives
-  the `StackDismissUnit` command (`CStackDismissUnitMsg`), which the server processes and
-  broadcasts. If a bare `extractUnitFromGroup(apply=1)` from the relay handler does NOT
-  reach the joiner, route it as the real `StackDismissUnit` command instead (the
-  server-command path the UI uses) so the server replicates it. Do not assume replication;
-  test it.
+- Issue the change as the CLIENT message the UI sends (`CStackDismissUnitMsg`), never a raw
+  `objectMap` edit or a client-side `extractUnitFromGroup` (that is the server's apply step;
+  on a client it does not replicate, the same trap the hire hit with `addUnitToGroup`).
+- REPLICATION IS VERIFIED: the message route was the right call (this doc predicted it). After
+  a dismiss, read EITHER role's `/api/world`; the slot is empty and `units` decremented on both.
+  The acting player may be host OR joiner (whoever owns the stack, on their turn).
 - Ownership: only the owner may dismiss. Validate `stack->ownerId == localPlayerId()`
   before issuing. The harness runs the host, so dismiss the host's own units only.
 - Timing: a turn-phase action. Do it during the host's turn (after BeginTurn, before
@@ -170,11 +149,11 @@ Replace a weak unit with a better hire:
 | big-unit flag | `slots[].isBig` | `UnitView.getImpl().isSmall()` (inverse) | `include/bindings/unitimplview.h` |
 | leader id | `leaderId` | `StackView::getLeader()` | `include/bindings/stackview.h` |
 | reporter emit | (extend lambda) | `forEachStack` already holds `StackView` | `src/testdrv/worldreporter.cpp:188-226` |
-| dismiss (execute) | `POST /api/ui/dismiss` | `VisitorApi::extractUnitFromGroup(apply=1)` | `include/visitors.h:191`; example `src/leadersforhirehooks.cpp:309` |
-| relay endpoint | `POST /api/ui/dismiss` | mirror `/api/ui/move` | `tools/relay/relay.js:400` |
-| opcode | `Op.DismissUnit` | mirror `MoveStack`/`InvokeToggle` | `src/testdrv/packetlogicbridge.cpp:43-59` |
-| command drain | `cmd.type==6 -> safeDismissUnit` | mirror `safeMoveStack` | `src/testdrv/autonav.cpp:353,364-392` |
-| ownership + issue | `dismissUnit()` | mirror `worldactions::moveStack` | `src/testdrv/worldactions.cpp:114-319` |
+| dismiss (execute) | `POST /api/ui/dismiss` (`Dismiss-Unit`) | `CPhaseGame::sendStackDismissUnitMsg` (CStackDismissUnitMsg) @0x406f47 | `src/testdrv/worldactions.cpp` `dismissUnit` |
+| relay endpoint | `POST /api/ui/dismiss?stack=&unit=` | mirror `/api/ui/move-unit` | `tools/relay/relay.js` |
+| opcode | `Op.DismissUnit = 0x0309` | mirror `MoveGroupUnit` | `src/testdrv/packetlogicbridge.cpp` |
+| command drain | `cmd.type==8 -> safeDismissUnit` | mirror `safeMoveGroupUnit` | `src/testdrv/autonav.cpp` |
+| ownership + leader guard | `dismissUnit()` | mirror `worldactions::moveGroupUnit` | `src/testdrv/worldactions.cpp` |
 
 Related (already present, used alongside slot management): item transfer between stacks
 `CMidServerLogicApi::stackExchangeItem`; native move `CPhaseGameApi::sendStackMoveMsg`

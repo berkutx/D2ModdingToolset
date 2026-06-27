@@ -276,7 +276,7 @@ bool g_hasInFlight = false; // whether g_inFlight is valid
 void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size)
 {
     if (op != 0x0300 && op != 0x0301 && op != 0x0302 && op != 0x0303 && op != 0x0305
-        && op != 0x0306 && op != 0x0307 && op != 0x0308)
+        && op != 0x0306 && op != 0x0307 && op != 0x0308 && op != 0x0309)
         return; // not a command we own
     size_t off = 0;
     auto readStr = [&](char* out, size_t outsz) -> bool {
@@ -327,7 +327,7 @@ void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size
             || !readStr(cmd.value, sizeof(cmd.value)))
             return;
         cmd.type = 6;
-    } else { // 0x0308 MoveGroupUnit: u16 stackId | u32 sourcePos | u32 targetPos
+    } else if (op == 0x0308) { // MoveGroupUnit: u16 stackId | u32 sourcePos | u32 targetPos
         if (!readStr(cmd.dlg, sizeof(cmd.dlg)))
             return;
         if (off + 8 > size)
@@ -335,6 +335,10 @@ void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size
         cmd.x = *reinterpret_cast<const int*>(p + off);     // sourcePos
         cmd.y = *reinterpret_cast<const int*>(p + off + 4); // targetPos
         cmd.type = 7;
+    } else { // 0x0309 DismissUnit: u16 stackId | u16 unitId
+        if (!readStr(cmd.dlg, sizeof(cmd.dlg)) || !readStr(cmd.widget, sizeof(cmd.widget)))
+            return;
+        cmd.type = 8;
     }
     auto sameCmd = [&](const RemoteCmd& q) {
         return q.type == cmd.type && q.param == cmd.param && q.x == cmd.x && q.y == cmd.y
@@ -399,6 +403,18 @@ void safeMoveGroupUnit(const RemoteCmd& cmd)
     reportFound(cmd.seq, ok);
 }
 
+// worldactions::dismissUnit sends a client net-message after a group scan; same __try seam.
+void safeDismissUnit(const RemoteCmd& cmd)
+{
+    bool ok = false;
+    __try {
+        ok = worldactions::dismissUnit(cmd.dlg, cmd.widget); // dlg=stackId, widget=unitId
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    reportFound(cmd.seq, ok);
+}
+
 void drainRemoteCommands()
 {
     for (;;) {
@@ -430,6 +446,8 @@ void drainRemoteCommands()
             safeHireMerc(cmd);
         else if (cmd.type == 7)
             safeMoveGroupUnit(cmd);
+        else if (cmd.type == 8)
+            safeDismissUnit(cmd);
     }
 }
 

@@ -159,6 +159,14 @@ function Hire-Merc([string]$Role, [string]$Camp, [string]$Stack, [string]$Unit) 
 function Move-GroupUnit([string]$Role, [string]$Stack, [int]$Src, [int]$Dst) {
     [bool](script:Post "move-unit?role=$([uri]::EscapeDataString($Role))&stack=$([uri]::EscapeDataString($Stack))&src=$Src&dst=$Dst")
 }
+# Dismiss the non-leader unit <Unit> from stack <Stack>, freeing its slot (testdrv
+# worldactions::dismissUnit, which sends the engine's CStackDismissUnitMsg). The LEADER is rejected by
+# the DLL (a different message disbands the stack). Use it to drop a low-value unit so a more valuable or
+# 2-slot one fits. Returns `found`: $true if the message was sent (own stack, our turn, a non-leader
+# group member). The host removes it + replicates; verify via Get-World slots[]/units on EITHER role.
+function Dismiss-Unit([string]$Role, [string]$Stack, [string]$Unit) {
+    [bool](script:Post "dismiss?role=$([uri]::EscapeDataString($Role))&stack=$([uri]::EscapeDataString($Stack))&unit=$([uri]::EscapeDataString($Unit))")
+}
 # Flip a toggle button (e.g. DLG_BATTLE_A::TOG_AUTOBATTLE). invokeButton matches only buttons, so toggles
 # (auto-battle, etc.) need their own verb. Returns the client's `found` flag.
 function Invoke-Toggle([string]$Role, [string]$Dialog, [string]$Toggle) {

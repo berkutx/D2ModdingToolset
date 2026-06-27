@@ -483,6 +483,63 @@ bool moveGroupUnit(const char* stackIdStr, int sourcePos, int targetPos)
     return true;
 }
 
+// Dismiss the unit <unitId> from stack <stackId> (remove it, freeing its slot). Sends the engine's OWN
+// CStackDismissUnitMsg via CPhaseGame::sendStackDismissUnitMsg (Russobit 0x406f47), the exact call the
+// manage-stack dismiss makes. The host applies it and broadcasts, so the removal REPLICATES to every
+// player. Use it to drop a low-value unit so a more valuable (or 2-slot) one fits. NEVER dismisses the
+// leader: that is a different, stack-disbanding message (CStackDismissLeaderMsg), and we reject a leader
+// id outright (the user's hard rule). MUST be called on the UI thread. Returns true if the message was
+// sent (own stack, our turn, the unit is a non-leader member of the group).
+bool dismissUnit(const char* stackIdStr, const char* unitIdStr)
+{
+    using namespace game;
+
+    // The dismiss send (0x406f47) has no clientTakesTurn gate of its own (like the swap), so we gate it.
+    CPhaseGame* phaseGame = hooks::getStashedPhaseGame();
+    if (!phaseGame || !phaseGame->data || !phaseGame->data->clientTakesTurn)
+        return false;
+
+    const IMidgardObjectMap* objectMap = hooks::getObjectMap();
+    if (!objectMap)
+        return false;
+
+    CMidgardID stackId{}, unitId{};
+    CMidgardIDApi::get().fromString(&stackId, stackIdStr);
+    CMidgardIDApi::get().fromString(&unitId, unitIdStr);
+    if (stackId == emptyId || unitId == emptyId)
+        return false;
+
+    CMidStack* stack = hooks::getStack(objectMap, &stackId);
+    if (!stack || stack->ownerId != localPlayerId())
+        return false; // only dismiss from our own stack, on our own turn
+
+    // NEVER dismiss the leader (hard rule; the engine disbands the stack via a different message).
+    if (unitId == stack->leaderId)
+        return false;
+
+    // The unit must actually be a member of this stack's group.
+    const auto& groups = CMidUnitGroupApi::get();
+    bool inGroup = false;
+    for (int p = 0; p < 6 && !inGroup; ++p) {
+        const CMidgardID* uid = groups.getUnitIdByPosition(&stack->group, p);
+        if (uid && *uid == unitId)
+            inGroup = true;
+    }
+    if (!inGroup)
+        return false;
+
+    spdlog::info("[testdrv] dismissUnit: stack={} unit={}", stackIdStr, unitIdStr);
+
+    // CPhaseGame::sendStackDismissUnitMsg(phaseGame, &unitId, &stackId): the message carries the unit id
+    // first, the stack id second (the exact call the manage-stack dismiss makes). The host removes the
+    // unit and broadcasts the result.
+    using SendStackDismissUnitMsgFn = void(__thiscall*)(CPhaseGame*, const CMidgardID*,
+                                                        const CMidgardID*);
+    auto sendStackDismissUnitMsg = reinterpret_cast<SendStackDismissUnitMsgFn>(0x406f47);
+    sendStackDismissUnitMsg(phaseGame, &unitId, &stackId);
+    return true;
+}
+
 } // namespace worldactions
 } // namespace testdrv
 } // namespace hooks

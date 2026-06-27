@@ -39,6 +39,7 @@ const Op = {
     InvokeToggle: 0x0306,   // -> client: flip a toggle button (u16 dlg | u16 toggle)
     HireMerc: 0x0307,       // -> client: buy a merc from a camp into a stack (u16 campId | u16 stackId | u16 unitId)
     MoveGroupUnit: 0x0308,  // -> client: move/swap a unit between formation slots (u16 stackId | i32 src | i32 dst)
+    DismissUnit: 0x0309,    // -> client: dismiss a non-leader unit from a stack (u16 stackId | u16 unitId)
     UiSnapshot: 0x0410,     // <- client: current dialog + all its widgets with state (JSON)
     WorldSnapshot: 0x0411,  // <- client: players' resources + all map stacks (JSON)
     Log: 0xff00,
@@ -436,6 +437,16 @@ const httpServer = http.createServer(async (req, res) => {
         const b = Buffer.alloc(8); b.writeInt32LE(src | 0, 0); b.writeInt32LE(dst | 0, 4);
         const found = await sendCommand(sock, Op.MoveGroupUnit, Buffer.concat([encodeStr(stack), b]));
         return sendJson(res, 200, { role: roleOf(sock), moveUnit: { stack, src, dst }, found });
+    }
+    // Dismiss a non-leader unit from a stack (testdrv worldactions::dismissUnit, which sends the engine's
+    // CStackDismissUnitMsg; the host removes it + replicates). The leader is rejected by the DLL.
+    // `found` = the message was sent (own stack, our turn, a non-leader group member).
+    if (req.method === 'POST' && path === '/api/ui/dismiss') {
+        const sock = clientByRole(q.get('role'));
+        if (!sock) return sendJson(res, 503, { error: 'no client for role ' + q.get('role') });
+        const stack = q.get('stack') || '', unit = q.get('unit') || '';
+        const found = await sendCommand(sock, Op.DismissUnit, Buffer.concat([encodeStr(stack), encodeStr(unit)]));
+        return sendJson(res, 200, { role: roleOf(sock), dismiss: { stack, unit }, found });
     }
     sendJson(res, 404, { error: 'not found' });
 });
