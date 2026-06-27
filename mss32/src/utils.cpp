@@ -395,13 +395,25 @@ std::string computeHash(std::vector<std::filesystem::path> filenames)
     }
 
     for (const auto& file : filenames) {
-        std::ifstream stream{file, std::ios_base::binary};
+        std::filesystem::path readPath{file};
+#ifdef D2_LOBBY_HASH_REF
+        // Optional lobby hash spoof: hash a reference mss32 (the players' build) instead of our own so a
+        // host running a modified mss32 still matches normal-build clients. Double opt-in: compiled only
+        // with D2_LOBBY_HASH_REF (CL=/DD2_LOBBY_HASH_REF), active only when mss32.hashref.dll sits next to
+        // mss32.dll. The sort above ran on the real path, so file ordering (and the hash) still match.
+        if (file.filename() == "mss32.dll") {
+            const auto ref = file.parent_path() / "mss32.hashref.dll";
+            if (std::filesystem::exists(ref))
+                readPath = ref;
+        }
+#endif
+        std::ifstream stream{readPath, std::ios_base::binary};
         if (!stream) {
             spdlog::error("Could not open file '{:s}'", file.filename().string());
             return "";
         }
 
-        const auto size = static_cast<size_t>(std::filesystem::file_size(file));
+        const auto size = static_cast<size_t>(std::filesystem::file_size(readPath));
         std::vector<unsigned char> contents(size);
 
         stream.read(reinterpret_cast<char*>(contents.data()), size);
