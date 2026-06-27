@@ -28,6 +28,8 @@
 #include "bindings/point.h"
 #include "bindings/scenarioview.h"
 #include "bindings/stackview.h"
+#include "bindings/attackview.h" // unit combat profile: getReach()/getAttackClass()/isMelee()/maxTargets()
+#include "bindings/unitimplview.h" // UnitImplView: getXpKilled()/getHitPoint()/getArmor()/getAttack()/...
 #include "bindings/unitslotview.h" // getGroup().getSlots() yields std::vector<UnitSlotView> (slot occupancy)
 #include "bindings/unitview.h" // getGroup().getUnits() yields std::vector<UnitView>; .size() needs it complete
 #include "gameutils.h"
@@ -39,6 +41,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <spdlog/spdlog.h>
 #include <string>
 #define WIN32_LEAN_AND_MEAN
@@ -112,6 +115,36 @@ void kvBool(std::string& out, const char* key, bool v)
     out += key;
     out += "\":";
     out += v ? "true" : "false";
+}
+
+// Emit a unit's combat profile (no leading/trailing comma; the caller frames it). Drives the formation
+// + camp-selection logic: the PRIMARY attack's `reach` classifies the line (AttackReachId Adjacent=3 =
+// hits only the nearest enemy = a FRONT defender; Any=2 / All=1 = can hit any target = a BACK unit),
+// `atkClass` flags casters/support (AttackClassId Heal=6 / Cure=14 = healer, Paralyze=3, etc.), and
+// `xp` (xpKilled) is the value proxy. `small` = single-slot (a big unit takes a whole column).
+void emitUnitProfile(std::string& out, const bindings::UnitImplView& impl)
+{
+    kvInt(out, "level", impl.getLevel());
+    out += ',';
+    kvInt(out, "xp", impl.getXpKilled());
+    out += ',';
+    kvInt(out, "hp", impl.getHitPoint());
+    out += ',';
+    kvInt(out, "armor", impl.getArmor());
+    out += ',';
+    kvInt(out, "dmg", impl.getDamageMax());
+    out += ',';
+    kvBool(out, "small", impl.isSmall());
+    if (auto atk = impl.getAttack()) {
+        out += ',';
+        kvInt(out, "reach", atk->getReach());
+        out += ',';
+        kvInt(out, "atkClass", atk->getAttackClass());
+        out += ',';
+        kvBool(out, "melee", atk->isMelee());
+        out += ',';
+        kvInt(out, "maxTargets", atk->maxTargets());
+    }
 }
 
 const char* relationOf(const game::CMidgardID& owner, const game::CMidgardID& local,
@@ -237,10 +270,10 @@ void buildJson(std::string& json, const game::IMidgardObjectMap* objectMap)
             const auto uid = slot.getUnitId();
             if (uid == game::emptyId)
                 continue;
-            bool big = false;
+            std::optional<bindings::UnitImplView> impl;
             if (auto uv = slot.getUnitView())
-                if (auto impl = uv->getImpl())
-                    big = !impl->isSmall();
+                impl = uv->getImpl();
+            const bool big = impl && !impl->isSmall();
             if (!firstSlot)
                 json += ',';
             firstSlot = false;
@@ -252,6 +285,10 @@ void buildJson(std::string& json, const game::IMidgardObjectMap* objectMap)
             kvInt(json, "line", slot.getLine());
             json += ',';
             kvBool(json, "isBig", big);
+            if (impl) {
+                json += ',';
+                emitUnitProfile(json, *impl); // reach/class/melee etc. for placement decisions
+            }
             json += '}';
         }
         json += ']';
@@ -289,7 +326,7 @@ void buildJson(std::string& json, const game::IMidgardObjectMap* objectMap)
             json += '{';
             kvStr(json, "impl", hooks::idToString(&implId.id).c_str());
             json += ',';
-            kvInt(json, "level", impl.getLevel());
+            emitUnitProfile(json, impl); // level/xp/hp/armor/dmg/small + primary attack reach/class/melee
             json += ',';
             kvBool(json, "unique", u.isUnique());
             json += '}';

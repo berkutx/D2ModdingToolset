@@ -11,9 +11,12 @@ param(
     [string]$Loader  = 'C:\GOG Games\disciples2-roulette-arena-template-loader\dist\berkutx_loader.exe',
     [int]$GenWaitSec = 120,
     [switch]$SkipChests,  # go straight to the camp (beat the ~60s MP turn timer while cracking the hire)
-    [switch]$BisectCamp   # enter ONLY the first camp, fire the hire, then STOP with DLG_MERCENARIES left
+    [switch]$BisectCamp,  # enter ONLY the first camp, fire the hire, then STOP with DLG_MERCENARIES left
                           # OPEN (no BTN_BACK) for manual inspection. Implies -SkipChests.
+    [switch]$DumpCamps    # pair, then list every own-side camp's units with their combat profile +
+                          # front/back classification, and STOP (no hire). Implies -SkipChests.
 )
+if ($DumpCamps) { $SkipChests = $true }
 if ($BisectCamp) { $SkipChests = $true }
 . "$PSScriptRoot\_relay.ps1"
 $hookLog = Join-Path $GameDir 'berkutx_roulette.log'
@@ -184,6 +187,26 @@ try {
     # hero runs out of movement, or a move is rejected (the ~60s MP turn timer rolled the turn over).
     $myCamps = @(Get-Camps join) | Where-Object { [Math]::Abs($_.y - $hero.y) -lt 15 }
     Write-Host ("[lt] {0} own-side camps to visit (hero half y~{1})" -f $myCamps.Count, $hero.y) -ForegroundColor Cyan
+
+    if ($DumpCamps) {
+        # Inspection: list every own-side camp's unit with its combat profile + classification.
+        # reach (category record id): 101=All 102=Any 103=Adjacent. Adjacent = hits only the nearest =
+        # FRONT defender; All/Any = can hit any target = BACK. atkClass: 1=Damage 3=Paralyze 6=Heal
+        # 14=Cure 24=Lower (Heal/Cure = healer = lower priority).
+        function Classify($u) {
+            $reach=[int]$u.reach; $cls=[int]$u.atkClass
+            $line = if ($reach -eq 103) { 'FRONT' } else { 'BACK ' }
+            $role = switch ($cls) { 6 {'HEALER'} 14 {'HEALER'} 3 {'PARALYZE'} default { if($reach -eq 103){'MELEE'} elseif($reach -eq 101){'AREA'} else {'RANGED'} } }
+            "{0} {1} reach={2} {3,-8} xp={4,-5} hp={5,-3} dmg={6,-4} {7}" -f $line,($(if($u.small){'1x'}else{'2x'})),$reach,$role,[int]$u.xp,[int]$u.hp,[int]$u.dmg,$u.impl
+        }
+        $sorted = $myCamps | Sort-Object { [int]$_.x }, { [int]$_.y }
+        foreach ($c in $sorted) {
+            Write-Host ("[lt][DUMP] camp {0} @({1},{2}):" -f $c.id,$c.x,$c.y) -ForegroundColor Cyan
+            foreach ($u in @($c.units)) { Write-Host ("    " + (Classify $u)) -ForegroundColor Gray }
+        }
+        Write-Host "[lt] LEFT RUNNING (relay pid=$($relay.Id)) - camps dumped, /api/world available. Done." -ForegroundColor Yellow
+        return
+    }
 
     if ($BisectCamp) {
         # BISECTION: first camp only -> confirm entry -> attempt hire -> STOP, leaving DLG_MERCENARIES
