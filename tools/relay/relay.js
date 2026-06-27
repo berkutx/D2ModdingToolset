@@ -38,6 +38,7 @@ const Op = {
     MoveStack: 0x0305,      // -> client: move a stack to a tile (u16 stackId | i32 x | i32 y)
     InvokeToggle: 0x0306,   // -> client: flip a toggle button (u16 dlg | u16 toggle)
     HireMerc: 0x0307,       // -> client: buy a merc from a camp into a stack (u16 campId | u16 stackId | u16 unitId)
+    MoveGroupUnit: 0x0308,  // -> client: move/swap a unit between formation slots (u16 stackId | i32 src | i32 dst)
     UiSnapshot: 0x0410,     // <- client: current dialog + all its widgets with state (JSON)
     WorldSnapshot: 0x0411,  // <- client: players' resources + all map stacks (JSON)
     Log: 0xff00,
@@ -424,6 +425,17 @@ const httpServer = http.createServer(async (req, res) => {
         const found = await sendCommand(sock, Op.HireMerc,
             Buffer.concat([encodeStr(camp), encodeStr(stack), encodeStr(unit)]));
         return sendJson(res, 200, { role: roleOf(sock), hire: { camp, stack, unit }, found });
+    }
+    // Move/swap a unit between formation slots of a stack (testdrv worldactions::moveGroupUnit, which
+    // sends the engine's CStackSwapUnitMsg; the host applies + replicates). Empty dst = move (src
+    // empties), occupied dst = swap. `found` = the message was sent (own stack, our turn, src occupied).
+    if (req.method === 'POST' && path === '/api/ui/move-unit') {
+        const sock = clientByRole(q.get('role'));
+        if (!sock) return sendJson(res, 503, { error: 'no client for role ' + q.get('role') });
+        const stack = q.get('stack') || '', src = parseInt(q.get('src'), 10), dst = parseInt(q.get('dst'), 10);
+        const b = Buffer.alloc(8); b.writeInt32LE(src | 0, 0); b.writeInt32LE(dst | 0, 4);
+        const found = await sendCommand(sock, Op.MoveGroupUnit, Buffer.concat([encodeStr(stack), b]));
+        return sendJson(res, 200, { role: roleOf(sock), moveUnit: { stack, src, dst }, found });
     }
     sendJson(res, 404, { error: 'not found' });
 });

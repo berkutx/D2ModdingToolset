@@ -270,14 +270,20 @@ bool moveStack(const char* stackIdStr, int targetX, int targetY)
         destIdx = index(targetX, targetY);
     } else {
         int best = kInf;
+        int bestCost = kInf;
         for (int i = 0; i < cells; ++i) {
             if (dist[i] == kInf || i == startIdx)
                 continue;
             const int ax = std::abs((i % mapSize) - targetX);
             const int ay = std::abs((i / mapSize) - targetY);
             const int cheb = (ax > ay) ? ax : ay;
-            if (cheb < best) {
+            // Smallest Chebyshev ring around the target; WITHIN a ring, the CHEAPEST tile to reach
+            // (least path cost). So the stack stops on the side it approached from and enters a site
+            // (camp/city) from there, instead of pathing around to a fixed lowest-index cell on the far
+            // side. A hero coming from the south thus enters a building from below, as a player expects.
+            if (cheb < best || (cheb == best && dist[i] < bestCost)) {
                 best = cheb;
+                bestCost = dist[i];
                 destIdx = i;
             }
         }
@@ -410,6 +416,70 @@ bool hireMerc(const char* campIdStr, const char* stackIdStr, const char* unitIdS
                                                    const CMidgardID*, int);
     auto sendSiteBuyUnitMsg = reinterpret_cast<SendSiteBuyUnitMsgFn>(0x4067a2);
     sendSiteBuyUnitMsg(phaseGame, &campId, &stackId, &unitId, freePos);
+    return true;
+}
+
+// Move the unit at <sourcePos> to <targetPos> within stack <stackId>'s 6-cell formation. Sends the
+// engine's OWN CStackSwapUnitMsg via CPhaseGame::sendStackSwapUnitMsg (Russobit 0x406cc7), the exact
+// call the formation drag-drop makes. The host applies it (CVisitorSwapUnitPosition) and broadcasts a
+// CCmdUpdateObjMsg, so the rearrange REPLICATES to every player. If <targetPos> is EMPTY this is a plain
+// MOVE (the source cell empties); if it is OCCUPIED it is a SWAP (the two cells exchange). Use it to
+// drop a just-hired unit into a free slot, or to set the battle line (ranged/casters back, melee front).
+// MUST be called on the UI thread. Returns true if the message was sent.
+//
+// Key detail (verified by RE + live): the engine's swap visitor validates the MOVED unit's position (it
+// must hold a unit) and ALLOWS the other to be empty. That validated position is the message's FIRST
+// position field, so <sourcePos> (the unit being moved) goes there and <targetPos> second. We gate:
+//  - positions 0..5 and distinct;
+//  - the SOURCE cell holds a unit (the engine rejects an empty source);
+//  - the stack is ours, on our turn (the send has no clientTakesTurn gate, so we add one).
+// A leader may be moved/swapped to any cell (it is never dismissed by this message). A big unit is
+// anchored to its FRONT (even) cell of a column; address it by that cell.
+bool moveGroupUnit(const char* stackIdStr, int sourcePos, int targetPos)
+{
+    using namespace game;
+
+    // The swap send (0x406cc7) has NO clientTakesTurn gate of its own (unlike the hire), so we gate it.
+    CPhaseGame* phaseGame = hooks::getStashedPhaseGame();
+    if (!phaseGame || !phaseGame->data || !phaseGame->data->clientTakesTurn)
+        return false;
+
+    const IMidgardObjectMap* objectMap = hooks::getObjectMap();
+    if (!objectMap)
+        return false;
+
+    if (sourcePos < 0 || sourcePos > 5 || targetPos < 0 || targetPos > 5 || sourcePos == targetPos)
+        return false;
+
+    CMidgardID stackId{};
+    CMidgardIDApi::get().fromString(&stackId, stackIdStr);
+    if (stackId == emptyId)
+        return false;
+
+    CMidStack* stack = hooks::getStack(objectMap, &stackId);
+    if (!stack || stack->ownerId != localPlayerId())
+        return false; // only rearrange our own stack, on our own turn
+
+    // The SOURCE cell (the moved unit) must hold a unit; the engine rejects an empty source. The TARGET
+    // may be empty (plain move, source empties) or occupied (swap). Gate only the source.
+    const auto& groups = CMidUnitGroupApi::get();
+    const CMidgardID* srcUnit = groups.getUnitIdByPosition(&stack->group, sourcePos);
+    if (!srcUnit || *srcUnit == emptyId)
+        return false;
+    const CMidgardID* tgtUnit = groups.getUnitIdByPosition(&stack->group, targetPos);
+    const bool targetEmpty = (!tgtUnit || *tgtUnit == emptyId);
+
+    spdlog::info("[testdrv] moveGroupUnit: stack={} {} {}->{}", stackIdStr, targetEmpty ? "move" : "swap",
+                 sourcePos, targetPos);
+
+    // CPhaseGame::sendStackSwapUnitMsg(phaseGame, posA, &stackIdA, posB, &stackIdB): in-group move uses
+    // the hero stack as BOTH ids. posA is the FIRST position field, which the engine requires occupied,
+    // so it is the MOVED unit (sourcePos); posB (targetPos) is the destination and may be empty. The host
+    // runs CVisitorSwapUnitPosition and broadcasts the result.
+    using SendStackSwapUnitMsgFn = void(__thiscall*)(CPhaseGame*, int, const CMidgardID*, int,
+                                                     const CMidgardID*);
+    auto sendStackSwapUnitMsg = reinterpret_cast<SendStackSwapUnitMsgFn>(0x406cc7);
+    sendStackSwapUnitMsg(phaseGame, sourcePos, &stackId, targetPos, &stackId);
     return true;
 }
 

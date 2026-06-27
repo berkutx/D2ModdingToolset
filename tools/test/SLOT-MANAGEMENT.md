@@ -10,7 +10,16 @@ fields on the world snapshot. Both mirror facilities that are already in the har
 | Operation | Agent call | Result |
 | --- | --- | --- |
 | Read slot occupancy | `GET /api/world` -> `stacks[].slots[]` + `leaderId` | per-slot `{position, unitId, isBig}` |
+| Move/swap a unit (formation) | `POST /api/ui/move-unit?role=&stack=<ID>&src=<0..5>&dst=<0..5>` (`Move-GroupUnit`) | `{found:bool}` |
 | Dismiss a unit (free a slot) | `POST /api/ui/dismiss?role=host&stackId=<ID>&unitId=<ID>` | `{found:bool}` |
+
+The move/swap is DONE and live-verified (replicates): `worldactions::moveGroupUnit` sends the engine's
+`CStackSwapUnitMsg` via `CPhaseGame::sendStackSwapUnitMsg` (Russobit `0x406cc7`), the host applies it
+(`CVisitorSwapUnitPosition`) and broadcasts `CCmdUpdateObjMsg`. `src` (the moved unit) must hold a unit;
+`dst` may be EMPTY (plain move, e.g. slide a just-hired unit down into a free slot) or OCCUPIED (swap,
+e.g. put a ranged/caster on the back line and a melee up front). The moved unit's position goes in the
+message's FIRST field (the one the engine requires occupied); the destination second (may be empty).
+(RE chain + the method to find such client messages: `HIRE-MERC.md`.)
 
 Backed entirely by mss32: read via `GroupView::getSlots()` / `UnitSlotView`; write via
 `VisitorApi::extractUnitFromGroup(..., apply=1)` (the same call mss32 already uses in

@@ -38,6 +38,17 @@ bool moveStack(const char* stackId, int x, int y);
  */
 bool hireMerc(const char* campId, const char* stackId, const char* unitId);
 
+/**
+ * Move the unit at <sourcePos> to <targetPos> within stack <stackId>'s 6-cell formation. Sends the
+ * engine's OWN CStackSwapUnitMsg via CPhaseGame::sendStackSwapUnitMsg, the exact call the formation
+ * drag-drop makes, so the host applies it and broadcasts: the rearrange REPLICATES to every player. If
+ * <targetPos> is EMPTY this is a plain MOVE (the source cell empties); if OCCUPIED it is a SWAP. Use it
+ * to drop a just-hired unit into a free slot, or to set the battle line (ranged/casters back, melee
+ * front). MUST be called on the UI thread. Returns true if the message was sent (own stack, our turn,
+ * SOURCE cell occupied, positions 0..5 and distinct).
+ */
+bool moveGroupUnit(const char* stackId, int sourcePos, int targetPos);
+
 } // namespace worldactions
 } // namespace testdrv
 } // namespace hooks

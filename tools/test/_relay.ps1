@@ -150,6 +150,15 @@ function Move-Stack([string]$Role, [string]$Id, [int]$X, [int]$Y) {
 function Hire-Merc([string]$Role, [string]$Camp, [string]$Stack, [string]$Unit) {
     [bool](script:Post "hire?role=$([uri]::EscapeDataString($Role))&camp=$([uri]::EscapeDataString($Camp))&stack=$([uri]::EscapeDataString($Stack))&unit=$([uri]::EscapeDataString($Unit))")
 }
+# Move the unit at slot <Src> to slot <Dst> within stack <Stack>'s formation (testdrv
+# worldactions::moveGroupUnit, which sends the engine's CStackSwapUnitMsg). An EMPTY <Dst> is a plain
+# move (the <Src> cell empties); an OCCUPIED <Dst> is a swap (e.g. put a ranged unit in the back line, a
+# melee in the front). <Src> must hold a unit. Slots are 0..5 (even = front, odd = back); a big unit
+# sits on its front/even cell. Returns `found`: $true if the message was sent (own stack, our turn,
+# <Src> occupied). The host applies + replicates; verify via Get-World slots[] on EITHER role.
+function Move-GroupUnit([string]$Role, [string]$Stack, [int]$Src, [int]$Dst) {
+    [bool](script:Post "move-unit?role=$([uri]::EscapeDataString($Role))&stack=$([uri]::EscapeDataString($Stack))&src=$Src&dst=$Dst")
+}
 # Flip a toggle button (e.g. DLG_BATTLE_A::TOG_AUTOBATTLE). invokeButton matches only buttons, so toggles
 # (auto-battle, etc.) need their own verb. Returns the client's `found` flag.
 function Invoke-Toggle([string]$Role, [string]$Dialog, [string]$Toggle) {

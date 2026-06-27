@@ -206,6 +206,27 @@ try {
                 $r = Hire-Merc join $camp.id $hero.id $u0.impl
                 Write-Host ("[lt][BISECT] hire (CSiteBuyUnitMsg): camp {0} unit {1} -> sent={2}" -f $camp.id,$u0.impl,$r) -ForegroundColor Magenta
             }
+            # Wait for the hire to apply + replicate (the host generates the unit and broadcasts it back).
+            $hiredUnit = $null
+            for ($w=0; $w -lt 12 -and -not $hiredUnit; $w++) {
+                Start-Sleep -Milliseconds 400
+                $sl = @((@(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1).slots)
+                $hiredUnit = ($sl | Where-Object { $_.position -eq 1 } | Select-Object -First 1).unitId
+            }
+            Write-Host ("[lt][BISECT] after hire: slot 1 = {0}" -f $hiredUnit) -ForegroundColor Cyan
+            # MOVE the hired merc from slot 1 DOWN to the empty slot 2 (CStackSwapUnitMsg, move-to-empty),
+            # then verify the rearrange replicates: read slots[] on BOTH roles, they must agree (the unit
+            # is now at slot 2, slot 1 empty). Empty target = plain move; an occupied target would swap.
+            if ($hiredUnit) {
+                $mr = Move-GroupUnit join $hero.id 1 2
+                Write-Host ("[lt][BISECT] move (CStackSwapUnitMsg): slot 1 -> empty slot 2 -> sent={0}" -f $mr) -ForegroundColor Magenta
+                Start-Sleep -Seconds 2
+                foreach ($role in 'join','host') {
+                    $sl = @((@(Get-Stacks $role) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1).slots) | Sort-Object position
+                    $desc = (($sl | ForEach-Object { "{0}={1}" -f $_.position,$_.unitId }) -join ' ')
+                    Write-Host ("[lt][BISECT] [{0}] slots: {1}" -f $role,$desc) -ForegroundColor Green
+                }
+            }
             $hc = @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
             Write-Host ("[lt][BISECT] hero units now {0}; dialog still {1}. STOPPED for manual inspection." -f $hc.units,(Get-Dialog join)) -ForegroundColor Cyan
         } else {
