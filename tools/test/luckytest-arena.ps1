@@ -13,10 +13,13 @@ param(
     [switch]$SkipChests,  # go straight to the camp (beat the ~60s MP turn timer while cracking the hire)
     [switch]$BisectCamp,  # enter ONLY the first camp, fire the hire, then STOP with DLG_MERCENARIES left
                           # OPEN (no BTN_BACK) for manual inspection. Implies -SkipChests.
-    [switch]$DumpCamps    # pair, then list every own-side camp's units with their combat profile +
+    [switch]$DumpCamps,   # pair, then list every own-side camp's units with their combat profile +
                           # front/back classification, and STOP (no hire). Implies -SkipChests.
+    [switch]$BuildSquad   # read all own-side camps, SELECT a leader+5 squad (3 back any-reach + 3 front
+                          # defenders, taking a big unit if it beats the 2 singles it displaces) and log
+                          # the plan. Plan-only for now (no hire/placement yet). Implies -SkipChests.
 )
-if ($DumpCamps) { $SkipChests = $true }
+if ($DumpCamps -or $BuildSquad) { $SkipChests = $true }
 if ($BisectCamp) { $SkipChests = $true }
 . "$PSScriptRoot\_relay.ps1"
 $hookLog = Join-Path $GameDir 'berkutx_roulette.log'
@@ -205,6 +208,55 @@ try {
             foreach ($u in @($c.units)) { Write-Host ("    " + (Classify $u)) -ForegroundColor Gray }
         }
         Write-Host "[lt] LEFT RUNNING (relay pid=$($relay.Id)) - camps dumped, /api/world available. Done." -ForegroundColor Yellow
+        return
+    }
+
+    if ($BuildSquad) {
+        # Select a leader+5 squad from the 7 own-side camps: 3 BACK any-reach (reach != 103) + 3 FRONT
+        # defenders (reach == 103), best by xp (healers atkClass 6/14 deprioritized). Take a BIG unit if
+        # its xp beats the two singles it would displace (it occupies a whole column). Plan-only for now.
+        $cand = @(foreach ($c in $myCamps) {
+            if (@($c.units).Count -eq 0) { continue }
+            $u = $c.units[0]; $reach = [int]$u.reach; $cls = [int]$u.atkClass
+            [pscustomobject]@{
+                campId=$c.id; x=[int]$c.x; y=[int]$c.y; impl=$u.impl; reach=$reach
+                xp=[int]$u.xp; hp=[int]$u.hp; big=(-not $u.small)
+                front=($reach -eq 103); healer=($cls -in 6,14)
+                val=([double]$u.xp * $(if ($cls -in 6,14) { 0.25 } else { 1.0 }))
+            }
+        })
+        $hs = @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
+        $ldr = @($hs.slots) | Where-Object { $_.unitId -eq $hs.leaderId } | Select-Object -First 1
+        $leaderFront = (-not $ldr) -or ([int]$ldr.reach -eq 103)
+        Write-Host ("[lt][SQUAD] leader {0} reach={1} -> {2}" -f $hs.leaderId,$(if($ldr){[int]$ldr.reach}else{'?'}),$(if($leaderFront){'FRONT'}else{'BACK'})) -ForegroundColor Cyan
+        $needFront = 3 - $(if ($leaderFront) {1} else {0})
+        $needBack  = 3 - $(if ($leaderFront) {0} else {1})
+
+        $pickFront = @(@($cand | Where-Object { $_.front }     | Sort-Object val -Descending) | Select-Object -First $needFront)
+        $pickBack  = @(@($cand | Where-Object { -not $_.front } | Sort-Object val -Descending) | Select-Object -First $needBack)
+        $bigPicks  = @()
+        # Big-if-valuable: a big unit occupies a column (1 front + 1 back). Replace the weakest picked
+        # front+back pair with the best unpicked big if it beats their summed value. Apply greedily.
+        while ($true) {
+            $used = @($pickFront.impl + $pickBack.impl + $bigPicks.impl)
+            $b = @($cand | Where-Object { $_.big -and ($used -notcontains $_.impl) } | Sort-Object val -Descending) | Select-Object -First 1
+            $wf = @($pickFront | Sort-Object val) | Select-Object -First 1
+            $wb = @($pickBack  | Sort-Object val) | Select-Object -First 1
+            if ($b -and $wf -and $wb -and ($b.val -gt ($wf.val + $wb.val))) {
+                Write-Host ("[lt][SQUAD] big {0}(xp{1}) replaces {2}(xp{3})+{4}(xp{5})" -f $b.campId,$b.xp,$wf.campId,$wf.xp,$wb.campId,$wb.xp) -ForegroundColor Yellow
+                $pickFront = @($pickFront | Where-Object { $_.impl -ne $wf.impl })
+                $pickBack  = @($pickBack  | Where-Object { $_.impl -ne $wb.impl })
+                $bigPicks  = @($bigPicks + $b)
+            } else { break }
+        }
+
+        Write-Host "[lt][SQUAD] PLAN (enter ONLY these camps):" -ForegroundColor Green
+        Write-Host ("[lt][SQUAD]   FRONT defenders: " + ((@($pickFront) | ForEach-Object { "{0}(xp{1})" -f $_.campId,$_.xp }) -join ', ')) -ForegroundColor Gray
+        Write-Host ("[lt][SQUAD]   BACK any-reach:  " + ((@($pickBack)  | ForEach-Object { "{0}(xp{1},r{2})" -f $_.campId,$_.xp,$_.reach }) -join ', ')) -ForegroundColor Gray
+        if (@($bigPicks).Count) { Write-Host ("[lt][SQUAD]   BIG (column):    " + ((@($bigPicks) | ForEach-Object { "{0}(xp{1},r{2})" -f $_.campId,$_.xp,$_.reach }) -join ', ')) -ForegroundColor Gray }
+        $visit = @($pickFront + $pickBack + $bigPicks) | Sort-Object x
+        Write-Host ("[lt][SQUAD]   camps to enter (x-order): " + ((@($visit) | ForEach-Object { "$($_.campId)@$($_.x)" }) -join ' -> ')) -ForegroundColor Cyan
+        Write-Host "[lt] LEFT RUNNING - plan only (no hire/placement yet). Done." -ForegroundColor Yellow
         return
     }
 
