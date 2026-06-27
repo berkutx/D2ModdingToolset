@@ -256,7 +256,68 @@ try {
         if (@($bigPicks).Count) { Write-Host ("[lt][SQUAD]   BIG (column):    " + ((@($bigPicks) | ForEach-Object { "{0}(xp{1},r{2})" -f $_.campId,$_.xp,$_.reach }) -join ', ')) -ForegroundColor Gray }
         $visit = @($pickFront + $pickBack + $bigPicks) | Sort-Object x
         Write-Host ("[lt][SQUAD]   camps to enter (x-order): " + ((@($visit) | ForEach-Object { "$($_.campId)@$($_.x)" }) -join ' -> ')) -ForegroundColor Cyan
-        Write-Host "[lt] LEFT RUNNING - plan only (no hire/placement yet). Done." -ForegroundColor Yellow
+
+        # EXECUTE: enter each chosen camp, hire its unit (free via the 100% merchant-discount perk), then
+        # place the squad front/back. Units are free and there is no turn timer, so it all fits one turn.
+        $curHero = { @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1 }
+        $hiredList = @()
+        foreach ($p in $visit) {
+            $camp = @($myCamps) | Where-Object { $_.id -eq $p.campId } | Select-Object -First 1
+            if (-not $camp) { continue }
+            Write-Host ("[lt][SQUAD] -> camp {0}@({1},{2}) for {3} ({4})" -f $camp.id,$camp.x,$camp.y,$p.impl,$(if($p.front){'FRONT'}else{'BACK'})) -ForegroundColor DarkCyan
+            $opened = $false
+            for ($s=0; $s -lt 8 -and -not $opened; $s++) {
+                if (-not (Move-Stack join $hero.id $camp.x $camp.y)) { break }
+                for ($w=0; $w -lt 6; $w++) { if ((Get-Dialog join) -eq 'DLG_MERCENARIES') { $opened=$true; break }; Start-Sleep -Milliseconds 400 }
+                $hh = & $curHero; if ($opened -or -not $hh -or $hh.movement -le 1) { break }
+            }
+            if (-not $opened) { Write-Host "   camp did not open (skip)" -ForegroundColor Yellow; continue }
+            $before = @(@((& $curHero).slots) | ForEach-Object { $_.unitId })
+            $null = Hire-Merc join $camp.id $hero.id $p.impl
+            $hired = $null
+            for ($w=0; $w -lt 15 -and -not $hired; $w++) {
+                Start-Sleep -Milliseconds 400
+                $new = @((& $curHero).slots) | Where-Object { $_.unitId -and ($before -notcontains $_.unitId) } | Select-Object -First 1
+                if ($new) { $hired = $new.unitId }
+            }
+            $null = Invoke-Button join DLG_MERCENARIES BTN_BACK
+            Start-Sleep -Milliseconds 500
+            if ($hired) { $hiredList += [pscustomobject]@{ unitId=$hired; front=$p.front }; Write-Host "   hired $hired" -ForegroundColor Green }
+            else { Write-Host "   hire did not land (skip)" -ForegroundColor Yellow }
+        }
+
+        # PLACE: front defenders -> even cells {0,2,4}, back any-reach -> odd cells {1,3,5}; leader to its
+        # line. Selection-sort the formation into the target via Move-GroupUnit (swap/move). (Big units
+        # span a column; this v1 arranges the small units - refine for big-heavy rolls.)
+        $hs = & $curHero
+        $frontU = @(); $backU = @()
+        if ($leaderFront) { $frontU += $hs.leaderId } else { $backU += $hs.leaderId }
+        foreach ($h in $hiredList) { if ($h.front) { $frontU += $h.unitId } else { $backU += $h.unitId } }
+        $desired = [ordered]@{}
+        $fc=@(0,2,4); $bc=@(1,3,5); $i=0
+        foreach ($u in $frontU) { if ($i -lt 3) { $desired["$($fc[$i])"]=$u; $i++ } }; $i=0
+        foreach ($u in $backU)  { if ($i -lt 3) { $desired["$($bc[$i])"]=$u; $i++ } }
+        foreach ($k in $desired.Keys) {
+            $c=[int]$k; $want=$desired[$k]
+            $sl=@((& $curHero).slots)
+            if ((($sl | Where-Object { $_.position -eq $c } | Select-Object -First 1).unitId) -eq $want) { continue }
+            $at=($sl | Where-Object { $_.unitId -eq $want } | Select-Object -First 1).position
+            if ($null -eq $at) { continue }
+            $null = Move-GroupUnit join $hero.id $at $c
+            Start-Sleep -Milliseconds 700
+        }
+
+        Start-Sleep -Seconds 1
+        foreach ($role in 'join','host') {
+            $h = @(Get-Stacks $role) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
+            Write-Host ("[lt][SQUAD] [{0}] final units={1}:" -f $role,$h.units) -ForegroundColor Green
+            foreach ($s in (@($h.slots) | Sort-Object position)) {
+                $ln = if ([int]$s.position % 2 -eq 0) { 'FRONT' } else { 'BACK ' }
+                $isLdr = if ($s.unitId -eq $h.leaderId) { ' <leader>' } else { '' }
+                Write-Host ("    cell {0} {1} reach={2} {3}{4}" -f $s.position,$ln,$s.reach,$s.unitId,$isLdr) -ForegroundColor Gray
+            }
+        }
+        Write-Host "[lt] LEFT RUNNING (relay pid=$($relay.Id)) - squad built. Done." -ForegroundColor Yellow
         return
     }
 
