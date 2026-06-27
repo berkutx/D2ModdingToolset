@@ -58,14 +58,18 @@ function Start-GameClient {
     return [System.Diagnostics.Process]::Start($psi)
 }
 
-# Resolve a random-scenario template's listbox index BY NAME (e.g. 'Diligence'). The generator lists
-# Templates\*.lua in case-insensitive filename order (std::filesystem), so we mirror that sort; this
-# avoids a brittle hardcoded index that breaks when templates are added or removed.
+# Resolve a random-scenario template's listbox index BY NAME (e.g. 'Diligence'). The generator
+# (hooks::loadScenarioTemplates) stores the Templates\*.lua in a std::set<fs::path>, which orders them
+# case-SENSITIVELY (ordinal: uppercase A-Z before '_' before lowercase a-z), NOT case-insensitively.
+# Mirror that EXACTLY so a lowercase-named template (e.g. 'luckytest') resolves to the same listbox index
+# the generator shows; a case-insensitive sort put it at the wrong index. (A .lua that fails to parse as a
+# template is silently skipped by the engine, shifting later indices, but every shipped template parses.)
 function Resolve-TemplateIndex([string]$GameDir, [string]$Name) {
-    $files = @(Get-ChildItem (Join-Path $GameDir 'Templates') -Filter *.lua -ErrorAction SilentlyContinue |
-        Sort-Object { $_.Name.ToUpperInvariant() })
-    for ($i = 0; $i -lt $files.Count; $i++) {
-        if ($files[$i].BaseName -ieq $Name) { return $i }
+    $names = @(Get-ChildItem (Join-Path $GameDir 'Templates') -Filter *.lua -ErrorAction SilentlyContinue | ForEach-Object Name)
+    $sorted = [System.Collections.Generic.List[string]]$names
+    $sorted.Sort([System.StringComparer]::Ordinal)
+    for ($i = 0; $i -lt $sorted.Count; $i++) {
+        if ([System.IO.Path]::GetFileNameWithoutExtension($sorted[$i]) -ieq $Name) { return $i }
     }
     throw "template '$Name' not found in $GameDir\Templates"
 }
@@ -94,9 +98,12 @@ function Get-GameUi([string]$Role) {
 function Get-World([string]$Role) {
     try { return Invoke-RestMethod "$script:RelayBase/api/world?role=$([uri]::EscapeDataString($Role))" -TimeoutSec 3 } catch { return $null }
 }
-# Convenience views over the world snapshot: the local player's resources, and the map's stacks.
+# Convenience views over the world snapshot: the local player's resources, the map's stacks, the
+# neutral mercenary camps (each with a hireable roster), and the treasure chests / bags lying around.
 function Get-Resources([string]$Role) { (Get-World $Role).players | Where-Object { $_.relation -eq 'self' } | Select-Object -First 1 }
 function Get-Stacks([string]$Role) { (Get-World $Role).stacks }
+function Get-Camps([string]$Role) { (Get-World $Role).camps }
+function Get-Bags([string]$Role) { (Get-World $Role).bags }
 # Wait until <Dialog> is the current dialog for <Role>; $true if it appeared, $false on timeout.
 function Wait-Dialog([string]$Role, [string]$Dialog, [int]$TimeoutSec = 60) {
     $t0 = Get-Date

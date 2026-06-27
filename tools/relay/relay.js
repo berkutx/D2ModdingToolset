@@ -192,8 +192,8 @@ function handleMessage(socket, op, flags, payload) {
         // never returns a dead duplicate, and its late 'close' can't touch the live entry.
         const prev = state.socketByRole[role];
         if (prev && prev !== socket) { state.clients.delete(prev); try { prev.destroy(); } catch (e) { /* gone */ } }
-        state.clients.set(socket, { role, pid: h.pid, modulePath: h.modulePath, dialog: null, widgets: [], buttons: [], players: [], stacks: [] });
-        state.byRole[role] = { connected: true, pid: h.pid, dialog: null, widgets: [], buttons: [], players: [], stacks: [], reachedStrategic: false, sawBeginTurn: false };
+        state.clients.set(socket, { role, pid: h.pid, modulePath: h.modulePath, dialog: null, widgets: [], buttons: [], players: [], stacks: [], camps: [], bags: [] });
+        state.byRole[role] = { connected: true, pid: h.pid, dialog: null, widgets: [], buttons: [], players: [], stacks: [], camps: [], bags: [], reachedStrategic: false, sawBeginTurn: false };
         state.socketByRole[role] = socket;
         console.log(`[hello] role=${role} pid=${h.pid} v${h.version}`);
         const ack = Buffer.alloc(8);
@@ -228,20 +228,22 @@ function handleMessage(socket, op, flags, payload) {
         break;
     }
     case Op.WorldSnapshot: {
-        // JSON: { day, players: [...], stacks: [...] }. Same DLL escaping guarantees as UiSnapshot,
-        // so a parse failure means a torn frame: log and skip, never crash the relay.
+        // JSON: { day, players: [...], stacks: [...], camps: [...], bags: [...] }. Same DLL escaping
+        // guarantees as UiSnapshot, so a parse failure means a torn frame: log and skip, never crash.
         let snap;
         try { snap = JSON.parse(payload.toString('utf8')); }
         catch (e) { console.error(`[world] ${roleOf(socket)} bad snapshot JSON: ${e.message}`); break; }
         const players = Array.isArray(snap.players) ? snap.players : [];
         const stacks = Array.isArray(snap.stacks) ? snap.stacks : [];
+        const camps = Array.isArray(snap.camps) ? snap.camps : [];
+        const bags = Array.isArray(snap.bags) ? snap.bags : [];
         const c = state.clients.get(socket);
         if (c) {
-            c.day = snap.day; c.players = players; c.stacks = stacks;
+            c.day = snap.day; c.players = players; c.stacks = stacks; c.camps = camps; c.bags = bags;
             const r = state.byRole[c.role];
-            if (r) { r.day = snap.day; r.players = players; r.stacks = stacks; }
+            if (r) { r.day = snap.day; r.players = players; r.stacks = stacks; r.camps = camps; r.bags = bags; }
         }
-        console.log(`[world] ${roleOf(socket)} -> day ${snap.day}, ${players.length} players, ${stacks.length} stacks`);
+        console.log(`[world] ${roleOf(socket)} -> day ${snap.day}, ${players.length} players, ${stacks.length} stacks, ${camps.length} camps, ${bags.length} bags`);
         break;
     }
     case Op.Log: {
@@ -344,15 +346,16 @@ const httpServer = http.createServer(async (req, res) => {
         for (const [name, r] of Object.entries(state.byRole)) roles[name] = { dialog: r.dialog, widgets: r.widgets };
         return sendJson(res, 200, { roles });
     }
-    // The live world snapshot. With ?role=, one role's { role, day, players, stacks }; without, every role.
+    // The live world snapshot. With ?role=, one role's { role, day, players, stacks, camps, bags };
+    // without, every role.
     if (req.method === 'GET' && path === '/api/world') {
         const role = q.get('role');
         if (role) {
             const r = state.byRole[role];
-            return sendJson(res, 200, { role, day: r ? r.day : null, players: r ? (r.players || []) : [], stacks: r ? (r.stacks || []) : [] });
+            return sendJson(res, 200, { role, day: r ? r.day : null, players: r ? (r.players || []) : [], stacks: r ? (r.stacks || []) : [], camps: r ? (r.camps || []) : [], bags: r ? (r.bags || []) : [] });
         }
         const roles = {};
-        for (const [name, r] of Object.entries(state.byRole)) roles[name] = { day: r.day, players: r.players || [], stacks: r.stacks || [] };
+        for (const [name, r] of Object.entries(state.byRole)) roles[name] = { day: r.day, players: r.players || [], stacks: r.stacks || [], camps: r.camps || [], bags: r.bags || [] };
         return sendJson(res, 200, { roles });
     }
     if (req.method === 'GET' && path === '/api/log') return sendJson(res, 200, { logs: state.logs.slice(-100), packets: state.packets.slice(-100) });

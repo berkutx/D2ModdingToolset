@@ -23,12 +23,14 @@
 #include "bindings/fortview.h"
 #include "bindings/groupview.h"
 #include "bindings/idview.h"
+#include "bindings/mercsview.h" // camps: forEachMercenary -> MercsView (+ SiteView, UnitImplView)
 #include "bindings/playerview.h"
 #include "bindings/point.h"
 #include "bindings/scenarioview.h"
 #include "bindings/stackview.h"
 #include "bindings/unitview.h" // getGroup().getUnits() yields std::vector<UnitView>; .size() needs it complete
 #include "gameutils.h"
+#include "midbag.h" // chests: raw CMidBag via forEachScenarioObject(IdType::Bag)
 #include "midgard.h"
 #include "midgardid.h"
 #include "utils.h"
@@ -222,6 +224,79 @@ void buildJson(std::string& json, const game::IMidgardObjectMap* objectMap)
         kvBool(json, "inside", s.getInside().has_value());
         json += '}';
     });
+    json += ']';
+
+    // Neutral mercenary camps: each is a CMidSiteMercs site exposing a fixed roster the visitor can
+    // hire. The test enters the first camp and hires the one hero in it, so report id/pos + the roster
+    // (impl id, level, unique). forEachMercenary already filters Site objects down to the mercs category.
+    json += ",\"camps\":[";
+    bool firstCamp = true;
+    scenario.forEachMercenary([&](const MercsView& m) {
+        const auto id = m.getId();
+        const auto pos = m.getPosition();
+        const auto roster = m.getUnits();
+        if (!firstCamp)
+            json += ',';
+        firstCamp = false;
+        json += '{';
+        kvStr(json, "id", hooks::idToString(&id.id).c_str());
+        json += ',';
+        kvInt(json, "x", pos.x);
+        json += ',';
+        kvInt(json, "y", pos.y);
+        json += ',';
+        json += "\"units\":[";
+        bool firstUnit = true;
+        for (const auto& u : roster) {
+            const auto impl = u.getImpl();
+            const auto implId = impl.getId();
+            if (!firstUnit)
+                json += ',';
+            firstUnit = false;
+            json += '{';
+            kvStr(json, "impl", hooks::idToString(&implId.id).c_str());
+            json += ',';
+            kvInt(json, "level", impl.getLevel());
+            json += ',';
+            kvBool(json, "unique", u.isUnique());
+            json += '}';
+        }
+        json += ']';
+        json += '}';
+    });
+    json += ']';
+
+    // Treasure chests / bags lying on the map. No *View wrapper exists for these, so read the raw
+    // CMidBag straight from the object map (id at offset 4 via IMidObjectT, position, inventory items).
+    // The test walks the 100-move hero onto each bag to collect it, so report id/pos + the item ids.
+    json += ",\"bags\":[";
+    bool firstBag = true;
+    hooks::forEachScenarioObject(
+        objectMap, game::IdType::Bag, [&](const game::IMidScenarioObject* obj) {
+            const auto* bag = static_cast<const game::CMidBag*>(obj);
+            const auto& pos = bag->mapElement.position;
+            if (!firstBag)
+                json += ',';
+            firstBag = false;
+            json += '{';
+            kvStr(json, "id", hooks::idToString(&bag->id).c_str());
+            json += ',';
+            kvInt(json, "x", pos.x);
+            json += ',';
+            kvInt(json, "y", pos.y);
+            json += ',';
+            json += "\"items\":[";
+            bool firstItem = true;
+            for (const game::CMidgardID* it = bag->inventory.items.bgn;
+                 it != bag->inventory.items.end; ++it) {
+                if (!firstItem)
+                    json += ',';
+                firstItem = false;
+                appendEscaped(json, hooks::idToString(it).c_str());
+            }
+            json += ']';
+            json += '}';
+        });
     json += ']';
     json += '}';
 }

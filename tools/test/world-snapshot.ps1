@@ -19,6 +19,7 @@
 param(
     [string]$GameDir,
     [string]$Template = 'Diligence', # generator template, selected by name (index resolved at runtime)
+    [int]$MapSize = 1,               # SPIN_SIZE index (0 = smallest); larger maps carry mercenary camps + more bags
     [switch]$Keep
 )
 
@@ -53,7 +54,7 @@ try {
     Start-Sleep 3
     if (-not (Set-EditText host $D EDIT_NAME "AutoWorld")) { throw "EDIT_NAME not set" } # BTN_GENERATE needs a name
     Start-Sleep 3
-    if (-not (Set-SpinOption host $D SPIN_SIZE 1)) { throw "SPIN_SIZE not set" }
+    if (-not (Set-SpinOption host $D SPIN_SIZE $MapSize)) { throw "SPIN_SIZE not set" }
     Start-Sleep 3
     if (-not (Set-SpinOption host $D SPIN_GOAL 0)) { throw "SPIN_GOAL not set" }
     Start-Sleep 3
@@ -119,6 +120,24 @@ try {
     if ($targets.Count -lt 1) { throw "no neutral/enemy stacks reported (nothing to scan/attack)" }
     Write-Host ("[world] {0} non-self stacks; e.g. id={1} relation={2} at ({3},{4}) movement={5}" -f `
             $targets.Count, $targets[0].id, $targets[0].relation, $targets[0].x, $targets[0].y, $targets[0].movement) -ForegroundColor Cyan
+
+    # (d) treasure chests / bags: each carries a position to walk a hero onto + the item ids inside.
+    #     Most templates scatter several; a tiny map may have few. Report the count + a sample.
+    $bags = @(Get-Bags host)
+    if ($bags.Count -lt 1) { throw "no bags/chests reported (the reporter's bag scan found nothing)" }
+    Write-Host ("[world] {0} chests/bags; e.g. {1} at ({2},{3}) items={4}" -f `
+            $bags.Count, $bags[0].id, $bags[0].x, $bags[0].y, @($bags[0].items).Count) -ForegroundColor Cyan
+
+    # (e) neutral mercenary camps: each carries a hireable roster (impl id, level, unique). Not every
+    #     template/size places them, so this is observe-only (logged, not a hard gate).
+    $camps = @(Get-Camps host)
+    if ($camps.Count -ge 1) {
+        $c0 = $camps[0]; $roster = (($c0.units | ForEach-Object { "$($_.impl)(L$($_.level))" }) -join ',')
+        Write-Host ("[world] {0} mercenary camps; e.g. {1} at ({2},{3}) roster=[{4}]" -f `
+                $camps.Count, $c0.id, $c0.x, $c0.y, $roster) -ForegroundColor Cyan
+    } else {
+        Write-Host "[world] 0 mercenary camps on this map (template/size dependent)." -ForegroundColor DarkGray
+    }
 
     $ok = $true
 } catch {
