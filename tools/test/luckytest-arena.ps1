@@ -228,43 +228,59 @@ try {
         $hs = @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
         $ldr = @($hs.slots) | Where-Object { $_.unitId -eq $hs.leaderId } | Select-Object -First 1
         $leaderFront = (-not $ldr) -or ([int]$ldr.reach -eq 103)
-        Write-Host ("[lt][SQUAD] leader {0} reach={1} -> {2}" -f $hs.leaderId,$(if($ldr){[int]$ldr.reach}else{'?'}),$(if($leaderFront){'FRONT'}else{'BACK'})) -ForegroundColor Cyan
+        $leaderBig = ($ldr -and ($ldr.small -eq $false))
+        Write-Host ("[lt][SQUAD] leader {0} reach={1} -> {2}{3}" -f $hs.leaderId,$(if($ldr){[int]$ldr.reach}else{'?'}),$(if($leaderFront){'FRONT'}else{'BACK'}),$(if($leaderBig){' 2x'}else{''})) -ForegroundColor Cyan
+
+        # Cell-budgeted: the formation is 6 cells; the leader occupies 1 (or 2 if big). Each hire takes 1
+        # cell (small) or 2 (big = a whole column), so count CELLS and STOP when full (3 big units already
+        # fill it). Target 3 BACK any-reach + 3 FRONT defenders; prefer singles, but take a BIG only if its
+        # value beats the best back + front singles it displaces ("ценнее по сумме").
+        $budget = 6 - $(if ($leaderBig) {2} else {1})
         $needFront = 3 - $(if ($leaderFront) {1} else {0})
         $needBack  = 3 - $(if ($leaderFront) {0} else {1})
-
-        $pickFront = @(@($cand | Where-Object { $_.front }     | Sort-Object val -Descending) | Select-Object -First $needFront)
-        $pickBack  = @(@($cand | Where-Object { -not $_.front } | Sort-Object val -Descending) | Select-Object -First $needBack)
-        $bigPicks  = @()
-        # Big-if-valuable: a big unit occupies a column (1 front + 1 back). Replace the weakest picked
-        # front+back pair with the best unpicked big if it beats their summed value. Apply greedily.
-        while ($true) {
-            $used = @($pickFront.impl + $pickBack.impl + $bigPicks.impl)
-            $b = @($cand | Where-Object { $_.big -and ($used -notcontains $_.impl) } | Sort-Object val -Descending) | Select-Object -First 1
-            $wf = @($pickFront | Sort-Object val) | Select-Object -First 1
-            $wb = @($pickBack  | Sort-Object val) | Select-Object -First 1
-            if ($b -and $wf -and $wb -and ($b.val -gt ($wf.val + $wb.val))) {
-                Write-Host ("[lt][SQUAD] big {0}(xp{1}) replaces {2}(xp{3})+{4}(xp{5})" -f $b.campId,$b.xp,$wf.campId,$wf.xp,$wb.campId,$wb.xp) -ForegroundColor Yellow
-                $pickFront = @($pickFront | Where-Object { $_.impl -ne $wf.impl })
-                $pickBack  = @($pickBack  | Where-Object { $_.impl -ne $wb.impl })
-                $bigPicks  = @($bigPicks + $b)
-            } else { break }
+        foreach ($u in $cand) { Add-Member -InputObject $u -Force -NotePropertyName cost -NotePropertyValue $(if ($u.big) {2} else {1}) }
+        $picks = @()
+        while ($budget -ge 1 -and ($needBack -gt 0 -or $needFront -gt 0)) {
+            $avail = @($cand | Where-Object { ($picks.impl -notcontains $_.impl) -and ($_.cost -le $budget) })
+            if (-not @($avail).Count) { break }
+            $bb  = @($avail | Where-Object { -not $_.front -and -not $_.big } | Sort-Object val -Descending) | Select-Object -First 1
+            $bf  = @($avail | Where-Object { $_.front -and -not $_.big } | Sort-Object val -Descending) | Select-Object -First 1
+            $big = @($avail | Where-Object { $_.big -and (((-not $_.front) -and $needBack -gt 0) -or ($_.front -and $needFront -gt 0)) } | Sort-Object val -Descending) | Select-Object -First 1
+            $pairVal = (0.0 + $(if ($bb) {$bb.val} else {0}) + $(if ($bf) {$bf.val} else {0}))
+            if ($big -and ($budget -ge 2) -and ($big.val -gt $pairVal)) {
+                $picks += $big; $budget -= 2
+                if ($big.front) { $needFront-- } else { $needBack-- }
+            } else {
+                $s = $null
+                if ($needBack -gt 0 -and $bb -and (-not ($needFront -gt 0 -and $bf -and $bf.val -gt $bb.val))) { $s = $bb }
+                elseif ($needFront -gt 0 -and $bf) { $s = $bf }
+                elseif ($needBack -gt 0 -and $bb) { $s = $bb }
+                if (-not $s) { break }
+                $picks += $s; $budget -= 1
+                if ($s.front) { $needFront-- } else { $needBack-- }
+            }
         }
-
-        Write-Host "[lt][SQUAD] PLAN (enter ONLY these camps):" -ForegroundColor Green
-        Write-Host ("[lt][SQUAD]   FRONT defenders: " + ((@($pickFront) | ForEach-Object { "{0}(xp{1})" -f $_.campId,$_.xp }) -join ', ')) -ForegroundColor Gray
-        Write-Host ("[lt][SQUAD]   BACK any-reach:  " + ((@($pickBack)  | ForEach-Object { "{0}(xp{1},r{2})" -f $_.campId,$_.xp,$_.reach }) -join ', ')) -ForegroundColor Gray
-        if (@($bigPicks).Count) { Write-Host ("[lt][SQUAD]   BIG (column):    " + ((@($bigPicks) | ForEach-Object { "{0}(xp{1},r{2})" -f $_.campId,$_.xp,$_.reach }) -join ', ')) -ForegroundColor Gray }
-        $visit = @($pickFront + $pickBack + $bigPicks) | Sort-Object x
-        Write-Host ("[lt][SQUAD]   camps to enter (x-order): " + ((@($visit) | ForEach-Object { "$($_.campId)@$($_.x)" }) -join ' -> ')) -ForegroundColor Cyan
+        Write-Host "[lt][SQUAD] PLAN (cell-budgeted; enter ONLY these camps):" -ForegroundColor Green
+        foreach ($p in @($picks)) { Write-Host ("[lt][SQUAD]   {0} {1} xp{2,-5} r{3,-3} {4}" -f $(if($p.front){'FRONT'}else{'BACK '}),$(if($p.big){'2x'}else{'1x'}),$p.xp,$p.reach,$p.campId) -ForegroundColor Gray }
+        # Nearest-first visit (the camps sit in a row; greedily take the nearest unvisited from where we are).
+        $visit = @(); $rest = @($picks); $px = [int]$hs.x
+        while (@($rest).Count) {
+            $n = @($rest | Sort-Object { [Math]::Abs([int]$_.x - $px) }) | Select-Object -First 1
+            $visit += $n; $rest = @($rest | Where-Object { $_.impl -ne $n.impl }); $px = [int]$n.x
+        }
+        Write-Host ("[lt][SQUAD]   visit order: " + ((@($visit) | ForEach-Object { "$($_.campId)@$($_.x)" }) -join ' -> ')) -ForegroundColor Cyan
 
         # EXECUTE: enter each chosen camp, hire its unit (free via the 100% merchant-discount perk), then
         # place the squad front/back. Units are free and there is no turn timer, so it all fits one turn.
         $curHero = { @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1 }
         $hiredList = @()
         foreach ($p in $visit) {
+            # cells used = per UNIQUE unit (a big unit can appear as 2 slot entries) weighted 2 if big.
+            $used = ((@((& $curHero).slots) | Group-Object unitId) | ForEach-Object { if ($_.Group[0].isBig) { 2 } else { 1 } } | Measure-Object -Sum).Sum
+            if ((6 - $used) -lt $p.cost) { Write-Host "   squad full ($used/6 cells) -> stop" -ForegroundColor Yellow; break }
             $camp = @($myCamps) | Where-Object { $_.id -eq $p.campId } | Select-Object -First 1
             if (-not $camp) { continue }
-            Write-Host ("[lt][SQUAD] -> camp {0}@({1},{2}) for {3} ({4})" -f $camp.id,$camp.x,$camp.y,$p.impl,$(if($p.front){'FRONT'}else{'BACK'})) -ForegroundColor DarkCyan
+            Write-Host ("[lt][SQUAD] -> camp {0}@({1},{2}) for {3} ({4} {5})" -f $camp.id,$camp.x,$camp.y,$p.impl,$(if($p.front){'FRONT'}else{'BACK'}),$(if($p.big){'2x'}else{'1x'})) -ForegroundColor DarkCyan
             $opened = $false
             for ($s=0; $s -lt 8 -and -not $opened; $s++) {
                 if (-not (Move-Stack join $hero.id $camp.x $camp.y)) { break }
@@ -282,21 +298,28 @@ try {
             }
             $null = Invoke-Button join DLG_MERCENARIES BTN_BACK
             Start-Sleep -Milliseconds 500
-            if ($hired) { $hiredList += [pscustomobject]@{ unitId=$hired; front=$p.front }; Write-Host "   hired $hired" -ForegroundColor Green }
+            if ($hired) { $hiredList += [pscustomobject]@{ unitId=$hired; front=$p.front; big=$p.big }; Write-Host "   hired $hired" -ForegroundColor Green }
             else { Write-Host "   hire did not land (skip)" -ForegroundColor Yellow }
         }
 
-        # PLACE: front defenders -> even cells {0,2,4}, back any-reach -> odd cells {1,3,5}; leader to its
-        # line. Selection-sort the formation into the target via Move-GroupUnit (swap/move). (Big units
-        # span a column; this v1 arranges the small units - refine for big-heavy rolls.)
-        $hs = & $curHero
+        # PLACE: big units already hold whole columns from the hire - leave them anchored. Arrange the
+        # SMALL units (incl. a small leader) into the remaining cells: front-defenders -> even {0,2,4},
+        # back any-reach -> odd {1,3,5}. Then selection-sort into place via Move-GroupUnit (never a big col).
+        $sl0 = @((& $curHero).slots)
+        $bigBlocked = @()
+        foreach ($g in (@($sl0 | Where-Object { $_.isBig }) | Group-Object unitId)) {
+            $col = ([Math]::Floor([int]$g.Group[0].position / 2)) * 2   # a big unit owns its whole column
+            $bigBlocked += $col; $bigBlocked += ($col + 1)
+        }
+        $bigBlocked = @($bigBlocked | Select-Object -Unique)
+        $availFront = @(0,2,4 | Where-Object { $bigBlocked -notcontains $_ })
+        $availBack  = @(1,3,5 | Where-Object { $bigBlocked -notcontains $_ })
         $frontU = @(); $backU = @()
-        if ($leaderFront) { $frontU += $hs.leaderId } else { $backU += $hs.leaderId }
-        foreach ($h in $hiredList) { if ($h.front) { $frontU += $h.unitId } else { $backU += $h.unitId } }
+        if (-not $leaderBig) { if ($leaderFront) { $frontU += $hs.leaderId } else { $backU += $hs.leaderId } }
+        foreach ($h in $hiredList) { if (-not $h.big) { if ($h.front) { $frontU += $h.unitId } else { $backU += $h.unitId } } }
         $desired = [ordered]@{}
-        $fc=@(0,2,4); $bc=@(1,3,5); $i=0
-        foreach ($u in $frontU) { if ($i -lt 3) { $desired["$($fc[$i])"]=$u; $i++ } }; $i=0
-        foreach ($u in $backU)  { if ($i -lt 3) { $desired["$($bc[$i])"]=$u; $i++ } }
+        $i=0; foreach ($u in $frontU) { if ($i -lt @($availFront).Count) { $desired["$($availFront[$i])"]=$u; $i++ } }
+        $i=0; foreach ($u in $backU)  { if ($i -lt @($availBack).Count)  { $desired["$($availBack[$i])"]=$u; $i++ } }
         foreach ($k in $desired.Keys) {
             $c=[int]$k; $want=$desired[$k]
             $sl=@((& $curHero).slots)
