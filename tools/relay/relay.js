@@ -42,6 +42,7 @@ const Op = {
     DismissUnit: 0x0309,    // -> client: dismiss a non-leader unit from a stack (u16 stackId | u16 unitId)
     UiSnapshot: 0x0410,     // <- client: current dialog + all its widgets with state (JSON)
     WorldSnapshot: 0x0411,  // <- client: players' resources + all map stacks (JSON)
+    LobbyChat: 0x0412,      // <- client: received custom-lobby chat log (JSON {messages:[{t,sender,text}]})
     Log: 0xff00,
 };
 
@@ -249,6 +250,22 @@ function handleMessage(socket, op, flags, payload) {
         console.log(`[world] ${roleOf(socket)} -> day ${snap.day}, ${players.length} players, ${stacks.length} stacks, ${camps.length} camps, ${bags.length} bags`);
         break;
     }
+    case Op.LobbyChat: {
+        // JSON: { messages: [ { t, sender, text }, ... ] } - the whole recent log, re-sent on change.
+        // Same DLL escaping guarantees as the other snapshots, so a parse failure is a torn frame: skip.
+        let snap;
+        try { snap = JSON.parse(payload.toString('utf8')); }
+        catch (e) { console.error(`[lobbychat] ${roleOf(socket)} bad JSON: ${e.message}`); break; }
+        const messages = Array.isArray(snap.messages) ? snap.messages : [];
+        const c = state.clients.get(socket);
+        if (c) {
+            c.lobbyChat = messages;
+            const r = state.byRole[c.role];
+            if (r) r.lobbyChat = messages;
+        }
+        console.log(`[lobbychat] ${roleOf(socket)} -> ${messages.length} msgs`);
+        break;
+    }
     case Op.Log: {
         const line = payload.toString('utf8');
         ring(state.logs, { t: nowIso(), role: roleOf(socket), line });
@@ -296,8 +313,13 @@ function attachParser(socket) {
     });
 }
 
-const pipeServer = net.createServer((socket) => {
-    console.log('[pipe] client connected');
+// Agent connections arrive over a Windows named pipe (default) and/or a TCP socket. The TCP path is
+// for the game running under Wine/WSL, where the bridge connects via D2TESTDRV_BRIDGE_TCP_HOST/_PORT
+// (a Wine process cannot reach a Linux-node "named pipe", which is just a unix socket). Same length-
+// prefixed frame protocol on both, so one handler serves both. Opt-in + platform-gated: zero change
+// to the Windows pipe flow.
+function onAgentConn(socket) {
+    console.log('[conn] client connected');
     state.clients.set(socket, { role: '?', pid: 0, modulePath: '', dialog: null, buttons: [] });
     attachParser(socket);
     const drop = () => {
@@ -309,14 +331,27 @@ const pipeServer = net.createServer((socket) => {
             if (state.byRole[c.role]) state.byRole[c.role].connected = false;
             delete state.socketByRole[c.role];
         }
-        console.log(`[pipe] ${c ? c.role : '?'} disconnected`);
+        console.log(`[conn] ${c ? c.role : '?'} disconnected`);
     };
     socket.on('close', drop);
-    socket.on('error', (e) => console.error('[pipe] socket error', e.message));
-});
+    socket.on('error', (e) => console.error('[conn] socket error', e.message));
+}
 
-pipeServer.on('error', (e) => console.error('[pipe] server error', e.message));
-pipeServer.listen(PIPE_NAME, () => console.log(`[pipe] listening on ${PIPE_NAME}`));
+// Named-pipe server (Windows only; on Wine/WSL the TCP server below is used instead).
+if (process.platform === 'win32') {
+    const pipeServer = net.createServer(onAgentConn);
+    pipeServer.on('error', (e) => console.error('[pipe] server error', e.message));
+    pipeServer.listen(PIPE_NAME, () => console.log(`[pipe] listening on ${PIPE_NAME}`));
+}
+
+// TCP agent server (set D2_RELAY_TCP_PORT to enable; the game uses D2TESTDRV_BRIDGE_TCP_HOST/_PORT).
+if (process.env.D2_RELAY_TCP_PORT) {
+    const tcpPort = parseInt(process.env.D2_RELAY_TCP_PORT, 10);
+    const tcpHost = process.env.D2_RELAY_TCP_HOST || '127.0.0.1';
+    const tcpServer = net.createServer(onAgentConn);
+    tcpServer.on('error', (e) => console.error('[tcp] server error', e.message));
+    tcpServer.listen(tcpPort, tcpHost, () => console.log(`[tcp] agent server on ${tcpHost}:${tcpPort}`));
+}
 
 // ---- HTTP API --------------------------------------------------------------
 function clientByRole(role) {
@@ -359,6 +394,18 @@ const httpServer = http.createServer(async (req, res) => {
         }
         const roles = {};
         for (const [name, r] of Object.entries(state.byRole)) roles[name] = { day: r.day, players: r.players || [], stacks: r.stacks || [], camps: r.camps || [], bags: r.bags || [] };
+        return sendJson(res, 200, { roles });
+    }
+    // The received custom-lobby chat log (set by Op.LobbyChat; needs D2TESTDRV_LOBBY_CHAT on the
+    // instance). With ?role=, one role's { role, messages:[{t,sender,text}] }; without, every role.
+    if (req.method === 'GET' && path === '/api/lobby/chat') {
+        const role = q.get('role');
+        if (role) {
+            const r = state.byRole[role];
+            return sendJson(res, 200, { role, messages: r ? (r.lobbyChat || []) : [] });
+        }
+        const roles = {};
+        for (const [name, r] of Object.entries(state.byRole)) roles[name] = { messages: r.lobbyChat || [] };
         return sendJson(res, 200, { roles });
     }
     if (req.method === 'GET' && path === '/api/log') return sendJson(res, 200, { logs: state.logs.slice(-100), packets: state.packets.slice(-100) });
