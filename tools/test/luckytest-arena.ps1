@@ -6,6 +6,8 @@
   the single hero there. Finally hand control to the user (leave everything running).
 #>
 param(
+    [switch]$AttachHost,  # WSL/lobby: drive a host already launched and AT THE ARENA via the existing
+                          # relay (:8077); skip this script's own deploy/relay-start/launch/DirectPlay pair.
     [string]$GameDir = 'C:\GOG Games\slasher_mns_2_4 - Copy',
     [string]$Mss32   = 'C:\GOG Games\DEV\_mss32_out\release-stage\mss32.dll',
     [string]$Loader  = 'C:\GOG Games\disciples2-roulette-arena-template-loader\dist\berkutx_loader.exe',
@@ -15,13 +17,21 @@ param(
                           # OPEN (no BTN_BACK) for manual inspection. Implies -SkipChests.
     [switch]$DumpCamps,   # pair, then list every own-side camp's units with their combat profile +
                           # front/back classification, and STOP (no hire). Implies -SkipChests.
-    [switch]$BuildSquad   # read all own-side camps, SELECT a leader+5 squad (3 back any-reach + 3 front
-                          # defenders, taking a big unit if it beats the 2 singles it displaces) and log
-                          # the plan. Plan-only for now (no hire/placement yet). Implies -SkipChests.
+    [switch]$BuildSquad,  # walk the road ONCE collecting chests AND entering only the needed camps
+                          # (interleaved nearest-first), SELECT a leader+5 squad (3 back any-reach + 3
+                          # front defenders, big if it beats the 2 singles it displaces), hire, place.
+    [switch]$CampProbe,   # repro: move the HOST hero to each own-half camp's EXACT entry pos+(1,3), report
+                          # landed-vs-target (drift) + open/fail, then STOP for manual inspection.
+    [switch]$JoinerSelf   # with -BuildSquad: drive ONLY the host (build + clash + attack + auto-battle); the
+                          # JOINER is played EXTERNALLY (manual) and the harness only MONITORS its turn-pass
+                          # (day increment), logging its hero/squad. The clash targets the nearest enemy.
+                          # NOTE: in the battle the JOINER is fought BY THE HUMAN - the harness never toggles
+                          # auto-battle on the joiner nor touches its battle/post-battle dialogs.
 )
-if ($DumpCamps -or $BuildSquad) { $SkipChests = $true }
+# -BuildSquad does its own interleaved chest+camp route (the bulk collect-all-first exhausts movement).
+if ($DumpCamps -or $BuildSquad -or $CampProbe) { $SkipChests = $true }
 if ($BisectCamp) { $SkipChests = $true }
-. "$PSScriptRoot\_relay.ps1"
+. (Join-Path $PSScriptRoot '_relay.ps1')
 $hookLog = Join-Path $GameDir 'berkutx_roulette.log'
 
 $Dismiss = @{
@@ -56,6 +66,55 @@ function ClickAndLeave([string]$role, [string]$dlg, [string]$btn, [int]$sec) {
     }
     return $false
 }
+# Close ONE non-map, non-camp popup (e.g. the "Вы нашли предмет" item-pickup scroll). Tries the known map
+# button ($Dismiss), then any present fwdBtn, then the FIRST enabled button - robust to unknown dialogs whose
+# close button we do not hardcode. Logs the dialog+button so unknown popups become known. '' if already clear.
+function Dismiss-Popup([string]$role) {
+    $ui = Get-GameUi $role
+    $d = $ui.dialog
+    if ($d -in @('DLG_ISO_PAL','DLG_STRATEGIC','DLG_MERCENARIES')) { return '' }
+    $btn = $null
+    if ($Dismiss.ContainsKey($d)) { $btn = $Dismiss[$d] }
+    if (-not $btn) { foreach ($pref in $fwdBtns) { if ($ui.widgets | Where-Object { $_.name -eq $pref }) { $btn = $pref; break } } }
+    if (-not $btn) { $btn = ($ui.widgets | Where-Object { $_.type -eq 'button' -and ($_.state.enabled -ne $false) } | Select-Object -First 1).name }
+    if ($btn) { $null = Invoke-Button $role $d $btn; Write-Host "      [popup] $role $d -> $btn" -ForegroundColor DarkGray }
+    return $d
+}
+# Drain popups until the map is back (or a camp dialog appears, which the caller handles).
+function Clear-ToMap([string]$role, [int]$tries=5) {
+    for ($i=0; $i -lt $tries; $i++) {
+        $d = Get-Dialog $role
+        if ($d -in @('DLG_ISO_PAL','DLG_STRATEGIC')) { return $true }
+        if ($d -eq 'DLG_MERCENARIES') { return $false }
+        $null = Dismiss-Popup $role
+        Start-Sleep -Milliseconds 500
+    }
+    return ((Get-Dialog $role) -in @('DLG_ISO_PAL','DLG_STRATEGIC'))
+}
+# Monitor an externally-played JOINER turn: poll until it PASSES (day increments) OR it starts a battle,
+# logging the joiner's hero/squad. Returns @{day; battle}. Used by -JoinerSelf (joiner is manual).
+function Wait-JoinerPass([int]$fromDay, [int]$sec, [string]$label) {
+    $t0 = Get-Date
+    while ((((Get-Date)-$t0).TotalSeconds) -lt $sec) {
+        if ((Get-Dialog host) -eq 'DLG_BATTLE_A' -or (Get-Dialog join) -eq 'DLG_BATTLE_A') {
+            Write-Host "[lt][monitor $label] BATTLE started during the joiner turn" -ForegroundColor Magenta
+            return @{ day = $fromDay; battle = $true }
+        }
+        $w = Get-World host; $d = if ($w) { [int]$w.day } else { $fromDay }
+        $jh = @(Get-Stacks join) | Where-Object { $_.relation -eq 'self' -and [int]$_.units -ge 1 } | Sort-Object { -[int]$_.units } | Select-Object -First 1
+        Write-Host ("[lt][monitor $label] day={0} join hero {1}" -f $d, $(if($jh){"$($jh.id) u$($jh.units) hp$($jh.hp) @($($jh.x),$($jh.y))"}else{'?'})) -ForegroundColor DarkGray
+        if ($d -gt $fromDay) { Write-Host "[lt][monitor $label] joiner PASSED (day $fromDay -> $d)" -ForegroundColor Green; return @{ day = $d; battle = $false } }
+        Start-Sleep -Seconds 5
+    }
+    Write-Host "[lt][monitor $label] timeout (day still $fromDay) - joiner did not pass" -ForegroundColor Yellow
+    return @{ day = $fromDay; battle = $false }
+}
+function Get-HeroById([string]$role, [string]$id) { @(Get-Stacks $role) | Where-Object { $_.id -eq $id } | Select-Object -First 1 }
+function End-RoleTurn([string]$role) {
+    $d = Get-Dialog $role
+    if ($d -in @('DLG_STRATEGIC','DLG_ISO_PAL')) { $null = Invoke-Button $role DLG_STRATEGIC BTN_END_TURN; Start-Sleep -Seconds 2; return $true }
+    return $false
+}
 function PassTurnToJoiner([int]$sec) {
     $t0=Get-Date; $lf=(Get-Date).AddSeconds(-10)
     while ((((Get-Date)-$t0).TotalSeconds) -lt $sec) {
@@ -69,7 +128,209 @@ function PassTurnToJoiner([int]$sec) {
     return [bool](Get-RoleState join).sawBeginTurn
 }
 
+# Build a leader+5 squad for ONE role during ITS active turn: read that half's 7 camps, classify each
+# offer by attack reach (103=Adjacent=FRONT defender; else=BACK any-reach; atkClass 6/14=healer=lower),
+# cell-budget select 3 BACK + 3 FRONT (a BIG 2-slot unit only if its value beats the two singles it
+# displaces), then ONE ascending-x corridor pass collecting own-half chests and entering only the chosen
+# camps to hire (free), and place (bigs anchored, smalls sorted front{0,2,4}/back{1,3,5}). Role-agnostic:
+# both halves are a vertical translation (chests one row below camps), so the same logic serves host+join.
+function Build-RoleSquad([string]$role) {
+    $hero=$null; $t0=Get-Date
+    while ((((Get-Date)-$t0).TotalSeconds) -lt 30) {
+        $hero = @(Get-Stacks $role) | Where-Object { $_.relation -eq 'self' -and $_.movement -ge 80 } | Select-Object -First 1
+        if ($hero) { break }; Start-Sleep 1
+    }
+    if (-not $hero) { Write-Host "[lt][$role] no 100-move hero -> skip build" -ForegroundColor Red; return $null }
+    Write-Host ("[lt][{0}] hero {1} @({2},{3}) mv={4}" -f $role,$hero.id,$hero.x,$hero.y,$hero.movement) -ForegroundColor Cyan
+    $myCamps = @(Get-Camps $role) | Where-Object { [Math]::Abs([int]$_.y - [int]$hero.y) -lt 15 }
+    $curHero = { @(Get-Stacks $role) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1 }
+
+    # Corridor bounds (own-half camps + chests, with margin). Leaving the band = the game TELEPORTED the hero
+    # on a bad-path move (the displacement bug) = a hard error: fail loud, never silently continue (user rule).
+    $ownBags = @(Get-Bags $role | Where-Object { [Math]::Abs([int]$_.y - [int]$hero.y) -lt 15 })
+    $xs = @(@($myCamps | ForEach-Object { [int]$_.x }) + @($ownBags | ForEach-Object { [int]$_.x }))
+    $ys = @(@($myCamps | ForEach-Object { [int]$_.y }) + @($ownBags | ForEach-Object { [int]$_.y }))
+    $xmin = (($xs | Measure-Object -Minimum).Minimum) - 4; $xmax = (($xs | Measure-Object -Maximum).Maximum) + 4
+    $ymin = (($ys | Measure-Object -Minimum).Minimum) - 4; $ymax = (($ys | Measure-Object -Maximum).Maximum) + 5
+    $assertPos = {
+        param($ctx)
+        $hh = & $curHero
+        if ($hh -and ([int]$hh.x -lt $xmin -or [int]$hh.x -gt $xmax -or [int]$hh.y -lt $ymin -or [int]$hh.y -gt $ymax)) {
+            throw "[$role] TELEPORT after $ctx -> hero $($hh.id) at ($($hh.x),$($hh.y)) left corridor x[$xmin..$xmax] y[$ymin..$ymax]"
+        }
+    }
+
+    $cand = @(foreach ($c in $myCamps) {
+        if (@($c.units).Count -eq 0) { continue }
+        $u = $c.units[0]; $reach = [int]$u.reach; $cls = [int]$u.atkClass
+        [pscustomobject]@{
+            campId=$c.id; x=[int]$c.x; y=[int]$c.y; impl=$u.impl; reach=$reach
+            xp=[int]$u.xp; hp=[int]$u.hp; big=(-not $u.small)
+            front=($reach -eq 103); healer=($cls -in 6,14)
+            val=([double]$u.xp * $(if ($cls -in 6,14) { 0.25 } else { 1.0 }))
+            cost=$(if (-not $u.small) {2} else {1})
+        }
+    })
+    $hs = & $curHero
+    $ldr = @($hs.slots) | Where-Object { $_.unitId -eq $hs.leaderId } | Select-Object -First 1
+    $leaderFront = (-not $ldr) -or ([int]$ldr.reach -eq 103)
+    # "big" = ACTUAL 2-cell occupancy. The slot reporter emits a unit's impl isBig flag, but a hero/leader
+    # carries that flag yet sits in ONE cell - so count slot entries (a big unit = 2 entries), not the flag.
+    $leaderCells = @(@($hs.slots) | Where-Object { $_.unitId -eq $hs.leaderId }).Count
+    if ($leaderCells -lt 1) { $leaderCells = 1 }
+    $leaderBig = ($leaderCells -ge 2)
+    Write-Host ("[lt][{0}] leader {1} reach={2} -> {3}{4} ({5} cell)" -f $role,$hs.leaderId,$(if($ldr){[int]$ldr.reach}else{'?'}),$(if($leaderFront){'FRONT'}else{'BACK'}),$(if($leaderBig){' 2x'}else{''}),$leaderCells) -ForegroundColor Cyan
+
+    # Target 3 BACK any-reach (odd cells) + 3 FRONT defenders (even cells). The leader holds its cell(s): a
+    # small leader = 1 cell on its line; a big leader = a whole column (1 front + 1 back). A big HIRE also
+    # fills 1 front + 1 back. Fill the MORE under-quota line FIRST so backs are never starved by higher-xp
+    # fronts; take a big only when it beats the front+back pair it would replace (or when only bigs remain).
+    $budget = 6 - $leaderCells
+    if ($leaderBig) { $needFront = 2; $needBack = 2 }
+    else { $needFront = 3 - $(if ($leaderFront) {1} else {0}); $needBack = 3 - $(if ($leaderFront) {0} else {1}) }
+    $picks = @()
+    while ($budget -ge 1 -and ($needBack -gt 0 -or $needFront -gt 0)) {
+        $avail = @($cand | Where-Object { ($picks.impl -notcontains $_.impl) -and ($_.cost -le $budget) })
+        if (-not @($avail).Count) { break }
+        $bb  = @($avail | Where-Object { -not $_.front -and -not $_.big } | Sort-Object val -Descending) | Select-Object -First 1
+        $bf  = @($avail | Where-Object { $_.front -and -not $_.big } | Sort-Object val -Descending) | Select-Object -First 1
+        $big = @($avail | Where-Object { $_.big } | Sort-Object val -Descending) | Select-Object -First 1
+        $pairVal = (0.0 + $(if ($bb) {$bb.val} else {0}) + $(if ($bf) {$bf.val} else {0}))
+        if ($big -and ($budget -ge 2) -and ($needFront -gt 0) -and ($needBack -gt 0) -and ($big.val -gt $pairVal)) {
+            $picks += $big; $budget -= 2; $needFront--; $needBack--; continue   # a big fills a whole column
+        }
+        $fillBack = if ($needBack -le 0) { $false } elseif ($needFront -le 0) { $true } else { $needBack -ge $needFront }
+        if ($fillBack -and $bb) { $picks += $bb; $needBack--; $budget--; continue }
+        if ($needFront -gt 0 -and $bf) { $picks += $bf; $needFront--; $budget--; continue }
+        if ($needBack -gt 0 -and $bb) { $picks += $bb; $needBack--; $budget--; continue }
+        if ($big -and ($budget -ge 2)) { $picks += $big; $budget -= 2; if ($needBack -gt 0) { $needBack-- } else { $needFront-- }; continue }
+        break
+    }
+
+    # ONE corridor pass: own-half chests + chosen camps, ascending x (see the EXECUTE note in git history).
+    $route = @()
+    foreach ($p in @($picks)) { $route += [pscustomobject]@{ type='camp'; id=$p.campId; x=[int]$p.x; y=[int]$p.y; pick=$p } }
+    foreach ($b in @(Get-Bags $role | Where-Object { [Math]::Abs([int]$_.y - [int]$hero.y) -lt 15 })) {
+        $route += [pscustomobject]@{ type='chest'; id=$b.id; x=[int]$b.x; y=[int]$b.y; pick=$null }
+    }
+    $route = @($route | Sort-Object { [int]$_.x })
+    Write-Host ("[lt][{0}] corridor: {1} own-half chests + {2} camps, ascending x" -f $role,@($route | Where-Object { $_.type -eq 'chest' }).Count,@($route | Where-Object { $_.type -eq 'camp' }).Count) -ForegroundColor Cyan
+    $hiredList = @(); $gotChests = 0
+    foreach ($n in $route) {
+        $h = & $curHero
+        if (-not $h -or $h.movement -le 2) { Write-Host "   [$role] out of movement -> stop route" -ForegroundColor Yellow; break }
+        if ($n.type -eq 'chest') {
+            $null = Move-Stack $role $hero.id $n.x $n.y
+            Start-Sleep -Milliseconds 1200
+            $null = Clear-ToMap $role 5   # close the "Вы нашли предмет" pickup scroll (any button)
+            $bagGone=$false; for ($k2=0; $k2 -lt 4 -and -not $bagGone; $k2++) { if (-not (@(Get-Bags $role) | Where-Object { $_.id -eq $n.id })) { $bagGone=$true } else { Start-Sleep -Milliseconds 300 } }
+            if ($bagGone) { $gotChests++ }
+            & $assertPos "chest $($n.id)"
+            continue
+        }
+        $p = $n.pick
+        $used = @((& $curHero).slots).Count   # occupied CELLS (1 slot entry per cell, big = 2 entries); NOT the isBig flag - a leader carries isBig yet holds 1 cell -> false "full"
+        if ((6 - $used) -lt $p.cost) { Write-Host "   [$role] squad full ($used/6) -> skip camp $($p.campId)" -ForegroundColor DarkGray; continue }
+        $camp = @($myCamps) | Where-Object { $_.id -eq $p.campId } | Select-Object -First 1
+        if (-not $camp) { continue }
+        Write-Host ("[lt][{0}] -> camp {1}@({2},{3}) for {4} ({5} {6})" -f $role,$camp.id,$camp.x,$camp.y,$p.impl,$(if($p.front){'FRONT'}else{'BACK'}),$(if($p.big){'2x'}else{'1x'})) -ForegroundColor DarkCyan
+        # Enter the camp via the CONFIRMED constant two-step (role-agnostic offset, probed drift=0, ~3 mp/camp,
+        # opens every time): (1) move to the EXACT "facing" cell pos+(1,3); (2) step one tile in to pos+(1,2)
+        # -> DLG_MERCENARIES opens. Targeting camp.pos itself routes the hero AROUND the building (the harness
+        # pathfinder knows only fort/ruin entrances, not merc CMidSite) = the old drain; this avoids it.
+        $enX = [int]$camp.x + 1; $enY = [int]$camp.y + 3
+        $trX = [int]$camp.x + 1; $trY = [int]$camp.y + 2
+        $null = Move-Stack $role $hero.id $enX $enY
+        Start-Sleep -Milliseconds 1000
+        $null = Clear-ToMap $role 4   # close any pickup scroll BEFORE the trigger step
+        & $assertPos "camp $($p.campId) entry"
+        $opened = $false
+        for ($s=0; $s -lt 4 -and -not $opened; $s++) {
+            if (-not (Move-Stack $role $hero.id $trX $trY)) { break }
+            for ($w=0; $w -lt 6; $w++) { if ((Get-Dialog $role) -eq 'DLG_MERCENARIES') { $opened=$true; break }; Start-Sleep -Milliseconds 400 }
+            $hh = & $curHero; if ($opened -or -not $hh -or $hh.movement -le 1) { break }
+        }
+        & $assertPos "camp $($p.campId) trigger"
+        if (-not $opened) {
+            for ($k=0; $k -lt 3; $k++) { if ((Get-Dialog $role) -ne 'DLG_MERCENARIES') { break }; $null = Invoke-Button $role DLG_MERCENARIES BTN_BACK; Start-Sleep -Milliseconds 400 }
+            Write-Host "   [$role] camp did not open (skip)" -ForegroundColor Yellow; continue
+        }
+        $before = @(@((& $curHero).slots) | ForEach-Object { $_.unitId })
+        $null = Hire-Merc $role $camp.id $hero.id $p.impl
+        $hired = $null
+        for ($w=0; $w -lt 15 -and -not $hired; $w++) {
+            Start-Sleep -Milliseconds 400
+            $new = @((& $curHero).slots) | Where-Object { $_.unitId -and ($before -notcontains $_.unitId) } | Select-Object -First 1
+            if ($new) { $hired = $new.unitId }
+        }
+        $null = Invoke-Button $role DLG_MERCENARIES BTN_BACK
+        Start-Sleep -Milliseconds 500
+        if ($hired) { $hiredList += [pscustomobject]@{ unitId=$hired; campId=$p.campId; front=$p.front; big=$p.big }; Write-Host "   [$role] hired $hired" -ForegroundColor Green }
+        else { Write-Host "   [$role] hire did not land (skip)" -ForegroundColor Yellow }
+    }
+    Write-Host ("[lt][{0}] route done: {1} chests, {2} hired" -f $role,$gotChests,@($hiredList).Count) -ForegroundColor Cyan
+
+    $sl0 = @((& $curHero).slots)
+    $bigBlocked = @()
+    foreach ($g in (@($sl0 | Group-Object unitId) | Where-Object { $_.Count -ge 2 })) {   # 2 slot entries = a real big column
+        $col = ([Math]::Floor([int]$g.Group[0].position / 2)) * 2
+        $bigBlocked += $col; $bigBlocked += ($col + 1)
+    }
+    $bigBlocked = @($bigBlocked | Select-Object -Unique)
+    $availFront = @(0,2,4 | Where-Object { $bigBlocked -notcontains $_ })
+    $availBack  = @(1,3,5 | Where-Object { $bigBlocked -notcontains $_ })
+    $frontU = @(); $backU = @()
+    if (-not $leaderBig) { if ($leaderFront) { $frontU += $hs.leaderId } else { $backU += $hs.leaderId } }
+    foreach ($hu in $hiredList) { if (-not $hu.big) { if ($hu.front) { $frontU += $hu.unitId } else { $backU += $hu.unitId } } }
+    $desired = [ordered]@{}
+    $i=0; foreach ($u in $frontU) { if ($i -lt @($availFront).Count) { $desired["$($availFront[$i])"]=$u; $i++ } }
+    $i=0; foreach ($u in $backU)  { if ($i -lt @($availBack).Count)  { $desired["$($availBack[$i])"]=$u; $i++ } }
+    foreach ($k in $desired.Keys) {
+        $c=[int]$k; $want=$desired[$k]
+        $sl=@((& $curHero).slots)
+        if ((($sl | Where-Object { $_.position -eq $c } | Select-Object -First 1).unitId) -eq $want) { continue }
+        $at=($sl | Where-Object { $_.unitId -eq $want } | Select-Object -First 1).position
+        if ($null -eq $at) { continue }
+        $null = Move-GroupUnit $role $hero.id $at $c
+        Start-Sleep -Milliseconds 700
+    }
+    # Never leave a camp dialog open: it blocks END_TURN and the turn handoff to the other role.
+    for ($k=0; $k -lt 6; $k++) { if ((Get-Dialog $role) -ne 'DLG_MERCENARIES') { break }; $null = Invoke-Button $role DLG_MERCENARIES BTN_BACK; Start-Sleep -Milliseconds 400 }
+    Start-Sleep -Seconds 1
+    $final = & $curHero
+    return [pscustomobject]@{
+        role=$role; heroId=$hero.id; leaderId=$hs.leaderId
+        candidates=$cand; pickedCampIds=@($picks.campId); hiredList=$hiredList
+        gotChests=$gotChests; finalSlots=@($final.slots); units=$final.units
+    }
+}
+
+# Print the "selected / left" table for one role: every own-half camp offer with its classification and
+# whether it was TAKEN or LEFT, then the resulting formation. Russian status labels per the user's request.
+function Show-SquadTable($res) {
+    if (-not $res) { Write-Host "[lt][SQUAD] (no result)" -ForegroundColor Red; return }
+    $picked = @($res.pickedCampIds); $hiredCamps = @($res.hiredList.campId)
+    Write-Host ""
+    Write-Host ("==== [{0}] герой {1}: выбрано {2}/{3} лагерей, нанято {4}, сундуков {5} ====" -f $res.role.ToUpper(),$res.heroId,@($picked).Count,@($res.candidates).Count,@($res.hiredList).Count,$res.gotChests) -ForegroundColor Green
+    Write-Host ("  {0,-9} {1,-11} {2,-11} {3,-6} {4,-6} {5,-7} {6}" -f 'СТАТУС','лагерь','юнит','линия','reach','xp','разм') -ForegroundColor DarkGray
+    foreach ($c in (@($res.candidates) | Sort-Object { [int]$_.x })) {
+        $status = if ($hiredCamps -contains $c.campId) { 'ВЗЯТ' } elseif ($picked -contains $c.campId) { 'ВЗЯТ?' } else { 'ОСТАВЛЕН' }
+        $col = if ($status -eq 'ОСТАВЛЕН') { 'DarkGray' } else { 'White' }
+        $line = if ($c.front) { 'FRONT' } else { 'BACK' }
+        Write-Host ("  {0,-9} {1,-11} {2,-11} {3,-6} {4,-6} {5,-7} {6}" -f $status,$c.campId,$c.impl,$line,$c.reach,$c.xp,$(if($c.big){'2x'}else{'1x'})) -ForegroundColor $col
+    }
+    Write-Host "  Итоговый строй:" -ForegroundColor Gray
+    foreach ($s in (@($res.finalSlots) | Sort-Object position)) {
+        $ln = if ([int]$s.position % 2 -eq 0) { 'FRONT' } else { 'BACK ' }
+        $isLdr = if ($s.unitId -eq $res.leaderId) { ' <leader>' } else { '' }
+        Write-Host ("    cell {0} {1} reach={2} {3}{4}" -f $s.position,$ln,$s.reach,$s.unitId,$isLdr) -ForegroundColor Gray
+    }
+}
+
 # ---- run ----------------------------------------------------------------------------------------
+$relay = $null
+$ok = $false
+if (-not $AttachHost) {
 # Cleanup OUR tagged Copy-game windows only (spare the user's mp-test + any other folder).
 Get-Process Discipl2 -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -match '\[(HOST|CLIENT)\]' -and $_.MainWindowTitle -notmatch 'mp-test' } | Stop-Process -Force -ErrorAction SilentlyContinue
 Stop-Process -Name dplaysvr -Force -ErrorAction SilentlyContinue
@@ -84,8 +345,9 @@ $idx = Resolve-TemplateIndex $GameDir 'luckytest'
 Write-Host "[lt] luckytest index=$idx; deploying + launching..." -ForegroundColor Cyan
 
 $relay = Start-TestRelay
-$ok = $false
+} else { Write-Host "[lt] -AttachHost: driving the already-launched lobby host (at the arena) via the existing relay :8077" -ForegroundColor Cyan }
 try {
+  if (-not $AttachHost) {
     # HOST via the loader (roulette hook). JOINER via plain Start-GameClient (gets the arena over the net).
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName=(Join-Path $GameDir 'berkutx_loader.exe'); $psi.WorkingDirectory=$GameDir; $psi.UseShellExecute=$false
@@ -138,6 +400,224 @@ try {
     if (-not (ClickAndLeave join DLG_LOBBY BTN_OK 45)) { throw "joiner BTN_OK did not leave lobby" }
     if (-not (ClearPopups join 180)) { throw "joiner did not reach the arena map" }
     Write-Host "[lt] both reached the arena." -ForegroundColor Green
+  }  # end DirectPlay launch+pair setup (skipped under -AttachHost; the host is already at the arena)
+
+    if ($CampProbe) {
+        # Repro on the HOST (its first turn): move the hero to each own-half camp's EXACT entry = pos+(1,3),
+        # the offset the user confirmed constant. Report where the hero ACTUALLY landed vs that target (drift)
+        # and whether the camp opened. No camp.pos fallback, no approximation - pure exact-coordinate move.
+        if (-not (ClearPopups host 60)) { throw "host not on map for probe" }
+        $hero=$null; $t0=Get-Date
+        while ((((Get-Date)-$t0).TotalSeconds) -lt 30) { $hero = @(Get-Stacks host) | Where-Object { $_.relation -eq 'self' -and $_.movement -ge 80 } | Select-Object -First 1; if ($hero) { break }; Start-Sleep 1 }
+        if (-not $hero) { throw "no host 100-move hero" }
+        $myCamps = @(Get-Camps host) | Where-Object { [Math]::Abs([int]$_.y - [int]$hero.y) -lt 15 } | Sort-Object { [int]$_.x }
+        Write-Host ("[PROBE] host hero {0} start @({1},{2}) mv={3}; {4} own-half camps" -f $hero.id,$hero.x,$hero.y,$hero.movement,@($myCamps).Count) -ForegroundColor Cyan
+        foreach ($camp in $myCamps) {
+            $ex = [int]$camp.x + 1; $ey = [int]$camp.y + 3
+            $hb = @(Get-Stacks host) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
+            if (-not $hb -or [int]$hb.movement -le 2) { Write-Host "[PROBE] out of movement -> stop" -ForegroundColor Yellow; break }
+            $r = Move-Stack host $hero.id $ex $ey
+            Start-Sleep -Milliseconds 1500
+            $dlg = Get-Dialog host
+            $ha = @(Get-Stacks host) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
+            $drift = [Math]::Abs([int]$ha.x - $ex) + [Math]::Abs([int]$ha.y - $ey)
+            $verdict = if ($dlg -eq 'DLG_MERCENARIES') { 'OPENED' } else { 'did NOT open' }
+            Write-Host ("[PROBE] camp {0} pos=({1},{2}) entry=({3},{4}) sent={5} -> landed @({6},{7}) drift={8} dialog={9} => {10}" -f $camp.id,$camp.x,$camp.y,$ex,$ey,$r,$ha.x,$ha.y,$drift,$dlg,$verdict) -ForegroundColor $(if($verdict -eq 'OPENED'){'Green'}else{'Yellow'})
+            if ($dlg -eq 'DLG_MERCENARIES') { $null = Invoke-Button host DLG_MERCENARIES BTN_BACK; Start-Sleep -Milliseconds 500 }
+            $null = Clear-ToMap host 4
+        }
+        $hf = @(Get-Stacks host) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
+        Write-Host ("[PROBE] FINAL host hero @({0},{1}) mv={2}. STOPPED - look at the host window." -f $hf.x,$hf.y,$hf.movement) -ForegroundColor Yellow
+        Write-Host "[lt] LEFT RUNNING (relay pid=$(if($relay){$relay.Id}else{'ext'})) - probe done." -ForegroundColor Yellow
+        return
+    }
+
+    if ($BuildSquad) {
+        # BOTH halves. Host acts on its (first) turn, then hands off; the joiner acts on its turn. Same
+        # role-agnostic builder for each (the two halves are a vertical translation). One table per role.
+        if (-not (ClearPopups host 60)) { throw "host not on map for build" }
+        Write-Host "[lt] building HOST squad (host turn)..." -ForegroundColor Green
+        $hostRes = Build-RoleSquad host
+        Write-Host "[lt] host done; passing turn to joiner..." -ForegroundColor Green
+        if ($JoinerSelf) {
+            # JOINER is an external human (berkut2), NOT a relay 'join' role. EVENT -> REACTION, ONE press:
+            # wait up to 150s for the joiner to ENTER THE GAME (its enemy player slot becomes human-controlled),
+            # then end the host turn with a SINGLE END_TURN. (The old PassTurnToJoiner looped, pressing END_TURN
+            # every ~3s while waiting for the non-existent 'join' relay role, which re-fired on the host's
+            # LATER turns and skipped them.)
+            Write-Host "[lt][JOINER-SELF] host built; waiting up to 150s for the joiner to enter the game..." -ForegroundColor Green
+            $jt0 = Get-Date; $joinerIn = $false
+            while ((((Get-Date)-$jt0).TotalSeconds) -lt 150) {
+                if (@((Get-World host).players) | Where-Object { $_.relation -eq 'enemy' -and $_.human }) { $joinerIn = $true; break }
+                Start-Sleep -Seconds 2
+            }
+            Write-Host ("[lt][JOINER-SELF] joiner in-game={0} -> ending host turn (single END_TURN)" -f $joinerIn) -ForegroundColor Green
+            $null = ClearPopups host 30
+            $null = Invoke-Button host DLG_STRATEGIC BTN_END_TURN; Start-Sleep -Seconds 2
+            # JOINER is external (manual): do NOT build/drive it - MONITOR its day-1 turn until it passes.
+            $joinRes = $null
+            $dBuild = if ($w0 = Get-World host) { [int]$w0.day } else { 1 }
+            $null = Wait-JoinerPass $dBuild 600 "build"
+            Show-SquadTable $hostRes
+        } else {
+            if (-not (PassTurnToJoiner 150)) { throw "host end-turn did not pass to joiner" }
+            if (-not (ClearPopups join 60)) { throw "joiner not on map after turn start" }
+            Write-Host "[lt] building JOINER squad (joiner turn)..." -ForegroundColor Green
+            $joinRes = Build-RoleSquad join
+            Show-SquadTable $hostRes
+            Show-SquadTable $joinRes
+        }
+
+        # ============ POST-BUILD: cycle the day -> head-on clash -> host attacks joiner -> both auto-battle ===
+        $hostHero = $hostRes.heroId
+        if (-not $hostHero) { throw "missing host hero id - cannot stage the clash" }
+        if ($JoinerSelf) {
+            # Joiner already passed (monitored) -> host's turn now. No joiner id to drive (it is manual); the
+            # clash targets the nearest ENEMY. Clear the host's new-day begin-turn/income dialogs.
+            $joinHero = $null
+            Write-Host "[lt] new day: clearing host begin-turn / income dialogs..." -ForegroundColor Green
+            $null = ClearPopups host 60
+        } else {
+            $joinHero = $joinRes.heroId
+            if (-not $joinHero) { throw "missing join hero id - cannot stage the clash" }
+            # 1) Joiner ends its turn (host already ended its before the joiner built) -> a full day cycles.
+            Write-Host "[lt] joiner ending its turn (cycle the day)..." -ForegroundColor Green
+            $null = End-RoleTurn join
+            # 2) New day: click through begin-turn + income dialogs (each role as its turn comes up).
+            Write-Host "[lt] new day: clearing begin-turn / income dialogs..." -ForegroundColor Green
+            $null = ClearPopups host 60
+            $null = ClearPopups join 60
+        }
+
+        # 3) Pause 30s before the clash.
+        Write-Host "[lt] pause 30s..." -ForegroundColor Cyan
+        Start-Sleep -Seconds 30
+
+        # 4) Head-on: each hero moves toward the OTHER across its turn; the HOST moves first each cycle so it
+        #    delivers the attack (Move-Stack onto the enemy tile -> server starts the PvP battle = DLG_BATTLE_A).
+        # Pre-clash baseline (on the map = valid; mid-battle hp/world is stale, only read AFTER the battle).
+        # The winner is judged from unit losses measured map-to-map (before the clash vs after the battle).
+        $preH = Get-HeroById host $hostHero
+        $preHostUnits = [int]$preH.units
+        if ($JoinerSelf) {
+            # joiner is manual: baseline its main (most-units) self stack and track it as $joinHero for stats
+            $preJ = @(Get-Stacks join) | Where-Object { $_.relation -eq 'self' -and [int]$_.units -ge 1 } | Sort-Object { -[int]$_.units } | Select-Object -First 1
+            if ($preJ) { $joinHero = $preJ.id }
+        } else {
+            $preJ = Get-HeroById join $joinHero
+        }
+        $preJoinUnits = [int]$preJ.units
+        Write-Host ("[lt] pre-clash baseline: host {0} units / join {1} units (joinHero={2})" -f $preHostUnits,$preJoinUnits,$joinHero) -ForegroundColor DarkGray
+        Write-Host "[lt] heroes closing for a head-on clash..." -ForegroundColor Green
+        $battleRole = $null
+        for ($cyc = 0; $cyc -lt 8 -and -not $battleRole; $cyc++) {
+            $null = ClearPopups host 40
+            $hp = Get-HeroById host $hostHero
+            if ($JoinerSelf) {
+                $jp = @(Get-Stacks host) | Where-Object { $_.relation -eq 'enemy' -and [int]$_.units -ge 1 } | Sort-Object { [Math]::Max([Math]::Abs([int]$_.x-[int]$hp.x),[Math]::Abs([int]$_.y-[int]$hp.y)) } | Select-Object -First 1
+            } else {
+                $jp = Get-HeroById join $joinHero
+            }
+            if ($hp -and $jp) {
+                Write-Host ("[lt][clash $cyc] HOST @({0},{1}) mv={2} -> target {3} @({4},{5})" -f $hp.x,$hp.y,$hp.movement,$jp.id,$jp.x,$jp.y) -ForegroundColor DarkCyan
+                $null = Move-Stack host $hostHero ([int]$jp.x) ([int]$jp.y)
+                # The host's day-2 move can be long: give ~15s for the move animation to finish, clicking
+                # through any chest/event popups it walks over en route, BEFORE reading whether the move
+                # landed in a battle (a too-short wait mis-reads the still-animating hero).
+                for ($s = 0; $s -lt 10; $s++) {
+                    Start-Sleep -Milliseconds 1500
+                    $hd = Get-Dialog host
+                    if ($hd -eq 'DLG_BATTLE_A') { break }
+                    if ($hd -and $hd -notin @('DLG_ISO_PAL','DLG_STRATEGIC')) { foreach ($b in $fwdBtns) { if (Invoke-Button host $hd $b) { break } } }
+                }
+                if ((Get-Dialog host) -eq 'DLG_BATTLE_A') { $battleRole = 'host'; break }
+            } elseif ($JoinerSelf) { Write-Host "[lt][clash $cyc] no enemy stack visible to the host yet" -ForegroundColor Yellow }
+            $null = End-RoleTurn host
+            if ($JoinerSelf) {
+                # Monitor the joiner's manual turn: pass = day++ OR it attacked (battle).
+                $dC = if ($wC = Get-World host) { [int]$wC.day } else { 0 }
+                $mr = Wait-JoinerPass $dC 600 "clash $cyc"
+                if ($mr.battle) { $battleRole = $(if ((Get-Dialog host) -eq 'DLG_BATTLE_A') { 'host' } else { 'join' }); break }
+            } else {
+                $null = ClearPopups join 40
+                $hp = Get-HeroById host $hostHero; $jp = Get-HeroById join $joinHero
+                if ($hp -and $jp) {
+                    Write-Host ("[lt][clash $cyc] JOIN @({0},{1}) mv={2} -> HOST @({3},{4})" -f $jp.x,$jp.y,$jp.movement,$hp.x,$hp.y) -ForegroundColor DarkCyan
+                    $null = Move-Stack join $joinHero ([int]$hp.x) ([int]$hp.y); Start-Sleep 2
+                    if ((Get-Dialog join) -eq 'DLG_BATTLE_A') { $battleRole = 'join'; break }
+                }
+                $null = End-RoleTurn join
+            }
+        }
+
+        if (-not $battleRole) {
+            Write-Host "[lt] heroes did not reach a clash in 6 cycles (check the path between halves)." -ForegroundColor Yellow
+        } else {
+            # *** -JoinerSelf: ONLY the HOST auto-battles. The JOINER is the HUMAN player - they fight the
+            # *** battle THEMSELVES, so the harness must NOT toggle its auto-battle nor touch its battle/post-
+            # *** battle dialogs. (User: "я должен был сам драться - не делай так в этом тесте".)
+            $battleRoles = if ($JoinerSelf) { @('host') } else { @('host','join') }
+            Write-Host ("[lt] BATTLE started ($battleRole initiated). Engaging auto-battle on: {0}..." -f ($battleRoles -join '+')) -ForegroundColor Green
+            # 5) Engage auto-battle. The action panel (TOG_AUTOBATTLE) is built only when it is THAT player's
+            #    unit-turn (battleviewerinterfhooks.cpp:566-577) and the reporter captures only the viewer
+            #    frame - so POLL and toggle whenever reachable, not one-shot. -JoinerSelf -> host only.
+            $autoOn = @{}; foreach ($r in $battleRoles) { $autoOn[$r] = $false }
+            $t0 = Get-Date
+            while ((((Get-Date)-$t0).TotalSeconds) -lt 45 -and (@($battleRoles | Where-Object { -not $autoOn[$_] }).Count -gt 0)) {
+                foreach ($r in $battleRoles) {
+                    if ($autoOn[$r]) { continue }
+                    $d = Get-Dialog $r
+                    if ($d -in @('DLG_STRATEGIC','DLG_ISO_PAL')) { $autoOn[$r] = $true; continue }    # already resolved out
+                    if ($d -eq 'DLG_BATTLE_A' -and (Invoke-Toggle $r DLG_BATTLE_A TOG_AUTOBATTLE)) { $autoOn[$r] = $true; Write-Host "   [$r] auto-battle ON" -ForegroundColor Green }
+                }
+                Start-Sleep -Milliseconds 700
+            }
+            foreach ($r in $battleRoles) { if (-not $autoOn[$r]) { Write-Host "   [$r] could not reach TOG_AUTOBATTLE (panel not up)" -ForegroundColor Yellow } }
+            if ($JoinerSelf) { Write-Host "[lt] JOINER-SELF: fight the battle on the JOINER yourself - the harness will NOT touch it." -ForegroundColor Magenta }
+
+            # 6) End the battle: wait until BOTH roles are back on the map (battle over). Manage dialogs ONLY
+            #    for the harness-driven roles ($battleRoles); in -JoinerSelf the joiner battle is the human's,
+            #    leave it alone. Grace window for auto-resolve, then BTN_CLOSE a stalled host battle.
+            Write-Host "[lt] settling the battle..." -ForegroundColor Cyan
+            $battleClose = @('BTN_OK','BTN_TAKEALL','BTN_TAKE','BTN_CONTINUE','BTN_RIGHTSIDE')
+            $t0 = Get-Date; $graceSec = 60
+            while ((((Get-Date)-$t0).TotalSeconds) -lt 180) {
+                $elapsed = ((Get-Date)-$t0).TotalSeconds
+                $allMap = $true
+                foreach ($r in 'host','join') {
+                    $d = Get-Dialog $r
+                    if ($d -notin @('DLG_STRATEGIC','DLG_ISO_PAL')) {
+                        $allMap = $false
+                        if ($r -in $battleRoles) {   # the human joiner's battle is left untouched in -JoinerSelf
+                            if ($d -eq 'DLG_BATTLE_A') { if ($elapsed -gt $graceSec) { $null = Invoke-Button $r DLG_BATTLE_A BTN_CLOSE } }   # force-exit a stalled battle only after the grace window
+                            else { foreach ($b in $battleClose) { if (Invoke-Button $r $d $b) { break } } }
+                        }
+                    }
+                }
+                if ($allMap) { break }
+                Start-Sleep -Milliseconds 900
+            }
+            # Post-battle result - read ONLY now, after the battle is over (mid-battle world is stale). Retry
+            # the census so an ABSENT hero = a real removal (destroyed), not a dropped poll. Winner = whoever
+            # destroyed the other, else fewer unit losses (map-to-map vs the pre-clash baseline); log for stats.
+            Start-Sleep -Seconds 2
+            $postHs = @(); $postJs = @(); $t0 = Get-Date
+            while ((((Get-Date)-$t0).TotalSeconds) -lt 15) { $postHs = @(Get-Stacks host); $postJs = @(Get-Stacks join); if ($postHs.Count -gt 0 -and $postJs.Count -gt 0) { break }; Start-Sleep 1 }
+            $postH = $postHs | Where-Object { $_.id -eq $hostHero } | Select-Object -First 1   # host hero from the HOST view
+            $postJ = $postJs | Where-Object { $_.id -eq $joinHero } | Select-Object -First 1   # join hero from the JOIN view (no fog)
+            $hUnits = $(if ($postH) { [int]$postH.units } else { 0 }); $jUnits = $(if ($postJ) { [int]$postJ.units } else { 0 })
+            $hLost = $preHostUnits - $hUnits; $jLost = $preJoinUnits - $jUnits
+            $winner = if (-not $postH -and -not $postJ) { 'BOTH GONE' } elseif (-not $postH) { 'JOIN' } elseif (-not $postJ) { 'HOST' }
+                      elseif ($jLost -gt $hLost) { 'HOST' } elseif ($hLost -gt $jLost) { 'JOIN' } else { 'DRAW/no-contest' }
+            Write-Host ("[lt][BATTLE RESULT] WINNER={0}" -f $winner) -ForegroundColor Magenta
+            Write-Host ("[lt][BATTLE RESULT] host: {0} units (was {1}, lost {2}) hp={3} @({4}) | join: {5} units (was {6}, lost {7}) hp={8} @({9})" -f `
+                $hUnits,$preHostUnits,$hLost,$(if($postH){$postH.hp}else{0}),$(if($postH){"$($postH.x),$($postH.y)"}else{'-'}),`
+                $jUnits,$preJoinUnits,$jLost,$(if($postJ){$postJ.hp}else{0}),$(if($postJ){"$($postJ.x),$($postJ.y)"}else{'-'})) -ForegroundColor Magenta
+        }
+
+        Write-Host "[lt] LEFT RUNNING (relay pid=$(if($relay){$relay.Id}else{'ext'})) - both squads built + clash. Done." -ForegroundColor Yellow
+        return
+    }
 
     Write-Host "[lt] host passing turn to joiner..." -ForegroundColor Green
     # Host passes its turn so the JOINER plays.
@@ -207,140 +687,7 @@ try {
             Write-Host ("[lt][DUMP] camp {0} @({1},{2}):" -f $c.id,$c.x,$c.y) -ForegroundColor Cyan
             foreach ($u in @($c.units)) { Write-Host ("    " + (Classify $u)) -ForegroundColor Gray }
         }
-        Write-Host "[lt] LEFT RUNNING (relay pid=$($relay.Id)) - camps dumped, /api/world available. Done." -ForegroundColor Yellow
-        return
-    }
-
-    if ($BuildSquad) {
-        # Select a leader+5 squad from the 7 own-side camps: 3 BACK any-reach (reach != 103) + 3 FRONT
-        # defenders (reach == 103), best by xp (healers atkClass 6/14 deprioritized). Take a BIG unit if
-        # its xp beats the two singles it would displace (it occupies a whole column). Plan-only for now.
-        $cand = @(foreach ($c in $myCamps) {
-            if (@($c.units).Count -eq 0) { continue }
-            $u = $c.units[0]; $reach = [int]$u.reach; $cls = [int]$u.atkClass
-            [pscustomobject]@{
-                campId=$c.id; x=[int]$c.x; y=[int]$c.y; impl=$u.impl; reach=$reach
-                xp=[int]$u.xp; hp=[int]$u.hp; big=(-not $u.small)
-                front=($reach -eq 103); healer=($cls -in 6,14)
-                val=([double]$u.xp * $(if ($cls -in 6,14) { 0.25 } else { 1.0 }))
-            }
-        })
-        $hs = @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
-        $ldr = @($hs.slots) | Where-Object { $_.unitId -eq $hs.leaderId } | Select-Object -First 1
-        $leaderFront = (-not $ldr) -or ([int]$ldr.reach -eq 103)
-        $leaderBig = ($ldr -and ($ldr.small -eq $false))
-        Write-Host ("[lt][SQUAD] leader {0} reach={1} -> {2}{3}" -f $hs.leaderId,$(if($ldr){[int]$ldr.reach}else{'?'}),$(if($leaderFront){'FRONT'}else{'BACK'}),$(if($leaderBig){' 2x'}else{''})) -ForegroundColor Cyan
-
-        # Cell-budgeted: the formation is 6 cells; the leader occupies 1 (or 2 if big). Each hire takes 1
-        # cell (small) or 2 (big = a whole column), so count CELLS and STOP when full (3 big units already
-        # fill it). Target 3 BACK any-reach + 3 FRONT defenders; prefer singles, but take a BIG only if its
-        # value beats the best back + front singles it displaces ("ценнее по сумме").
-        $budget = 6 - $(if ($leaderBig) {2} else {1})
-        $needFront = 3 - $(if ($leaderFront) {1} else {0})
-        $needBack  = 3 - $(if ($leaderFront) {0} else {1})
-        foreach ($u in $cand) { Add-Member -InputObject $u -Force -NotePropertyName cost -NotePropertyValue $(if ($u.big) {2} else {1}) }
-        $picks = @()
-        while ($budget -ge 1 -and ($needBack -gt 0 -or $needFront -gt 0)) {
-            $avail = @($cand | Where-Object { ($picks.impl -notcontains $_.impl) -and ($_.cost -le $budget) })
-            if (-not @($avail).Count) { break }
-            $bb  = @($avail | Where-Object { -not $_.front -and -not $_.big } | Sort-Object val -Descending) | Select-Object -First 1
-            $bf  = @($avail | Where-Object { $_.front -and -not $_.big } | Sort-Object val -Descending) | Select-Object -First 1
-            $big = @($avail | Where-Object { $_.big -and (((-not $_.front) -and $needBack -gt 0) -or ($_.front -and $needFront -gt 0)) } | Sort-Object val -Descending) | Select-Object -First 1
-            $pairVal = (0.0 + $(if ($bb) {$bb.val} else {0}) + $(if ($bf) {$bf.val} else {0}))
-            if ($big -and ($budget -ge 2) -and ($big.val -gt $pairVal)) {
-                $picks += $big; $budget -= 2
-                if ($big.front) { $needFront-- } else { $needBack-- }
-            } else {
-                $s = $null
-                if ($needBack -gt 0 -and $bb -and (-not ($needFront -gt 0 -and $bf -and $bf.val -gt $bb.val))) { $s = $bb }
-                elseif ($needFront -gt 0 -and $bf) { $s = $bf }
-                elseif ($needBack -gt 0 -and $bb) { $s = $bb }
-                if (-not $s) { break }
-                $picks += $s; $budget -= 1
-                if ($s.front) { $needFront-- } else { $needBack-- }
-            }
-        }
-        Write-Host "[lt][SQUAD] PLAN (cell-budgeted; enter ONLY these camps):" -ForegroundColor Green
-        foreach ($p in @($picks)) { Write-Host ("[lt][SQUAD]   {0} {1} xp{2,-5} r{3,-3} {4}" -f $(if($p.front){'FRONT'}else{'BACK '}),$(if($p.big){'2x'}else{'1x'}),$p.xp,$p.reach,$p.campId) -ForegroundColor Gray }
-        # Nearest-first visit (the camps sit in a row; greedily take the nearest unvisited from where we are).
-        $visit = @(); $rest = @($picks); $px = [int]$hs.x
-        while (@($rest).Count) {
-            $n = @($rest | Sort-Object { [Math]::Abs([int]$_.x - $px) }) | Select-Object -First 1
-            $visit += $n; $rest = @($rest | Where-Object { $_.impl -ne $n.impl }); $px = [int]$n.x
-        }
-        Write-Host ("[lt][SQUAD]   visit order: " + ((@($visit) | ForEach-Object { "$($_.campId)@$($_.x)" }) -join ' -> ')) -ForegroundColor Cyan
-
-        # EXECUTE: enter each chosen camp, hire its unit (free via the 100% merchant-discount perk), then
-        # place the squad front/back. Units are free and there is no turn timer, so it all fits one turn.
-        $curHero = { @(Get-Stacks join) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1 }
-        $hiredList = @()
-        foreach ($p in $visit) {
-            # cells used = per UNIQUE unit (a big unit can appear as 2 slot entries) weighted 2 if big.
-            $used = ((@((& $curHero).slots) | Group-Object unitId) | ForEach-Object { if ($_.Group[0].isBig) { 2 } else { 1 } } | Measure-Object -Sum).Sum
-            if ((6 - $used) -lt $p.cost) { Write-Host "   squad full ($used/6 cells) -> stop" -ForegroundColor Yellow; break }
-            $camp = @($myCamps) | Where-Object { $_.id -eq $p.campId } | Select-Object -First 1
-            if (-not $camp) { continue }
-            Write-Host ("[lt][SQUAD] -> camp {0}@({1},{2}) for {3} ({4} {5})" -f $camp.id,$camp.x,$camp.y,$p.impl,$(if($p.front){'FRONT'}else{'BACK'}),$(if($p.big){'2x'}else{'1x'})) -ForegroundColor DarkCyan
-            $opened = $false
-            for ($s=0; $s -lt 8 -and -not $opened; $s++) {
-                if (-not (Move-Stack join $hero.id $camp.x $camp.y)) { break }
-                for ($w=0; $w -lt 6; $w++) { if ((Get-Dialog join) -eq 'DLG_MERCENARIES') { $opened=$true; break }; Start-Sleep -Milliseconds 400 }
-                $hh = & $curHero; if ($opened -or -not $hh -or $hh.movement -le 1) { break }
-            }
-            if (-not $opened) { Write-Host "   camp did not open (skip)" -ForegroundColor Yellow; continue }
-            $before = @(@((& $curHero).slots) | ForEach-Object { $_.unitId })
-            $null = Hire-Merc join $camp.id $hero.id $p.impl
-            $hired = $null
-            for ($w=0; $w -lt 15 -and -not $hired; $w++) {
-                Start-Sleep -Milliseconds 400
-                $new = @((& $curHero).slots) | Where-Object { $_.unitId -and ($before -notcontains $_.unitId) } | Select-Object -First 1
-                if ($new) { $hired = $new.unitId }
-            }
-            $null = Invoke-Button join DLG_MERCENARIES BTN_BACK
-            Start-Sleep -Milliseconds 500
-            if ($hired) { $hiredList += [pscustomobject]@{ unitId=$hired; front=$p.front; big=$p.big }; Write-Host "   hired $hired" -ForegroundColor Green }
-            else { Write-Host "   hire did not land (skip)" -ForegroundColor Yellow }
-        }
-
-        # PLACE: big units already hold whole columns from the hire - leave them anchored. Arrange the
-        # SMALL units (incl. a small leader) into the remaining cells: front-defenders -> even {0,2,4},
-        # back any-reach -> odd {1,3,5}. Then selection-sort into place via Move-GroupUnit (never a big col).
-        $sl0 = @((& $curHero).slots)
-        $bigBlocked = @()
-        foreach ($g in (@($sl0 | Where-Object { $_.isBig }) | Group-Object unitId)) {
-            $col = ([Math]::Floor([int]$g.Group[0].position / 2)) * 2   # a big unit owns its whole column
-            $bigBlocked += $col; $bigBlocked += ($col + 1)
-        }
-        $bigBlocked = @($bigBlocked | Select-Object -Unique)
-        $availFront = @(0,2,4 | Where-Object { $bigBlocked -notcontains $_ })
-        $availBack  = @(1,3,5 | Where-Object { $bigBlocked -notcontains $_ })
-        $frontU = @(); $backU = @()
-        if (-not $leaderBig) { if ($leaderFront) { $frontU += $hs.leaderId } else { $backU += $hs.leaderId } }
-        foreach ($h in $hiredList) { if (-not $h.big) { if ($h.front) { $frontU += $h.unitId } else { $backU += $h.unitId } } }
-        $desired = [ordered]@{}
-        $i=0; foreach ($u in $frontU) { if ($i -lt @($availFront).Count) { $desired["$($availFront[$i])"]=$u; $i++ } }
-        $i=0; foreach ($u in $backU)  { if ($i -lt @($availBack).Count)  { $desired["$($availBack[$i])"]=$u; $i++ } }
-        foreach ($k in $desired.Keys) {
-            $c=[int]$k; $want=$desired[$k]
-            $sl=@((& $curHero).slots)
-            if ((($sl | Where-Object { $_.position -eq $c } | Select-Object -First 1).unitId) -eq $want) { continue }
-            $at=($sl | Where-Object { $_.unitId -eq $want } | Select-Object -First 1).position
-            if ($null -eq $at) { continue }
-            $null = Move-GroupUnit join $hero.id $at $c
-            Start-Sleep -Milliseconds 700
-        }
-
-        Start-Sleep -Seconds 1
-        foreach ($role in 'join','host') {
-            $h = @(Get-Stacks $role) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
-            Write-Host ("[lt][SQUAD] [{0}] final units={1}:" -f $role,$h.units) -ForegroundColor Green
-            foreach ($s in (@($h.slots) | Sort-Object position)) {
-                $ln = if ([int]$s.position % 2 -eq 0) { 'FRONT' } else { 'BACK ' }
-                $isLdr = if ($s.unitId -eq $h.leaderId) { ' <leader>' } else { '' }
-                Write-Host ("    cell {0} {1} reach={2} {3}{4}" -f $s.position,$ln,$s.reach,$s.unitId,$isLdr) -ForegroundColor Gray
-            }
-        }
-        Write-Host "[lt] LEFT RUNNING (relay pid=$($relay.Id)) - squad built. Done." -ForegroundColor Yellow
+        Write-Host "[lt] LEFT RUNNING (relay pid=$(if($relay){$relay.Id}else{'ext'})) - camps dumped, /api/world available. Done." -ForegroundColor Yellow
         return
     }
 
@@ -408,7 +755,7 @@ try {
         } else {
             Write-Host ("[lt][BISECT] DLG_MERCENARIES did NOT open (dialog={0})" -f (Get-Dialog join)) -ForegroundColor Red
         }
-        Write-Host "[lt] LEFT RUNNING (relay pid=$($relay.Id)) - DLG_MERCENARIES open, inspect manually. Done." -ForegroundColor Yellow
+        Write-Host "[lt] LEFT RUNNING (relay pid=$(if($relay){$relay.Id}else{'ext'})) - DLG_MERCENARIES open, inspect manually. Done." -ForegroundColor Yellow
         return
     }
 
@@ -465,4 +812,4 @@ try {
 } catch {
     Write-Host "[lt] FAIL: $($_.Exception.Message)" -ForegroundColor Red
 }
-Write-Host "[lt] LEFT RUNNING (relay pid=$($relay.Id)) for inspection / hand-off." -ForegroundColor Yellow
+Write-Host "[lt] LEFT RUNNING (relay pid=$(if($relay){$relay.Id}else{'ext'})) for inspection / hand-off." -ForegroundColor Yellow
