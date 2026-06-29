@@ -8,7 +8,7 @@
  
  
  /* export for cncnet cnc games */
-@@ -149,6 +150,38 @@
+@@ -149,6 +150,46 @@
          indeo_enable();
          timeBeginPeriod(1);
          hook_init();
@@ -43,6 +43,14 @@
 +        {
 +            extern void pluginhost_install(void);
 +            pluginhost_install();
++        }
++
++        /* C4dll-R monolith: headless message-only window shim, active only when renderer=null.
++         * Detours user32!CreateWindowExA so top-level windows become HWND_MESSAGE (Wine null driver)
++         * + fake screen geometry; ported from mss32 noxwindow so the worker window also succeeds. */
++        {
++            extern void headless_install(void);
++            headless_install();
 +        }
          break;
      }

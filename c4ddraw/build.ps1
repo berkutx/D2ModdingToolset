@@ -101,8 +101,9 @@ Copy-Item (Join-Path $root "features\featuremenu.cpp") (Join-Path $build "src\fe
 Copy-Item (Join-Path $root "features\pluginhost.cpp") (Join-Path $build "src\pluginhost.cpp") -Force
 Copy-Item (Join-Path $root "features\cyrillic.cpp") (Join-Path $build "src\cyrillic.cpp") -Force
 Copy-Item (Join-Path $root "features\timerhost.cpp") (Join-Path $build "src\timerhost.cpp") -Force
+Copy-Item (Join-Path $root "features\headless.cpp") (Join-Path $build "src\headless.cpp") -Force
 Copy-Item (Join-Path $root "features\c4plugin.h") (Join-Path $build "src\c4plugin.h") -Force
-foreach ($sym in @("featuremenu_install", "pluginhost_install", "cyrillic_install")) {
+foreach ($sym in @("featuremenu_install", "pluginhost_install", "cyrillic_install", "headless_install")) {
     if (-not (Select-String -Path (Join-Path $build "src\dllmain.c") -Pattern $sym -Quiet)) {
         throw "patch did not apply: $sym() call missing from src/dllmain.c"
     }
@@ -121,9 +122,9 @@ $vcx = Join-Path $build "cnc-ddraw.vcxproj"
 (Get-Content $vcx -Raw) `
     -replace '<TargetName>ddraw</TargetName>', '<TargetName>C4dll-R</TargetName>' `
     -replace '<ModuleDefinitionFile>exports\.def</ModuleDefinitionFile>', '<ModuleDefinitionFile>C4dll-R.def</ModuleDefinitionFile>' `
-    -replace '<ClCompile Include="src\\dllmain\.c" />', "<ClCompile Include=`"src\featuremenu.cpp`" />`r`n    <ClCompile Include=`"src\pluginhost.cpp`" />`r`n    <ClCompile Include=`"src\cyrillic.cpp`" />`r`n    <ClCompile Include=`"src\timerhost.cpp`" />`r`n    <ClCompile Include=`"src\dllmain.c`" />" |
+    -replace '<ClCompile Include="src\\dllmain\.c" />', "<ClCompile Include=`"src\featuremenu.cpp`" />`r`n    <ClCompile Include=`"src\pluginhost.cpp`" />`r`n    <ClCompile Include=`"src\cyrillic.cpp`" />`r`n    <ClCompile Include=`"src\timerhost.cpp`" />`r`n    <ClCompile Include=`"src\headless.cpp`" />`r`n    <ClCompile Include=`"src\dllmain.c`" />" |
 Set-Content -Path $vcx -Encoding UTF8
-foreach ($src in @('featuremenu\.cpp', 'pluginhost\.cpp', 'cyrillic\.cpp')) {
+foreach ($src in @('featuremenu\.cpp', 'pluginhost\.cpp', 'cyrillic\.cpp', 'headless\.cpp')) {
     if (-not (Select-String -Path $vcx -Pattern $src -Quiet)) {
         throw "vcxproj retarget failed: $src not added to the project"
     }
