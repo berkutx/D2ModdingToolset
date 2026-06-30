@@ -469,7 +469,10 @@ try {
                 Start-Sleep -Seconds 2
             }
             if (-not $joinerIn) { Write-Host "[lt][JOINER-SELF] no joiner within ${jwait}s -> aborting (caller kills the process)" -ForegroundColor Yellow; throw "no joiner within ${jwait}s" }
-            Write-Host "[lt][JOINER-SELF] joiner in-game=True -> ending host turn (single END_TURN)" -ForegroundColor Green
+            # 10s buffer: human flips when the join REGISTERS, but the joiner's client is still loading the
+            # scenario; ending the host turn instantly auto-passes the joiner's day-1 turn (he enters on day 2).
+            Write-Host "[lt][JOINER-SELF] joiner in-game=True -> 10s buffer for its client to load, then ending host turn" -ForegroundColor Green
+            Start-Sleep -Seconds 10
             $null = ClearPopups host 30
             $null = Invoke-Button host DLG_STRATEGIC BTN_END_TURN; Start-Sleep -Seconds 2
             # JOINER is external (manual): do NOT build/drive it - MONITOR its day-1 turn until it passes.
