@@ -207,6 +207,12 @@ function Build-RoleSquad([string]$role) {
         break
     }
 
+    # LOG THE PLAN (diag): the leader's ACTUAL slot footprint at planning + every pick's line/size/value, so a
+    # leader-cell miscount is visible at the SOURCE (not re-derived from the final formation).
+    $ldrSlots = @($hs.slots | Where-Object { $_.unitId -eq $hs.leaderId })
+    Write-Host ("[lt][{0}][plan] leader {1} cells={2} pos=[{3}] isBig={4} -> {5}; budget-left={6} needF={7} needB={8}; {9} picks" -f $role,$hs.leaderId,@($ldrSlots).Count,(@($ldrSlots | ForEach-Object { [int]$_.position }) -join ','),$(if(@($ldrSlots)[0].isBig){'T'}else{'F'}),$(if($leaderFront){'FRONT'}else{'BACK'}),$budget,$needFront,$needBack,@($picks).Count) -ForegroundColor Magenta
+    foreach ($pp in @($picks)) { Write-Host ("[lt][{0}][plan]   pick camp {1} {2} {3} {4} val={5}" -f $role,$pp.campId,$pp.impl,$(if($pp.front){'FRONT'}else{'BACK'}),$(if($pp.big){'2x'}else{'1x'}),[int]$pp.val) -ForegroundColor Magenta }
+
     # ONE corridor pass: own-half chests + chosen camps, ascending x (see the EXECUTE note in git history).
     $route = @()
     foreach ($p in @($picks)) { $route += [pscustomobject]@{ type='camp'; id=$p.campId; x=[int]$p.x; y=[int]$p.y; pick=$p } }
@@ -255,7 +261,12 @@ function Build-RoleSquad([string]$role) {
             for ($k=0; $k -lt 3; $k++) { if ((Get-Dialog $role) -ne 'DLG_MERCENARIES') { break }; $null = Invoke-Button $role DLG_MERCENARIES BTN_BACK; Start-Sleep -Milliseconds 400 }
             Write-Host "   [$role] camp did not open (skip)" -ForegroundColor Yellow; continue
         }
-        $before = @(@((& $curHero).slots) | ForEach-Object { $_.unitId })
+        $slBefore = @((& $curHero).slots)
+        $before = @($slBefore | ForEach-Object { $_.unitId })
+        # DIAG: occupied cells + which 2-cell columns are FREE before the hire (a big unit needs a free column).
+        $occ = @($slBefore | ForEach-Object { [int]$_.position })
+        $freeCols = @(0,2,4 | Where-Object { ($occ -notcontains $_) -and ($occ -notcontains ($_+1)) })
+        Write-Host ("[lt][{0}][hire] camp {1} {2} ({3} {4}); occupied=[{5}]; free 2-cell cols=[{6}]" -f $role,$camp.id,$p.impl,$(if($p.front){'FRONT'}else{'BACK'}),$(if($p.big){'2x'}else{'1x'}),($occ -join ','),(@($freeCols) -join ',')) -ForegroundColor DarkYellow
         $null = Hire-Merc $role $camp.id $hero.id $p.impl
         $hired = $null
         for ($w=0; $w -lt 15 -and -not $hired; $w++) {
@@ -265,8 +276,12 @@ function Build-RoleSquad([string]$role) {
         }
         $null = Invoke-Button $role DLG_MERCENARIES BTN_BACK
         Start-Sleep -Milliseconds 500
-        if ($hired) { $hiredList += [pscustomobject]@{ unitId=$hired; campId=$p.campId; front=$p.front; big=$p.big }; Write-Host "   [$role] hired $hired" -ForegroundColor Green }
-        else { Write-Host "   [$role] hire did not land (skip)" -ForegroundColor Yellow }
+        if ($hired) {
+            $hiredList += [pscustomobject]@{ unitId=$hired; campId=$p.campId; front=$p.front; big=$p.big }
+            $landed = @((& $curHero).slots | Where-Object { $_.unitId -eq $hired } | ForEach-Object { [int]$_.position })
+            Write-Host ("   [$role] hired $hired at cell(s) [{0}]" -f ($landed -join ',')) -ForegroundColor Green
+        }
+        else { Write-Host ("   [$role] hire did NOT land ({0} {1}); free 2-cell cols were [{2}] -> server had no room" -f $(if($p.front){'FRONT'}else{'BACK'}),$(if($p.big){'2x'}else{'1x'}),(@($freeCols) -join ',')) -ForegroundColor Yellow }
     }
     Write-Host ("[lt][{0}] route done: {1} chests, {2} hired" -f $role,$gotChests,@($hiredList).Count) -ForegroundColor Cyan
 
@@ -291,6 +306,7 @@ function Build-RoleSquad([string]$role) {
         if ((($sl | Where-Object { $_.position -eq $c } | Select-Object -First 1).unitId) -eq $want) { continue }
         $at=($sl | Where-Object { $_.unitId -eq $want } | Select-Object -First 1).position
         if ($null -eq $at) { continue }
+        Write-Host ("[lt][{0}][place] move {1} from cell {2} -> {3}" -f $role,$want,$at,$c) -ForegroundColor DarkCyan
         $null = Move-GroupUnit $role $hero.id $at $c
         Start-Sleep -Milliseconds 700
     }
