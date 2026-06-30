@@ -461,13 +461,15 @@ try {
             # then end the host turn with a SINGLE END_TURN. (The old PassTurnToJoiner looped, pressing END_TURN
             # every ~3s while waiting for the non-existent 'join' relay role, which re-fired on the host's
             # LATER turns and skipped them.)
-            Write-Host "[lt][JOINER-SELF] host built; waiting up to 150s for the joiner to enter the game..." -ForegroundColor Green
+            $jwait = if ($env:LB_JOINERWAIT) { [int]$env:LB_JOINERWAIT } else { 150 }
+            Write-Host "[lt][JOINER-SELF] host built; waiting up to ${jwait}s for the joiner to enter the game..." -ForegroundColor Green
             $jt0 = Get-Date; $joinerIn = $false
-            while ((((Get-Date)-$jt0).TotalSeconds) -lt 150) {
+            while ((((Get-Date)-$jt0).TotalSeconds) -lt $jwait) {
                 if (@((Get-World host).players) | Where-Object { $_.relation -eq 'enemy' -and $_.human }) { $joinerIn = $true; break }
                 Start-Sleep -Seconds 2
             }
-            Write-Host ("[lt][JOINER-SELF] joiner in-game={0} -> ending host turn (single END_TURN)" -f $joinerIn) -ForegroundColor Green
+            if (-not $joinerIn) { Write-Host "[lt][JOINER-SELF] no joiner within ${jwait}s -> aborting (caller kills the process)" -ForegroundColor Yellow; throw "no joiner within ${jwait}s" }
+            Write-Host "[lt][JOINER-SELF] joiner in-game=True -> ending host turn (single END_TURN)" -ForegroundColor Green
             $null = ClearPopups host 30
             $null = Invoke-Button host DLG_STRATEGIC BTN_END_TURN; Start-Sleep -Seconds 2
             # JOINER is external (manual): do NOT build/drive it - MONITOR its day-1 turn until it passes.
