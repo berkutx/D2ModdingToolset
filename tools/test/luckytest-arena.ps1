@@ -94,20 +94,46 @@ function Clear-ToMap([string]$role, [int]$tries=5) {
 # Monitor an externally-played JOINER turn: poll until it PASSES (day increments) OR it starts a battle,
 # logging the joiner's hero/squad. Returns @{day; battle}. Used by -JoinerSelf (joiner is manual).
 function Wait-JoinerPass([int]$fromDay, [int]$sec, [string]$label) {
-    $t0 = Get-Date
+    $t0 = Get-Date; $goneStreak = 0
     while ((((Get-Date)-$t0).TotalSeconds) -lt $sec) {
-        if ((Get-Dialog host) -eq 'DLG_BATTLE_A' -or (Get-Dialog join) -eq 'DLG_BATTLE_A') {
+        $hd = Get-Dialog host
+        # JOINER DISCONNECT (client crash): once it joined (human=True), a drop flips the enemy slot human
+        # True->False and the engine reassigns it to AI, which pops a BLOCKING DLG_CHAT_AI taunt on the host.
+        # DLG_CHAT_AI = immediate, unambiguous; human=False is confirmed across 2 polls to ignore a transient read.
+        if ($hd -eq 'DLG_CHAT_AI') {
+            Write-Host "[lt][monitor $label] JOINER DISCONNECTED (AI taunt DLG_CHAT_AI on host = slot reverted to AI)" -ForegroundColor Red
+            return @{ day = $fromDay; battle = $false; gone = $true }
+        }
+        $ep = @((Get-World host).players) | Where-Object { $_.relation -eq 'enemy' } | Select-Object -First 1
+        if ($ep -and -not $ep.human) { $goneStreak++ } else { $goneStreak = 0 }
+        if ($goneStreak -ge 2) {
+            Write-Host "[lt][monitor $label] JOINER DISCONNECTED (enemy slot human True->False, 2 polls)" -ForegroundColor Red
+            return @{ day = $fromDay; battle = $false; gone = $true }
+        }
+        if ($hd -eq 'DLG_BATTLE_A' -or (Get-Dialog join) -eq 'DLG_BATTLE_A') {
             Write-Host "[lt][monitor $label] BATTLE started during the joiner turn" -ForegroundColor Magenta
-            return @{ day = $fromDay; battle = $true }
+            return @{ day = $fromDay; battle = $true; gone = $false }
         }
         $w = Get-World host; $d = if ($w) { [int]$w.day } else { $fromDay }
         $jh = @(Get-Stacks join) | Where-Object { $_.relation -eq 'self' -and [int]$_.units -ge 1 } | Sort-Object { -[int]$_.units } | Select-Object -First 1
         Write-Host ("[lt][monitor $label] day={0} join hero {1}" -f $d, $(if($jh){"$($jh.id) u$($jh.units) hp$($jh.hp) @($($jh.x),$($jh.y))"}else{'?'})) -ForegroundColor DarkGray
-        if ($d -gt $fromDay) { Write-Host "[lt][monitor $label] joiner PASSED (day $fromDay -> $d)" -ForegroundColor Green; return @{ day = $d; battle = $false } }
+        if ($d -gt $fromDay) { Write-Host "[lt][monitor $label] joiner PASSED (day $fromDay -> $d)" -ForegroundColor Green; return @{ day = $d; battle = $false; gone = $false } }
         Start-Sleep -Seconds 5
     }
     Write-Host "[lt][monitor $label] timeout (day still $fromDay) - joiner did not pass" -ForegroundColor Yellow
-    return @{ day = $fromDay; battle = $false }
+    return @{ day = $fromDay; battle = $false; gone = $false }
+}
+# Joiner crashed: print the verdict and CLEAR the blocking AI-taunt / popup so the host is left free (not frozen).
+function Report-JoinerGone([string]$where) {
+    Write-Host "[lt][BATTLE RESULT] JOINER DISCONNECTED (client crash) at: $where - host survived the drop" -ForegroundColor Red
+    for ($i = 0; $i -lt 10; $i++) {
+        $d = Get-Dialog host
+        if ($d -in @('DLG_STRATEGIC','DLG_ISO_PAL')) { break }
+        $hit = $false
+        foreach ($b in @('BTN_OK','BTN_CLOSE','BTN_CONTINUE','BTN_YES')) { if (Invoke-Button host $d $b) { $hit = $true; break } }
+        Start-Sleep -Milliseconds 600
+    }
+    Write-Host ("[lt] host dialog after clearing the drop: {0}" -f (Get-Dialog host)) -ForegroundColor DarkGray
 }
 function Get-HeroById([string]$role, [string]$id) { @(Get-Stacks $role) | Where-Object { $_.id -eq $id } | Select-Object -First 1 }
 function End-RoleTurn([string]$role) {
@@ -171,14 +197,19 @@ function Build-RoleSquad([string]$role) {
             cost=$(if (-not $u.small) {2} else {1})
         }
     })
+    # ROSTER (diag): every own-half camp's unit + value, so "who was available" is visible, not just the picks.
+    Write-Host ("[lt][{0}][roster] {1} own-half camps (who's available):" -f $role,@($cand).Count) -ForegroundColor DarkCyan
+    foreach ($rc in @($cand | Sort-Object val -Descending)) {
+        Write-Host ("[lt][{0}][roster]   camp {1} {2} {3} {4} val={5} (xp{6} hp{7} reach{8}{9})" -f $role,$rc.campId,$rc.impl,$(if($rc.front){'FRONT'}else{'BACK'}),$(if($rc.big){'2x'}else{'1x'}),[int]$rc.val,$rc.xp,$rc.hp,$rc.reach,$(if($rc.healer){' HEAL'}else{''})) -ForegroundColor DarkCyan
+    }
     $hs = & $curHero
     $ldr = @($hs.slots) | Where-Object { $_.unitId -eq $hs.leaderId } | Select-Object -First 1
     $leaderFront = (-not $ldr) -or ([int]$ldr.reach -eq 103)
-    # "big" = ACTUAL 2-cell occupancy. The slot reporter emits a unit's impl isBig flag, but a hero/leader
-    # carries that flag yet sits in ONE cell - so count slot entries (a big unit = 2 entries), not the flag.
-    $leaderCells = @(@($hs.slots) | Where-Object { $_.unitId -eq $hs.leaderId }).Count
-    if ($leaderCells -lt 1) { $leaderCells = 1 }
-    $leaderBig = ($leaderCells -ge 2)
+    # TRUST the reporter's isBig flag: a big unit (incl. a big LEADER) occupies a whole COLUMN (2 cells: its
+    # front cell + the back cell of that column), even when it shows as a single slot entry. If isBig ever
+    # disagrees with the real footprint, that is a reporter BUG to fix at the source, not to work around here.
+    $leaderBig = [bool]$ldr.isBig
+    $leaderCells = if ($leaderBig) { 2 } else { 1 }
     Write-Host ("[lt][{0}] leader {1} reach={2} -> {3}{4} ({5} cell)" -f $role,$hs.leaderId,$(if($ldr){[int]$ldr.reach}else{'?'}),$(if($leaderFront){'FRONT'}else{'BACK'}),$(if($leaderBig){' 2x'}else{''}),$leaderCells) -ForegroundColor Cyan
 
     # Target 3 BACK any-reach (odd cells) + 3 FRONT defenders (even cells). The leader holds its cell(s): a
@@ -206,11 +237,19 @@ function Build-RoleSquad([string]$role) {
         if ($big -and ($budget -ge 2)) { $picks += $big; $budget -= 2; if ($needBack -gt 0) { $needBack-- } else { $needFront-- }; continue }
         break
     }
+    # GREEDY FILL to 6/6: if a quota line ran dry but cells remain, add the next most valuable unit of ANY type
+    # (highest val that fits the remaining budget) so the formation is full, not left with a hole.
+    while ($budget -ge 1) {
+        $avail = @($cand | Where-Object { ($picks.impl -notcontains $_.impl) -and ($_.cost -le $budget) } | Sort-Object val -Descending)
+        if (-not @($avail).Count) { break }
+        $gp = @($avail)[0]; $picks += $gp; $budget -= $gp.cost
+        Write-Host ("[lt][{0}][plan]   greedy-fill {1} {2} {3} val={4}" -f $role,$gp.impl,$(if($gp.front){'FRONT'}else{'BACK'}),$(if($gp.big){'2x'}else{'1x'}),[int]$gp.val) -ForegroundColor DarkMagenta
+    }
 
     # LOG THE PLAN (diag): the leader's ACTUAL slot footprint at planning + every pick's line/size/value, so a
     # leader-cell miscount is visible at the SOURCE (not re-derived from the final formation).
     $ldrSlots = @($hs.slots | Where-Object { $_.unitId -eq $hs.leaderId })
-    Write-Host ("[lt][{0}][plan] leader {1} cells={2} pos=[{3}] isBig={4} -> {5}; budget-left={6} needF={7} needB={8}; {9} picks" -f $role,$hs.leaderId,@($ldrSlots).Count,(@($ldrSlots | ForEach-Object { [int]$_.position }) -join ','),$(if(@($ldrSlots)[0].isBig){'T'}else{'F'}),$(if($leaderFront){'FRONT'}else{'BACK'}),$budget,$needFront,$needBack,@($picks).Count) -ForegroundColor Magenta
+    Write-Host ("[lt][{0}][plan] leader {1} rawslots={2} foot={10} pos=[{3}] isBig={4} -> {5}; budget-left={6} needF={7} needB={8}; {9} picks" -f $role,$hs.leaderId,@($ldrSlots).Count,(@($ldrSlots | ForEach-Object { [int]$_.position }) -join ','),$(if(@($ldrSlots)[0].isBig){'T'}else{'F'}),$(if($leaderFront){'FRONT'}else{'BACK'}),$budget,$needFront,$needBack,@($picks).Count,$leaderCells) -ForegroundColor Magenta
     foreach ($pp in @($picks)) { Write-Host ("[lt][{0}][plan]   pick camp {1} {2} {3} {4} val={5}" -f $role,$pp.campId,$pp.impl,$(if($pp.front){'FRONT'}else{'BACK'}),$(if($pp.big){'2x'}else{'1x'}),[int]$pp.val) -ForegroundColor Magenta }
 
     # ONE corridor pass: own-half chests + chosen camps, ascending x (see the EXECUTE note in git history).
@@ -287,8 +326,8 @@ function Build-RoleSquad([string]$role) {
 
     $sl0 = @((& $curHero).slots)
     $bigBlocked = @()
-    foreach ($g in (@($sl0 | Group-Object unitId) | Where-Object { $_.Count -ge 2 })) {   # 2 slot entries = a real big column
-        $col = ([Math]::Floor([int]$g.Group[0].position / 2)) * 2
+    foreach ($s in @($sl0 | Where-Object { $_.isBig })) {   # TRUST isBig: any big unit (incl. a big leader shown in 1 slot) owns its whole column
+        $col = ([Math]::Floor([int]$s.position / 2)) * 2
         $bigBlocked += $col; $bigBlocked += ($col + 1)
     }
     $bigBlocked = @($bigBlocked | Select-Object -Unique)
@@ -478,7 +517,8 @@ try {
             # JOINER is external (manual): do NOT build/drive it - MONITOR its day-1 turn until it passes.
             $joinRes = $null
             $dBuild = if ($w0 = Get-World host) { [int]$w0.day } else { 1 }
-            $null = Wait-JoinerPass $dBuild 600 "build"
+            $bm = Wait-JoinerPass $dBuild 600 "build"
+            if ($bm.gone) { Report-JoinerGone "build-monitor"; Write-Host "[lt] LEFT RUNNING (relay pid=$(if($relay){$relay.Id}else{'ext'})) - joiner disconnected. Done." -ForegroundColor Yellow; return }
             Show-SquadTable $hostRes
         } else {
             if (-not (PassTurnToJoiner 150)) { throw "host end-turn did not pass to joiner" }
@@ -521,19 +561,31 @@ try {
         $preH = Get-HeroById host $hostHero
         $preHostUnits = [int]$preH.units
         if ($JoinerSelf) {
-            # joiner is manual: baseline its main (most-units) self stack and track it as $joinHero for stats
-            $preJ = @(Get-Stacks join) | Where-Object { $_.relation -eq 'self' -and [int]$_.units -ge 1 } | Sort-Object { -[int]$_.units } | Select-Object -First 1
+            # The joiner is the EXTERNAL human - there is NO relay 'join' role, so Get-Stacks join is $null.
+            # Baseline it from the HOST's ENEMY view (fog-limited - it may be out of sight). NEVER read
+            # Get-Stacks join here: an absent role returns 0 and would later force a false winner. -1 = unknown.
+            $preJ = @(Get-Stacks host) | Where-Object { $_.relation -eq 'enemy' -and [int]$_.units -ge 1 } | Sort-Object { [Math]::Max([Math]::Abs([int]$_.x-[int]$preH.x),[Math]::Abs([int]$_.y-[int]$preH.y)) } | Select-Object -First 1
             if ($preJ) { $joinHero = $preJ.id }
+            $preJoinUnits = if ($preJ) { [int]$preJ.units } else { -1 }
         } else {
             $preJ = Get-HeroById join $joinHero
+            $preJoinUnits = [int]$preJ.units
         }
-        $preJoinUnits = [int]$preJ.units
-        Write-Host ("[lt] pre-clash baseline: host {0} units / join {1} units (joinHero={2})" -f $preHostUnits,$preJoinUnits,$joinHero) -ForegroundColor DarkGray
+        Write-Host ("[lt] pre-clash baseline: host {0} units / join {1} (joinHero={2})" -f $preHostUnits,$(if($preJoinUnits -lt 0){'?(fog)'}else{"$preJoinUnits units"}),$(if($joinHero){$joinHero}else{'?'})) -ForegroundColor DarkGray
         Write-Host "[lt] heroes closing for a head-on clash..." -ForegroundColor Green
         $battleRole = $null
         for ($cyc = 0; $cyc -lt 8 -and -not $battleRole; $cyc++) {
             $null = ClearPopups host 40
+            # The host hero can TELEPORT at turn-start (engine repositions it). Read its position until two
+            # consecutive reads match, so the attack is planned from where it ACTUALLY is now (post-teleport),
+            # not a stale pre-teleport coord. $jp (the target) is then selected against the FRESH host position.
             $hp = Get-HeroById host $hostHero
+            for ($st = 0; $st -lt 6; $st++) {
+                Start-Sleep -Milliseconds 700
+                $hp2 = Get-HeroById host $hostHero
+                if ($hp2 -and $hp -and [int]$hp2.x -eq [int]$hp.x -and [int]$hp2.y -eq [int]$hp.y) { $hp = $hp2; break }
+                if ($hp2) { $hp = $hp2 }
+            }
             if ($JoinerSelf) {
                 $jp = @(Get-Stacks host) | Where-Object { $_.relation -eq 'enemy' -and [int]$_.units -ge 1 } | Sort-Object { [Math]::Max([Math]::Abs([int]$_.x-[int]$hp.x),[Math]::Abs([int]$_.y-[int]$hp.y)) } | Select-Object -First 1
             } else {
@@ -558,6 +610,7 @@ try {
                 # Monitor the joiner's manual turn: pass = day++ OR it attacked (battle).
                 $dC = if ($wC = Get-World host) { [int]$wC.day } else { 0 }
                 $mr = Wait-JoinerPass $dC 600 "clash $cyc"
+                if ($mr.gone) { Report-JoinerGone "clash $cyc"; Write-Host "[lt] LEFT RUNNING (relay pid=$(if($relay){$relay.Id}else{'ext'})) - joiner disconnected. Done." -ForegroundColor Yellow; return }
                 if ($mr.battle) { $battleRole = $(if ((Get-Dialog host) -eq 'DLG_BATTLE_A') { 'host' } else { 'join' }); break }
             } else {
                 $null = ClearPopups join 40
@@ -596,44 +649,80 @@ try {
             foreach ($r in $battleRoles) { if (-not $autoOn[$r]) { Write-Host "   [$r] could not reach TOG_AUTOBATTLE (panel not up)" -ForegroundColor Yellow } }
             if ($JoinerSelf) { Write-Host "[lt] JOINER-SELF: fight the battle on the JOINER yourself - the harness will NOT touch it." -ForegroundColor Magenta }
 
-            # 6) End the battle: wait until BOTH roles are back on the map (battle over). Manage dialogs ONLY
-            #    for the harness-driven roles ($battleRoles); in -JoinerSelf the joiner battle is the human's,
-            #    leave it alone. Grace window for auto-resolve, then BTN_CLOSE a stalled host battle.
-            Write-Host "[lt] settling the battle..." -ForegroundColor Cyan
+            # 6) End the battle. The TRUE end-signal is a role leaving DLG_BATTLE_A back to the map on its OWN;
+            #    worldreporter has NO battle-awareness, so stack counts read mid-battle are stale. Watch only the
+            #    READABLE/harness-driven roles ($battleRoles - in -JoinerSelf the human joiner's battle is untouched
+            #    and its relay role is absent anyway). BTN_CLOSE is a LAST-RESORT force-exit of a STALLED (frozen,
+            #    non-ticking) battle past the grace window; it exits WITHOUT applying a result, so flag it and the
+            #    verdict reports inconclusive rather than a fake win.
+            Write-Host "[lt] settling the battle (waiting for the battle window to close on its own)..." -ForegroundColor Cyan
             $battleClose = @('BTN_OK','BTN_TAKEALL','BTN_TAKE','BTN_CONTINUE','BTN_RIGHTSIDE')
-            $t0 = Get-Date; $graceSec = 60
-            while ((((Get-Date)-$t0).TotalSeconds) -lt 180) {
+            $forcedClose = $false
+            $t0 = Get-Date; $graceSec = 90; $maxSettle = 240
+            while ((((Get-Date)-$t0).TotalSeconds) -lt $maxSettle) {
                 $elapsed = ((Get-Date)-$t0).TotalSeconds
                 $allMap = $true
-                foreach ($r in 'host','join') {
+                foreach ($r in $battleRoles) {
                     $d = Get-Dialog $r
                     if ($d -notin @('DLG_STRATEGIC','DLG_ISO_PAL')) {
                         $allMap = $false
-                        if ($r -in $battleRoles) {   # the human joiner's battle is left untouched in -JoinerSelf
-                            if ($d -eq 'DLG_BATTLE_A') { if ($elapsed -gt $graceSec) { $null = Invoke-Button $r DLG_BATTLE_A BTN_CLOSE } }   # force-exit a stalled battle only after the grace window
-                            else { foreach ($b in $battleClose) { if (Invoke-Button $r $d $b) { break } } }
+                        if ($d -eq 'DLG_BATTLE_A') {
+                            if ($elapsed -gt $graceSec) { if (Invoke-Button $r DLG_BATTLE_A BTN_CLOSE) { $forcedClose = $true } }   # force-exit only a stalled battle, and mark it
+                        } else {
+                            foreach ($b in $battleClose) { if (Invoke-Button $r $d $b) { break } }   # clear post-battle reward popups
                         }
                     }
                 }
                 if ($allMap) { break }
                 Start-Sleep -Milliseconds 900
             }
-            # Post-battle result - read ONLY now, after the battle is over (mid-battle world is stale). Retry
-            # the census so an ABSENT hero = a real removal (destroyed), not a dropped poll. Winner = whoever
-            # destroyed the other, else fewer unit losses (map-to-map vs the pre-clash baseline); log for stats.
+            # Post-battle result - read ONLY now, after the window closed (mid-battle world is stale). Retry the
+            # census so an ABSENT hero = a real removal, not a dropped poll.
             Start-Sleep -Seconds 2
-            $postHs = @(); $postJs = @(); $t0 = Get-Date
-            while ((((Get-Date)-$t0).TotalSeconds) -lt 15) { $postHs = @(Get-Stacks host); $postJs = @(Get-Stacks join); if ($postHs.Count -gt 0 -and $postJs.Count -gt 0) { break }; Start-Sleep 1 }
-            $postH = $postHs | Where-Object { $_.id -eq $hostHero } | Select-Object -First 1   # host hero from the HOST view
-            $postJ = $postJs | Where-Object { $_.id -eq $joinHero } | Select-Object -First 1   # join hero from the JOIN view (no fog)
-            $hUnits = $(if ($postH) { [int]$postH.units } else { 0 }); $jUnits = $(if ($postJ) { [int]$postJ.units } else { 0 })
-            $hLost = $preHostUnits - $hUnits; $jLost = $preJoinUnits - $jUnits
-            $winner = if (-not $postH -and -not $postJ) { 'BOTH GONE' } elseif (-not $postH) { 'JOIN' } elseif (-not $postJ) { 'HOST' }
-                      elseif ($jLost -gt $hLost) { 'HOST' } elseif ($hLost -gt $jLost) { 'JOIN' } else { 'DRAW/no-contest' }
-            Write-Host ("[lt][BATTLE RESULT] WINNER={0}" -f $winner) -ForegroundColor Magenta
-            Write-Host ("[lt][BATTLE RESULT] host: {0} units (was {1}, lost {2}) hp={3} @({4}) | join: {5} units (was {6}, lost {7}) hp={8} @({9})" -f `
-                $hUnits,$preHostUnits,$hLost,$(if($postH){$postH.hp}else{0}),$(if($postH){"$($postH.x),$($postH.y)"}else{'-'}),`
-                $jUnits,$preJoinUnits,$jLost,$(if($postJ){$postJ.hp}else{0}),$(if($postJ){"$($postJ.x),$($postJ.y)"}else{'-'})) -ForegroundColor Magenta
+            if ($JoinerSelf) {
+                # The joiner is the external human (no 'join' role) and is usually under FOG from the host, so its
+                # stack canNOT be read. Judge ONLY the HOST's OWN hero (authoritative, no fog on own units); report
+                # the joiner's fate as unknown. NEVER infer a winner from the absent join role or a fogged enemy.
+                # Distinguish a genuine removal (world READABLE, hero absent = destroyed) from a transient relay/
+                # world stall (world UNREADABLE = honest UNKNOWN, never a fabricated loss).
+                $postH = $null; $worldOk = $false; $t0 = Get-Date
+                while ((((Get-Date)-$t0).TotalSeconds) -lt 15) {
+                    $wh = Get-World host
+                    if ($wh) { $worldOk = $true; $postH = @($wh.stacks) | Where-Object { $_.id -eq $hostHero } | Select-Object -First 1; if ($postH) { break } }
+                    Start-Sleep 1
+                }
+                if (-not $worldOk) {
+                    $winner = 'UNKNOWN (host world unreadable - relay/poll stall)'
+                } elseif (-not $postH) {
+                    # Host hero gone from a READABLE world = a CONFIRMED host loss, definitive even if the battle
+                    # window had to be force-closed (the absent-hero census is real; a frozen/unfought battle would
+                    # still show the PRE-battle units, not an absent hero). Confirmed death outranks force-close.
+                    $winner = 'JOIN (host hero destroyed)'
+                } elseif ($forcedClose) {
+                    $winner = 'UNKNOWN (battle force-closed / frozen - host still alive, not resolved)'
+                } else {
+                    $hLost = $preHostUnits - [int]$postH.units
+                    $winner = "HOST SURVIVED (lost $hLost of $preHostUnits); joiner outcome unknown - survival is not a confirmed win"
+                }
+                Write-Host ("[lt][BATTLE RESULT] {0}" -f $winner) -ForegroundColor Magenta
+                Write-Host ("[lt][BATTLE RESULT] host: {0} units (was {1}) hp={2} @({3}) | join: fate not visible (fog / external human)" -f `
+                    $(if($postH){[int]$postH.units}else{0}),$preHostUnits,$(if($postH){$postH.hp}else{0}),$(if($postH){"$($postH.x),$($postH.y)"}else{'destroyed'})) -ForegroundColor Magenta
+            } else {
+                # Both roles relay-driven: read each hero from its OWN view (no fog); winner = whoever destroyed the
+                # other, else fewer unit losses (map-to-map vs the pre-clash baseline); log for stats.
+                $postHs = @(); $postJs = @(); $t0 = Get-Date
+                while ((((Get-Date)-$t0).TotalSeconds) -lt 15) { $postHs = @(Get-Stacks host); $postJs = @(Get-Stacks join); if ($postHs.Count -gt 0 -and $postJs.Count -gt 0) { break }; Start-Sleep 1 }
+                $postH = $postHs | Where-Object { $_.id -eq $hostHero } | Select-Object -First 1   # host hero from the HOST view
+                $postJ = $postJs | Where-Object { $_.id -eq $joinHero } | Select-Object -First 1   # join hero from the JOIN view (no fog)
+                $hUnits = $(if ($postH) { [int]$postH.units } else { 0 }); $jUnits = $(if ($postJ) { [int]$postJ.units } else { 0 })
+                $hLost = $preHostUnits - $hUnits; $jLost = $preJoinUnits - $jUnits
+                $winner = if (-not $postH -and -not $postJ) { 'BOTH GONE' } elseif (-not $postH) { 'JOIN' } elseif (-not $postJ) { 'HOST' }
+                          elseif ($jLost -gt $hLost) { 'HOST' } elseif ($hLost -gt $jLost) { 'JOIN' } else { 'DRAW/no-contest' }
+                Write-Host ("[lt][BATTLE RESULT] WINNER={0}" -f $winner) -ForegroundColor Magenta
+                Write-Host ("[lt][BATTLE RESULT] host: {0} units (was {1}, lost {2}) hp={3} @({4}) | join: {5} units (was {6}, lost {7}) hp={8} @({9})" -f `
+                    $hUnits,$preHostUnits,$hLost,$(if($postH){$postH.hp}else{0}),$(if($postH){"$($postH.x),$($postH.y)"}else{'-'}),`
+                    $jUnits,$preJoinUnits,$jLost,$(if($postJ){$postJ.hp}else{0}),$(if($postJ){"$($postJ.x),$($postJ.y)"}else{'-'})) -ForegroundColor Magenta
+            }
         }
 
         Write-Host "[lt] LEFT RUNNING (relay pid=$(if($relay){$relay.Id}else{'ext'})) - both squads built + clash. Done." -ForegroundColor Yellow
