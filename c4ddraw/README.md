@@ -11,8 +11,9 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 
 | Path | What it is | Committed |
 | --- | --- | --- |
-| `upstream/cnc-ddraw/` | Pristine upstream cnc-ddraw snapshot (the vendored original) | yes |
-| `patches/cnc-ddraw-mss32.patch` | Our diff over upstream: DirectDraw embed + `DDReloadConfig`/`DDTakeScreenshot` exports + the `featuremenu_install()` call | yes |
+| `upstream/cnc-ddraw/` | The cnc-ddraw renderer as a **git submodule**, pinned at upstream `a0b81b11` (v7.1.0.1). Never edited in place. | submodule pointer |
+| `patches/cnc-ddraw-mss32.patch` | Our diff over upstream: DirectDraw embed + `DDReloadConfig`/`DDTakeScreenshot` exports + the `featuremenu_install()` call (`dllmain.c`, `winapi_hooks.c`, `exports.def`) | yes |
+| `patches/cnc-ddraw-render-null.patch` | The `render_null` headless backend: `dd.c` renderer branch + vcxproj entries + new `inc/render_null.h`, `src/render_null.c` | yes |
 | `features/featuremenu.cpp` | The in-game menu, self-contained (no mss32 deps) | yes |
 | `forwarder/C4dll-R.cb63.def` | The 483 CB63 export forwards (`Name=CB63.Name @ord`) | yes |
 | `build.ps1` | Reproducible build + deploy/restore | yes |
@@ -40,7 +41,8 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 ./build.ps1 -Restore        # put the baseline C4dll-R.dll + standalone ddraw.dll back
 ```
 
-`build.ps1` copies `upstream/` to `build/`, applies the patch, copies in `features/featuremenu.cpp`,
+`build.ps1` copies the pinned `upstream/cnc-ddraw` submodule to `build/`, applies both patches
+(`cnc-ddraw-mss32` + `cnc-ddraw-render-null`), copies in `features/featuremenu.cpp`,
 generates `C4dll-R.def` (the CB63 forwards plus the two exports), retargets the vcxproj
 (`TargetName` + `.def` + the extra source), and runs MSBuild (Release, Win32, v143, static CRT).
 MSBuild is located via `vswhere`, so it works both on a dev box and on CI. The CI workflow
@@ -71,9 +73,11 @@ Put `C4dll-R.dll` next to `Discipl2.exe` (replacing the CodeBase copy), keep `CB
 
 ## Updating cnc-ddraw
 
-Refresh `upstream/cnc-ddraw/` from the upstream commit you want, re-apply `patches/cnc-ddraw-mss32.patch`
-(`git apply`), resolve any reject, and regenerate the patch with `diff -u`. `build.ps1` always builds
-from `upstream/` + the patch, so the upstream original is never edited in place.
+`upstream/cnc-ddraw/` is a git submodule pinned at an exact commit. To move to a newer upstream:
+bump the submodule (`git -C upstream/cnc-ddraw fetch && git -C upstream/cnc-ddraw checkout <sha>`, then
+`git add upstream/cnc-ddraw`), re-apply both patches against the new tree (`git apply`), resolve any
+reject, and regenerate. `build.ps1` always builds from the pinned submodule + the patches, so the
+upstream tree is never edited in place. Both patches touch disjoint files, so order does not matter.
 
 ---
 
@@ -90,8 +94,9 @@ from `upstream/` + the patch, so the upstream original is never edited in place.
 
 | Путь | Что это | В репозитории |
 | --- | --- | --- |
-| `upstream/cnc-ddraw/` | Нетронутый снимок апстрима cnc-ddraw (вендоренный оригинал) | да |
-| `patches/cnc-ddraw-mss32.patch` | Наш дифф: встраивание DirectDraw + экспорты `DDReloadConfig`/`DDTakeScreenshot` + вызов `featuremenu_install()` | да |
+| `upstream/cnc-ddraw/` | Рендерер cnc-ddraw как **git submodule**, запинен на апстрим `a0b81b11` (v7.1.0.1). На месте не редактируется. | указатель submodule |
+| `patches/cnc-ddraw-mss32.patch` | Наш дифф: встраивание DirectDraw + экспорты `DDReloadConfig`/`DDTakeScreenshot` + вызов `featuremenu_install()` (`dllmain.c`, `winapi_hooks.c`, `exports.def`) | да |
+| `patches/cnc-ddraw-render-null.patch` | Headless-бэкенд `render_null`: ветка рендерера в `dd.c` + записи vcxproj + новые `inc/render_null.h`, `src/render_null.c` | да |
 | `features/featuremenu.cpp` | Внутриигровое меню, самодостаточное (без зависимостей mss32) | да |
 | `forwarder/C4dll-R.cb63.def` | 483 форварда экспортов CB63 (`Name=CB63.Name @ord`) | да |
 | `build.ps1` | Воспроизводимая сборка + deploy/restore | да |
@@ -119,7 +124,8 @@ from `upstream/` + the patch, so the upstream original is never edited in place.
 ./build.ps1 -Restore        # вернуть baseline C4dll-R.dll + отдельный ddraw.dll
 ```
 
-`build.ps1` копирует `upstream/` в `build/`, накладывает патч, копирует `features/featuremenu.cpp`,
+`build.ps1` копирует запиненный submodule `upstream/cnc-ddraw` в `build/`, накладывает оба патча
+(`cnc-ddraw-mss32` + `cnc-ddraw-render-null`), копирует `features/featuremenu.cpp`,
 генерирует `C4dll-R.def` (форварды CB63 плюс два экспорта), перенацеливает vcxproj (`TargetName` +
 `.def` + доп. исходник) и запускает MSBuild (Release, Win32, v143, статический CRT). MSBuild ищется
 через `vswhere`, поэтому работает и на машине разработчика, и на CI. Workflow
@@ -149,6 +155,8 @@ git push origin c4dll-r-v1.0
 
 ## Обновление cnc-ddraw
 
-Обновите `upstream/cnc-ddraw/` до нужного коммита апстрима, наложите `patches/cnc-ddraw-mss32.patch`
-(`git apply`), разрешите конфликты и пересоберите патч через `diff -u`. `build.ps1` всегда собирает из
-`upstream/` + патч, поэтому оригинал апстрима не редактируется на месте.
+`upstream/cnc-ddraw/` это git submodule, запиненный на точный коммит. Чтобы перейти на новый апстрим:
+сдвиньте submodule (`git -C upstream/cnc-ddraw fetch && git -C upstream/cnc-ddraw checkout <sha>`, затем
+`git add upstream/cnc-ddraw`), наложите оба патча на новое дерево (`git apply`), разрешите конфликты и
+пересоберите. `build.ps1` всегда собирает из запиненного submodule + патчи, поэтому дерево апстрима не
+редактируется на месте. Оба патча трогают непересекающиеся файлы, поэтому порядок не важен.

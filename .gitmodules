@@ -21,3 +21,6 @@
 	path = D2RSG
 	url = https://github.com/Bartonsun/D2RSG.git
 	branch = dev
+[submodule "c4ddraw/upstream/cnc-ddraw"]
+	path = c4ddraw/upstream/cnc-ddraw
+	url = https://github.com/FunkyFr3sh/cnc-ddraw.git

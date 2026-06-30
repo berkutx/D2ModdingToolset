@@ -37,6 +37,11 @@ jobs:
           submodules: false
           fetch-depth: 1
 
+      # Only the cnc-ddraw submodule is needed for this build (not the mss32 deps); init it explicitly.
+      # No --depth: the submodule is pinned at an exact commit that may not stay at the branch tip.
+      - name: Init cnc-ddraw submodule
+        run: git submodule update --init -- c4ddraw/upstream/cnc-ddraw
+
       - name: Build monolith C4dll-R.dll
         run: |
           # Load the MSVC x86 env natively (vswhere + Enter-VsDevShell) so dumpbin is on PATH;

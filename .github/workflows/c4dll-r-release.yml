@@ -40,6 +40,11 @@ jobs:
           submodules: false
           fetch-depth: 1
 
+      # Only the cnc-ddraw submodule is needed for this build (not the mss32 deps); init it explicitly.
+      # No --depth: the submodule is pinned at an exact commit that may not stay at the branch tip.
+      - name: Init cnc-ddraw submodule
+        run: git submodule update --init -- c4ddraw/upstream/cnc-ddraw
+
       - name: Build C4dll-R.dll + timer.c4p
         run: |
           # Same build a dev runs: build.ps1 produces the monolith (step 1-6) and timer.c4p (step 7).

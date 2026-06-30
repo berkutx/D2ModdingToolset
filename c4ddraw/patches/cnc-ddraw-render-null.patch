@@ -1,0 +1,103 @@
+diff --git a/cnc-ddraw.vcxproj b/cnc-ddraw.vcxproj
+index 23648a8..dea6a19 100644
+--- a/cnc-ddraw.vcxproj
++++ b/cnc-ddraw.vcxproj
+@@ -67,6 +67,7 @@
+     <ClCompile Include="src\render_ogl.c" />
+     <ClCompile Include="src\render_d3d9.c" />
+     <ClCompile Include="src\render_gdi.c" />
++    <ClCompile Include="src\render_null.c" />
+     <ClCompile Include="src\screenshot.c" />
+     <ClCompile Include="src\config.c" />
+     <ClCompile Include="src\ddsurface.c" />
+@@ -111,6 +112,7 @@
+     <ClInclude Include="inc\openglshader.h" />
+     <ClInclude Include="inc\render_ogl.h" />
+     <ClInclude Include="inc\render_gdi.h" />
++    <ClInclude Include="inc\render_null.h" />
+     <ClInclude Include="inc\screenshot.h" />
+     <ClInclude Include="inc\config.h" />
+     <ClInclude Include="inc\ddsurface.h" />
+diff --git a/inc/render_null.h b/inc/render_null.h
+new file mode 100644
+index 0000000..4f5d49f
+--- /dev/null
++++ b/inc/render_null.h
+@@ -0,0 +1,14 @@
++#ifndef RENDER_NULL_H
++#define RENDER_NULL_H
++
++#include <windows.h>
++
++/*
++ * Headless null renderer (ddraw.ini: renderer=null). Drains the present signal and paces like the
++ * real backends, but draws nothing: no device context, no GL, no blit -> no GPU/display dependency.
++ * The game still writes to its DirectDraw surfaces (in memory); we just never present them. Lets the
++ * engine run with zero visual cost and without a graphics device (Wine/headless, many instances).
++ */
++DWORD WINAPI null_render_main(void);
++
++#endif
+diff --git a/src/dd.c b/src/dd.c
+index afb161a..301fe7f 100644
+--- a/src/dd.c
++++ b/src/dd.c
+@@ -10,6 +10,7 @@
+ #include "wndproc.h"
+ #include "render_d3d9.h"
+ #include "render_gdi.h"
++#include "render_null.h"
+ #include "render_ogl.h"
+ #include "fps_limiter.h"
+ #include "debug.h"
+@@ -1880,6 +1881,10 @@ HRESULT dd_CreateEx(GUID* lpGuid, LPVOID* lplpDD, REFIID iid, IUnknown* pUnkOute
+                 g_ddraw.renderer = gdi_render_main;
+             }
+         }
++        else if (tolower(g_config.renderer[0]) == 'n') /* null - headless, no rendering at all */
++        {
++            g_ddraw.renderer = null_render_main;
++        }
+         else /* auto */
+         {
+             if (!IsWine() && d3d9_is_available())
+diff --git a/src/render_null.c b/src/render_null.c
+new file mode 100644
+index 0000000..b15dc83
+--- /dev/null
++++ b/src/render_null.c
+@@ -0,0 +1,34 @@
++#include <windows.h>
++#include "dd.h"
++#include "fps_limiter.h"
++#include "config.h"
++#include "render_null.h"
++
++/*
++ * Null renderer. Same wait-on-present-semaphore + fps pacing loop as the GDI backend, but with the
++ * blit removed: present nothing. No HDC, no OpenGL context, no surface copy. The game's Flip/Blt just
++ * signal the render semaphore (fire-and-forget, exactly as with GDI), so draining it here keeps the
++ * engine running normally while nothing is ever drawn or shown.
++ */
++DWORD WINAPI null_render_main(void)
++{
++    fpsl_init();
++
++    DWORD timeout = g_config.minfps > 0 ? g_ddraw.minfps_tick_len : INFINITE;
++
++    while (g_ddraw.render.run &&
++        (g_config.minfps < 0 || WaitForSingleObject(g_ddraw.render.sem, timeout) != WAIT_FAILED) &&
++        g_ddraw.render.run)
++    {
++        fpsl_frame_start();
++
++        /* headless: present nothing */
++
++        if (!g_ddraw.render.run)
++            break;
++
++        fpsl_frame_end();
++    }
++
++    return 0;
++}

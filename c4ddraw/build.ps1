@@ -9,7 +9,8 @@
                                              our C4dll-R + disables the standalone ddraw.dll)
   Restore vanilla:.\build.ps1 -Restore     (puts the baseline C4dll-R/ddraw.dll back)
 
-  The build: copy upstream/cnc-ddraw -> apply patches/cnc-ddraw-mss32.patch -> generate
+  The build: copy upstream/cnc-ddraw (git submodule, pinned commit) -> apply
+  patches/cnc-ddraw-mss32.patch + patches/cnc-ddraw-render-null.patch -> generate
   C4dll-R.def (483 CB63 forwards + DDReloadConfig/DDTakeScreenshot) -> retarget the vcxproj
   (TargetName + .def) -> msbuild Release. cnc-ddraw's DllMain hooks the game's IAT
   DirectDrawCreate(Ex) so the embedded renderer is used; the system ddraw.dll satisfies the
@@ -27,6 +28,7 @@ $root = $PSScriptRoot
 $upstream = Join-Path $root "upstream\cnc-ddraw"
 $build = Join-Path $root "build\cnc-ddraw"
 $patch = Join-Path $root "patches\cnc-ddraw-mss32.patch"
+$patchNull = Join-Path $root "patches\cnc-ddraw-render-null.patch"
 $cb63def = Join-Path $root "forwarder\C4dll-R.cb63.def"
 $out = Join-Path $build "bin\Release\C4dll-R.dll"
 $pluginProj = Join-Path $root "plugins\timer\timer.vcxproj"
@@ -75,23 +77,40 @@ Write-Host "[1/6] clean build dir" -ForegroundColor Cyan
 if (Test-Path $build) { [System.IO.Directory]::Delete($build, $true) }
 New-Item -ItemType Directory -Force -Path (Split-Path $build) | Out-Null
 
-Write-Host "[2/6] copy pristine upstream cnc-ddraw" -ForegroundColor Cyan
+Write-Host "[2/6] copy pristine upstream cnc-ddraw (submodule)" -ForegroundColor Cyan
+# cnc-ddraw is a git submodule pinned at the exact upstream commit (c4ddraw/upstream/cnc-ddraw).
+# Init it if a fresh/partial checkout left it empty (CI's actions/checkout submodules:recursive
+# already populates it).
+if (-not (Test-Path (Join-Path $upstream "src\dd.c"))) {
+    $toplevel = (& git -C $root rev-parse --show-toplevel).Trim()
+    & git -C $toplevel submodule update --init -- "c4ddraw/upstream/cnc-ddraw"
+    if ($LASTEXITCODE -ne 0) { throw "submodule init failed (exit $LASTEXITCODE)" }
+}
 Copy-Item $upstream $build -Recurse -Force
+# the submodule working tree carries a .git gitlink file; drop it so the throwaway git-apply repo below is clean
+Remove-Item (Join-Path $build ".git") -Force -Recurse -ErrorAction SilentlyContinue
 
-Write-Host "[3/6] apply our patch (exports + DirectDraw embed)" -ForegroundColor Cyan
+Write-Host "[3/6] apply our patches (mss32 embed/exports + render_null headless)" -ForegroundColor Cyan
 # Apply inside a throwaway repo so git apply resolves paths cleanly (it "Skipped patch" when
-# run outside a working tree). autocrlf=false keeps the patch context matching the vendored EOLs.
+# run outside a working tree). autocrlf=false keeps the patch context matching the upstream EOLs.
+# Two disjoint patches: cnc-ddraw-mss32 (dllmain/winapi_hooks/exports.def) + render-null
+# (dd.c renderer branch + vcxproj + inc/render_null.h + src/render_null.c).
 Push-Location $build
 try {
     & git init -q
-    # --ignore-whitespace: tolerate trailing-whitespace differences in context lines (the patch is
+    # --ignore-whitespace: tolerate trailing-whitespace differences in context lines (the patches are
     # hand-edited; cnc-ddraw sources have some trailing spaces we don't want to track exactly).
     & git -c core.autocrlf=false apply --ignore-whitespace "$patch"
-    if ($LASTEXITCODE -ne 0) { throw "git apply failed (exit $LASTEXITCODE)" }
+    if ($LASTEXITCODE -ne 0) { throw "git apply (mss32) failed (exit $LASTEXITCODE)" }
+    & git -c core.autocrlf=false apply --ignore-whitespace "$patchNull"
+    if ($LASTEXITCODE -ne 0) { throw "git apply (render-null) failed (exit $LASTEXITCODE)" }
 }
 finally { Pop-Location }
 if (-not (Select-String -Path (Join-Path $build "src\dllmain.c") -Pattern "DDReloadConfig" -Quiet)) {
     throw "patch did not apply: DDReloadConfig missing from src/dllmain.c"
+}
+if (-not (Test-Path (Join-Path $build "src\render_null.c"))) {
+    throw "render-null patch did not apply: src/render_null.c missing"
 }
 
 # Add our self-contained feature sources (features/*.cpp + headers). They are NOT part of upstream
