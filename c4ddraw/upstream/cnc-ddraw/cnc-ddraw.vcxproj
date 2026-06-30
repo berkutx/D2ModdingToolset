@@ -67,6 +67,7 @@
     <ClCompile Include="src\render_ogl.c" />
     <ClCompile Include="src\render_d3d9.c" />
     <ClCompile Include="src\render_gdi.c" />
+    <ClCompile Include="src\render_null.c" />
     <ClCompile Include="src\screenshot.c" />
     <ClCompile Include="src\config.c" />
     <ClCompile Include="src\ddsurface.c" />
@@ -111,6 +112,7 @@
     <ClInclude Include="inc\openglshader.h" />
     <ClInclude Include="inc\render_ogl.h" />
     <ClInclude Include="inc\render_gdi.h" />
+    <ClInclude Include="inc\render_null.h" />
     <ClInclude Include="inc\screenshot.h" />
     <ClInclude Include="inc\config.h" />
     <ClInclude Include="inc\ddsurface.h" />

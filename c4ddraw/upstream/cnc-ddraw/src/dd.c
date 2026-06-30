@@ -10,6 +10,7 @@
 #include "wndproc.h"
 #include "render_d3d9.h"
 #include "render_gdi.h"
+#include "render_null.h"
 #include "render_ogl.h"
 #include "fps_limiter.h"
 #include "debug.h"
@@ -1879,6 +1880,10 @@ HRESULT dd_CreateEx(GUID* lpGuid, LPVOID* lplpDD, REFIID iid, IUnknown* pUnkOute
                 g_ddraw.show_driver_warning = TRUE;
                 g_ddraw.renderer = gdi_render_main;
             }
+        }
+        else if (tolower(g_config.renderer[0]) == 'n') /* null - headless, no rendering at all */
+        {
+            g_ddraw.renderer = null_render_main;
         }
         else /* auto */
         {
