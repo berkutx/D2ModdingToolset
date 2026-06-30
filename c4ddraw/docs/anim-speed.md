@@ -55,11 +55,13 @@ mechanism A from a live "attack playing" signal.
   setting (vanilla `10` unless set), so between attacks idle stays calm.
 - **Limitation.** Because mechanism A is the global clock, idle units also speed up *during* the burst
   window. The split is "calm between attacks", not true per-unit isolation. See `BACKLOG.md`.
-- **Per-unit (experimental, default off).** The "per-unit" toggle keeps the global clock at idle and
-  instead shrinks the interval (`+0x34`) of only the battle viewer's action animators
-  (`*(IBatViewer+4) -> *(+4996/5000/5016/5020) -> +0x34`), so just the acting units play faster. Guarded
-  (`isUserPtr` + SEH + a 33/66 value-sanity check so a wrong offset is a no-op) and logs `[burst] iv@34=..`
-  to confirm the objects in-game. Experimental: may glitch; see `BACKLOG.md`.
+- **Per-unit (experimental, default off).** The "per-unit" toggle respects the menu: the global battle
+  clock stays at whatever "Battle animation" selected (idle and everyone else exactly as chosen). On top of
+  that, it shrinks the interval (`+0x34`) of only the battle viewer's action animators
+  (`*(IBatViewer+4) -> *(+4996/5000/5016/5020) -> +0x34`) during the window, so the acting units get EXTRA
+  speed. For calm idle, set "Battle animation" Off. Guarded (`isUserPtr` + SEH + a 33/66 value-sanity check
+  so a wrong offset is a no-op) and logs `[burst] iv@34=..` to confirm the objects in-game. May glitch; see
+  `BACKLOG.md`.
 
 ## Code map (`features/featuremenu.cpp`)
 
@@ -131,11 +133,12 @@ speed** (механизм B), а не Map animation (механизм A).
   `10`, если не задано), поэтому между атаками idle остаётся спокойным.
 - **Ограничение.** Так как механизм A это глобальные часы, idle-юниты тоже ускоряются *во время* окна
   burst. Это разделение "спокойно между атаками", а не настоящая пер-юнит изоляция. См. `BACKLOG.md`.
-- **Пер-юнит (экспериментально, по умолчанию off).** Тогл "per-unit" держит глобальные часы на idle и
-  вместо этого уменьшает интервал (`+0x34`) только у боевых аниматоров действия вьюера
-  (`*(IBatViewer+4) -> *(+4996/5000/5016/5020) -> +0x34`), поэтому ускоряются лишь ходящие отряды.
-  Защищено (`isUserPtr` + SEH + проверка значения 33/66, чтобы неверное смещение было no-op) и логирует
-  `[burst] iv@34=..` для подтверждения объектов вживую. Экспериментально, может глючить; см. `BACKLOG.md`.
+- **Пер-юнит (экспериментально, по умолчанию off).** Тогл "per-unit" уважает меню: глобальные часы боя
+  остаются на том, что выбрано в "Battle animation" (idle и все остальные ровно как выбрано). Поверх этого
+  он уменьшает интервал (`+0x34`) только у боевых аниматоров действия вьюера
+  (`*(IBatViewer+4) -> *(+4996/5000/5016/5020) -> +0x34`) в окне атаки, так что ходящие получают ДОПОЛНИТЕЛЬНУЮ
+  скорость. Хочешь спокойный idle - выключи "Battle animation". Защищено (`isUserPtr` + SEH + проверка
+  значения 33/66, чтобы неверное смещение было no-op) и логирует `[burst] iv@34=..`. Может глючить; см. `BACKLOG.md`.
 
 ## Карта кода (`features/featuremenu.cpp`)
 

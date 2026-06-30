@@ -11,6 +11,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <detours.h>
+#include <intrin.h>
+#pragma intrinsic(_ReturnAddress)
 
 // Renderer exports (dllmain.c, same module): DDReloadConfig re-reads ddraw.ini + dd_SetDisplayMode;
 // DDTakeScreenshot saves a PNG. Both no-op safely before the renderer is initialized.
@@ -246,6 +248,7 @@ __declspec(naked) void batShowThunk()
     __asm {
         mov dword ptr [g_inBattle], 1
         mov dword ptr [g_attackPulse], 1
+        mov dword ptr [g_batViewer], ecx   // slot[2] DOES fire (slot[1] doesn't); same IBatViewer this
         jmp dword ptr [g_batShowOrig]
     }
 }
@@ -266,6 +269,49 @@ __declspec(naked) void batDtorThunk()
     }
 }
 
+// --- per-unit frame-speed hook: CBatUnitAnim vftable @0x6F48CC slot[1] update = 0x65615E ---
+// CBatUnitAnim::update does --CBatUnitAnimData[+0x1024] each frame and advances a frame at 0. We patch the
+// slot so EVERY per-unit update (every game frame) decrements the countdown extra for ANY actively-animating
+// unit (cd>=2) -> attacker + all units taking the hit speed up; idle units (cd<2) untouched. g_perUnitExtra
+// set by the pump; ==0 = passthrough. Scratch regs only (eax/ecx/edx), stack untouched -> safe tail-jmp.
+void* g_batUnitAnimUpdOrig = nullptr;
+volatile LONG g_perUnitExtra = 0; // extra countdown decrement per frame; 0 = off
+volatile LONG g_perUnitHits = 0;  // diag: times the hook actually sped a unit
+volatile LONG g_thunkCalls = 0;   // diag: times the per-unit update ran at all (hook reached?)
+volatile LONG g_maxCd = 0;        // diag: largest data[4132] countdown ever observed
+
+__declspec(naked) void batUnitAnimUpdateThunk()
+{
+    __asm {
+        inc dword ptr [g_thunkCalls]     // always: proves the hook is reached
+        mov edx, dword ptr [g_perUnitExtra]
+        test edx, edx
+        jz pu_pass
+        mov eax, dword ptr [esp+4]       // this (CBatUnitAnim*), __stdcall(this)
+        test eax, eax
+        jz pu_pass
+        mov ecx, dword ptr [eax+4]       // data (CBatUnitAnimData*)
+        test ecx, ecx
+        jz pu_pass
+        mov eax, dword ptr [ecx+1024h]   // cd = data[4132] countdown
+        cmp eax, dword ptr [g_maxCd]     // track the biggest cd we ever see
+        jle pu_nomax
+        mov dword ptr [g_maxCd], eax
+    pu_nomax:
+        cmp eax, 2                       // ANY animating unit (attacker + targets); idle is cd<2
+        jl pu_pass
+        sub eax, edx
+        cmp eax, 1
+        jge pu_store
+        mov eax, 1
+    pu_store:
+        mov dword ptr [ecx+1024h], eax
+        inc dword ptr [g_perUnitHits]
+    pu_pass:
+        jmp dword ptr [g_batUnitAnimUpdOrig]
+    }
+}
+
 void installBattleDiscriminator()
 {
     if (g_ver != VerRussobit)
@@ -281,6 +327,13 @@ void installBattleDiscriminator()
         mlog("[menu] battle anim discriminator installed (vftable 0x6F4294)");
     else
         mlog("[menu] battle anim discriminator install FAILED");
+    // per-unit frame-speed hook: CBatUnitAnim vftable 0x6F48CC, slot[1] (update 0x65615E) at 0x6F48D0
+    g_batUnitAnimUpdOrig = reinterpret_cast<void**>(0x6F48CC)[1];
+    void* uthunk = reinterpret_cast<void*>(&batUnitAnimUpdateThunk);
+    if (writeBytes(0x6F48D0, reinterpret_cast<const std::uint8_t*>(&uthunk), sizeof(uthunk)))
+        mlog("[menu] per-unit anim hook installed (vftable 0x6F48CC slot1, orig=%p)", g_batUnitAnimUpdOrig);
+    else
+        mlog("[menu] per-unit anim hook install FAILED");
 }
 
 // Speed 1..6 -> virtual-clock factor (x1.5/x2/x3/x4/x5/x15, fixed-point /10); 10 = identity (off).
@@ -358,7 +411,8 @@ enum : UINT
     kIdAtk3 = 0xA1E4,
     kIdAtk4 = 0xA1E5,
     kIdAtk5 = 0xA1E6,
-    kIdPerUnit = 0xA1E7, // toggle: attack burst speeds ONLY acting units (experimental)
+    kIdAtk6 = 0xA1E7, // 15x (test)
+    kIdPerUnit = 0xA1E8, // toggle: attack burst speeds ONLY acting units (experimental)
     kIdLast = 0xA1FF, // upper bound of our WM_COMMAND id block
 };
 
@@ -496,10 +550,11 @@ void seedConfigFirstRun()
     const char* old = exeDirFile("mss32menu.ini");
     const int aa = GetPrivateProfileIntA("menu", "alwaysActive", 0, old) ? 1 : 0;
     const int oldAnimOn = GetPrivateProfileIntA("menu", "animationSpeedEnabled", 0, old);
-    // Old animationSpeed topped near 1.5x; the new scale STARTS at 1.5x (=speed 1), so old "on" -> speed 1.
-    const int en = oldAnimOn ? 1 : 0;
-    const int bSp = oldAnimOn ? 1 : 2; // default when later enabled: 2x
-    const int mSp = oldAnimOn ? 1 : 2;
+    // Defaults: battle animation ON at 2x, map animation OFF. (Old single-global "on" -> battle speed 1.)
+    const int battleEn = 1;
+    const int mapEn = 0;
+    const int bSp = oldAnimOn ? 1 : 2; // battle default 2x
+    const int mSp = 2;
 
     char buf[1024];
     const int n = wsprintfA(buf,
@@ -520,19 +575,19 @@ void seedConfigFirstRun()
         "mapAnimEnabled=%d\r\n"
         "mapAnimSpeed=%d\r\n"
         "\r\n"
-        "; Battle attack burst: speed up ONLY while a hit/effect plays, so idle units stay calm.\r\n"
-        ";   battleAttackEnabled : 0 = off, 1 = on.   battleAttackSpeed : 1..5  ->  1.5x..5x.\r\n"
-        "battleAttackEnabled=0\r\n"
-        "battleAttackSpeed=3\r\n",
-        aa, en, bSp, en, mSp);
+        "; Attack speed-up: extra burst ONLY while a hit/effect plays (on top of battle speed).\r\n"
+        ";   battleAttackEnabled : 0 = off, 1 = on.   battleAttackSpeed : 1..6  ->  1.5x..5x / 15x.\r\n"
+        "battleAttackEnabled=1\r\n"
+        "battleAttackSpeed=5\r\n",
+        aa, battleEn, bSp, mapEn, mSp);
 
     HANDLE h = CreateFileA(f, GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h != INVALID_HANDLE_VALUE) {
         DWORD wr = 0;
         WriteFile(h, buf, static_cast<DWORD>(n), &wr, nullptr);
         CloseHandle(h);
-        mlog("[menu] first-run C4menu.ini generated (alwaysActive=%d, anim on=%d, b=%d m=%d)", aa, en,
-             bSp, mSp);
+        mlog("[menu] first-run C4menu.ini generated (alwaysActive=%d, battleAnim on=%d, b=%d m=%d)", aa,
+             battleEn, bSp, mSp);
     }
 }
 
@@ -856,11 +911,10 @@ void readNativeSpeeds()
 const DWORD kAttackHoldMs = 1200; // hold full attack factor while the hit plays (re-armed by each pulse)
 const DWORD kAttackRampMs = 700;  // then ease back DOWN to the idle base over this long (no instant snap)
 
-// Eased burst factor (x10): idle base, jumps to attack during the hold window, eases linearly back over
-// kAttackRampMs. Shared by the global-clock burst and the per-unit burst so both feel the same.
-int easedBattleFactor(void)
+// Eased burst factor (x10): from the given idle base, jumps to the attack factor during the hold window,
+// then eases linearly back over kAttackRampMs. Used by both the global-clock burst and the per-unit burst.
+int easedBurstFactor(int idle)
 {
-    const int idle = g_battleAnimEnabled ? kAnimFactor[g_battleAnimSpeed - 1] : 10;
     if (!g_inBattle || !g_attackExpiryTick)
         return idle;
     const int atk = kAnimFactor[g_battleAttackSpeed - 1];
@@ -873,74 +927,547 @@ int easedBattleFactor(void)
     return f < idle ? idle : f;
 }
 
-// EXPERIMENTAL per-unit burst: instead of the global clock, shrink the interval (+0x34, 66/33ms) of ONLY
-// the battle viewer's action animators, so just the acting units play faster while idle units stay vanilla.
-// Chain (verified from IBatViewer::update 0x630DE3 + sub_62B7E0=deref): viewer -> *(+4) data ->
-// *(+4996/+5000/+5016/+5020) = animator -> +0x34 interval. Heavily guarded: a wrong field reads != 33/66
-// so it is a no-op (never corrupts), restores every frame, SEH-wrapped, logs what it finds for tuning.
+// EXPERIMENTAL per-unit burst. The actual speed-up happens in batUnitAnimUpdateThunk (the patched per-unit
+// CBatUnitAnim::update, runs every game frame). Here, from the 32ms pump, we just FEED that hook: which unit
+// is acting (viewer's current unit id @+3996) and how much extra to decrement its countdown. The hook itself
+// catches every frame, so the transient countdown is never missed (polling here did miss it).
+const unsigned kFactoryImageAnimVft = 0x6E2FCC; // FactoryImageAnim full-object vftable (RTTI-confirmed)
+
+// Advance ONE unit's sprite extra frames: scan its CBatUnitAnimData for a FactoryImageAnim* (vft match) and
+// call FactoryImageAnim::update (0x52EA1F, advances currentFrame by 1, no time gate) `extra` times. Per-unit,
+// no global clock touched. Guarded: only a confirmed FactoryImageAnim is touched.
+const unsigned kFactoryImageAnimVft0 = 0x6E2FBC; // FactoryImageAnim's IMqAnimation sub-object vftable (at +4)
+
+// True if p is a valid FactoryImageAnim (both vtables + sane state); advances it `extra` frames.
+static bool tryAdvanceFactoryImageAnim(char* p, int extra, bool log, int o, int q)
+{
+    using UpdateFn = void(__stdcall*)(void*);
+    static UpdateFn spriteUpdate = reinterpret_cast<UpdateFn>(0x52EA1F);
+    if (!isUserPtr(p) || IsBadReadPtr(p, 40))
+        return false;
+    if (*reinterpret_cast<unsigned*>(p) != kFactoryImageAnimVft
+        || *reinterpret_cast<unsigned*>(p + 4) != kFactoryImageAnimVft0)
+        return false;
+    const unsigned char paused = *reinterpret_cast<unsigned char*>(p + 36);
+    const int cf = *reinterpret_cast<int*>(p + 32);
+    if (paused > 1 || cf < 0 || cf > 4096)
+        return false;
+    if (log)
+        mlog("[sprite] +0x%X.%d frame=%d paused=%d", o, q, cf, paused);
+    for (int i = 0; i < extra; ++i)
+        spriteUpdate(p + 4);
+    return true;
+}
+
+// Advance ALL of a unit's FactoryImageAnims (body/portrait/effect), scanning the data AND one level into
+// each pointer (SmartPtr/wrapper). Returns how many it touched.
+int speedUnitSprite(char* ad, int extra, bool log)
+{
+    int n = 0;
+    for (int o = 0; o < 4136; o += 4) {
+        char* p = *reinterpret_cast<char**>(ad + o);
+        if (!isUserPtr(p) || IsBadReadPtr(p, 64))
+            continue;
+        if (tryAdvanceFactoryImageAnim(p, extra, log, o, -4)) { // p is the FactoryImageAnim directly
+            ++n;
+            continue;
+        }
+        for (int q = 0; q <= 16; q += 4) { // p holds a FactoryImageAnim* in its first fields (SmartPtr)
+            char* fa = *reinterpret_cast<char**>(p + q);
+            if (tryAdvanceFactoryImageAnim(fa, extra, log, o, q)) {
+                ++n;
+                break;
+            }
+        }
+    }
+    return n;
+}
+
+// --- idle-slow: slow ONLY the idle frame clock (sub_548E10), leaving the action path (sub_648645) at
+// normal speed. Idle units calm down; the attacker + units taking the hit (action path) stay normal-fast,
+// so they visually stand out. Gated by g_perUnitBurst (the menu toggle) + g_inBattle.
+void* g_origIdleClock = nullptr;    // Detours trampoline to sub_548E10 (clock->frame mapper)
+volatile LONG g_idleClockCalls = 0; // diag: per-frame call rate proves this is the idle driver
+int g_idleSlow = 1;                 // extra-calm multiplier on top of the auto-cancel (1 = idle exactly vanilla)
+
+int __stdcall idleClockHook(int a1)
+{
+    InterlockedIncrement(&g_idleClockCalls);
+    static int logged = 0;
+    if (g_inBattle && logged < 24) { // find WHO calls it per-frame (return-address distribution)
+        ++logged;
+        mlog("[idle] sub_548E10 ret=%p a1=%d", _ReturnAddress(), a1);
+    }
+    int in = a1;
+    // Cancel the global battle speedup on the idle path only: divide by g_battleFactor/10 so idle nets to
+    // ~vanilla while the action path (sub_648645, untouched) keeps the full x15. g_idleSlow is a manual
+    // extra-calm multiplier on top (1 = idle exactly vanilla).
+    int slow = (g_battleFactor / 10) * (g_idleSlow < 1 ? 1 : g_idleSlow);
+    if (g_inBattle && g_perUnitBurst && slow > 1 && a1 > slow)
+        in = a1 / slow; // slow the idle animation clock -> idle frames advance slower
+    return reinterpret_cast<int(__stdcall*)(int)>(g_origIdleClock)(in);
+}
+
+void installIdleSlowDetour()
+{
+    if (g_ver != VerRussobit)
+        return;
+    g_origIdleClock = reinterpret_cast<void*>(0x548E10);
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(&g_origIdleClock, reinterpret_cast<void*>(idleClockHook));
+    if (DetourTransactionCommit() != NO_ERROR) {
+        g_origIdleClock = reinterpret_cast<void*>(0x548E10);
+        mlog("[menu] idle-slow detour FAILED (0x548E10)");
+    } else {
+        mlog("[menu] idle-slow detour installed (sub_548E10, slow=%d)", g_idleSlow);
+    }
+}
+
+// --- FactoryImageAnim::update probe (sub_52EA1F = void __stdcall(int a1); a1=IMqAnimation sub-object,
+// full obj = a1-4, currentFrame @a1+28, paused @a1+32). This is the no-time-gate per-frame sprite advancer.
+// DECISIVE test: do global-list entries carry unit identity? Rich logging: object dump, unit-id scan
+// (0xA3E4xxxx CMidgardID pattern), distinct-caller set, and a pseudo-callstack (stack scan for code addrs).
+// Detailed dump re-armed on each attack pulse so we capture idle frames AND attack frames.
+void* g_origFiaUpdate = nullptr;
+volatile LONG g_fiaCalls = 0;
+volatile LONG g_fiaDetailed = 0; // re-armed to 0 on attack pulse; hook dumps while < kFiaDumpMax
+const LONG kFiaDumpMax = 90;
+
+// Idle-FIA set: FIAs (full-object ptr) reached from IDLE-display units (+4064 vtable 0x6F4964), rebuilt by
+// pollBattleUnits each ~150ms. The tick slows only these. Poll + tick both on the game thread (no race).
+// FIAs (full-object ptr) reached from ACTING-display units (+4064 vtable 0x6F4964 = a unit currently
+// playing an action: attacker + units taking the hit). Idle units use 0x6E2F8C/0x6F492C with NO reachable
+// FIA, so they never enter this set. Rebuilt by pollBattleUnits each ~150ms. The tick SPEEDS these.
+unsigned g_playFia[96];
+DWORD g_playFiaExp[96]; // per-entry expiry tick (sticky TTL so brief action windows hold)
+volatile LONG g_playFiaN = 0;
+static bool isPlayFia(unsigned full)
+{
+    const LONG n = g_playFiaN;
+    for (LONG i = 0; i < n; ++i)
+        if (g_playFia[i] == full)
+            return true;
+    return false;
+}
+
+static void fiaScanUnitIds(const int* base, int dwords, const char* tag)
+{
+    __try {
+        for (int i = 0; i < dwords; ++i) {
+            unsigned v = static_cast<unsigned>(base[i]);
+            if ((v & 0xFFFF0000) == 0xA3E40000) // CMidgardID unit pattern observed this scenario
+                mlog("    [uid?] %s +0x%X = %08X", tag, i * 4, v);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// True while a hit/effect is playing (attack-pulse window: hold + ramp). Used to keep attacks at full speed
+// while idle is slowed between hits. Reliable signal (sub_639743 slot[2] -> g_attackExpiryTick).
+static bool inAttackWindow()
+{
+    return g_attackExpiryTick && static_cast<int>(GetTickCount() - g_attackExpiryTick) < static_cast<int>(kAttackRampMs);
+}
+
+const int kIdleDiv = 4; // idle/between-hits animation speed = 1/kIdleDiv (1/4); attacks run full speed
+
+int __stdcall fiaUpdateHook(int a1)
+{
+    const LONG n = InterlockedIncrement(&g_fiaCalls);
+    // (FIA-skip idle-slow reverted: skipping frames on the shared FIA tick breaks the cursor + target ring,
+    // which are also FIAs and MUST run at full rate; and FIAs carry no unit identity to slow selectively.)
+    if (g_inBattle) {
+        __try {
+            void** sp = reinterpret_cast<void**>(_AddressOfReturnAddress());
+            const unsigned caller = reinterpret_cast<unsigned>(sp[0]);
+            // distinct immediate-caller set: answers "is it sub_51EB10 directly, or via a wrapper?"
+            static unsigned seen[32];
+            static int nseen = 0;
+            bool isNew = true;
+            for (int i = 0; i < nseen; ++i)
+                if (seen[i] == caller) { isNew = false; break; }
+            if (isNew && nseen < 32) {
+                seen[nseen++] = caller;
+                mlog("[fia] NEW caller=%08X (at call #%ld)", caller, n);
+            }
+            // Distinct-object table: dump every UNIQUE sprite once (full fields +0..+60), flag uid patterns.
+            // This shows ALL list entries (~31), not just the first N calls, so we see who carries a unit ref.
+            const int full = a1 - 4;
+            static unsigned objs[80];
+            static int nobjs = 0;
+            bool newObj = true;
+            for (int i = 0; i < nobjs; ++i)
+                if (objs[i] == static_cast<unsigned>(full)) { newObj = false; break; }
+            if (newObj && nobjs < 80) {
+                objs[nobjs++] = static_cast<unsigned>(full);
+                char line[256];
+                int off = 0;
+                off += _snprintf(line + off, sizeof(line) - off, "[fiaobj] #%d this=%08X", nobjs, static_cast<unsigned>(full));
+                for (int d = 0; d <= 15; ++d) { // +0..+60
+                    unsigned v = *reinterpret_cast<unsigned*>(full + d * 4);
+                    const char* mark = ((v & 0xFFFF0000) == 0xA3E40000) ? "*" : "";
+                    off += _snprintf(line + off, sizeof(line) - off, " +%d=%08X%s", d * 4, v, mark);
+                }
+                mlog("%s", line);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    return reinterpret_cast<int(__stdcall*)(int)>(g_origFiaUpdate)(a1);
+}
+
+void installFiaProbe()
+{
+    if (g_ver != VerRussobit)
+        return;
+    g_origFiaUpdate = reinterpret_cast<void*>(0x52EA1F);
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(&g_origFiaUpdate, reinterpret_cast<void*>(fiaUpdateHook));
+    if (DetourTransactionCommit() != NO_ERROR) {
+        g_origFiaUpdate = reinterpret_cast<void*>(0x52EA1F);
+        mlog("[menu] FIA probe FAILED (0x52EA1F)");
+    } else {
+        mlog("[menu] FIA probe installed (0x52EA1F)");
+    }
+}
+
+// --- unit-update probe: sub_655006 = __thiscall(this=CBatUnitAnim, char a2, char a3). data=*(this+4);
+// uid@+12, state flags @+35/+38/+39, display image @+4064. This is where a unit (state known) resolves
+// its display. DECISIVE for tagging: (a) is it per-frame (rate), (b) can we reach the unit's FIA (0x6E2FCC)
+// from its data here? If yes -> tag {FIA->idle?} on state, then slow idle-tagged in the tick.
+void* g_origUnitUpd = nullptr;
+volatile LONG g_unitUpdCalls = 0;
+volatile LONG g_unitDetailed = 0;
+
+int __fastcall unitUpdHook(void* thisptr, void* /*edx*/, char a2, char a3)
+{
+    InterlockedIncrement(&g_unitUpdCalls);
+    if (g_inBattle && g_unitDetailed < 60) {
+        __try {
+            char* data = *reinterpret_cast<char**>(reinterpret_cast<char*>(thisptr) + 4);
+            if (isUserPtr(data) && !IsBadReadPtr(data, 4140)) {
+                const int uid = *reinterpret_cast<int*>(data + 12);
+                char* img = *reinterpret_cast<char**>(data + 4064);
+                const unsigned imgvft =
+                    (isUserPtr(img) && !IsBadReadPtr(img, 4)) ? *reinterpret_cast<unsigned*>(img) : 0;
+                // find a FIA (vtable 0x6E2FCC) reachable from the unit data: direct ptr, or one level deep
+                int fiaOff = -1;
+                unsigned fiaPtr = 0;
+                for (int o = 0; o < 4136; o += 4) {
+                    char* p = *reinterpret_cast<char**>(data + o);
+                    if (!isUserPtr(p) || IsBadReadPtr(p, 8))
+                        continue;
+                    if (*reinterpret_cast<unsigned*>(p) == 0x6E2FCC) { fiaOff = o; fiaPtr = reinterpret_cast<unsigned>(p); break; }
+                    char* q = *reinterpret_cast<char**>(p);
+                    if (isUserPtr(q) && !IsBadReadPtr(q, 4) && *reinterpret_cast<unsigned*>(q) == 0x6E2FCC) {
+                        fiaOff = o | 0x10000; fiaPtr = reinterpret_cast<unsigned>(q); break;
+                    }
+                }
+                InterlockedIncrement(&g_unitDetailed);
+                mlog("[unit] uid=%08X a2=%d a3=%d f35=%d f38=%d f39=%d img=%08X imgvft=%08X fiaOff=%X fiaPtr=%08X",
+                     static_cast<unsigned>(uid), a2, a3, *reinterpret_cast<unsigned char*>(data + 35),
+                     *reinterpret_cast<unsigned char*>(data + 38), *reinterpret_cast<unsigned char*>(data + 39),
+                     reinterpret_cast<unsigned>(img), imgvft, fiaOff, fiaPtr);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    return reinterpret_cast<int(__fastcall*)(void*, void*, char, char)>(g_origUnitUpd)(thisptr, nullptr, a2, a3);
+}
+
+void installUnitProbe()
+{
+    if (g_ver != VerRussobit)
+        return;
+    g_origUnitUpd = reinterpret_cast<void*>(0x655006);
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(&g_origUnitUpd, reinterpret_cast<void*>(unitUpdHook));
+    if (DetourTransactionCommit() != NO_ERROR) {
+        g_origUnitUpd = reinterpret_cast<void*>(0x655006);
+        mlog("[menu] unit probe FAILED (0x655006)");
+    } else {
+        mlog("[menu] unit probe installed (0x655006)");
+    }
+}
+
+// --- animation-NAME probe: sub_52E355 = int __stdcall(char* Str, int a2, int a3). Str = the image/anim
+// frame NAME loaded for an animation. This is the "level higher" where idle-vs-attack is encoded by name.
+// Log every DISTINCT name seen, to verify whether unit idle/attack/hit are distinguishable by name pattern.
+void* g_origName355 = nullptr;
+
+int __stdcall name355Hook(char* Str, int a2, int a3)
+{
+    __try {
+        if (isUserPtr(Str) && !IsBadReadPtr(Str, 4)) {
+            // printable, length 3..31
+            int len = 0;
+            bool printable = true;
+            while (len < 32) {
+                char c = Str[len];
+                if (c == 0)
+                    break;
+                if (c < 0x20 || static_cast<unsigned char>(c) > 0x7E) { printable = false; break; }
+                ++len;
+            }
+            if (printable && len >= 3 && len < 32) {
+                static char seen[256][32];
+                static int nseen = 0;
+                bool isNew = true;
+                for (int i = 0; i < nseen; ++i)
+                    if (lstrcmpA(seen[i], Str) == 0) { isNew = false; break; }
+                if (isNew && nseen < 256) {
+                    lstrcpynA(seen[nseen], Str, 32);
+                    ++nseen;
+                    // callstack from this (safe, working) __stdcall hook: code addresses up the stack reveal
+                    // the requesting unit/state path. Captured for the first batch of distinct names.
+                    char cs[180];
+                    int co = 0, nf = 0;
+                    cs[0] = 0;
+                    if (nseen <= 60) {
+                        void** sp = reinterpret_cast<void**>(_AddressOfReturnAddress());
+                        for (int i = 0; i < 240 && nf < 16; ++i) {
+                            const unsigned a = reinterpret_cast<unsigned>(sp[i]);
+                            if (a >= 0x401000 && a < 0x6D5000)
+                                co += _snprintf(cs + co, sizeof(cs) - co, " %08X", a), ++nf;
+                        }
+                        cs[co] = 0;
+                    }
+                    mlog("[name] #%d \"%s\" cs:%s", nseen, Str, cs);
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return reinterpret_cast<int(__stdcall*)(char*, int, int)>(g_origName355)(Str, a2, a3);
+}
+
+void installNameProbe()
+{
+    if (g_ver != VerRussobit)
+        return;
+    g_origName355 = reinterpret_cast<void*>(0x52E355);
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(&g_origName355, reinterpret_cast<void*>(name355Hook));
+    if (DetourTransactionCommit() != NO_ERROR) {
+        g_origName355 = reinterpret_cast<void*>(0x52E355);
+        mlog("[menu] name probe FAILED (0x52E355)");
+    } else {
+        mlog("[menu] name probe installed (0x52E355)");
+    }
+}
+
+// --- FIA-origin probe: hook the FIA constructor sub_52E8AC (__thiscall, this=ecx = the tickable FIA,
+// vtable 0x6E2FCC). At birth, capture {FIA pointer + code-address callstack + printable name strings on
+// the stack}. The callstack reveals the requesting unit/state path (idle vs action) which I trace in IDA;
+// the names show the animation identity. This links the anonymous tick entry back to its origin.
+void* g_origFiaCtor = nullptr;
+
+int __fastcall fiaCtorHook(void* ecx, void* edx, int arg0)
+{
+    __try {
+        static int n = 0;
+        if (n < 160) {
+            ++n;
+            void** sp = reinterpret_cast<void**>(_AddressOfReturnAddress());
+            char cs[180];
+            int co = 0, nf = 0;
+            char nm[180];
+            int no = 0, nn = 0;
+            nm[0] = 0;
+            for (int i = 0; i < 240; ++i) {
+                const unsigned a = reinterpret_cast<unsigned>(sp[i]);
+                if (nf < 14 && a >= 0x401000 && a < 0x6D5000)
+                    co += _snprintf(cs + co, sizeof(cs) - co, " %08X", a), ++nf;
+                if (nn < 4 && isUserPtr(reinterpret_cast<void*>(a)) && !IsBadReadPtr(reinterpret_cast<void*>(a), 6)) {
+                    char* s = reinterpret_cast<char*>(a);
+                    int L = 0;
+                    bool ok = true;
+                    while (L < 24) { char c = s[L]; if (!c) break; if (c < 0x20 || static_cast<unsigned char>(c) > 0x7E) { ok = false; break; } ++L; }
+                    if (ok && L >= 4 && L < 24)
+                        no += _snprintf(nm + no, sizeof(nm) - no, " \"%s\"", s), ++nn;
+                }
+            }
+            cs[co] = 0;
+            mlog("[fiamap] #%d fia=%08X cs:%s names:%s", n, reinterpret_cast<unsigned>(ecx), cs, nm);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return reinterpret_cast<int(__fastcall*)(void*, void*, int)>(g_origFiaCtor)(ecx, edx, arg0);
+}
+
+void installFiaCtorProbe()
+{
+    if (g_ver != VerRussobit)
+        return;
+    g_origFiaCtor = reinterpret_cast<void*>(0x52E8AC);
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(&g_origFiaCtor, reinterpret_cast<void*>(fiaCtorHook));
+    if (DetourTransactionCommit() != NO_ERROR) {
+        g_origFiaCtor = reinterpret_cast<void*>(0x52E8AC);
+        mlog("[menu] FIA-ctor probe FAILED (0x52E8AC)");
+    } else {
+        mlog("[menu] FIA-ctor probe installed (0x52E8AC)");
+    }
+}
+
+// --- IDLE-SLOW (the real lever). Idle-breathing units have display +4064 = wrapper vtable 0x6E2F8C; its
+// per-frame advance is sub_5B7C60 (forwards to the inner animator at *(+4064+4), which advances a counter).
+// Acting/other units use different wrappers. So hook sub_5B7C60 and, ONLY for 0x6E2F8C wrappers, skip most
+// advances -> idle animation slows while attacks (other wrappers) stay full speed. Reachable, stable, no poll.
+const unsigned kIdleWrapVft = 0x6E2F8C;
+void* g_orig5B7C60 = nullptr;
+volatile LONG g_idleAdvCalls = 0;
+volatile LONG g_idleAdvSkipped = 0;
+
+int __fastcall idleAdvHook(void* thisp, void* edx, int a2)
+{
+    // (idle-adv skip reverted too: same root issue - 0x6E2F8C is shared by UI, and frame-skip is jittery.)
+    return reinterpret_cast<int(__fastcall*)(void*, void*, int)>(g_orig5B7C60)(thisp, edx, a2);
+}
+
+void installIdleAdvHook()
+{
+    if (g_ver != VerRussobit)
+        return;
+    g_orig5B7C60 = reinterpret_cast<void*>(0x5B7C60);
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(&g_orig5B7C60, reinterpret_cast<void*>(idleAdvHook));
+    if (DetourTransactionCommit() != NO_ERROR) {
+        g_orig5B7C60 = reinterpret_cast<void*>(0x5B7C60);
+        mlog("[menu] idle-adv hook FAILED (0x5B7C60)");
+    } else {
+        mlog("[menu] idle-adv hook installed (0x5B7C60)");
+    }
+}
+
+const unsigned kFiaVft = 0x6E2FCC;
+const unsigned kImgPlayVft = 0x6F4964;
+const unsigned kImgActVft = 0x6F492C;
+
+// CORRECTED per-unit probe using the toolset header offsets (CBatUnitAnimData): attacker @3968,
+// unitPosition @3972, animCounter @3984, ptr1/ptr2/ptr3 SmartPointers @4036/4044/4052. These are the REAL
+// per-unit animation fields (the +4064 I used before was unknown4 padding). Dump them + the objects' vtables.
+void pollBattleUnits(void)
+{
+    static DWORD sLast = 0;
+    if (!g_inBattle || (GetTickCount() - sLast) < 600)
+        return;
+    __try {
+        char* viewer = reinterpret_cast<char*>(g_batViewer);
+        if (!isUserPtr(viewer))
+            return;
+        char* vdata = *reinterpret_cast<char**>(viewer + 4);
+        if (!isUserPtr(vdata))
+            return;
+        sLast = GetTickCount();
+        static const int kBase[2] = {5032, 5056};
+        for (int grp = 0; grp < 2; ++grp) {
+            for (int k = 0; k < 6; ++k) {
+                char* anim = *reinterpret_cast<char**>(vdata + kBase[grp] + 4 * k);
+                if (!isUserPtr(anim) || IsBadReadPtr(anim, 8))
+                    continue;
+                char* d = *reinterpret_cast<char**>(anim + 4);
+                if (!isUserPtr(d) || IsBadReadPtr(d, 4136))
+                    continue;
+                const int uid = *reinterpret_cast<int*>(d + 12);
+                if (!uid)
+                    continue;
+                const unsigned char attacker = *reinterpret_cast<unsigned char*>(d + 3968);
+                const int pos = *reinterpret_cast<int*>(d + 3972);
+                mlog("[u] uid=%08X atk=%d pos=%d", uid, attacker, pos);
+                // Probe the SHARED 2D engine (batViewer2dEngine @3976) ONCE: scan it for FIA pointers
+                // (vtable 0x6E2FCC) - direct and via Vector<...>{begin,end} - to find per-unit body sprites.
+                static DWORD sEngLog = 0;
+                if (grp == 0 && k == 0 && GetTickCount() - sEngLog > 1500) {
+                    sEngLog = GetTickCount();
+                    char* eng = *reinterpret_cast<char**>(d + 3976);
+                    if (isUserPtr(eng) && !IsBadReadPtr(eng, 800)) {
+                        // eng+780 is a Vector {begin,end,cap}; dump every element (per-unit body FIAs?)
+                        char* begin = *reinterpret_cast<char**>(eng + 780);
+                        char* end = *reinterpret_cast<char**>(eng + 784);
+                        mlog("    [eng] engine=%p vec780 begin=%p end=%p count=%d", eng, begin, end,
+                             (isUserPtr(begin) && isUserPtr(end) && end > begin) ? static_cast<int>((end - begin) / 4) : -1);
+                        if (isUserPtr(begin) && isUserPtr(end) && end > begin) {
+                            int count = static_cast<int>((end - begin) / 4);
+                            if (count > 32)
+                                count = 32;
+                            for (int i = 0; i < count; ++i) {
+                                char* f = *reinterpret_cast<char**>(begin + i * 4);
+                                unsigned fv = (isUserPtr(f) && !IsBadReadPtr(f, 36)) ? *reinterpret_cast<unsigned*>(f) : 0;
+                                const int cf = (fv == kFiaVft) ? *reinterpret_cast<int*>(f + 32) : -1;
+                                mlog("    [vec] [%d] %p vft=%08X cf=%d%s", i, f, fv, cf, fv == kFiaVft ? " FIA" : "");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 void applyPerUnitBurst(int f)
 {
-    static int* sPtr[4] = {nullptr, nullptr, nullptr, nullptr};
-    static int sOrig[4] = {0, 0, 0, 0};
-    static int sN = 0;
     static DWORD sLastLog = 0;
+    g_perUnitExtra = 0; // old countdown hook stays a passthrough; the new path drives the sprite directly
     __try {
-        for (int i = 0; i < sN; ++i) // restore last frame's scaling first
-            if (isUserPtr(sPtr[i]))
-                *sPtr[i] = sOrig[i];
-        sN = 0;
+        if (f <= 10 || !g_inBattle)
+            return; // safety is the strong FactoryImageAnim validation in speedUnitSprite, not a timed gate
         char* viewer = reinterpret_cast<char*>(g_batViewer);
-        if (f <= 10 || !g_inBattle || !isUserPtr(viewer))
+        if (!isUserPtr(viewer))
             return;
-        char* data = *reinterpret_cast<char**>(viewer + 4);
-        if (!isUserPtr(data))
+        char* vdata = *reinterpret_cast<char**>(viewer + 4);
+        if (!isUserPtr(vdata))
             return;
-        static const int kOff[4] = {4996, 5000, 5016, 5020};
-        const bool logNow = (GetTickCount() - sLastLog) > 1000;
-        for (int i = 0; i < 4; ++i) {
-            char* anim = *reinterpret_cast<char**>(data + kOff[i]);
-            if (!isUserPtr(anim))
-                continue;
-            int* pIv = reinterpret_cast<int*>(anim + 0x34);
-            const int v = *pIv;
-            if (logNow)
-                mlog("[burst] off=%d anim=%p iv@34=%d (30=%d 38=%d)", kOff[i], anim, v,
-                     *reinterpret_cast<int*>(anim + 0x30), *reinterpret_cast<int*>(anim + 0x38));
-            if ((v == 33 || v == 66) && sN < 4) { // sanity: only a real interval; else no-op
-                int nv = v * 10 / f;
-                if (nv < 1)
-                    nv = 1;
-                sPtr[sN] = pIv;
-                sOrig[sN] = v;
-                ++sN;
-                *pIv = nv;
+        char* animBase = vdata; // GetUnitAnimation base resolves to vdata (=*(viewer+4)); header-confirmed
+        const int actingId = *reinterpret_cast<int*>(vdata + 3996); // viewer's current (acting) unit id
+        int extra = (f - 10) / 30;                                  // x15 -> ~4; x3 -> 0..1; modest, tunable
+        if (extra < 1)
+            extra = 1;
+        const bool logNow = GetTickCount() - sLastLog > 1000;
+        if (logNow) {
+            sLastLog = GetTickCount();
+            mlog("[burst] enter f=%d extra=%d actingId=%08X", f, extra, static_cast<unsigned>(actingId));
+        }
+        static const int kBase[2] = {5032, 5056}; // unitAnimations[6] + unitAnimations2[6]
+        int sped = 0;
+        for (int grp = 0; grp < 2; ++grp) {
+            for (int k = 0; k < 6; ++k) {
+                char* anim = *reinterpret_cast<char**>(animBase + kBase[grp] + 4 * k);
+                if (!isUserPtr(anim))
+                    continue;
+                char* ad = *reinterpret_cast<char**>(anim + 4);
+                if (!isUserPtr(ad))
+                    continue;
+                if (*reinterpret_cast<int*>(ad + 12) != actingId) // only the acting unit (attacker) for now
+                    continue;
+                sped += speedUnitSprite(ad, extra, logNow);
             }
         }
         if (logNow)
-            sLastLog = GetTickCount();
+            mlog("[burst] f=%d extra=%d actingId=%08X spritesAdvanced=%d", f, extra,
+                 static_cast<unsigned>(actingId), sped);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        sN = 0;
     }
 }
 
 void updateBattleBurst(void)
 {
+    // Each hit/effect (vftable slot[2] -> g_attackPulse) opens a window during which the battle clock runs at
+    // the attack-burst factor, then eases back to the "Battle animation" base. Run from the 32ms WM_TIMER pump.
     if (g_attackPulse) {
         g_attackPulse = 0;
         g_attackExpiryTick = GetTickCount() + kAttackHoldMs; // hold end; ramp runs for kAttackRampMs after it
     }
-    if (!g_battleAttackEnabled) {
-        if (g_perUnitBurst)
-            applyPerUnitBurst(10); // feature off: make sure any scaled interval is restored
+    if (!g_battleAttackEnabled)
         return; // global g_battleFactor left to applyAnimSpeed (the live battle multiplier)
-    }
-    const int f = easedBattleFactor();
-    if (g_perUnitBurst) {
-        g_battleFactor = g_battleAnimEnabled ? kAnimFactor[g_battleAnimSpeed - 1] : 10; // keep global at idle
-        applyPerUnitBurst(f); // speed only the acting animators
-    } else {
-        g_battleFactor = f; // global-clock burst (speeds everything in battle during the window)
-    }
+    g_battleFactor = easedBurstFactor(g_battleAnimEnabled ? kAnimFactor[g_battleAnimSpeed - 1] : 10);
 }
 
 void refreshChecks()
@@ -960,9 +1487,7 @@ void refreshChecks()
         CheckMenuRadioItem(g_mapAnimMenu, kIdAnimMapOff, kIdAnimMap6, mSel, MF_BYCOMMAND);
     const UINT aSel = g_battleAttackEnabled ? (kIdAtk1 + static_cast<UINT>(g_battleAttackSpeed - 1)) : kIdAtkOff;
     if (g_battleAtkMenu)
-        CheckMenuRadioItem(g_battleAtkMenu, kIdAtkOff, kIdAtk5, aSel, MF_BYCOMMAND);
-    if (g_gameMenu)
-        CheckMenuItem(g_gameMenu, kIdPerUnit, MF_BYCOMMAND | (g_perUnitBurst ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuRadioItem(g_battleAtkMenu, kIdAtkOff, kIdAtk6, aSel, MF_BYCOMMAND);
     if (g_battleMenu)
         CheckMenuRadioItem(g_battleMenu, kIdBattle1, kIdBattle4,
                            kIdBattle1 + static_cast<UINT>(g_battleSpeed - 1), MF_BYCOMMAND);
@@ -1021,7 +1546,7 @@ void onMenuCommand(UINT id)
     } else if (id == kIdAtkOff) {
         g_battleAttackEnabled = false;
         applyAnimSpeed(0, g_battleAnimEnabled, g_battleAnimSpeed); // hand g_battleFactor back to the base
-    } else if (id >= kIdAtk1 && id <= kIdAtk5) {
+    } else if (id >= kIdAtk1 && id <= kIdAtk6) {
         g_battleAttackEnabled = true;
         g_battleAttackSpeed = static_cast<int>(id - kIdAtk1) + 1;
         updateBattleBurst(); // apply immediately (idle base now, burst on next hit)
@@ -1213,24 +1738,23 @@ void buildMenu()
     g_battleAnimMenu = CreatePopupMenu();
     AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnimOff, "Off (vanilla)");
     AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim1, "1.5x");
-    AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim2, "2x");
+    AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim2, "2x  (default)");
     AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim3, "3x");
     AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim4, "4x");
     AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim5, "5x");
-    AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim6, "15x (test)");
+    AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim6, "Super fast (15x)");
     AppendMenuA(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_battleAnimMenu),
-                "Battle animation (live x1.5..x5)");
+                "Battle speed (whole battle)");
     g_battleAtkMenu = CreatePopupMenu();
-    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtkOff, "Off (calm idle)");
+    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtkOff, "Off");
     AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk1, "1.5x");
     AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk2, "2x");
     AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk3, "3x");
     AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk4, "4x");
-    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk5, "5x");
+    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk5, "5x  (default)");
+    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk6, "Super fast (15x)");
     AppendMenuA(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_battleAtkMenu),
-                "Battle attack burst (fast hits, calm idle)");
-    AppendMenuA(g_gameMenu, MF_STRING, kIdPerUnit,
-                "  - per-unit: speed only acting units (experimental, may glitch)");
+                "Attack speed-up (extra burst on each hit)");
     g_mapAnimMenu = CreatePopupMenu();
     AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMapOff, "Off (vanilla)");
     AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap1, "1.5x");
@@ -1238,9 +1762,9 @@ void buildMenu()
     AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap3, "3x");
     AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap4, "4x");
     AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap5, "5x");
-    AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap6, "15x (test)");
+    AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap6, "Super fast (15x)");
     AppendMenuA(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_mapAnimMenu),
-                "Map animation (live x1.5..x5)");
+                "Map animation speed");
     g_battleMenu = CreatePopupMenu();
     AppendMenuA(g_battleMenu, MF_STRING, kIdBattle1, "Slow");
     AppendMenuA(g_battleMenu, MF_STRING, kIdBattle2, "Normal");
@@ -1644,9 +2168,9 @@ extern "C" void featuremenu_install(void)
 
     const char* f = iniFile();
     g_alwaysActive = GetPrivateProfileIntA("menu", "alwaysActive", 0, f) != 0;
-    // Split battle/map live-multiplier keys, default OFF (each context stays vanilla until opted in).
-    g_battleAnimEnabled = GetPrivateProfileIntA("menu", "battleAnimEnabled", 0, f) != 0;
-    g_battleAnimSpeed = GetPrivateProfileIntA("menu", "battleAnimSpeed", 5, f);
+    // Defaults: battle animation x2, attack burst x5 (fast hits, calm-ish battle). Map anim off.
+    g_battleAnimEnabled = GetPrivateProfileIntA("menu", "battleAnimEnabled", 1, f) != 0;
+    g_battleAnimSpeed = GetPrivateProfileIntA("menu", "battleAnimSpeed", 2, f);
     if (g_battleAnimSpeed < 1)
         g_battleAnimSpeed = 1;
     if (g_battleAnimSpeed > 6)
@@ -1657,13 +2181,12 @@ extern "C" void featuremenu_install(void)
         g_mapAnimSpeed = 1;
     if (g_mapAnimSpeed > 6)
         g_mapAnimSpeed = 6;
-    g_battleAttackEnabled = GetPrivateProfileIntA("menu", "battleAttackEnabled", 0, f) != 0;
-    g_battleAttackSpeed = GetPrivateProfileIntA("menu", "battleAttackSpeed", 3, f);
+    g_battleAttackEnabled = GetPrivateProfileIntA("menu", "battleAttackEnabled", 1, f) != 0;
+    g_battleAttackSpeed = GetPrivateProfileIntA("menu", "battleAttackSpeed", 5, f);
     if (g_battleAttackSpeed < 1)
         g_battleAttackSpeed = 1;
-    if (g_battleAttackSpeed > 5)
-        g_battleAttackSpeed = 5;
-    g_perUnitBurst = GetPrivateProfileIntA("menu", "perUnitBurst", 0, f) != 0;
+    if (g_battleAttackSpeed > 6)
+        g_battleAttackSpeed = 6;
     g_dragScroll = GetPrivateProfileIntA("menu", "dragScroll", 0, f) != 0;
 
     // Apply now (DllMain, before the game's main loop / anim init). The IAT is already populated by the
