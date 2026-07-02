@@ -11,7 +11,7 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 
 | Path | What it is | Committed |
 | --- | --- | --- |
-| `upstream/cnc-ddraw/` | The cnc-ddraw renderer as a **git submodule**, pinned at upstream `a0b81b11` (v7.1.0.1). Never edited in place. | submodule pointer |
+| `upstream/cnc-ddraw/` | The cnc-ddraw renderer as a **git submodule**, pinned at upstream `a0b81b11` (a 7.1.0.1-dev snapshot, 80 commits past the v7.1.0.0 tag). Never edited in place. | submodule pointer |
 | `patches/cnc-ddraw-mss32.patch` | Our diff over upstream: DirectDraw embed + `DDReloadConfig`/`DDTakeScreenshot` exports + the `featuremenu_install()` call (`dllmain.c`, `winapi_hooks.c`, `exports.def`) | yes |
 | `patches/cnc-ddraw-render-null.patch` | The `render_null` headless backend: `dd.c` renderer branch + vcxproj entries + new `inc/render_null.h`, `src/render_null.c` | yes |
 | `features/featuremenu.cpp` | The in-game menu, self-contained (no mss32 deps) | yes |
@@ -44,7 +44,10 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 `build.ps1` copies the pinned `upstream/cnc-ddraw` submodule to `build/`, applies both patches
 (`cnc-ddraw-mss32` + `cnc-ddraw-render-null`), copies in `features/featuremenu.cpp`,
 generates `C4dll-R.def` (the CB63 forwards plus the two exports), retargets the vcxproj
-(`TargetName` + `.def` + the extra source), and runs MSBuild (Release, Win32, v143, static CRT).
+(`TargetName` + `.def` + the extra source), stamps the version identity (`-Version <ver>`, default
+`dev-<repo sha>`: writes `inc/git.h` from the outer repo, edits `res.rc` to identify as C4dll-R,
+strips the upstream PreBuildEvent that regenerated `git.h` as UNKNOWN), and runs MSBuild (Release,
+Win32, v143, static CRT).
 MSBuild is located via `vswhere`, so it works both on a dev box and on CI. The CI workflow
 `.github/workflows/c4ddraw.yml` runs the same `build.ps1` and uploads `C4dll-R.dll` + `timer.c4p`.
 
@@ -60,10 +63,14 @@ git push origin c4dll-r-v1.0
 ```
 
 `.github/workflows/c4dll-r-release.yml` then builds `C4dll-R.dll` + `Mods/timer.c4p`, packages them
-with `INSTALL.txt` and a sample `C4plugins.ini` into `C4dll-R-v1.0.zip`, and publishes a GitHub
-Release with that zip plus the loose `C4dll-R.dll` and `timer.c4p` attached. Running the workflow
-manually (workflow_dispatch) publishes a **prerelease** tagged `c4dll-r-dev-<sha>` for testing. The
-package sources live in `c4ddraw/release/` (`INSTALL.txt`, `C4plugins.ini`, `RELEASE_NOTES.md`).
+with `INSTALL.txt`, a sample `C4plugins.ini` and the recommended `ddraw.ini` into `C4dll-R-v1.0.zip`, and publishes a GitHub
+Release with that zip, a `-symbols.zip` (the matching PDBs for crash triage) and the loose
+`C4dll-R.dll` + `timer.c4p` attached. The release version is stamped into the DLL version
+resource (`build.ps1 -Version`), so a build is identifiable from file properties. Running the
+workflow manually (workflow_dispatch) publishes a **prerelease** tagged `c4dll-r-dev-<sha>` (or
+your label); versions containing `rc` / `alpha` / `beta` / `dev` are always marked prerelease. The
+package sources live in `c4ddraw/release/` (`INSTALL.txt`, `C4plugins.ini`, `ddraw.ini`,
+`RELEASE_NOTES.md`).
 
 ## Deploy by hand
 
@@ -78,6 +85,175 @@ bump the submodule (`git -C upstream/cnc-ddraw fetch && git -C upstream/cnc-ddra
 `git add upstream/cnc-ddraw`), re-apply both patches against the new tree (`git apply`), resolve any
 reject, and regenerate. `build.ps1` always builds from the pinned submodule + the patches, so the
 upstream tree is never edited in place. Both patches touch disjoint files, so order does not matter.
+
+## What exactly is linked into C4dll-R.dll
+
+One binary, three layers:
+
+| Layer | Sources | Purpose |
+| --- | --- | --- |
+| cnc-ddraw core | all upstream `src/*.c`: `dd`, `ddsurface`, `blt`, `config`, renderers `render_ogl` / `render_d3d9` / `render_gdi`, `winapi_hooks`, `wndproc`, `hook`, `fps_limiter`, `utils`, `lodepng` (screenshots), the `IDirectDraw*` / `IDirect3D*` COM shims | the DirectDraw replacement itself |
+| render_null | added by `patches/cnc-ddraw-render-null.patch` | headless backend (`renderer=null`) for test harnesses, no visible output |
+| Microsoft Detours | upstream `src/detours/` | function/IAT hooking used by cnc-ddraw and the feature layer |
+| Feature layer | `features/featuremenu.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `cyrillic.cpp`, `headless.cpp` | in-game menu, `Mods\*.c4p` plugin host, game-event keystones for plugins, RU text codepage fix, headless windowing |
+
+Exports: the 483 CodeBase forwards (`name=CB63.name`) plus `DDReloadConfig` (live settings
+reload) and `DDTakeScreenshot`. `Mods\timer.c4p` is built separately from `plugins/timer/` and is
+NOT inside the DLL.
+
+Why one DLL: the game already imports a library named `C4dll-R` (the CodeBase copy), so a single
+file swap delivers the renderer, the menu and the plugin host, with no separate `ddraw.dll` that
+could shadow or be shadowed.
+
+## First run and settings files
+
+Three files, three owners:
+
+| File | Who creates it | What lives there |
+| --- | --- | --- |
+| `ddraw.ini` | shipped in the release zip (recommended defaults); if absent, the embedded cnc-ddraw generates a stock one on first launch | renderer, window mode, resolution, shader, performance caps |
+| `C4menu.ini` | generated by the menu on first launch | gameplay toggles: always active, animation speed, attack burst, drag-scroll; plus `language` (auto/en/ru) and `debugLog` (0 = no C4menu-<pid>.log files, default; 1 or the `C4DLL_DEBUG` env var enables diagnostics) |
+| `Disciple.ini` | the game's own file | only the two "game option" presets are written there (`BattleSpeed`, `PlayerSpeed` + `OpponentSpeed`), because they are native game options |
+
+Old settings conversion: on first launch (no `C4menu.ini` yet) the menu reads the legacy
+`mss32menu.ini` `[menu]` section (the old mss32-mod menu config) and converts it: `alwaysActive`
+carries over as is; old `animationSpeedEnabled=1` maps to battle speed 1.5x, otherwise the default
+2x is used. Nothing else is read, and the conversion never touches the game's `Disciple.ini` or
+`Scripts\settings.lua`. Once `C4menu.ini` exists it is never regenerated: the user owns it.
+
+Without our `ddraw.ini` the auto-generated stock one means upstream defaults: exclusive
+fullscreen (no title bar, so the menu bar is not visible), `renderer=auto` (picks D3D9 first, so
+no shader filters) and `maxgameticks=0`. That is exactly why the zip ships a tuned `ddraw.ini`.
+
+## Settings reference: ddraw.ini (shipped defaults)
+
+"live" = the menu applies it instantly through `DDReloadConfig`; "restart" = takes effect on the
+next game start.
+
+| Key | Shipped | Effect | Applies |
+| --- | --- | --- | --- |
+| `fake_mode` | `1024x768x16` | fakes a 16-bit desktop for the game's color-depth check | restart |
+| `renderer` | `opengl` | shaders + best upscaling; `auto` picks D3D9 first (no shader filters); `gdi` = software; if OpenGL fails, cnc-ddraw falls back to GDI on its own | restart |
+| `windowed` + `fullscreen` | `true` + `false` | windowed with a title bar and the menu; `true`+`true` = borderless fullscreen; `false`+any = exclusive fullscreen | live |
+| `border` | `true` | real title bar, draggable window; the menu bar sits under it | live |
+| `resizable` | `true` | window edges resize; aspect is kept by `maintas` | live |
+| `width`, `height` | `0`, `0` | output size; 0 = native game size (1024x768) | live |
+| `maintas` | `true` | keep 4:3, no stretching on widescreen | live |
+| `boxing` | `false` | integer scaling (sharp pixels + borders); off fills the window | live |
+| `shader` | `lanczos2-sharp` | upscale filter, OpenGL renderer only; the menu offers 8 presets | live |
+| `savesettings` | `1` | cnc-ddraw writes window size/pos/state back on exit | - |
+| `maxgameticks` | `100` | game loop cap in ticks/s; see "The game speed cap" below | restart |
+| `maxfps` | `-1` | render FPS cap, -1 = screen refresh; paces the render thread only, never slows the game | restart |
+| `vsync` | `false` | vertical sync; needed only against tearing in exclusive fullscreen (windowed and borderless never tear thanks to DWM composition), costs a little display lag | live |
+| `singlecpu` | `true` | pin the process to one core (cnc-ddraw old-game default; candidate for `false`, see Experimental; menu: Performance > Single CPU core) | restart |
+| `noactivateapp` | `true` | keep rendering when unfocused (the game LOGIC half of this is the menu item "Always active") | restart |
+| `nonexclusive` | `true` | never take exclusive DirectDraw; reliable menus/videos | restart |
+| `adjmouse` | `true` | scale the cursor to the window size | live |
+| `devmode` | `true` | cursor not clipped to the window (original windowed feel); Ctrl+Tab or RAlt+RCtrl release it if anything clips | live |
+| `keytogglefullscreen` ... | see file | hotkeys as VK codes, 0x00 disables | - |
+| `resolutions`, `fixchilds` | `0`, `2` | mode-list and child-window handling; fine as is for D2 | - |
+
+Parser warning: comments only on their own lines. Everything after `=` including trailing spaces
+is the value, so an inline `; comment` silently breaks the setting.
+
+## The game speed cap (maxgameticks)
+
+The one setting that matters more than FPS. The engine advances every game command (a move, a
+battle action, a dialog transition) through an internal chain that is pumped one step per
+main-loop iteration, and `maxgameticks` caps that loop. Measured on real sessions: one command
+takes about 10 pump steps, so the reaction floor per command is roughly `10 / maxgameticks`
+seconds:
+
+| maxgameticks | Reaction floor per command | CPU |
+| --- | --- | --- |
+| 30 | ~330 ms: the game visibly "thinks" before every action | coolest |
+| 60 | ~170 ms | low |
+| 100 (shipped) | ~100 ms | moderate |
+| -1 (uncapped) | as fast as the CPU allows | one core busy |
+
+The old DisciplesGL "ColdCPU" feel corresponds to 30. The shipped default is 100: near-instant
+reactions at a bounded CPU cost. Note that `maxfps` has no such effect: it paces only the render
+thread.
+
+## In-game menu
+
+Russobit exe only: on other builds the menu does not install (the renderer still works). The bar
+appears under the title bar in windowed mode: **Game / Video / Performance / Plugins**.
+
+The menu is bilingual: `C4menu.ini` `[menu] language` = `auto` (default) / `en` / `ru`. With
+`auto` the menu is Russian when the Windows UI language is Russian or the system codepage is 1251,
+English otherwise. Submenus carry grayed one-line hints explaining each option.
+
+### Game
+
+| Item | What it does | Saved to | Applies |
+| --- | --- | --- | --- |
+| Always active | the game keeps running (no pause) when the window loses focus; an in-place patch of the activation check, verified against the original bytes before writing | `C4menu.ini` `alwaysActive` | live |
+| Map drag-scroll (left button) | hold LMB on the map and drag to pan; a plain click still selects (delivered on release); window-edge scroll is off while enabled | `C4menu.ini` `dragScroll` | live |
+| Battle speed (whole battle): Off / 1.5x / 2x (default) / 3x / 4x / 5x / 15x | multiplies all battle animation timing via a virtual clock (a `timeGetTime` redirect); no game memory is patched | `C4menu.ini` `battleAnimEnabled` + `battleAnimSpeed` | live |
+| Attack speed-up (burst on each hit): Off / 1.5x .. 5x (default) / 15x | an extra multiplier only while a hit/effect plays (about 1.2 s, easing back over 0.7 s), on top of the battle speed | `C4menu.ini` `battleAttackEnabled` + `battleAttackSpeed` | live |
+| Map animation speed: Off (default) / 1.5x .. 15x | the same virtual clock on the strategic map (water, flags, effects) | `C4menu.ini` `mapAnimEnabled` + `mapAnimSpeed` | live |
+| Battle speed (game option): Slow / Normal / Fast / Instant | the game's OWN option, same as its settings screen | `Disciple.ini` `BattleSpeed` | next battle |
+| Map movement speed (game option): Normal / Fast / Very fast | the game's OWN option: walk speed of player and AI stacks, read when a move starts | `Disciple.ini` `PlayerSpeed` + `OpponentSpeed` | next move |
+
+The 15x entries are test presets, exaggerated on purpose.
+
+### Video
+
+| Item | What it does | Saved to | Applies |
+| --- | --- | --- | --- |
+| Display mode: Windowed / Fullscreen borderless / Fullscreen exclusive | window style; exclusive does a real display-mode change and falls back to borderless where impossible (RDP); Alt+Enter toggles | `ddraw.ini` `windowed` + `fullscreen` | live |
+| Resolution: Native .. 3840x2160 | output window size; Native = the 1024x768 game size | `ddraw.ini` `width` + `height` | live |
+| Filter / upscale: Lanczos (best for D2 art) / xBRZ / Bicubic / AMD FSR / xBR lv2 / Bilinear / None / CRT | the upscale shader | `ddraw.ini` `shader` | live, OpenGL only |
+| Renderer (restart): OpenGL (recommended) / GDI / Auto | rendering backend; Auto picks D3D9 first, which has no shader filters | `ddraw.ini` `renderer` | restart |
+| Keep 4:3 aspect | letterbox instead of stretch on widescreen | `ddraw.ini` `maintas` | live |
+| VSync | fixes tearing in exclusive fullscreen at the cost of a little display lag; windowed and borderless never tear (DWM composition), so keep it off there | `ddraw.ini` `vsync` | live |
+| Integer scaling | pixel-perfect zoom with borders; keep OFF to fill the window | `ddraw.ini` `boxing` | live |
+| Take screenshot (PrintScreen) | saves a screenshot via the renderer | - | - |
+
+### Performance
+
+| Item | What it does | Saved to | Applies |
+| --- | --- | --- | --- |
+| Frame cap (restart): Monitor refresh rate / 30 / 60 / 144 | render FPS only, never slows game logic | `ddraw.ini` `maxfps` | restart |
+| Game speed cap (restart): Uncapped / 30 / 60 / 100 (default) | the game loop cap, see the section above | `ddraw.ini` `maxgameticks` | restart |
+| Single CPU core (restart) | pins the whole process to CPU core 0 (cnc-ddraw's old-game safety net, ON by default); OFF is the experimental performance option, see Experimental | `ddraw.ini` `singlecpu` | restart |
+
+### Plugins
+
+Appears when `Mods\` contains plugins: `Native (.c4p)` and `Legacy (.mod)` submenus, each grafting
+the plugin's own menu. The bundled Timer plugin is configured via `C4plugins.ini` and is
+documented separately.
+
+## Experimental
+
+- Attack burst 15x steps: test-only exaggeration.
+- `C4menu.ini` `perUnitBurst`: per-unit burst scoping; no menu item, off by default, unfinished.
+- Single CPU core (`singlecpu`): cnc-ddraw's old-game safety net. With `true` (the default) the
+  whole process is pinned to CPU core 0 on Windows 10 (`SetProcessAffinityMask(1)`; Windows 11
+  24H2+ uses a softer per-thread mechanism instead). The pin protects ancient games from timer
+  drift and core-migration bugs, but it also serializes everything on one core: the render thread
+  runs at ABOVE_NORMAL priority and preempts the game thread on every presented frame, and any
+  background-thread burst becomes a direct game stall. D2 has no known core-migration problems,
+  so `false` is the performance candidate; it is NOT yet A/B tested, which is why the shipped
+  default stays `true`. Toggle: Performance > Single CPU core (restart), or `singlecpu=` in
+  ddraw.ini; it is a plain config value, no rebuild involved. How to test: switch OFF, restart the
+  game, play a battle and a few map turns; watch for sound stutter or timing oddities (test with
+  sound ON - stutter is the known failure mode), then keep whichever feels better.
+- `renderer=null`: no-render backend for test harnesses; nothing is drawn, the game window stays a
+  NORMAL window. Where the environment cannot create real top-level windows at all (Wine null
+  driver, no X server) the same run falls back to message-only windows automatically: the fallback
+  arms only after a real window creation fails AND the message-only retry succeeds, so on a desktop
+  it never engages.
+
+## No OpenGL on the system (VM, RDP): Mesa and dxil.dll
+
+Not part of the release. Where no working OpenGL driver exists, the Mesa3D Windows distribution
+can be dropped next to the exe (`opengl32.dll` + `libgallium_wgl.dll` and companions): cnc-ddraw
+then renders GL through Mesa, usually via its D3D12 backend. In that setup `dxil.dll` from the
+same Mesa kit is REQUIRED: without it the D3D12 driver cannot sign its shaders and the game
+silently exits at startup. Outside the Mesa setup `dxil.dll` does nothing and is not shipped with
+C4dll-R.
 
 ---
 
@@ -94,7 +270,7 @@ upstream tree is never edited in place. Both patches touch disjoint files, so or
 
 | Путь | Что это | В репозитории |
 | --- | --- | --- |
-| `upstream/cnc-ddraw/` | Рендерер cnc-ddraw как **git submodule**, запинен на апстрим `a0b81b11` (v7.1.0.1). На месте не редактируется. | указатель submodule |
+| `upstream/cnc-ddraw/` | Рендерер cnc-ddraw как **git submodule**, запинен на апстрим `a0b81b11` (dev-снапшот линии 7.1.0.1, 80 коммитов после тега v7.1.0.0). На месте не редактируется. | указатель submodule |
 | `patches/cnc-ddraw-mss32.patch` | Наш дифф: встраивание DirectDraw + экспорты `DDReloadConfig`/`DDTakeScreenshot` + вызов `featuremenu_install()` (`dllmain.c`, `winapi_hooks.c`, `exports.def`) | да |
 | `patches/cnc-ddraw-render-null.patch` | Headless-бэкенд `render_null`: ветка рендерера в `dd.c` + записи vcxproj + новые `inc/render_null.h`, `src/render_null.c` | да |
 | `features/featuremenu.cpp` | Внутриигровое меню, самодостаточное (без зависимостей mss32) | да |
@@ -127,7 +303,10 @@ upstream tree is never edited in place. Both patches touch disjoint files, so or
 `build.ps1` копирует запиненный submodule `upstream/cnc-ddraw` в `build/`, накладывает оба патча
 (`cnc-ddraw-mss32` + `cnc-ddraw-render-null`), копирует `features/featuremenu.cpp`,
 генерирует `C4dll-R.def` (форварды CB63 плюс два экспорта), перенацеливает vcxproj (`TargetName` +
-`.def` + доп. исходник) и запускает MSBuild (Release, Win32, v143, статический CRT). MSBuild ищется
+`.def` + доп. исходник), зашивает версию (`-Version <ver>`, по умолчанию `dev-<sha репо>`: пишет
+`inc/git.h` из внешнего репо, правит `res.rc` на идентичность C4dll-R, вырезает апстримный
+PreBuildEvent, который перегенерировал `git.h` в UNKNOWN) и запускает MSBuild (Release, Win32,
+v143, статический CRT). MSBuild ищется
 через `vswhere`, поэтому работает и на машине разработчика, и на CI. Workflow
 `.github/workflows/c4ddraw.yml` запускает тот же `build.ps1` и выгружает `C4dll-R.dll` + `timer.c4p`.
 
@@ -143,10 +322,13 @@ git push origin c4dll-r-v1.0
 ```
 
 `.github/workflows/c4dll-r-release.yml` соберёт `C4dll-R.dll` + `Mods/timer.c4p`, упакует их с
-`INSTALL.txt` и примером `C4plugins.ini` в `C4dll-R-v1.0.zip` и опубликует GitHub Release с этим
-архивом плюс отдельными файлами `C4dll-R.dll` и `timer.c4p`. Ручной запуск workflow
-(workflow_dispatch) публикует **пре-релиз** с тегом `c4dll-r-dev-<sha>` для теста. Исходники пакета —
-в `c4ddraw/release/` (`INSTALL.txt`, `C4plugins.ini`, `RELEASE_NOTES.md`).
+`INSTALL.txt`, примером `C4plugins.ini` и рекомендованным `ddraw.ini` в `C4dll-R-v1.0.zip` и опубликует GitHub Release с этим
+архивом, `-symbols.zip` (соответствующие PDB для разбора крашей) и отдельными файлами
+`C4dll-R.dll` + `timer.c4p`. Версия релиза зашивается в ресурс версии DLL (`build.ps1 -Version`),
+так что сборка опознаётся по свойствам файла. Ручной запуск workflow (workflow_dispatch) публикует
+**пре-релиз** с тегом `c4dll-r-dev-<sha>` (или вашей меткой); версии, содержащие `rc` / `alpha` /
+`beta` / `dev`, всегда помечаются пре-релизом. Исходники пакета — в `c4ddraw/release/`
+(`INSTALL.txt`, `C4plugins.ini`, `ddraw.ini`, `RELEASE_NOTES.md`).
 
 ## Ручная установка
 
@@ -160,3 +342,175 @@ git push origin c4dll-r-v1.0
 `git add upstream/cnc-ddraw`), наложите оба патча на новое дерево (`git apply`), разрешите конфликты и
 пересоберите. `build.ps1` всегда собирает из запиненного submodule + патчи, поэтому дерево апстрима не
 редактируется на месте. Оба патча трогают непересекающиеся файлы, поэтому порядок не важен.
+
+## Что именно слинковано внутри C4dll-R.dll
+
+Один бинарь, три слоя:
+
+| Слой | Исходники | Назначение |
+| --- | --- | --- |
+| Ядро cnc-ddraw | все апстримные `src/*.c`: `dd`, `ddsurface`, `blt`, `config`, рендереры `render_ogl` / `render_d3d9` / `render_gdi`, `winapi_hooks`, `wndproc`, `hook`, `fps_limiter`, `utils`, `lodepng` (скриншоты), COM-прослойки `IDirectDraw*` / `IDirect3D*` | сама замена DirectDraw |
+| render_null | добавляется `patches/cnc-ddraw-render-null.patch` | headless-бэкенд (`renderer=null`) для тест-харнессов, без видимого вывода |
+| Microsoft Detours | апстримный `src/detours/` | function/IAT-хуки для cnc-ddraw и слоя фич |
+| Слой фич | `features/featuremenu.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `cyrillic.cpp`, `headless.cpp` | внутриигровое меню, хост плагинов `Mods\*.c4p`, игровые события для плагинов, фикс кодировки русского текста, headless-окна |
+
+Экспорты: 483 форварда CodeBase (`name=CB63.name`) плюс `DDReloadConfig` (живое перечтение
+настроек) и `DDTakeScreenshot`. `Mods\timer.c4p` собирается отдельно из `plugins/timer/` и внутрь
+DLL НЕ входит.
+
+Почему одна DLL: игра уже импортирует библиотеку с именем `C4dll-R` (копию CodeBase), поэтому
+замена одного файла даёт рендерер, меню и хост плагинов сразу, без отдельного `ddraw.dll`,
+который мог бы кого-то перекрыть или быть перекрытым.
+
+## Первый запуск и файлы настроек
+
+Три файла, три владельца:
+
+| Файл | Кто создаёт | Что хранит |
+| --- | --- | --- |
+| `ddraw.ini` | лежит в релизном zip (рекомендованные значения); если отсутствует, встроенный cnc-ddraw при первом запуске создаст стоковый | рендерер, режим окна, разрешение, шейдер, капы производительности |
+| `C4menu.ini` | создаётся меню при первом запуске | игровые тумблеры: always active, скорости анимаций, attack burst, drag-scroll; плюс `language` (auto/en/ru) и `debugLog` (0 = не писать файлы C4menu-<pid>.log, по умолчанию; 1 или env `C4DLL_DEBUG` включает диагностику) |
+| `Disciple.ini` | собственный файл игры | туда пишутся только два «родных» пресета (`BattleSpeed`, `PlayerSpeed` + `OpponentSpeed`), потому что это опции самой игры |
+
+Конвертация старых настроек: при первом запуске (когда `C4menu.ini` ещё нет) меню читает
+легаси-файл `mss32menu.ini`, секцию `[menu]` (старый конфиг меню mss32-мода), и конвертирует:
+`alwaysActive` переносится как есть; старый `animationSpeedEnabled=1` превращается в скорость боя
+1.5x, иначе берётся дефолт 2x. Больше ничего не читается, а `Disciple.ini` и
+`Scripts\settings.lua` игры конвертация не трогает никогда. Существующий `C4menu.ini` повторно не
+генерируется: файл принадлежит пользователю.
+
+Без нашего `ddraw.ini` автосозданный стоковый означает апстрим-дефолты: эксклюзивный полный экран
+(нет заголовка окна, значит не виден меню-бар), `renderer=auto` (сначала D3D9, то есть без
+шейдерных фильтров) и `maxgameticks=0`. Именно поэтому в zip лежит настроенный `ddraw.ini`.
+
+## Справочник настроек: ddraw.ini (значения из комплекта)
+
+«сразу» = меню применяет сразу через `DDReloadConfig`; «рестарт» = вступает в силу со следующего
+запуска игры.
+
+| Ключ | В комплекте | Эффект | Применение |
+| --- | --- | --- | --- |
+| `fake_mode` | `1024x768x16` | фейкает 16-битный десктоп для проверки глубины цвета в игре | рестарт |
+| `renderer` | `opengl` | шейдеры + лучший апскейл; `auto` сначала берёт D3D9 (без шейдерных фильтров); `gdi` = софтверный; если OpenGL не поднялся, cnc-ddraw сам откатится на GDI | рестарт |
+| `windowed` + `fullscreen` | `true` + `false` | окно с заголовком и меню; `true`+`true` = borderless на весь экран; `false`+любое = эксклюзивный фулскрин | сразу |
+| `border` | `true` | настоящий заголовок окна (окно можно таскать); меню-бар под ним | сразу |
+| `resizable` | `true` | окно тянется за края; пропорции держит `maintas` | сразу |
+| `width`, `height` | `0`, `0` | размер вывода; 0 = родной размер игры (1024x768) | сразу |
+| `maintas` | `true` | держать 4:3, без растягивания на широких экранах | сразу |
+| `boxing` | `false` | целочисленный масштаб (чёткие пиксели + рамки); выкл = заполнять окно | сразу |
+| `shader` | `lanczos2-sharp` | фильтр апскейла, только для OpenGL; в меню 8 пресетов | сразу |
+| `savesettings` | `1` | cnc-ddraw сам сохраняет размер/позицию/состояние окна при выходе | - |
+| `maxgameticks` | `100` | кап игрового цикла, тиков/с; см. раздел «Кап скорости игры» | рестарт |
+| `maxfps` | `-1` | кап FPS рендера, -1 = частота монитора; крутит только поток рендера, игру не замедляет | рестарт |
+| `vsync` | `false` | вертикальная синхронизация; нужна только от разрывов в эксклюзивном фулскрине (в окне и безрамочном режиме разрывов не бывает благодаря композиции DWM), стоит немного задержки вывода | сразу |
+| `singlecpu` | `true` | прижать процесс к одному ядру (дефолт cnc-ddraw для старых игр; кандидат на `false`, см. «Экспериментальное»; меню: Производительность > Одно ядро CPU) | рестарт |
+| `noactivateapp` | `true` | продолжать рендер без фокуса (логическую половину даёт пункт меню "Always active") | рестарт |
+| `nonexclusive` | `true` | не брать эксклюзивный DirectDraw; надёжные меню/видео | рестарт |
+| `adjmouse` | `true` | масштабировать курсор под окно | сразу |
+| `devmode` | `true` | курсор не запирается в окне (родное оконное поведение); если что-то заперло: Ctrl+Tab или RAlt+RCtrl | сразу |
+| `keytogglefullscreen` ... | см. файл | горячие клавиши VK-кодами, 0x00 отключает | - |
+| `resolutions`, `fixchilds` | `0`, `2` | список видеорежимов и обработка дочерних окон; для D2 менять не нужно | - |
+
+Предупреждение о парсере: комментарии только отдельной строкой. Всё после `=`, включая хвостовые
+пробелы, считается значением, поэтому инлайновый `; комментарий` молча ломает настройку.
+
+## Кап скорости игры (maxgameticks)
+
+Настройка важнее FPS. Движок проводит каждую игровую команду (ход, действие боя, переход
+диалога) через внутреннюю цепочку, которая прокачивается по одному шагу за итерацию главного
+цикла, а `maxgameticks` этот цикл ограничивает. Замерено на реальных сессиях: одна команда
+занимает около 10 шагов цикла, поэтому пол реакции на команду примерно `10 / maxgameticks`
+секунд:
+
+| maxgameticks | Пол реакции на команду | CPU |
+| --- | --- | --- |
+| 30 | ~330 мс: игра заметно «думает» перед каждым действием | самый холодный |
+| 60 | ~170 мс | низкий |
+| 100 (в комплекте) | ~100 мс | умеренный |
+| -1 (без капа) | насколько хватит CPU | одно ядро занято |
+
+Старому «ColdCPU» из DisciplesGL соответствует 30. В комплекте 100: почти мгновенные реакции при
+ограниченной цене по CPU. Заметьте: `maxfps` такого эффекта не имеет, он крутит только поток
+рендера.
+
+## Внутриигровое меню
+
+Только для exe Русобита: на других сборках меню не устанавливается (рендерер работает). Бар
+появляется под заголовком окна в оконном режиме: **Игра / Видео / Производительность / Плагины**.
+
+Меню двуязычное: `C4menu.ini` `[menu] language` = `auto` (по умолчанию) / `en` / `ru`. При `auto`
+меню русское, когда язык интерфейса Windows русский или системная кодовая страница 1251, иначе
+английское. В подменю есть серые строки-подсказки, объясняющие каждую опцию.
+
+### Игра
+
+| Пункт | Что делает | Куда пишет | Применение |
+| --- | --- | --- | --- |
+| Всегда активна | игра продолжает работать (без паузы), когда окно теряет фокус; точечный патч проверки активации, сверяется с оригинальными байтами перед записью | `C4menu.ini` `alwaysActive` | сразу |
+| Перетаскивание карты | зажать ЛКМ на карте и тянуть = панорамирование; обычный клик по-прежнему выбирает (доставляется при отпускании); скролл от края окна при включённом пункте отключён | `C4menu.ini` `dragScroll` | сразу |
+| Скорость боя (весь бой): Выкл / 1.5x / 2x (по умолчанию) / 3x / 4x / 5x / 15x | умножает тайминг всех боевых анимаций через виртуальные часы (редирект `timeGetTime`); память игры не патчится | `C4menu.ini` `battleAnimEnabled` + `battleAnimSpeed` | сразу |
+| Ускорение атак (рывок на каждый удар): Выкл / 1.5x .. 5x (по умолчанию) / 15x | дополнительный множитель только пока проигрывается удар/эффект (около 1.2 с, плавный спад за 0.7 с), поверх скорости боя | `C4menu.ini` `battleAttackEnabled` + `battleAttackSpeed` | сразу |
+| Скорость анимаций карты: Выкл (по умолчанию) / 1.5x .. 15x | те же виртуальные часы на стратегической карте (вода, флаги, эффекты) | `C4menu.ini` `mapAnimEnabled` + `mapAnimSpeed` | сразу |
+| Скорость боя (опция игры): Медленно / Нормально / Быстро / Мгновенно | СОБСТВЕННАЯ опция игры, та же, что в её настройках | `Disciple.ini` `BattleSpeed` | со следующего боя |
+| Скорость передвижения на карте (опция игры): Нормально / Быстро / Очень быстро | СОБСТВЕННАЯ опция игры: скорость шага ваших и вражеских отрядов, читается при старте движения | `Disciple.ini` `PlayerSpeed` + `OpponentSpeed` | со следующего движения |
+
+Пункты 15x - тестовые пресеты, преувеличены намеренно.
+
+### Видео
+
+| Пункт | Что делает | Куда пишет | Применение |
+| --- | --- | --- | --- |
+| Режим экрана: Оконный / Полный экран без рамки / Полный экран эксклюзивный | стиль окна; эксклюзивный делает настоящую смену видеорежима и откатывается в безрамочный там, где она невозможна (RDP); Alt+Enter переключает | `ddraw.ini` `windowed` + `fullscreen` | сразу |
+| Разрешение: Родное .. 3840x2160 | размер окна вывода; Родное = игровые 1024x768 | `ddraw.ini` `width` + `height` | сразу |
+| Фильтр / масштабирование: Lanczos (лучший для графики D2) / xBRZ / Bicubic / AMD FSR / xBR lv2 / Bilinear / Без фильтра / CRT | шейдер апскейла | `ddraw.ini` `shader` | сразу, только OpenGL |
+| Рендерер (рестарт): OpenGL (рекомендуется) / GDI / Auto | бэкенд рендера; Auto сначала берёт D3D9, у которого нет шейдерных фильтров | `ddraw.ini` `renderer` | рестарт |
+| Держать 4:3 | леттербокс вместо растягивания на широких экранах | `ddraw.ini` `maintas` | сразу |
+| VSync | лечит разрывы в эксклюзивном фулскрине ценой небольшой задержки вывода; в окне и безрамочном режиме разрывов нет и так (композиция DWM), там держите выключенным | `ddraw.ini` `vsync` | сразу |
+| Целочисленный масштаб | пиксель-в-пиксель с рамками; держите OFF, чтобы заполнять окно | `ddraw.ini` `boxing` | сразу |
+| Сделать скриншот (PrintScreen) | скриншот средствами рендерера | - | - |
+
+### Производительность
+
+| Пункт | Что делает | Куда пишет | Применение |
+| --- | --- | --- | --- |
+| Кап FPS (рестарт): Частота монитора / 30 / 60 / 144 | только FPS рендера, логику игры не замедляет | `ddraw.ini` `maxfps` | рестарт |
+| Кап скорости игры (рестарт): Без капа / 30 / 60 / 100 (по умолчанию) | кап игрового цикла, см. раздел выше | `ddraw.ini` `maxgameticks` | рестарт |
+| Одно ядро CPU (рестарт) | прижимает весь процесс к ядру 0 (страховка cnc-ddraw для старых игр, ON по умолчанию); OFF - экспериментальный вариант производительности, см. «Экспериментальное» | `ddraw.ini` `singlecpu` | рестарт |
+
+### Плагины
+
+Появляется, когда в `Mods\` есть плагины: подменю `Нативные (.c4p)` и `Старые (.mod)`, каждое
+подцепляет собственное меню плагина. Комплектный плагин Timer настраивается через
+`C4plugins.ini` и документируется отдельно.
+
+## Экспериментальное
+
+- Шаги 15x у burst/скоростей: тестовое преувеличение.
+- `C4menu.ini` `perUnitBurst`: burst только для действующих юнитов; пункта меню нет, по умолчанию
+  выключено, не доделано.
+- Одно ядро CPU (`singlecpu`): страховка cnc-ddraw для старых игр. При `true` (по умолчанию) весь
+  процесс прижимается к ядру 0 на Windows 10 (`SetProcessAffinityMask(1)`; на Windows 11 24H2+
+  вместо этого мягкий пер-поточный механизм). Прижим защищает древние игры от дрейфа таймеров и
+  багов миграции между ядрами, но и сериализует всё на одном ядре: поток рендера с приоритетом
+  ABOVE_NORMAL вытесняет игровой поток на каждом показанном кадре, а любой всплеск фонового
+  потока превращается в прямую задержку игры. У D2 известных проблем с миграцией ядер нет,
+  поэтому `false` - кандидат по производительности; A/B-прогонов ещё НЕ было, поэтому дефолт
+  остаётся `true`. Переключатель: Производительность > Одно ядро CPU (рестарт), либо `singlecpu=`
+  в ddraw.ini; это обычное значение конфига, пересборка не нужна. Как тестировать: выключить,
+  перезапустить игру, сыграть бой и несколько ходов по карте; следить за заиканием звука и
+  странностями таймингов (тестировать СО ЗВУКОМ - заикание и есть известный симптом), затем
+  оставить то, что ощущается лучше.
+- `renderer=null`: норендер-бэкенд для тест-харнессов; ничего не рисуется, окно игры остаётся
+  ОБЫЧНЫМ окном. Там, где среда вообще не может создать настоящие top-level окна (null-драйвер
+  Wine, без X-сервера), тот же запуск сам откатывается на message-only окна: фолбэк взводится
+  только после того, как создание настоящего окна ПРОВАЛИЛОСЬ, а message-only повтор удался,
+  поэтому на десктопе он не срабатывает никогда.
+
+## В системе нет OpenGL (VM, RDP): Mesa и dxil.dll
+
+Не входит в релиз. Там, где рабочего драйвера OpenGL нет, рядом с exe можно положить
+Windows-дистрибутив Mesa3D (`opengl32.dll` + `libgallium_wgl.dll` и сопутствующие): cnc-ddraw
+будет рендерить GL через Mesa, обычно через её D3D12-бэкенд. В такой конфигурации `dxil.dll` из
+того же комплекта Mesa ОБЯЗАТЕЛЕН: без него D3D12-драйвер не может подписывать шейдеры и игра
+молча завершается на старте. Вне Mesa-конфигурации `dxil.dll` не делает ничего и с C4dll-R не
+поставляется.
