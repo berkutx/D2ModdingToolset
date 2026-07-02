@@ -76,6 +76,10 @@ jobs:
           if ($pexp -lt 5) { Write-Error "timer.c4p missing c4p_* exports ($pexp/5)"; exit 1 }
           Copy-Item $c4p out/timer.c4p
 
+          # keep the matching symbols for crash triage
+          Copy-Item "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.pdb" out/C4dll-R.pdb
+          Copy-Item "c4ddraw/plugins/timer/bin/Release/timer.pdb" out/timer.pdb
+
       - name: Upload C4dll-R.dll
         if: success()
         uses: actions/upload-artifact@v7
@@ -93,3 +97,13 @@ jobs:
           path: out/timer.c4p
           if-no-files-found: warn
           archive: false
+
+      - name: Upload PDB symbols
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pdb-symbols
+          path: |
+            out/C4dll-R.pdb
+            out/timer.pdb
+          if-no-files-found: warn

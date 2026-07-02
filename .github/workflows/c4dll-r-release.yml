@@ -45,52 +45,68 @@ jobs:
       - name: Init cnc-ddraw submodule
         run: git submodule update --init -- c4ddraw/upstream/cnc-ddraw
 
+      # Version is computed BEFORE the build so build.ps1 can stamp it into the DLL version
+      # resource. Only a real tag PUSH makes a full release; a manual dispatch (even from a tag
+      # ref) and any rc/alpha/beta/dev version are prereleases.
+      - name: Compute version
+        id: ver
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF_TYPE -eq 'tag') {
+            $tag = $env:GITHUB_REF_NAME
+            $ver = $tag -replace '^c4dll-r-', ''
+          } else {
+            $label = "${{ github.event.inputs.version }}".Trim()
+            if (-not $label) { $label = "dev-$(git rev-parse --short HEAD)" }
+            $ver = $label
+            $tag = "c4dll-r-$ver"
+          }
+          $isPreVer = $ver -match '(?i)(^|[.-])(rc|alpha|beta|dev)\d*([.-]|$)'
+          $pre = if ($env:GITHUB_EVENT_NAME -ne 'push' -or $isPreVer) { "true" } else { "false" }
+          "tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append
+          "ver=$ver" | Out-File $env:GITHUB_OUTPUT -Append
+          "pre=$pre" | Out-File $env:GITHUB_OUTPUT -Append
+          Write-Host "version $ver (tag $tag, prerelease=$pre)"
+
       - name: Build C4dll-R.dll + timer.c4p
         run: |
           # Same build a dev runs: build.ps1 produces the monolith (step 1-6) and timer.c4p (step 7).
+          # -Version stamps the release version into the DLL version resource (res.rc + git.h).
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
-          ./c4ddraw/build.ps1
+          ./c4ddraw/build.ps1 -Version "${{ steps.ver.outputs.ver }}"
           if (-not (Test-Path "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll")) { Write-Error "C4dll-R.dll missing"; exit 1 }
           if (-not (Test-Path "c4ddraw/plugins/timer/bin/Release/timer.c4p")) { Write-Error "timer.c4p missing"; exit 1 }
 
       - name: Package drop-in zip
         id: pkg
         run: |
-          if ($env:GITHUB_REF_TYPE -eq "tag") {
-            $tag = $env:GITHUB_REF_NAME
-            $ver = $tag -replace '^c4dll-r-', ''
-            $pre = "false"
-          } else {
-            $label = "${{ github.event.inputs.version }}".Trim()
-            if (-not $label) { $label = "dev-$(git rev-parse --short HEAD)" }
-            $ver = $label
-            $tag = "c4dll-r-$ver"
-            $pre = "true"
-          }
+          $ver = "${{ steps.ver.outputs.ver }}"
           $stage = "pkg/C4dll-R-$ver"
           New-Item -ItemType Directory -Force -Path "$stage/Mods" | Out-Null
           Copy-Item "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll" "$stage/C4dll-R.dll"
           Copy-Item "c4ddraw/plugins/timer/bin/Release/timer.c4p" "$stage/Mods/timer.c4p"
           Copy-Item "c4ddraw/release/INSTALL.txt" "$stage/INSTALL.txt"
           Copy-Item "c4ddraw/release/C4plugins.ini" "$stage/C4plugins.ini"
+          Copy-Item "c4ddraw/release/ddraw.ini" "$stage/ddraw.ini"
           $zip = "C4dll-R-$ver.zip"
           Compress-Archive -Path "$stage" -DestinationPath $zip -Force
-          "tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append
-          "ver=$ver" | Out-File $env:GITHUB_OUTPUT -Append
+          # matching symbols for crash triage, published next to the zip
+          $symzip = "C4dll-R-$ver-symbols.zip"
+          Compress-Archive -Path "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.pdb", "c4ddraw/plugins/timer/bin/Release/timer.pdb" -DestinationPath $symzip -Force
           "zip=$zip" | Out-File $env:GITHUB_OUTPUT -Append
-          "pre=$pre" | Out-File $env:GITHUB_OUTPUT -Append
-          Write-Host "packaged $zip (tag $tag, prerelease=$pre)"
+          "symzip=$symzip" | Out-File $env:GITHUB_OUTPUT -Append
+          Write-Host "packaged $zip + $symzip"
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "${{ steps.pkg.outputs.tag }}"
-          $ver = "${{ steps.pkg.outputs.ver }}"
+          $tag = "${{ steps.ver.outputs.tag }}"
+          $ver = "${{ steps.ver.outputs.ver }}"
+          $pre = "${{ steps.ver.outputs.pre }}" -eq "true"
           $zip = "${{ steps.pkg.outputs.zip }}"
-          $pre = "${{ steps.pkg.outputs.pre }}" -eq "true"
+          $symzip = "${{ steps.pkg.outputs.symzip }}"
 
           # Release notes from the committed template (avoids a here-string, which cannot close at
           # column 0 inside a YAML run block). Substitute the version + zip name.
@@ -104,9 +120,14 @@ jobs:
             if ($pre) { $createArgs += '--prerelease' }
             gh @createArgs
             if ($LASTEXITCODE -ne 0) { Write-Error "gh release create failed"; exit 1 }
+          } else {
+            # The release already exists (e.g. a real tag push after an earlier manual prerelease
+            # created the same tag): make the prerelease flag match THIS run.
+            gh release edit $tag --prerelease=$("$pre".ToLower())
+            if ($LASTEXITCODE -ne 0) { Write-Error "gh release edit failed"; exit 1 }
           }
 
-          # Attach the zip and the loose files (clobber so re-runs replace assets).
-          gh release upload $tag $zip "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll" "c4ddraw/plugins/timer/bin/Release/timer.c4p" --clobber
+          # Attach the zip, the symbols and the loose files (clobber so re-runs replace assets).
+          gh release upload $tag $zip $symzip "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll" "c4ddraw/plugins/timer/bin/Release/timer.c4p" --clobber
           if ($LASTEXITCODE -ne 0) { Write-Error "gh release upload failed"; exit 1 }
-          Write-Host "published release $tag"
+          Write-Host "published release $tag (prerelease=$pre)"

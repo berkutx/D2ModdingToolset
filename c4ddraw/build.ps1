@@ -21,7 +21,8 @@ param(
     [string]$SdkVersion = "",   # "" = let the project pick the latest installed SDK (CI-friendly)
     [switch]$Deploy,
     [switch]$Restore,
-    [string]$Game = "C:\GOG Games\slasher_mns_2_4"
+    [string]$Game = "C:\GOG Games\slasher_mns_2_4",
+    [string]$Version = ""       # stamped into the DLL version resource; "" = dev-<repo short sha>
 )
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
@@ -149,6 +150,40 @@ foreach ($src in @('featuremenu\.cpp', 'pluginhost\.cpp', 'cyrillic\.cpp', 'head
     }
 }
 
+Write-Host "[5b/6] stamp version identity (inc/git.h + res.rc; PreBuildEvent stripped)" -ForegroundColor Cyan
+# The upstream PreBuildEvent regenerates inc/git.h with `git describe` in the PROJECT dir - the
+# throwaway git-apply repo above has zero commits, so it always yielded "git~UNKNOWN, UNKNOWN"
+# in the DLL version resource. Strip the event and write git.h from the OUTER repo instead.
+$mainSha = ""
+try { $mainSha = (& git -C $root rev-parse --short HEAD 2>$null) } catch {}
+$mainSha = if ($LASTEXITCODE -eq 0 -and $mainSha) { "$mainSha".Trim() } else { "unknown" }
+if (-not $Version) { $Version = "dev-$mainSha" }
+@(
+    "#ifndef GIT_H"
+    "#define GIT_H"
+    "#define GIT_COMMIT `"$mainSha`""
+    "#define GIT_BRANCH `"C4dll-R`""
+    "#endif"
+) | Set-Content -Path (Join-Path $build "inc\git.h") -Encoding ASCII
+$vcxRaw = Get-Content $vcx -Raw
+$vcxRaw = [regex]::Replace($vcxRaw, '(?s)\s*<PreBuildEvent>.*?</PreBuildEvent>', '')
+Set-Content -Path $vcx -Value $vcxRaw -Encoding UTF8
+# res.rc: identify the binary as C4dll-R (the cnc-ddraw base version stays visible in the string)
+$rc = Join-Path $build "res.rc"
+$verValue = $Version + ' (cnc-ddraw " VERSION_STRING ", git~" GIT_COMMIT ")'
+$rcRaw = Get-Content $rc -Raw
+$rcRaw = $rcRaw -replace '"FileDescription",\s*"DirectDraw replacement"', '"FileDescription", "C4dll-R renderer for Disciples II (cnc-ddraw based)"'
+$rcRaw = $rcRaw -replace '"InternalName",\s*"ddraw"', '"InternalName", "C4dll-R"'
+$rcRaw = $rcRaw -replace '"OriginalFileName",\s*"ddraw\.dll"', '"OriginalFileName", "C4dll-R.dll"'
+$rcRaw = $rcRaw -replace '"ProductName",\s*"cnc-ddraw"', '"ProductName", "C4dll-R"'
+$rcRaw = $rcRaw -replace '"FileVersion",\s*VERSION_STRING[^\r\n]*', ('"FileVersion", "' + $verValue + '"')
+$rcRaw = $rcRaw -replace '"ProductVersion",\s*VERSION_STRING[^\r\n]*', ('"ProductVersion", "' + $verValue + '"')
+Set-Content -Path $rc -Value $rcRaw -Encoding ASCII
+if (-not (Select-String -Path $rc -Pattern 'C4dll-R renderer for Disciples II' -Quiet)) {
+    throw "res.rc version stamp failed"
+}
+Write-Host ("  version: {0} (git {1})" -f $Version, $mainSha)
+
 Write-Host "[6/6] msbuild Release ($Toolset)" -ForegroundColor Cyan
 $env:_CL_ = ""
 $ms = Find-MSBuild
@@ -158,6 +193,9 @@ if ($SdkVersion) { $mbArgs += "/p:WindowsTargetPlatformVersion=$SdkVersion" }
 & $ms @mbArgs
 if ($LASTEXITCODE -ne 0) { throw "msbuild failed" }
 Write-Host ("BUILT -> {0} ({1:n0} bytes)" -f $out, (Get-Item $out).Length) -ForegroundColor Green
+$fvi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($out)
+if ($fvi.InternalName -ne 'C4dll-R') { throw "version stamp missing in the built dll (InternalName='$($fvi.InternalName)')" }
+Write-Host ("  stamped FileVersion: '{0}'" -f $fvi.FileVersion) -ForegroundColor Green
 
 # Build the native timer plugin (timer.c4p). Self-contained Win32 DLL (GDI+, static CRT, embedded
 # clock font) reconstructed from the legacy timer.mod; the host (pluginhost) drives its turn reset.
