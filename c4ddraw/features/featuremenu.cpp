@@ -1,4 +1,4 @@
-/*
+﻿/*
  * C4dll-R monolith: in-game menu bar + feature toggles, embedded in the cnc-ddraw renderer.
  * Self-contained: no mss32 dependency; game version + GameSettings chain inlined as raw addresses.
  * Russobit-only patch sites. Original from D2ModdingToolset (GPLv3+, see repo LICENSE).
@@ -60,8 +60,22 @@ const char* logLeaf()
     return leaf;
 }
 
+const char* iniFile(); // defined below (C4menu.ini next to the exe)
+
+// Diagnostics are OFF by default (no C4menu-<pid>.log noise in the game folder).
+// Enable with [menu] debugLog=1 in C4menu.ini or the C4DLL_DEBUG env var.
 void mlog(const char* fmt, ...)
 {
+    static int enabled = -1;
+    if (enabled < 0) {
+        char env[8] = {};
+        enabled = (GetPrivateProfileIntA("menu", "debugLog", 0, iniFile()) != 0 ||
+                   GetEnvironmentVariableA("C4DLL_DEBUG", env, sizeof(env)) > 0)
+                      ? 1
+                      : 0;
+    }
+    if (!enabled)
+        return;
     char buf[600];
     va_list ap;
     va_start(ap, fmt);
@@ -383,6 +397,7 @@ enum : UINT
     kIdTicks30 = 0xA161,
     kIdTicks60 = 0xA162,
     kIdTicks100 = 0xA163,
+    kIdSingleCpu = 0xA164, // ddraw.ini singlecpu toggle (experimental, restart)
     kIdResBase = 0xA170, // + index into kRes[]
     kIdFpsBase = 0xA180, // + index into kFpsValues[]
     // native game speeds (GameSettings + Disciple.ini); apply next battle / turn
@@ -416,66 +431,102 @@ enum : UINT
     kIdLast = 0xA1FF, // upper bound of our WM_COMMAND id block
 };
 
-// cnc-ddraw renderer + shader tables (menu label + exact ddraw.ini value).
+// --- menu language (EN/RU). [menu] language = auto|en|ru; auto = Russian when the Windows UI
+// language is Russian or the system codepage is 1251 (the Russobit audience). Wide strings +
+// AppendMenuW keep the Cyrillic correct on any system codepage.
+bool g_ru = false;
+static const wchar_t* L(const wchar_t* en, const wchar_t* ru)
+{
+    return g_ru ? ru : en;
+}
+
+// cnc-ddraw renderer + shader tables (menu labels EN/RU + exact ddraw.ini value).
 struct NameVal
 {
-    const char* label;
+    const wchar_t* en;
+    const wchar_t* ru;
     const char* value;
 };
 const NameVal kRenderers[] = {
-    {"OpenGL - shaders + best upscaling (recommended)", "opengl"},
-    {"GDI - software, max compatibility (slower)", "gdi"},
-    {"Auto - pick D3D9/OpenGL automatically", "auto"}};
+    {L"OpenGL - shaders + best upscaling (recommended)",
+     L"OpenGL - шейдеры и лучший апскейл (рекомендуется)", "opengl"},
+    {L"GDI - software, max compatibility (slower)",
+     L"GDI - программный, максимальная совместимость (медленнее)", "gdi"},
+    {L"Auto - picks D3D9 first (no shader filters)",
+     L"Auto - сам выберет D3D9 (без шейдерных фильтров)", "auto"}};
 const int kRendererCount = 3;
 // Image filters, ranked best->basic for D2's hand-painted art.
 const NameVal kShaders[] = {
-    {"Lanczos - sharp, detailed (best for D2 art)", "Shaders\\interpolation\\lanczos2-sharp.glsl"},
-    {"xBRZ - pixel-art scaler, clean sprite edges", "Shaders\\xbrz\\xbrz-freescale-multipass.glsl"},
-    {"Bicubic - smooth, balanced (cnc default)", "Shaders\\interpolation\\catmull-rom-bilinear.glsl"},
-    {"AMD FSR - modern edge sharpening, crisp", "Shaders\\interpolation\\fsr.glsl"},
-    {"xBR lv2 - pixel-art, lighter than xBRZ", "Shaders\\xbr\\xbr-lv2-noblend.glsl"},
-    {"Bilinear - simple smoothing, a bit soft", "Shaders\\interpolation\\bilinear.glsl"},
-    {"None - sharpest pixels, blocky on zoom", "Shaders\\nearest-neighbor.glsl"},
-    {"CRT - retro scanlines (style, not sharper)", "Shaders\\crt\\crt-lottes-fast-no-warp-bilinear.glsl"}};
+    {L"Lanczos - sharp, detailed (best for D2 art)",
+     L"Lanczos - чёткий, детальный (лучший для графики D2)",
+     "Shaders\\interpolation\\lanczos2-sharp.glsl"},
+    {L"xBRZ - pixel-art scaler, clean sprite edges",
+     L"xBRZ - пиксель-арт скейлер, чистые края спрайтов",
+     "Shaders\\xbrz\\xbrz-freescale-multipass.glsl"},
+    {L"Bicubic - smooth, balanced (cnc default)",
+     L"Bicubic - мягкий, сбалансированный (дефолт cnc)",
+     "Shaders\\interpolation\\catmull-rom-bilinear.glsl"},
+    {L"AMD FSR - modern edge sharpening, crisp",
+     L"AMD FSR - современная резкость краёв",
+     "Shaders\\interpolation\\fsr.glsl"},
+    {L"xBR lv2 - pixel-art, lighter than xBRZ",
+     L"xBR lv2 - пиксель-арт, легче xBRZ",
+     "Shaders\\xbr\\xbr-lv2-noblend.glsl"},
+    {L"Bilinear - simple smoothing, a bit soft",
+     L"Bilinear - простое сглаживание, слегка мыльно",
+     "Shaders\\interpolation\\bilinear.glsl"},
+    {L"None - sharpest pixels, blocky on zoom",
+     L"Без фильтра - самые чёткие пиксели, кубики при увеличении",
+     "Shaders\\nearest-neighbor.glsl"},
+    {L"CRT - retro scanlines (style, not sharper)",
+     L"CRT - ретро-развёртка (стиль, не чёткость)",
+     "Shaders\\crt\\crt-lottes-fast-no-warp-bilinear.glsl"}};
 const int kShaderCount = 8;
-const int kTicksValues[] = {0, 30, 60, 100};
+// -1 = limiter fully off (cnc-ddraw treats 0 as "emulate 60hz flip", not off)
+const int kTicksValues[] = {-1, 30, 60, 100};
 const int kTicksCount = 4;
 // Output window size (ddraw.ini width/height). 0,0 = native game size (1024x768); larger upscales.
 struct ResOpt
 {
-    const char* label;
+    const wchar_t* en;
+    const wchar_t* ru;
     int w, h;
 };
 const ResOpt kRes[] = {
-    {"Native (game size)", 0, 0},
-    {"640 x 480", 640, 480},
-    {"800 x 600", 800, 600},
-    {"1152 x 864", 1152, 864},
-    {"1280 x 960", 1280, 960},
-    {"1280 x 720 (16:9)", 1280, 720},
-    {"1366 x 768 (16:9)", 1366, 768},
-    {"1600 x 1200", 1600, 1200},
-    {"1600 x 900 (16:9)", 1600, 900},
-    {"1920 x 1440", 1920, 1440},
-    {"1920 x 1080 (16:9)", 1920, 1080},
-    {"2560 x 1440 (16:9)", 2560, 1440},
-    {"3840 x 2160 (16:9)", 3840, 2160}};
+    {L"Native (game size)", L"Родное (размер игры)", 0, 0},
+    {L"640 x 480", L"640 x 480", 640, 480},
+    {L"800 x 600", L"800 x 600", 800, 600},
+    {L"1152 x 864", L"1152 x 864", 1152, 864},
+    {L"1280 x 960", L"1280 x 960", 1280, 960},
+    {L"1280 x 720 (16:9)", L"1280 x 720 (16:9)", 1280, 720},
+    {L"1366 x 768 (16:9)", L"1366 x 768 (16:9)", 1366, 768},
+    {L"1600 x 1200", L"1600 x 1200", 1600, 1200},
+    {L"1600 x 900 (16:9)", L"1600 x 900 (16:9)", 1600, 900},
+    {L"1920 x 1440", L"1920 x 1440", 1920, 1440},
+    {L"1920 x 1080 (16:9)", L"1920 x 1080 (16:9)", 1920, 1080},
+    {L"2560 x 1440 (16:9)", L"2560 x 1440 (16:9)", 2560, 1440},
+    {L"3840 x 2160 (16:9)", L"3840 x 2160 (16:9)", 3840, 2160}};
 const int kResCount = 13; // 0xA170..0xA17C (room before kIdFpsBase)
 const int kFpsValues[] = {-1, 30, 60, 144};
-const char* kFpsLabels[] = {"VSync / refresh", "30", "60", "144"};
+const wchar_t* kFpsLabelsEn[] = {L"Monitor refresh rate", L"30", L"60", L"144"};
+const wchar_t* kFpsLabelsRu[] = {L"Частота монитора", L"30", L"60", L"144"};
 const int kFpsCount = 4;
 // Display mode = ddraw.ini windowed/fullscreen pair. Windowed keeps caption + menu; fullscreen modes
 // are borderless (menu bar stays). Exclusive does a real mode change, falls back to borderless (RDP).
 struct ModeOpt
 {
-    const char* label;
+    const wchar_t* en;
+    const wchar_t* ru;
     const char* windowed;
     const char* fullscreen;
 };
 const ModeOpt kModes[] = {
-    {"Windowed - title bar + menu, draggable", "true", "false"},
-    {"Fullscreen borderless - fills screen, alt-tab friendly", "true", "true"},
-    {"Fullscreen exclusive - real mode change (local only)", "false", "true"}};
+    {L"Windowed - title bar + menu, draggable",
+     L"Оконный - заголовок + меню, окно можно таскать", "true", "false"},
+    {L"Fullscreen borderless - fills screen, alt-tab friendly",
+     L"Полный экран без рамки - весь экран, дружит с alt-tab", "true", "true"},
+    {L"Fullscreen exclusive - real mode change (local only)",
+     L"Полный экран эксклюзивный - реальная смена режима (не для RDP)", "false", "true"}};
 const int kModeCount = 3;
 
 bool g_alwaysActive = false;
@@ -491,6 +542,7 @@ bool g_perUnitBurst = false;        // EXPERIMENTAL: scale only the acting anima
 int g_rendererIdx = 0;  // index into kRenderers
 int g_shaderIdx = -1;   // index into kShaders
 bool g_maintas = false, g_vsync = false, g_boxing = false;
+bool g_singlecpu = true; // ddraw.ini singlecpu (cnc-ddraw default true); OFF = experimental
 bool g_dragScroll = false; // grab+drag map panning (ini [menu] dragScroll, default off)
 int g_ticksIdx = -1;    // index into kTicksValues
 int g_resIdx = -1;      // index into kRes
@@ -556,7 +608,7 @@ void seedConfigFirstRun()
     const int bSp = oldAnimOn ? 1 : 2; // battle default 2x
     const int mSp = 2;
 
-    char buf[1024];
+    char buf[2048];
     const int n = wsprintfA(buf,
         "; C4dll-R menu settings (auto-generated on first run).\r\n"
         "; Edit by hand, or use the in-game \"Game\" menu - changes are saved back here.\r\n"
@@ -564,6 +616,9 @@ void seedConfigFirstRun()
         "; never modifies on its own.\r\n"
         "\r\n"
         "[menu]\r\n"
+        "; Menu language: auto = Russian on Russian systems, else English. Or force: en / ru.\r\n"
+        "language=auto\r\n"
+        "\r\n"
         "; Keep the game running (no pause) when the window loses focus.  0 = off, 1 = on.\r\n"
         "alwaysActive=%d\r\n"
         "\r\n"
@@ -578,7 +633,10 @@ void seedConfigFirstRun()
         "; Attack speed-up: extra burst ONLY while a hit/effect plays (on top of battle speed).\r\n"
         ";   battleAttackEnabled : 0 = off, 1 = on.   battleAttackSpeed : 1..6  ->  1.5x..5x / 15x.\r\n"
         "battleAttackEnabled=1\r\n"
-        "battleAttackSpeed=5\r\n",
+        "battleAttackSpeed=5\r\n"
+        "\r\n"
+        "; Write C4menu-<pid>.log diagnostics next to the exe.  0 = off (default), 1 = on.\r\n"
+        "debugLog=0\r\n",
         aa, battleEn, bSp, mapEn, mSp);
 
     HANDLE h = CreateFileA(f, GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -652,6 +710,7 @@ void readDdrawState()
     g_maintas = readDdrawBool("maintas", false);
     g_vsync = readDdrawBool("vsync", false);
     g_boxing = readDdrawBool("boxing", false);
+    g_singlecpu = readDdrawBool("singlecpu", true);
 
     const int ticks = GetPrivateProfileIntA("ddraw", "maxgameticks", 0, ddrawIni());
     g_ticksIdx = -1;
@@ -1519,6 +1578,9 @@ void refreshChecks()
     if (g_ticksMenu && g_ticksIdx >= 0)
         CheckMenuRadioItem(g_ticksMenu, kIdTicks0, kIdTicks100,
                            kIdTicks0 + static_cast<UINT>(g_ticksIdx), MF_BYCOMMAND);
+    if (g_perfMenu)
+        CheckMenuItem(g_perfMenu, kIdSingleCpu,
+                      MF_BYCOMMAND | (g_singlecpu ? MF_CHECKED : MF_UNCHECKED));
 }
 
 void onMenuCommand(UINT id)
@@ -1580,6 +1642,11 @@ void onMenuCommand(UINT id)
         char b[8];
         wsprintfA(b, "%d", kTicksValues[g_ticksIdx]);
         writeDdrawStr("maxgameticks", b);
+        restartItem = true;
+    } else if (id == kIdSingleCpu) {
+        // Experimental: affinity is applied once in dd_CreateEx, so a game restart is required.
+        g_singlecpu = !g_singlecpu;
+        writeDdrawBool("singlecpu", g_singlecpu);
         restartItem = true;
     } else if (id >= kIdResBase && id < kIdResBase + static_cast<UINT>(kResCount)) {
         g_resIdx = static_cast<int>(id - kIdResBase);
@@ -1731,99 +1798,169 @@ void buildMenu()
     readDdrawState();   // reflect current ddraw.ini in the checks/radios
     readNativeSpeeds(); // reflect current Disciple.ini battle/map speeds
 
-    // ===== "Game" - gameplay / animation (Battle/Map speed presets apply next battle/turn) =====
+    // ===== "Game" - gameplay / animation =====
     g_gameMenu = CreatePopupMenu();
-    AppendMenuA(g_gameMenu, MF_STRING, kIdAlwaysActive, "Always active");
-    AppendMenuA(g_gameMenu, MF_STRING, kIdDragScroll, "Map drag-scroll (left button)");
+    AppendMenuW(g_gameMenu, MF_STRING, kIdAlwaysActive,
+                L(L"Always active - keep playing when the window loses focus",
+                  L"Всегда активна - игра не встаёт на паузу без фокуса"));
+    AppendMenuW(g_gameMenu, MF_STRING, kIdDragScroll,
+                L(L"Map drag-scroll - hold left button to pan the map",
+                  L"Перетаскивание карты - зажать левую кнопку и тянуть"));
     g_battleAnimMenu = CreatePopupMenu();
-    AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnimOff, "Off (vanilla)");
-    AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim1, "1.5x");
-    AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim2, "2x  (default)");
-    AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim3, "3x");
-    AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim4, "4x");
-    AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim5, "5x");
-    AppendMenuA(g_battleAnimMenu, MF_STRING, kIdAnim6, "Super fast (15x)");
-    AppendMenuA(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_battleAnimMenu),
-                "Battle speed (whole battle)");
+    AppendMenuW(g_battleAnimMenu, MF_STRING, kIdAnimOff, L(L"Off (vanilla)", L"Выкл (оригинал)"));
+    AppendMenuW(g_battleAnimMenu, MF_STRING, kIdAnim1, L"1.5x");
+    AppendMenuW(g_battleAnimMenu, MF_STRING, kIdAnim2, L(L"2x  (default)", L"2x  (по умолчанию)"));
+    AppendMenuW(g_battleAnimMenu, MF_STRING, kIdAnim3, L"3x");
+    AppendMenuW(g_battleAnimMenu, MF_STRING, kIdAnim4, L"4x");
+    AppendMenuW(g_battleAnimMenu, MF_STRING, kIdAnim5, L"5x");
+    AppendMenuW(g_battleAnimMenu, MF_STRING, kIdAnim6,
+                L(L"Super fast (15x, test)", L"Супербыстро (15x, тест)"));
+    AppendMenuW(g_battleAnimMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_battleAnimMenu, MF_STRING | MF_GRAYED, 0,
+                L(L"Speeds up ALL battle animation. Applies instantly, safe.",
+                  L"Ускоряет ВСЕ анимации боя. Применяется сразу, безопасно."));
+    AppendMenuW(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_battleAnimMenu),
+                L(L"Battle speed (whole battle)", L"Скорость боя (весь бой)"));
     g_battleAtkMenu = CreatePopupMenu();
-    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtkOff, "Off");
-    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk1, "1.5x");
-    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk2, "2x");
-    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk3, "3x");
-    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk4, "4x");
-    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk5, "5x  (default)");
-    AppendMenuA(g_battleAtkMenu, MF_STRING, kIdAtk6, "Super fast (15x)");
-    AppendMenuA(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_battleAtkMenu),
-                "Attack speed-up (extra burst on each hit)");
+    AppendMenuW(g_battleAtkMenu, MF_STRING, kIdAtkOff, L(L"Off", L"Выкл"));
+    AppendMenuW(g_battleAtkMenu, MF_STRING, kIdAtk1, L"1.5x");
+    AppendMenuW(g_battleAtkMenu, MF_STRING, kIdAtk2, L"2x");
+    AppendMenuW(g_battleAtkMenu, MF_STRING, kIdAtk3, L"3x");
+    AppendMenuW(g_battleAtkMenu, MF_STRING, kIdAtk4, L"4x");
+    AppendMenuW(g_battleAtkMenu, MF_STRING, kIdAtk5, L(L"5x  (default)", L"5x  (по умолчанию)"));
+    AppendMenuW(g_battleAtkMenu, MF_STRING, kIdAtk6,
+                L(L"Super fast (15x, test)", L"Супербыстро (15x, тест)"));
+    AppendMenuW(g_battleAtkMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_battleAtkMenu, MF_STRING | MF_GRAYED, 0,
+                L(L"Extra speed only while a hit plays; waiting units stay calm.",
+                  L"Доп. ускорение только на время удара; ожидающие юниты спокойны."));
+    AppendMenuW(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_battleAtkMenu),
+                L(L"Attack speed-up (burst on each hit)", L"Ускорение атак (рывок на каждый удар)"));
     g_mapAnimMenu = CreatePopupMenu();
-    AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMapOff, "Off (vanilla)");
-    AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap1, "1.5x");
-    AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap2, "2x");
-    AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap3, "3x");
-    AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap4, "4x");
-    AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap5, "5x");
-    AppendMenuA(g_mapAnimMenu, MF_STRING, kIdAnimMap6, "Super fast (15x)");
-    AppendMenuA(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_mapAnimMenu),
-                "Map animation speed");
+    AppendMenuW(g_mapAnimMenu, MF_STRING, kIdAnimMapOff, L(L"Off (vanilla)", L"Выкл (оригинал)"));
+    AppendMenuW(g_mapAnimMenu, MF_STRING, kIdAnimMap1, L"1.5x");
+    AppendMenuW(g_mapAnimMenu, MF_STRING, kIdAnimMap2, L"2x");
+    AppendMenuW(g_mapAnimMenu, MF_STRING, kIdAnimMap3, L"3x");
+    AppendMenuW(g_mapAnimMenu, MF_STRING, kIdAnimMap4, L"4x");
+    AppendMenuW(g_mapAnimMenu, MF_STRING, kIdAnimMap5, L"5x");
+    AppendMenuW(g_mapAnimMenu, MF_STRING, kIdAnimMap6,
+                L(L"Super fast (15x, test)", L"Супербыстро (15x, тест)"));
+    AppendMenuW(g_mapAnimMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_mapAnimMenu, MF_STRING | MF_GRAYED, 0,
+                L(L"Speeds up map animation (water, flags, effects).",
+                  L"Ускоряет анимации карты (вода, флаги, эффекты)."));
+    AppendMenuW(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_mapAnimMenu),
+                L(L"Map animation speed", L"Скорость анимаций карты"));
     g_battleMenu = CreatePopupMenu();
-    AppendMenuA(g_battleMenu, MF_STRING, kIdBattle1, "Slow");
-    AppendMenuA(g_battleMenu, MF_STRING, kIdBattle2, "Normal");
-    AppendMenuA(g_battleMenu, MF_STRING, kIdBattle3, "Fast");
-    AppendMenuA(g_battleMenu, MF_STRING, kIdBattle4, "Instant");
-    AppendMenuA(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_battleMenu),
-                "Battle speed (game option, next battle)");
+    AppendMenuW(g_battleMenu, MF_STRING, kIdBattle1, L(L"Slow", L"Медленно"));
+    AppendMenuW(g_battleMenu, MF_STRING, kIdBattle2, L(L"Normal", L"Нормально"));
+    AppendMenuW(g_battleMenu, MF_STRING, kIdBattle3, L(L"Fast", L"Быстро"));
+    AppendMenuW(g_battleMenu, MF_STRING, kIdBattle4, L(L"Instant", L"Мгновенно"));
+    AppendMenuW(g_battleMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_battleMenu, MF_STRING | MF_GRAYED, 0,
+                L(L"The game's own option; applies from the next battle.",
+                  L"Родная опция игры; действует со следующего боя."));
+    AppendMenuW(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_battleMenu),
+                L(L"Battle speed (game option)", L"Скорость боя (опция игры)"));
     g_mapMenu = CreatePopupMenu();
-    AppendMenuA(g_mapMenu, MF_STRING, kIdMap1, "Normal");
-    AppendMenuA(g_mapMenu, MF_STRING, kIdMap2, "Fast");
-    AppendMenuA(g_mapMenu, MF_STRING, kIdMap3, "Very fast");
-    AppendMenuA(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_mapMenu),
-                "Map turn speed (game option, next turn)");
+    AppendMenuW(g_mapMenu, MF_STRING, kIdMap1, L(L"Normal", L"Нормально"));
+    AppendMenuW(g_mapMenu, MF_STRING, kIdMap2, L(L"Fast", L"Быстро"));
+    AppendMenuW(g_mapMenu, MF_STRING, kIdMap3, L(L"Very fast", L"Очень быстро"));
+    AppendMenuW(g_mapMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_mapMenu, MF_STRING | MF_GRAYED, 0,
+                L(L"Walk speed of your and enemy stacks (the game's own option).",
+                  L"Скорость шага ваших и вражеских отрядов (родная опция игры)."));
+    AppendMenuW(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_mapMenu),
+                L(L"Map movement speed (game option)",
+                  L"Скорость передвижения на карте (опция игры)"));
 
     // ===== "Video" - look (all live except Renderer) =====
     g_videoMenu = CreatePopupMenu();
     g_modeMenu = CreatePopupMenu();
     for (int i = 0; i < kModeCount; ++i)
-        AppendMenuA(g_modeMenu, MF_STRING, kIdModeWindowed + i, kModes[i].label);
-    AppendMenuA(g_modeMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(g_modeMenu, MF_STRING | MF_GRAYED, 0, "Hotkey: Alt+Enter toggles fullscreen");
-    AppendMenuA(g_videoMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_modeMenu), "Display mode");
+        AppendMenuW(g_modeMenu, MF_STRING, kIdModeWindowed + i, g_ru ? kModes[i].ru : kModes[i].en);
+    AppendMenuW(g_modeMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_modeMenu, MF_STRING | MF_GRAYED, 0,
+                L(L"Hotkey: Alt+Enter toggles fullscreen",
+                  L"Горячая клавиша: Alt+Enter переключает полный экран"));
+    AppendMenuW(g_videoMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_modeMenu),
+                L(L"Display mode", L"Режим экрана"));
     g_resMenu = CreatePopupMenu();
     for (int i = 0; i < kResCount; ++i)
-        AppendMenuA(g_resMenu, MF_STRING, kIdResBase + i, kRes[i].label);
-    AppendMenuA(g_videoMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_resMenu), "Resolution");
+        AppendMenuW(g_resMenu, MF_STRING, kIdResBase + i, g_ru ? kRes[i].ru : kRes[i].en);
+    AppendMenuW(g_videoMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_resMenu),
+                L(L"Resolution", L"Разрешение"));
     g_shaderMenu = CreatePopupMenu();
     for (int i = 0; i < kShaderCount; ++i)
-        AppendMenuA(g_shaderMenu, MF_STRING, kIdShaderBase + i, kShaders[i].label);
-    AppendMenuA(g_videoMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_shaderMenu), "Filter / upscale");
+        AppendMenuW(g_shaderMenu, MF_STRING, kIdShaderBase + i,
+                    g_ru ? kShaders[i].ru : kShaders[i].en);
+    AppendMenuW(g_shaderMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_shaderMenu, MF_STRING | MF_GRAYED, 0,
+                L(L"OpenGL renderer only", L"Только для рендерера OpenGL"));
+    AppendMenuW(g_videoMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_shaderMenu),
+                L(L"Filter / upscale", L"Фильтр / масштабирование"));
     g_rendMenu = CreatePopupMenu();
     for (int i = 0; i < kRendererCount; ++i)
-        AppendMenuA(g_rendMenu, MF_STRING, kIdRendOpenGL + i, kRenderers[i].label);
-    AppendMenuA(g_videoMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_rendMenu), "Renderer (restart)");
-    AppendMenuA(g_videoMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(g_videoMenu, MF_STRING, kIdMaintas, "Keep 4:3 aspect - no stretch on widescreen");
-    AppendMenuA(g_videoMenu, MF_STRING, kIdVsync, "VSync - no tearing (caps to refresh)");
-    AppendMenuA(g_videoMenu, MF_STRING, kIdBoxing, "Integer scaling (pixel-art only - keep OFF to fill window)");
-    AppendMenuA(g_videoMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(g_videoMenu, MF_STRING, kIdScreenshot, "Take screenshot (PrintScreen)");
+        AppendMenuW(g_rendMenu, MF_STRING, kIdRendOpenGL + i,
+                    g_ru ? kRenderers[i].ru : kRenderers[i].en);
+    AppendMenuW(g_rendMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_rendMenu, MF_STRING | MF_GRAYED, 0,
+                L(L"Applies after a game restart", L"Применяется после перезапуска игры"));
+    AppendMenuW(g_videoMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_rendMenu),
+                L(L"Renderer (restart)", L"Рендерер (рестарт)"));
+    AppendMenuW(g_videoMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_videoMenu, MF_STRING, kIdMaintas,
+                L(L"Keep 4:3 aspect - no stretch on widescreen",
+                  L"Держать 4:3 - без растягивания на широких экранах"));
+    AppendMenuW(g_videoMenu, MF_STRING, kIdVsync,
+                L(L"VSync - fixes tearing in exclusive fullscreen (a bit more lag)",
+                  L"VSync - лечит разрывы в эксклюзивном фулскрине (чуть больше задержка)"));
+    AppendMenuW(g_videoMenu, MF_STRING, kIdBoxing,
+                L(L"Integer scaling - pixel-perfect with borders (OFF = fill window)",
+                  L"Целочисленный масштаб - пиксель-в-пиксель с рамками (OFF = заполнять окно)"));
+    AppendMenuW(g_videoMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_videoMenu, MF_STRING, kIdScreenshot,
+                L(L"Take screenshot (PrintScreen)", L"Сделать скриншот (PrintScreen)"));
 
     // ===== "Performance" - frame/CPU caps (apply on restart) =====
     g_perfMenu = CreatePopupMenu();
     g_fpsMenu = CreatePopupMenu();
     for (int i = 0; i < kFpsCount; ++i)
-        AppendMenuA(g_fpsMenu, MF_STRING, kIdFpsBase + i, kFpsLabels[i]);
-    AppendMenuA(g_perfMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_fpsMenu), "Frame cap (restart)");
+        AppendMenuW(g_fpsMenu, MF_STRING, kIdFpsBase + i,
+                    g_ru ? kFpsLabelsRu[i] : kFpsLabelsEn[i]);
+    AppendMenuW(g_fpsMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_fpsMenu, MF_STRING | MF_GRAYED, 0,
+                L(L"Render only - does not slow the game itself",
+                  L"Только рендер - саму игру не замедляет"));
+    AppendMenuW(g_perfMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_fpsMenu),
+                L(L"Frame cap (restart)", L"Кап FPS (рестарт)"));
     g_ticksMenu = CreatePopupMenu();
-    AppendMenuA(g_ticksMenu, MF_STRING, kIdTicks0, "Uncapped (high CPU)");
-    AppendMenuA(g_ticksMenu, MF_STRING, kIdTicks30, "30 (coolest)");
-    AppendMenuA(g_ticksMenu, MF_STRING, kIdTicks60, "60 (default)");
-    AppendMenuA(g_ticksMenu, MF_STRING, kIdTicks100, "100 (smoothest)");
-    AppendMenuA(g_perfMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_ticksMenu),
-                "Game speed cap (restart)");
+    AppendMenuW(g_ticksMenu, MF_STRING, kIdTicks0,
+                L(L"Uncapped (high CPU)", L"Без капа (грузит CPU)"));
+    AppendMenuW(g_ticksMenu, MF_STRING, kIdTicks30,
+                L(L"30 (cool CPU, sluggish)", L"30 (холодный CPU, задумчиво)"));
+    AppendMenuW(g_ticksMenu, MF_STRING, kIdTicks60, L"60");
+    AppendMenuW(g_ticksMenu, MF_STRING, kIdTicks100,
+                L(L"100 (smoothest, default)", L"100 (плавнее всего, по умолчанию)"));
+    AppendMenuW(g_ticksMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_ticksMenu, MF_STRING | MF_GRAYED, 0,
+                L(L"Game core speed: low values make the game think before every action",
+                  L"Скорость ядра игры: низкие значения = пауза перед каждым действием"));
+    AppendMenuW(g_perfMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_ticksMenu),
+                L(L"Game speed cap (restart)", L"Кап скорости игры (рестарт)"));
+    AppendMenuW(g_perfMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_perfMenu, MF_STRING, kIdSingleCpu,
+                L(L"Single CPU core (restart) - old-game safety net",
+                  L"Одно ядро CPU (рестарт) - страховка для старых игр"));
+    AppendMenuW(g_perfMenu, MF_STRING | MF_GRAYED, 0,
+                L(L"Experimental: OFF frees the game from core 0; back ON if sound stutters",
+                  L"Экспериментально: OFF снимает привязку к ядру 0; верните ON при заикании звука"));
 
     g_bar = CreateMenu();
-    AppendMenuA(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_gameMenu), "Game");
-    AppendMenuA(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_videoMenu), "Video");
-    AppendMenuA(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_perfMenu), "Performance");
+    AppendMenuW(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_gameMenu), L(L"Game", L"Игра"));
+    AppendMenuW(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_videoMenu), L(L"Video", L"Видео"));
+    AppendMenuW(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_perfMenu),
+                L(L"Performance", L"Производительность"));
 
     // ===== "Plugins" - hosted Mods\ plugins, split native (.c4p) / legacy (.mod) =====
     // Surface each plugin + graft its config submenu; commands route to the plugin via the WndProc chain.
@@ -1851,11 +1988,12 @@ void buildMenu()
                 ++nLegacy;
             }
         }
-        AppendMenuA(plugins, MF_POPUP | (nNew ? 0u : MF_GRAYED),
-                    reinterpret_cast<UINT_PTR>(nativeSub), "Native (.c4p)");
-        AppendMenuA(plugins, MF_POPUP | (nLegacy ? 0u : MF_GRAYED),
-                    reinterpret_cast<UINT_PTR>(legacySub), "Legacy (.mod)");
-        AppendMenuA(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(plugins), "Plugins");
+        AppendMenuW(plugins, MF_POPUP | (nNew ? 0u : MF_GRAYED),
+                    reinterpret_cast<UINT_PTR>(nativeSub), L(L"Native (.c4p)", L"Нативные (.c4p)"));
+        AppendMenuW(plugins, MF_POPUP | (nLegacy ? 0u : MF_GRAYED),
+                    reinterpret_cast<UINT_PTR>(legacySub), L(L"Legacy (.mod)", L"Старые (.mod)"));
+        AppendMenuW(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(plugins),
+                    L(L"Plugins", L"Плагины"));
     }
 }
 
@@ -2167,6 +2305,16 @@ extern "C" void featuremenu_install(void)
     seedConfigFirstRun();
 
     const char* f = iniFile();
+    // Menu language: [menu] language = auto|en|ru. auto = Russian when the Windows UI language is
+    // Russian or the system codepage is 1251 (Russobit audience runs both kinds of systems).
+    char lang[8] = {};
+    GetPrivateProfileStringA("menu", "language", "auto", lang, sizeof(lang), f);
+    if (lstrcmpiA(lang, "ru") == 0)
+        g_ru = true;
+    else if (lstrcmpiA(lang, "en") == 0)
+        g_ru = false;
+    else
+        g_ru = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_RUSSIAN || GetACP() == 1251;
     g_alwaysActive = GetPrivateProfileIntA("menu", "alwaysActive", 0, f) != 0;
     // Defaults: battle animation x2, attack burst x5 (fast hits, calm-ish battle). Map anim off.
     g_battleAnimEnabled = GetPrivateProfileIntA("menu", "battleAnimEnabled", 1, f) != 0;
