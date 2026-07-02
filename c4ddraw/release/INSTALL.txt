@@ -15,11 +15,19 @@ REQUIREMENTS
 INSTALL
   1. Make a backup of your current C4dll-R.dll (if you have one).
   2. Copy C4dll-R.dll next to Discipl2.exe (replace the existing one).
-  3. Copy Mods\timer.c4p into the game's Mods\ folder.
-  4. (Optional) Copy C4plugins.ini next to Discipl2.exe to configure the timer.
-  5. Delete any standalone ddraw.dll in the game folder (the renderer is built
+  3. Copy ddraw.ini next to Discipl2.exe - these are the recommended renderer
+     defaults (windowed with the menu bar, OpenGL, game speed cap 100).
+     Upgrading and already tuned your ddraw.ini? Keep yours.
+  4. Copy Mods\timer.c4p into the game's Mods\ folder.
+  5. (Optional) Copy C4plugins.ini next to Discipl2.exe to configure the timer.
+  6. Delete any standalone ddraw.dll in the game folder (the renderer is built
      into C4dll-R.dll - a separate ddraw.dll would shadow it).
-  6. Launch the game.
+  7. Launch the game.
+
+  Note: without ddraw.ini the renderer generates a stock config on first run:
+  exclusive fullscreen (no title bar, so no menu bar visible) and no game
+  speed cap tuning. Alt+Enter switches to a window; still, copying the
+  bundled ddraw.ini is the intended setup.
 
 USING IT
   - In-game menu (under the title bar): Game / Video / Performance / Plugins.
@@ -53,12 +61,20 @@ This package is independent of the mss32 mod and is versioned separately.
 УСТАНОВКА
   1. Сделайте резервную копию текущего C4dll-R.dll (если он есть).
   2. Скопируйте C4dll-R.dll рядом с Discipl2.exe (заменив существующий).
-  3. Скопируйте Mods\timer.c4p в папку Mods\ игры.
-  4. (Необязательно) Скопируйте C4plugins.ini рядом с Discipl2.exe для настройки
+  3. Скопируйте ddraw.ini рядом с Discipl2.exe - это рекомендованные настройки
+     рендерера (окно с меню-баром, OpenGL, кап скорости игры 100).
+     Обновляетесь и уже настроили свой ddraw.ini? Оставьте свой.
+  4. Скопируйте Mods\timer.c4p в папку Mods\ игры.
+  5. (Необязательно) Скопируйте C4plugins.ini рядом с Discipl2.exe для настройки
      таймера.
-  5. Удалите отдельный ddraw.dll в папке игры (рендерер встроен в C4dll-R.dll,
+  6. Удалите отдельный ddraw.dll в папке игры (рендерер встроен в C4dll-R.dll,
      отдельный ddraw.dll его перекроет).
-  6. Запустите игру.
+  7. Запустите игру.
+
+  Примечание: без ddraw.ini рендерер при первом запуске создаст стоковый
+  конфиг: эксклюзивный полный экран (нет заголовка окна, значит не виден и
+  меню-бар) и без настройки капа скорости. Alt+Enter переключит в окно, но
+  задуманный вариант установки - скопировать комплектный ddraw.ini.
 
 КАК ПОЛЬЗОВАТЬСЯ
   - Внутриигровое меню (под заголовком окна): Game / Video / Performance /

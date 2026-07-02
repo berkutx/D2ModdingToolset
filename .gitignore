@@ -17,6 +17,8 @@
 [Dd]ebugPublic/
 [Rr]elease/
 [Rr]eleases/
+# c4ddraw/release/ is the release PACKAGE SOURCE dir (INSTALL.txt, ini templates), not build output
+!c4ddraw/release/
 x64/
 x86/
 bld/
