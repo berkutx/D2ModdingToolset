@@ -428,6 +428,8 @@ enum : UINT
     kIdAtk5 = 0xA1E6,
     kIdAtk6 = 0xA1E7, // 15x (test)
     kIdPerUnit = 0xA1E8, // toggle: attack burst speeds ONLY acting units (experimental)
+    kIdDialogVo = 0xA1E9, // toggle: auto-close voiced event popups after VO (logs dialog-vo-log.txt)
+    kIdDialogVoInfo = 0xA1EA, // disabled info line: where the voiced-dialog log is written
     kIdLast = 0xA1FF, // upper bound of our WM_COMMAND id block
 };
 
@@ -544,6 +546,7 @@ int g_shaderIdx = -1;   // index into kShaders
 bool g_maintas = false, g_vsync = false, g_boxing = false;
 bool g_singlecpu = true; // ddraw.ini singlecpu (cnc-ddraw default true); OFF = experimental
 bool g_dragScroll = false; // grab+drag map panning (ini [menu] dragScroll, default off)
+bool g_dialogVoSkip = false; // auto-close voiced event popups after VO + log their text (default off)
 int g_ticksIdx = -1;    // index into kTicksValues
 int g_resIdx = -1;      // index into kRes
 int g_fpsIdx = -1;      // index into kFpsValues
@@ -587,6 +590,7 @@ void persist()
     WritePrivateProfileStringA("menu", "battleAttackSpeed", buf, f);
     WritePrivateProfileStringA("menu", "perUnitBurst", g_perUnitBurst ? "1" : "0", f);
     WritePrivateProfileStringA("menu", "dragScroll", g_dragScroll ? "1" : "0", f);
+    WritePrivateProfileStringA("menu", "dialogVoSkip", g_dialogVoSkip ? "1" : "0", f);
 }
 
 // First run: if C4menu.ini is absent, generate a commented one (converting any old mss32menu.ini).
@@ -634,6 +638,10 @@ void seedConfigFirstRun()
         ";   battleAttackEnabled : 0 = off, 1 = on.   battleAttackSpeed : 1..6  ->  1.5x..5x / 15x.\r\n"
         "battleAttackEnabled=1\r\n"
         "battleAttackSpeed=5\r\n"
+        "\r\n"
+        "; Auto-close event dialogs that have a voiceover, once the VO finishes (streamer aid).\r\n"
+        "; Their text is appended to dialog-vo-log.txt in the game folder.  0 = off (default), 1 = on.\r\n"
+        "dialogVoSkip=0\r\n"
         "\r\n"
         "; Write C4menu-<pid>.log diagnostics next to the exe.  0 = off (default), 1 = on.\r\n"
         "debugLog=0\r\n",
@@ -1529,6 +1537,219 @@ void updateBattleBurst(void)
     g_battleFactor = easedBurstFactor(g_battleAnimEnabled ? kAnimFactor[g_battleAnimSpeed - 1] : 10);
 }
 
+// ---------------------------------------------------------------------------
+// Dialog VO auto-skip + text logger (Russobit event popups). Only DLG_EVENT_POPUP
+// with a REAL voiceover is touched: detour the VO-start (0x4BE403) to arm + log the
+// voiced popup, the UI sample-EOS dispatcher (0x521352) to flag VO-end, then invoke the
+// single close button (BTN_RIGHTSIDE) from the 32ms UI timer. Voiced-only; default off;
+// every game-memory read SEH-guarded. Addresses/offsets from .idare\Discipl2.exe.i64 +
+// toolset headers (CPopupInterf/CButtonInterf/CTextBoxInterf/CDialogInterfApi Russobit).
+// Design: <game>\dialog-vo-autoclose-research.md.
+void* g_dvOrigVoStart = reinterpret_cast<void*>(0x4BE403); // CEventPopup try-start-VO, thiscall(this)
+void* g_dvOrigEos = reinterpret_cast<void*>(0x521352);     // UI: sample-finished dispatcher
+typedef void*(__stdcall* DvFindFn)(void* dialog, const char* name);
+const DvFindFn dvFindButton = reinterpret_cast<DvFindFn>(0x50BAAF);  // CDialogInterf::findButton
+const DvFindFn dvFindTextBox = reinterpret_cast<DvFindFn>(0x50BB0F); // CDialogInterf::findTextBox
+
+void* g_dvArmedPopup = nullptr;  // the armed CEventPopup; dialog = *(*(popup+0xC)) (CPopupDialogInterf.dialog**)
+int g_dvArmedSound = 0;          // soundId of the armed VO (0 = nothing armed)
+bool g_dvVoDone = false;         // set by the EOS hook when the armed soundId finished
+
+const char* dvLogPath()
+{
+    return exeDirFile("dialog-vo-log.txt");
+}
+
+// Append a CP1251 in-game string to an open UTF-8 file (game text is CP1251).
+void dvWriteUtf8(HANDLE h, const char* s)
+{
+    if (!s)
+        return;
+    wchar_t w[1024];
+    int wn = MultiByteToWideChar(1251, 0, s, -1, w, 1024);
+    if (wn <= 1)
+        return; // empty or conversion failed
+    char u8[3072];
+    int un = WideCharToMultiByte(CP_UTF8, 0, w, wn - 1, u8, sizeof(u8), nullptr, nullptr);
+    if (un > 0) {
+        DWORD wr;
+        WriteFile(h, u8, static_cast<DWORD>(un), &wr, nullptr);
+    }
+}
+
+void dvLog(const char* sound, const char* text)
+{
+    HANDLE h = CreateFileA(dvLogPath(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return;
+    DWORD wr;
+    if (GetFileSize(h, nullptr) == 0) {
+        const unsigned char bom[3] = {0xEF, 0xBB, 0xBF};
+        WriteFile(h, bom, 3, &wr, nullptr);
+    }
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char hdr[96];
+    int n = wsprintfA(hdr, "%04d-%02d-%02d %02d:%02d:%02d | sound=", st.wYear, st.wMonth, st.wDay,
+                      st.wHour, st.wMinute, st.wSecond);
+    WriteFile(h, hdr, n, &wr, nullptr);
+    dvWriteUtf8(h, (sound && sound[0]) ? sound : "");
+    WriteFile(h, " | text=", 8, &wr, nullptr);
+    dvWriteUtf8(h, text ? text : "");
+    WriteFile(h, "\r\n", 2, &wr, nullptr);
+    CloseHandle(h);
+}
+
+// Popup text: DLG_EVENT_POPUP always uses TXT_RIGHTSIDE (the side only switches the IMG_*side
+// picture), but a modded Interf.dlg could use TXT_LEFTSIDE - try both, first non-empty wins.
+const char* dvReadText(void* dialog)
+{
+    static const char* const names[2] = {"TXT_RIGHTSIDE", "TXT_LEFTSIDE"};
+    for (int i = 0; i < 2; ++i) {
+        void* tb = dvFindTextBox(dialog, names[i]);
+        if (!tb)
+            continue;
+        char* td = *reinterpret_cast<char**>(reinterpret_cast<char*>(tb) + 8);
+        if (!td)
+            continue;
+        const char* s = *reinterpret_cast<char**>(td + 0x14); // CTextBoxInterfData.text (String.ptr)
+        if (s && s[0])
+            return s;
+    }
+    return nullptr;
+}
+
+// Invoke the popup's single close button: BTN_RIGHTSIDE, with a BTN_LEFTSIDE fallback for a
+// modded left-only layout. -> buttonData(+8)->onClickedFunctor.data(+0xC)->vftable[0](functor).
+bool dvInvokeClose(void* dialog)
+{
+    static const char* const names[2] = {"BTN_RIGHTSIDE", "BTN_LEFTSIDE"};
+    for (int i = 0; i < 2; ++i) {
+        void* btn = dvFindButton(dialog, names[i]);
+        if (!btn)
+            continue;
+        char* bd = *reinterpret_cast<char**>(reinterpret_cast<char*>(btn) + 8);
+        void* fn = bd ? *reinterpret_cast<void**>(bd + 0xC) : nullptr;
+        if (!fn)
+            continue;
+        void** vft = *reinterpret_cast<void***>(fn);
+        if (vft && vft[0]) {
+            reinterpret_cast<void(__thiscall*)(void*)>(vft[0])(fn);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Detour: CEventPopup VO-start. Run original (it loads + plays the mp3, storing soundId at
+// data+0x30), then - only for a real VO - log the popup text/sound and arm the auto-close.
+void* __fastcall dvVoStartHook(void* self, void* /*edx*/)
+{
+    void* ret = reinterpret_cast<void*(__fastcall*)(void*, void*)>(g_dvOrigVoStart)(self, nullptr);
+    if (!g_dialogVoSkip || !self)
+        return ret;
+    // This runs MID-CEventPopup-ctor (called from inside 0x4BDA84), so the dialog's controls
+    // (TXT/BTN_RIGHTSIDE) are NOT loaded yet - touching them here faults. So ARM ONLY here (store the
+    // sample id + dialog); the text read and the close are deferred to dvoPoll, when the dialog is built.
+    __try {
+        unsigned dataP = *reinterpret_cast<unsigned*>(reinterpret_cast<char*>(self) + 0x20); // CEventPopup data
+        if (!dataP)
+            return ret;
+        char* data = reinterpret_cast<char*>(dataP);
+        unsigned bufP = *reinterpret_cast<unsigned*>(data + 0x2C); // loaded mp3 buffer (set before the play)
+        int soundId = *reinterpret_cast<int*>(data + 0x30);       // sample id, for EOS match; 0 = nothing
+        if (!soundId && !bufP)
+            return ret; // no VO -> leave the dialog to the player (voiced-only)
+        g_dvArmedPopup = self; // the CEventPopup; its dialog (= *(*(self+0xC))) is derived at close time
+        g_dvArmedSound = soundId;
+        g_dvVoDone = false;
+        mlog("[dvo] armed id=%d popup=%08x buf=%08x", soundId, (unsigned)(uintptr_t)self, bufP);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        mlog("[dvo] voStart SEH");
+    }
+    return ret;
+}
+
+// Detour: UI sample-finished dispatcher. If the finished sample is our armed VO, flag it; the actual
+// close runs on the 32ms UI timer (dvoPoll) to avoid touching dialogs mid-dispatch. Queue read mirrors
+// the original's own empty-check (head ptr @+0x14C vs tail @+0x150, id = *head).
+int __fastcall dvEosHook(void* self, void* /*edx*/, int a2, int a3)
+{
+    if (g_dialogVoSkip && g_dvArmedSound && self) {
+        __try {
+            char* base = *reinterpret_cast<char**>(self);
+            if (base) {
+                void* head = *reinterpret_cast<void**>(base + 0x14C);
+                void* tail = *reinterpret_cast<void**>(base + 0x150);
+                if (head && head != tail) {
+                    int id = *reinterpret_cast<int*>(head);
+                    mlog("[dvo] eos id=%d armed=%d", id, g_dvArmedSound);
+                    if (id == g_dvArmedSound)
+                        g_dvVoDone = true;
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    return reinterpret_cast<int(__fastcall*)(void*, void*, int, int)>(g_dvOrigEos)(self, nullptr, a2, a3);
+}
+
+// UI timer (32ms): when the armed VO has finished, invoke BTN_RIGHTSIDE once. Disarm FIRST so a
+// re-entrant close or the next popup cannot double-fire. SEH-guarded (the popup may be gone).
+void dvoPoll()
+{
+    if (!g_dialogVoSkip || !g_dvVoDone || !g_dvArmedSound)
+        return;
+    void* popup = g_dvArmedPopup;
+    g_dvVoDone = false;
+    g_dvArmedSound = 0;
+    g_dvArmedPopup = nullptr;
+    if (!popup)
+        return;
+    // The dialog is fully built now (VO finished). CPopupDialogInterf.dialog sits at popup+0xC; whether
+    // it is a CDialogInterf* or CDialogInterf** is version-fuzzy, so probe both derefs and pick the one
+    // whose first dword is the real CDialogInterf vftable (0x6E1884). Self-correcting + logs the layout.
+    __try {
+        void* c1 = *reinterpret_cast<void**>(reinterpret_cast<char*>(popup) + 0xC);
+        unsigned v1 = c1 ? *reinterpret_cast<unsigned*>(c1) : 0;
+        void* c2 = c1 ? *reinterpret_cast<void**>(c1) : nullptr;
+        unsigned v2 = c2 ? *reinterpret_cast<unsigned*>(c2) : 0;
+        mlog("[dvo] poll popup=%08x c1=%08x(v=%08x) c2=%08x(v=%08x)", (unsigned)(uintptr_t)popup,
+             (unsigned)(uintptr_t)c1, v1, (unsigned)(uintptr_t)c2, v2);
+        void* dialog = (v1 == 0x6E1884u) ? c1 : (v2 == 0x6E1884u ? c2 : nullptr);
+        if (!dialog) {
+            mlog("[dvo] no CDialogInterf (vftable 0x6E1884) off popup+0xC");
+            return;
+        }
+        bool closed = dvInvokeClose(dialog); // BTN_RIGHTSIDE -> onClicked functor
+        const char* text = dvReadText(dialog);
+        dvLog(nullptr, text); // sound name TBD (popup data+0x14 is a flag, not a string)
+        mlog("[dvo] VO done -> close=%d text=%s", closed ? 1 : 0, text ? "logged" : "none");
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        mlog("[dvo] close SEH");
+    }
+}
+
+void dvoInstall()
+{
+    mlog("[dvo] dvoInstall entered (skip=%d)", g_dialogVoSkip ? 1 : 0);
+    g_dvOrigVoStart = reinterpret_cast<void*>(0x4BE403);
+    g_dvOrigEos = reinterpret_cast<void*>(0x521352);
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(&g_dvOrigVoStart, reinterpret_cast<void*>(dvVoStartHook));
+    DetourAttach(&g_dvOrigEos, reinterpret_cast<void*>(dvEosHook));
+    if (DetourTransactionCommit() != NO_ERROR) {
+        g_dvOrigVoStart = reinterpret_cast<void*>(0x4BE403);
+        g_dvOrigEos = reinterpret_cast<void*>(0x521352);
+        mlog("[dvo] detours FAILED (0x4BE403 VO / 0x521352 EOS)");
+    } else {
+        mlog("[dvo] dialog-VO skip installed (default %s, log dialog-vo-log.txt)",
+             g_dialogVoSkip ? "on" : "off");
+    }
+}
+
 void refreshChecks()
 {
     if (!g_gameMenu)
@@ -1538,6 +1759,8 @@ void refreshChecks()
                   MF_BYCOMMAND | (g_alwaysActive ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_gameMenu, kIdDragScroll,
                   MF_BYCOMMAND | (g_dragScroll ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_gameMenu, kIdDialogVo,
+                  MF_BYCOMMAND | (g_dialogVoSkip ? MF_CHECKED : MF_UNCHECKED));
     const UINT bSel = g_battleAnimEnabled ? (kIdAnim1 + static_cast<UINT>(g_battleAnimSpeed - 1)) : kIdAnimOff;
     if (g_battleAnimMenu)
         CheckMenuRadioItem(g_battleAnimMenu, kIdAnimOff, kIdAnim6, bSel, MF_BYCOMMAND);
@@ -1591,6 +1814,8 @@ void onMenuCommand(UINT id)
         applyAlwaysActive(g_alwaysActive);
     } else if (id == kIdDragScroll) {
         g_dragScroll = !g_dragScroll; // live: the detour reads this flag (persist() saves it)
+    } else if (id == kIdDialogVo) {
+        g_dialogVoSkip = !g_dialogVoSkip; // live: the detours read this flag (persist() saves it)
     } else if (id == kIdAnimOff) {
         g_battleAnimEnabled = false;
         applyAnimSpeed(0, false, g_battleAnimSpeed);
@@ -1735,6 +1960,7 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     if (msg == WM_TIMER && wParam == kPressTimerId) {
         featuremenu_refresh_day();
         updateBattleBurst(); // idle/attack split: drive g_battleFactor from the attack pulse
+        dvoPoll();           // auto-close a voiced event popup once its VO has finished
         timerhost_pump();
         return 0;
     }
@@ -1806,6 +2032,12 @@ void buildMenu()
     AppendMenuW(g_gameMenu, MF_STRING, kIdDragScroll,
                 L(L"Map drag-scroll - hold left button to pan the map",
                   L"Перетаскивание карты - зажать левую кнопку и тянуть"));
+    AppendMenuW(g_gameMenu, MF_STRING, kIdDialogVo,
+                L(L"Skip voiced event dialogs - auto-close after the voiceover",
+                  L"Пропускать озвученные диалоги - авто-закрытие после озвучки"));
+    AppendMenuW(g_gameMenu, MF_STRING | MF_GRAYED, kIdDialogVoInfo,
+                L(L"    (their text is saved to dialog-vo-log.txt in the game folder)",
+                  L"    (их текст пишется в dialog-vo-log.txt в папке игры)"));
     g_battleAnimMenu = CreatePopupMenu();
     AppendMenuW(g_battleAnimMenu, MF_STRING, kIdAnimOff, L(L"Off (vanilla)", L"Выкл (оригинал)"));
     AppendMenuW(g_battleAnimMenu, MF_STRING, kIdAnim1, L"1.5x");
@@ -2336,6 +2568,7 @@ extern "C" void featuremenu_install(void)
     if (g_battleAttackSpeed > 6)
         g_battleAttackSpeed = 6;
     g_dragScroll = GetPrivateProfileIntA("menu", "dragScroll", 0, f) != 0;
+    g_dialogVoSkip = GetPrivateProfileIntA("menu", "dialogVoSkip", 0, f) != 0;
 
     // Apply now (DllMain, before the game's main loop / anim init). The IAT is already populated by the
     // loader, so the time-scale hook installs cleanly; the battle discriminator patches the idle vftable.
@@ -2344,6 +2577,7 @@ extern "C" void featuremenu_install(void)
     installBattleDiscriminator();
     timerhost_install(); // timer keystone: capture dialog/battle buttons + combat/animation state
     installDragScrollDetour(); // map grab+drag panning (gated by g_dragScroll; pass-through when off)
+    dvoInstall(); // voiced-dialog auto-skip + logger (gated by g_dialogVoSkip; pass-through when off)
     applyAnimSpeed(0, g_battleAnimEnabled, g_battleAnimSpeed);
     applyAnimSpeed(1, g_mapAnimEnabled, g_mapAnimSpeed);
 

@@ -14,7 +14,8 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 | `upstream/cnc-ddraw/` | The cnc-ddraw renderer as a **git submodule**, pinned at upstream `a0b81b11` (a 7.1.0.1-dev snapshot, 80 commits past the v7.1.0.0 tag). Never edited in place. | submodule pointer |
 | `patches/cnc-ddraw-mss32.patch` | Our diff over upstream: DirectDraw embed + `DDReloadConfig`/`DDTakeScreenshot` exports + the `featuremenu_install()` call (`dllmain.c`, `winapi_hooks.c`, `exports.def`) | yes |
 | `patches/cnc-ddraw-render-null.patch` | The `render_null` headless backend: `dd.c` renderer branch + vcxproj entries + new `inc/render_null.h`, `src/render_null.c` | yes |
-| `features/featuremenu.cpp` | The in-game menu, self-contained (no mss32 deps) | yes |
+| `features/featuremenu.cpp` | The in-game menu + feature hooks, self-contained (no mss32 deps) | yes |
+| `docs/hook-points.md` | Every game address/structure C4dll-R attaches to (Russobit) | yes |
 | `forwarder/C4dll-R.cb63.def` | The 483 CB63 export forwards (`Name=CB63.Name @ord`) | yes |
 | `build.ps1` | Reproducible build + deploy/restore | yes |
 | `build/`, `out/` | Build working copy + artifact (regenerated) | no (gitignored) |
@@ -32,6 +33,11 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
    address to receive `WM_COMMAND` and attaches a real menu bar (Game / Video / Performance / Plugins)
    under cnc-ddraw's title bar. Renderer settings are written to `ddraw.ini` and re-applied live via the
    renderer's own `DDReloadConfig`; screenshots use `DDTakeScreenshot`.
+5. The **Game** menu also carries gameplay features that hook the exe by address (Russobit only, all
+   SEH-guarded, most default-off): live battle/map animation-speed multipliers and per-hit attack burst,
+   map drag-scroll, and **Skip voiced event dialogs** (auto-close a `DLG_EVENT_POPUP` after its voiceover
+   finishes and append its text to `dialog-vo-log.txt`). Every game address and structure these touch is
+   listed in [`docs/hook-points.md`](docs/hook-points.md).
 
 ## Build
 
@@ -273,7 +279,8 @@ C4dll-R.
 | `upstream/cnc-ddraw/` | Рендерер cnc-ddraw как **git submodule**, запинен на апстрим `a0b81b11` (dev-снапшот линии 7.1.0.1, 80 коммитов после тега v7.1.0.0). На месте не редактируется. | указатель submodule |
 | `patches/cnc-ddraw-mss32.patch` | Наш дифф: встраивание DirectDraw + экспорты `DDReloadConfig`/`DDTakeScreenshot` + вызов `featuremenu_install()` (`dllmain.c`, `winapi_hooks.c`, `exports.def`) | да |
 | `patches/cnc-ddraw-render-null.patch` | Headless-бэкенд `render_null`: ветка рендерера в `dd.c` + записи vcxproj + новые `inc/render_null.h`, `src/render_null.c` | да |
-| `features/featuremenu.cpp` | Внутриигровое меню, самодостаточное (без зависимостей mss32) | да |
+| `features/featuremenu.cpp` | Внутриигровое меню + хуки фич, самодостаточное (без зависимостей mss32) | да |
+| `docs/hook-points.md` | Все адреса/структуры игры, к которым цепляется C4dll-R (Russobit) | да |
 | `forwarder/C4dll-R.cb63.def` | 483 форварда экспортов CB63 (`Name=CB63.Name @ord`) | да |
 | `build.ps1` | Воспроизводимая сборка + deploy/restore | да |
 | `build/`, `out/` | Рабочая копия сборки + артефакт (генерируются) | нет (gitignore) |
@@ -291,6 +298,11 @@ C4dll-R.
    получать `WM_COMMAND`, и крепит настоящий меню-бар (Game / Video / Performance / Plugins) под
    заголовком cnc-ddraw. Настройки рендерера пишутся в `ddraw.ini` и применяются вживую через собственный
    `DDReloadConfig`; скриншоты делает `DDTakeScreenshot`.
+5. Меню **Game** также несёт геймплейные фичи, которые цепляются к exe по адресам (только Russobit, всё
+   под SEH, большинство по умолчанию выключены): живые множители скорости анимации боя/карты и бонус на
+   удар, перетаскивание карты, и **пропуск озвученных диалогов** (авто-закрытие `DLG_EVENT_POPUP` после
+   озвучки + запись текста в `dialog-vo-log.txt`). Все адреса и структуры игры, к которым они цепляются,
+   перечислены в [`docs/hook-points.md`](docs/hook-points.md).
 
 ## Сборка
 
