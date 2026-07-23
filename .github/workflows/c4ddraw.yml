@@ -1,10 +1,12 @@
 name: c4ddraw
 
 # Builds the monolith C4dll-R.dll in ONE swappable assembly (DisciplesGL-style), from:
-#   - pristine upstream cnc-ddraw (c4ddraw/upstream, vendored)
-#   - our patch (c4ddraw/patches): DirectDraw embed (hook the game's DirectDrawCreate, so NO
-#     separate ddraw.dll) + the DDReloadConfig/DDTakeScreenshot exports + the in-game menu install
-#   - the in-game menu (c4ddraw/features/featuremenu.cpp), self-contained, no mss32 dependency
+#   - pristine upstream cnc-ddraw (c4ddraw/upstream/cnc-ddraw submodule)
+#   - the minimal cnc-ddraw-c4dll-r.patch: redirect the game's DirectDrawCreate(Ex) imports and call
+#     the single c4features_install bootstrap (dllmain.c only; NO separate ddraw.dll)
+#   - wrapper-owned feature sources: renderer bridge/exports, menu, localization, saves, cursor
+#     guard, plugins and headless mode (self-contained, no mss32 dependency)
+#   - renderer-specific patches: render_null, D2 defaults and Ctrl+Wheel simple zoom
 #   - the CB63 export forwarder (c4ddraw/forwarder/C4dll-R.cb63.def): all 483 CB63 exports
 #   - the native timer plugin (c4ddraw/plugins/timer -> timer.c4p), reconstructed from the legacy
 #     timer.mod; the host drives its per-turn reset. Built by build.ps1 step [7/7].
@@ -55,7 +57,7 @@ jobs:
           $dll = "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll"
           if (-not (Test-Path $dll)) { Write-Error "C4dll-R.dll was not produced"; exit 1 }
 
-          # Sanity: it must forward the CB63 exports AND export our 2 renderer/menu hooks, and must
+          # Sanity: it must forward the CB63 exports AND export our 2 renderer-bridge hooks, and must
           # NOT export DirectDrawCreate (that one is internal + IAT-hooked, the whole point).
           $exp  = & dumpbin /exports $dll
           $fwd  = ($exp | Select-String 'forwarded to CB63').Count

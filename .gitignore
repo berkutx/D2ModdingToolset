@@ -380,3 +380,6 @@ ASALocalRun/
 *blx.bib
 .bak 
 .mtc
+
+# Local experimental feature bundle (apply manually with git apply).
+/c4ddraw/patches/observer-mode-local.patch

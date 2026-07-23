@@ -10,7 +10,7 @@
   Restore vanilla:.\build.ps1 -Restore     (puts the baseline C4dll-R/ddraw.dll back)
 
   The build: copy upstream/cnc-ddraw (git submodule, pinned commit) -> apply
-  patches/cnc-ddraw-mss32.patch + patches/cnc-ddraw-render-null.patch -> generate
+  patches/cnc-ddraw-c4dll-r.patch + the renderer patches -> generate
   C4dll-R.def (483 CB63 forwards + DDReloadConfig/DDTakeScreenshot) -> retarget the vcxproj
   (TargetName + .def) -> msbuild Release. cnc-ddraw's DllMain hooks the game's IAT
   DirectDrawCreate(Ex) so the embedded renderer is used; the system ddraw.dll satisfies the
@@ -28,8 +28,10 @@ $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $upstream = Join-Path $root "upstream\cnc-ddraw"
 $build = Join-Path $root "build\cnc-ddraw"
-$patch = Join-Path $root "patches\cnc-ddraw-mss32.patch"
+$patch = Join-Path $root "patches\cnc-ddraw-c4dll-r.patch"
 $patchNull = Join-Path $root "patches\cnc-ddraw-render-null.patch"
+$patchIni = Join-Path $root "patches\cnc-ddraw-default-ini.patch"
+$patchZoom = Join-Path $root "patches\cnc-ddraw-simple-zoom.patch"
 $cb63def = Join-Path $root "forwarder\C4dll-R.cb63.def"
 $out = Join-Path $build "bin\Release\C4dll-R.dll"
 $pluginProj = Join-Path $root "plugins\timer\timer.vcxproj"
@@ -91,60 +93,83 @@ Copy-Item $upstream $build -Recurse -Force
 # the submodule working tree carries a .git gitlink file; drop it so the throwaway git-apply repo below is clean
 Remove-Item (Join-Path $build ".git") -Force -Recurse -ErrorAction SilentlyContinue
 
-Write-Host "[3/6] apply our patches (mss32 embed/exports + render_null headless)" -ForegroundColor Cyan
+Write-Host "[3/6] apply our patches (embed + render_null + defaults + simple zoom)" -ForegroundColor Cyan
 # Apply inside a throwaway repo so git apply resolves paths cleanly (it "Skipped patch" when
 # run outside a working tree). autocrlf=false keeps the patch context matching the upstream EOLs.
-# Two disjoint patches: cnc-ddraw-mss32 (dllmain/winapi_hooks/exports.def) + render-null
-# (dd.c renderer branch + vcxproj + inc/render_null.h + src/render_null.c).
+# Four patches: the minimal C4dll-R integration point (dllmain.c only) + render-null
+# (dd.c renderer branch + vcxproj + inc/render_null.h + src/render_null.c) + default-ini
+# (config.c cfg_create_ini: the Disciples II tuned ddraw.ini generated on first run)
+# + the narrow WndProc/final-render integration for wrapper-owned Ctrl+Wheel simple zoom.
 Push-Location $build
 try {
     & git init -q
     # --ignore-whitespace: tolerate trailing-whitespace differences in context lines (the patches are
     # hand-edited; cnc-ddraw sources have some trailing spaces we don't want to track exactly).
     & git -c core.autocrlf=false apply --ignore-whitespace "$patch"
-    if ($LASTEXITCODE -ne 0) { throw "git apply (mss32) failed (exit $LASTEXITCODE)" }
+    if ($LASTEXITCODE -ne 0) { throw "git apply (C4dll-R integration) failed (exit $LASTEXITCODE)" }
     & git -c core.autocrlf=false apply --ignore-whitespace "$patchNull"
     if ($LASTEXITCODE -ne 0) { throw "git apply (render-null) failed (exit $LASTEXITCODE)" }
+    & git -c core.autocrlf=false apply --ignore-whitespace "$patchIni"
+    if ($LASTEXITCODE -ne 0) { throw "git apply (default-ini) failed (exit $LASTEXITCODE)" }
+    & git -c core.autocrlf=false apply --ignore-whitespace "$patchZoom"
+    if ($LASTEXITCODE -ne 0) { throw "git apply (simple zoom) failed (exit $LASTEXITCODE)" }
 }
 finally { Pop-Location }
-if (-not (Select-String -Path (Join-Path $build "src\dllmain.c") -Pattern "DDReloadConfig" -Quiet)) {
-    throw "patch did not apply: DDReloadConfig missing from src/dllmain.c"
+if (-not (Select-String -Path (Join-Path $build "src\dllmain.c") -Pattern "c4features_install" -Quiet)) {
+    throw "patch did not apply: c4features_install() call missing from src/dllmain.c"
 }
 if (-not (Test-Path (Join-Path $build "src\render_null.c"))) {
     throw "render-null patch did not apply: src/render_null.c missing"
 }
+if (-not (Select-String -Path (Join-Path $build "src\config.c") -Pattern "fake_mode=1024x768x16" -Quiet)) {
+    throw "default-ini patch did not apply: D2 tuned template missing from src/config.c"
+}
+if (-not (Select-String -Path (Join-Path $build "src\wndproc.c") -Pattern "DDHandleSimpleZoom" -Quiet)) {
+    throw "simple-zoom patch did not apply: DDHandleSimpleZoom missing from src/wndproc.c"
+}
 
-# Add our self-contained feature sources (features/*.cpp + headers). They are NOT part of upstream
-# cnc-ddraw and do NOT depend on mss32; the patch only adds the *_install() calls in DllMain. We
-# copy them into src/ and inject the .cpp into the project below.
+# Add our self-contained C4dll-R sources. They are NOT part of upstream cnc-ddraw; the integration
+# patch only redirects DirectDraw imports and calls c4features_install() from DllMain. Renderer
+# adapters, screenshot, edge-scroll, localization and save handling all stay in these own sources.
+Copy-Item (Join-Path $root "features\c4features.cpp") (Join-Path $build "src\c4features.cpp") -Force
+Copy-Item (Join-Path $root "features\rendererbridge.c") (Join-Path $build "src\rendererbridge.c") -Force
 Copy-Item (Join-Path $root "features\featuremenu.cpp") (Join-Path $build "src\featuremenu.cpp") -Force
 Copy-Item (Join-Path $root "features\pluginhost.cpp") (Join-Path $build "src\pluginhost.cpp") -Force
-Copy-Item (Join-Path $root "features\cyrillic.cpp") (Join-Path $build "src\cyrillic.cpp") -Force
+Copy-Item (Join-Path $root "features\localization.cpp") (Join-Path $build "src\localization.cpp") -Force
+Copy-Item (Join-Path $root "features\savelogic.cpp") (Join-Path $build "src\savelogic.cpp") -Force
+Copy-Item (Join-Path $root "features\cursorfix.cpp") (Join-Path $build "src\cursorfix.cpp") -Force
 Copy-Item (Join-Path $root "features\timerhost.cpp") (Join-Path $build "src\timerhost.cpp") -Force
 Copy-Item (Join-Path $root "features\headless.cpp") (Join-Path $build "src\headless.cpp") -Force
 Copy-Item (Join-Path $root "features\c4plugin.h") (Join-Path $build "src\c4plugin.h") -Force
-foreach ($sym in @("featuremenu_install", "pluginhost_install", "cyrillic_install", "headless_install")) {
-    if (-not (Select-String -Path (Join-Path $build "src\dllmain.c") -Pattern $sym -Quiet)) {
-        throw "patch did not apply: $sym() call missing from src/dllmain.c"
+if (-not (Select-String -Path (Join-Path $build "src\rendererbridge.c") -Pattern "DDReloadConfig" -Quiet)) {
+    throw "C4dll-R source copy failed: DDReloadConfig missing from src/rendererbridge.c"
+}
+foreach ($sym in @("localization_install", "savelogic_install", "cursorfix_install", "featuremenu_install", "pluginhost_install", "headless_install")) {
+    if (-not (Select-String -Path (Join-Path $build "src\c4features.cpp") -Pattern $sym -Quiet)) {
+        throw "feature bootstrap incomplete: $sym() call missing"
     }
 }
 
 Write-Host "[4/6] generate C4dll-R.def (483 CB63 forwards + 2 exports)" -ForegroundColor Cyan
 $def = Join-Path $build "C4dll-R.def"
-$lines = @("; C4dll-R.dll - CB63 forwarder + embedded cnc-ddraw + mss32-menu exports")
+$lines = @("; C4dll-R.dll - CB63 forwarder + embedded cnc-ddraw + wrapper exports")
 $lines += (Get-Content $cb63def | Where-Object { $_ -match '^(EXPORTS|\s+\S+=CB63\.)' })
 $lines += "    DDReloadConfig @484"
 $lines += "    DDTakeScreenshot @485"
 Set-Content -Path $def -Value $lines -Encoding ASCII
 
-Write-Host "[5/6] retarget vcxproj (output C4dll-R, use C4dll-R.def, add featuremenu.cpp)" -ForegroundColor Cyan
+Write-Host "[5/6] retarget vcxproj (output C4dll-R, use C4dll-R.def, add C4dll-R sources)" -ForegroundColor Cyan
 $vcx = Join-Path $build "cnc-ddraw.vcxproj"
 (Get-Content $vcx -Raw) `
+    -replace '<ClCompile>', "<ClCompile>`r`n      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>" `
     -replace '<TargetName>ddraw</TargetName>', '<TargetName>C4dll-R</TargetName>' `
     -replace '<ModuleDefinitionFile>exports\.def</ModuleDefinitionFile>', '<ModuleDefinitionFile>C4dll-R.def</ModuleDefinitionFile>' `
-    -replace '<ClCompile Include="src\\dllmain\.c" />', "<ClCompile Include=`"src\featuremenu.cpp`" />`r`n    <ClCompile Include=`"src\pluginhost.cpp`" />`r`n    <ClCompile Include=`"src\cyrillic.cpp`" />`r`n    <ClCompile Include=`"src\timerhost.cpp`" />`r`n    <ClCompile Include=`"src\headless.cpp`" />`r`n    <ClCompile Include=`"src\dllmain.c`" />" |
+    -replace '<ClCompile Include="src\\dllmain\.c" />', "<ClCompile Include=`"src\rendererbridge.c`" />`r`n    <ClCompile Include=`"src\c4features.cpp`" />`r`n    <ClCompile Include=`"src\featuremenu.cpp`" />`r`n    <ClCompile Include=`"src\pluginhost.cpp`" />`r`n    <ClCompile Include=`"src\localization.cpp`" />`r`n    <ClCompile Include=`"src\savelogic.cpp`" />`r`n    <ClCompile Include=`"src\cursorfix.cpp`" />`r`n    <ClCompile Include=`"src\timerhost.cpp`" />`r`n    <ClCompile Include=`"src\headless.cpp`" />`r`n    <ClCompile Include=`"src\dllmain.c`" />" |
 Set-Content -Path $vcx -Encoding UTF8
-foreach ($src in @('featuremenu\.cpp', 'pluginhost\.cpp', 'cyrillic\.cpp', 'headless\.cpp')) {
+if (-not (Select-String -Path $vcx -SimpleMatch '<AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>' -Quiet)) {
+    throw "vcxproj retarget failed: compiler UTF-8 source/execution charset missing"
+}
+foreach ($src in @('rendererbridge\.c', 'c4features\.cpp', 'featuremenu\.cpp', 'pluginhost\.cpp', 'localization\.cpp', 'savelogic\.cpp', 'cursorfix\.cpp', 'timerhost\.cpp', 'headless\.cpp')) {
     if (-not (Select-String -Path $vcx -Pattern $src -Quiet)) {
         throw "vcxproj retarget failed: $src not added to the project"
     }
@@ -196,6 +221,15 @@ Write-Host ("BUILT -> {0} ({1:n0} bytes)" -f $out, (Get-Item $out).Length) -Fore
 $fvi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($out)
 if ($fvi.InternalName -ne 'C4dll-R') { throw "version stamp missing in the built dll (InternalName='$($fvi.InternalName)')" }
 Write-Host ("  stamped FileVersion: '{0}'" -f $fvi.FileVersion) -ForegroundColor Green
+# Do not let an editor silently dropping featuremenu.cpp's UTF-8 BOM corrupt the wide Russian menu
+# literals again. /utf-8 above is the actual fix; this binary-level assertion protects local and CI
+# builds independently of the host's active ANSI code page.
+$wideImage = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($out))
+$russianGameLabel = -join ([char]0x0418, [char]0x0433, [char]0x0440, [char]0x0430) # "Game"
+if (-not $wideImage.Contains($russianGameLabel)) {
+    throw "menu localization validation failed: UTF-16 Russian label missing from C4dll-R.dll"
+}
+Write-Host "  menu localization: UTF-8 -> UTF-16 validation passed" -ForegroundColor Green
 
 # Build the native timer plugin (timer.c4p). Self-contained Win32 DLL (GDI+, static CRT, embedded
 # clock font) reconstructed from the legacy timer.mod; the host (pluginhost) drives its turn reset.

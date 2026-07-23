@@ -1,0 +1,26 @@
+--- a/src/dllmain.c
++++ b/src/dllmain.c
+@@ -149,6 +149,23 @@
+         indeo_enable();
+         timeBeginPeriod(1);
+         hook_init();
++
++        /* EMBED (C4dll-R monolith): this DLL is NOT ddraw.dll, so the game's static DDRAW import
++         * resolves to the system ddraw. Redirect the game exe's IAT DirectDrawCreate(Ex) to our
++         * cnc-ddraw implementation so we provide the renderer. DisciplesGL did exactly this from
++         * inside C4dll-R. g_ddraw_module is already this module (set above), so ddraw.ini resolves
++         * next to C4dll-R (the game folder). */
++        hook_patch_iat(GetModuleHandleA(NULL), FALSE, "ddraw.dll", "DirectDrawCreate",
++                       (PROC)DirectDrawCreate);
++        hook_patch_iat(GetModuleHandleA(NULL), FALSE, "ddraw.dll", "DirectDrawCreateEx",
++                       (PROC)DirectDrawCreateEx);
++
++        /* Non-renderer C4dll-R features are compiled as separate sources. cnc-ddraw only owns
++         * this one integration call; feature ordering stays in features/c4features.cpp. */
++        {
++            extern void c4features_install(void);
++            c4features_install();
++        }
+         break;
+     }
+     case DLL_PROCESS_DETACH:

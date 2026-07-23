@@ -1,0 +1,250 @@
+diff --git a/src/render_d3d9.c b/src/render_d3d9.c
+index dde4b2cd..fae55bad 100644
+--- a/src/render_d3d9.c
++++ b/src/render_d3d9.c
+@@ -31,6 +31,9 @@ static BOOL d3d9_update_vertices(BOOL upscale_hack, BOOL stretch);
+ 
+ static D3D9RENDERER g_d3d9;
+ 
++extern void DDApplySimpleZoomViewport(
++    int bottom_origin, int* x, int* y, int* width, int* height);
++
+ BOOL d3d9_is_available()
+ {
+     LPDIRECT3D9 d3d9 = NULL;
+@@ -544,11 +547,16 @@ static BOOL d3d9_set_states()
+ 
+ static BOOL d3d9_update_vertices(BOOL upscale_hack, BOOL stretch)
+ {
+-    float vp_x = stretch ? (float)g_ddraw.render.viewport.x : 0.0f;
+-    float vp_y = stretch ? (float)g_ddraw.render.viewport.y : 0.0f;
++    int vp_x_i = stretch ? g_ddraw.render.viewport.x : 0;
++    int vp_y_i = stretch ? g_ddraw.render.viewport.y : 0;
++    int vp_width_i = stretch ? g_ddraw.render.viewport.width : g_ddraw.width;
++    int vp_height_i = stretch ? g_ddraw.render.viewport.height : g_ddraw.height;
++    DDApplySimpleZoomViewport(FALSE, &vp_x_i, &vp_y_i, &vp_width_i, &vp_height_i);
+ 
+-    float vp_w = stretch ? (float)(g_ddraw.render.viewport.width + g_ddraw.render.viewport.x) : (float)g_ddraw.width;
+-    float vp_h = stretch ? (float)(g_ddraw.render.viewport.height + g_ddraw.render.viewport.y) : (float)g_ddraw.height;
++    float vp_x = (float)vp_x_i;
++    float vp_y = (float)vp_y_i;
++    float vp_w = (float)(vp_x_i + vp_width_i);
++    float vp_h = (float)(vp_y_i + vp_height_i);
+ 
+     float s_h = upscale_hack ? g_d3d9.scale_h * ((float)g_ddraw.upscale_hack_height / g_ddraw.height) : g_d3d9.scale_h;
+     float s_w = upscale_hack ? g_d3d9.scale_w * ((float)g_ddraw.upscale_hack_width / g_ddraw.width) : g_d3d9.scale_w;
+@@ -699,6 +707,9 @@ DWORD WINAPI d3d9_render_main(void)
+             IDirect3DDevice9_Clear(g_d3d9.device, 0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
+         }
+ 
++        d3d9_update_vertices(
++            InterlockedExchangeAdd(&g_ddraw.upscale_hack_active, 0),
++            !g_ddraw.child_window_exists);
+         IDirect3DDevice9_BeginScene(g_d3d9.device);
+         IDirect3DDevice9_DrawPrimitive(g_d3d9.device, D3DPT_TRIANGLESTRIP, 0, 2);
+         IDirect3DDevice9_EndScene(g_d3d9.device);
+diff --git a/src/render_gdi.c b/src/render_gdi.c
+index c7292ed4..1328c465 100644
+--- a/src/render_gdi.c
++++ b/src/render_gdi.c
+@@ -10,6 +10,8 @@
+ #include "debug.h"
+ #include "config.h"
+ 
++extern void DDApplySimpleZoomViewport(
++    int bottom_origin, int* x, int* y, int* width, int* height);
+ 
+ DWORD WINAPI gdi_render_main(void)
+ {
+@@ -100,6 +102,20 @@ DWORD WINAPI gdi_render_main(void)
+             }
+ 
+             int lines_copied = 0;
++            int dst_x = g_ddraw.child_window_exists ? 0 : g_ddraw.render.viewport.x;
++            int dst_y = g_ddraw.child_window_exists ? 0 : g_ddraw.render.viewport.y;
++            int dst_width =
++                g_ddraw.child_window_exists ? g_ddraw.width : g_ddraw.render.viewport.width;
++            int dst_height =
++                g_ddraw.child_window_exists ? g_ddraw.height : g_ddraw.render.viewport.height;
++            DDApplySimpleZoomViewport(FALSE, &dst_x, &dst_y, &dst_width, &dst_height);
++            const BOOL simple_zoom =
++                dst_x != (g_ddraw.child_window_exists ? 0 : g_ddraw.render.viewport.x) ||
++                dst_y != (g_ddraw.child_window_exists ? 0 : g_ddraw.render.viewport.y) ||
++                dst_width !=
++                    (g_ddraw.child_window_exists ? g_ddraw.width : g_ddraw.render.viewport.width) ||
++                dst_height !=
++                    (g_ddraw.child_window_exists ? g_ddraw.height : g_ddraw.render.viewport.height);
+ 
+             if (g_ddraw.bnet_active)
+             {
+@@ -111,10 +127,10 @@ DWORD WINAPI gdi_render_main(void)
+             {
+                 lines_copied = real_StretchDIBits(
+                     g_ddraw.render.hdc,
+-                    g_ddraw.render.viewport.x,
+-                    g_ddraw.render.viewport.y,
+-                    g_ddraw.render.viewport.width,
+-                    g_ddraw.render.viewport.height,
++                    dst_x,
++                    dst_y,
++                    dst_width,
++                    dst_height,
+                     0,
+                     g_ddraw.height - g_ddraw.upscale_hack_height,
+                     g_ddraw.upscale_hack_width,
+@@ -124,15 +140,15 @@ DWORD WINAPI gdi_render_main(void)
+                     DIB_RGB_COLORS,
+                     SRCCOPY);
+             }
+-            else if (!g_ddraw.child_window_exists &&
+-                (g_ddraw.render.width != g_ddraw.width || g_ddraw.render.height != g_ddraw.height))
++            else if (simple_zoom || (!g_ddraw.child_window_exists &&
++                (g_ddraw.render.width != g_ddraw.width || g_ddraw.render.height != g_ddraw.height)))
+             {
+                 lines_copied = real_StretchDIBits(
+                     g_ddraw.render.hdc,
+-                    g_ddraw.render.viewport.x,
+-                    g_ddraw.render.viewport.y,
+-                    g_ddraw.render.viewport.width,
+-                    g_ddraw.render.viewport.height,
++                    dst_x,
++                    dst_y,
++                    dst_width,
++                    dst_height,
+                     0,
+                     0,
+                     g_ddraw.width,
+diff --git a/src/render_ogl.c b/src/render_ogl.c
+index aae1d34e..4d43be2a 100644
+--- a/src/render_ogl.c
++++ b/src/render_ogl.c
+@@ -26,6 +26,35 @@ static void ogl_check_error(const char* stmt);
+ 
+ static OGLRENDERER g_ogl;
+ 
++extern void DDApplySimpleZoomViewport(
++    int bottom_origin, int* x, int* y, int* width, int* height);
++
++static void ogl_set_output_viewport()
++{
++    int x;
++    int y;
++    int width;
++    int height;
++
++    if (g_ddraw.child_window_exists)
++    {
++        x = 0;
++        y = g_ddraw.render.height - g_ddraw.height;
++        width = g_ddraw.width;
++        height = g_ddraw.height;
++    }
++    else
++    {
++        x = g_ddraw.render.viewport.x;
++        y = g_ddraw.render.viewport.y + g_ddraw.render.opengl_y_align;
++        width = g_ddraw.render.viewport.width;
++        height = g_ddraw.render.viewport.height;
++    }
++
++    DDApplySimpleZoomViewport(TRUE, &x, &y, &width, &height);
++    glViewport(x, y, width, height);
++}
++
+ BOOL ogl_create()
+ {
+     if (g_ogl.hwnd == g_ddraw.hwnd && g_ogl.hdc == g_ddraw.render.hdc && g_ogl.context)
+@@ -1283,18 +1312,7 @@ static void ogl_render()
+ 
+             /* apply shader2 */
+ 
+-            if (g_ddraw.child_window_exists)
+-            {
+-                glViewport(0, g_ddraw.render.height - g_ddraw.height, g_ddraw.width, g_ddraw.height);
+-            }
+-            else
+-            {
+-                glViewport(
+-                    g_ddraw.render.viewport.x,
+-                    g_ddraw.render.viewport.y + g_ddraw.render.opengl_y_align,
+-                    g_ddraw.render.viewport.width,
+-                    g_ddraw.render.viewport.height);
+-            }
++            ogl_set_output_viewport();
+ 
+             glUseProgram(g_ogl.shader2_program);
+             glActiveTexture(GL_TEXTURE0);
+@@ -1331,18 +1349,7 @@ static void ogl_render()
+             glActiveTexture(GL_TEXTURE1);
+             glBindTexture(GL_TEXTURE_2D, 0);
+ 
+-            if (g_ddraw.child_window_exists)
+-            {
+-                glViewport(0, g_ddraw.render.height - g_ddraw.height, g_ddraw.width, g_ddraw.height);
+-            }
+-            else
+-            {
+-                glViewport(
+-                    g_ddraw.render.viewport.x, 
+-                    g_ddraw.render.viewport.y + g_ddraw.render.opengl_y_align,
+-                    g_ddraw.render.viewport.width, 
+-                    g_ddraw.render.viewport.height);
+-            }
++            ogl_set_output_viewport();
+ 
+             /* apply filter */
+ 
+@@ -1360,12 +1367,14 @@ static void ogl_render()
+         }
+         else if (g_oglu_got_version3 && g_ogl.main_program)
+         {
++            ogl_set_output_viewport();
+             glBindVertexArray(g_ogl.main_vao);
+             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, 0);
+             glBindVertexArray(0);
+         }
+         else
+         {
++            ogl_set_output_viewport();
+             glBegin(GL_TRIANGLE_FAN);
+             glTexCoord2f(0, 0);                          glVertex2f(-1, 1);
+             glTexCoord2f(g_ogl.scale_w, 0);              glVertex2f(1, 1);
+diff --git a/src/wndproc.c b/src/wndproc.c
+index 35550582..cc11daec 100644
+--- a/src/wndproc.c
++++ b/src/wndproc.c
+@@ -15,6 +15,9 @@
+ #include "debug.h"
+ #include "versionhelpers.h"
+ 
++extern int DDHandleSimpleZoom(HWND hwnd, WPARAM wParam, LPARAM lParam);
++extern int featuremenu_renderer_message(
++    HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, LRESULT* result);
+ 
+ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+ {
+@@ -40,6 +43,12 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
+     static BOOL in_size_move = FALSE;
+     static int redraw_count = 0;
+ 
++    {
++        LRESULT feature_result = 0;
++        if (featuremenu_renderer_message(hWnd, uMsg, wParam, lParam, &feature_result))
++            return feature_result;
++    }
++
+     switch (uMsg)
+     {
+     case WM_NULL:
+@@ -934,9 +943,8 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
+ 
+         if (uMsg == WM_MOUSEWHEEL)
+         {
+-            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+-            real_ScreenToClient(g_ddraw.hwnd, &pt);
+-            lParam = MAKELPARAM(pt.x, pt.y);
++            int key = DDHandleSimpleZoom(hWnd, wParam, lParam);
++            return CallWindowProcA(g_ddraw.wndproc, hWnd, WM_KEYDOWN, key, 1);
+         }
+ 
+         int x = max(GET_X_LPARAM(lParam) - g_ddraw.mouse.x_adjust, 0);

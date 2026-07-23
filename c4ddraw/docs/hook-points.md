@@ -1,18 +1,30 @@
 # C4dll-R hook points (game join points)
 
-Every place C4dll-R attaches to `Discipl2.exe`. **All addresses are for the Russobit build**
-(exe size **4187648**, "Rise of the Elves"); the menu/features refuse to install on any other
-version (`detectVersion()` gate). Structure offsets are version-independent (from the D2ModdingToolset
-headers) unless noted. Verified against `.idare/Discipl2.exe.i64`.
+Every place C4dll-R attaches to `Discipl2.exe`, plus its version-independent Win32 API hooks.
+**All explicit game addresses are for the Russobit build** (exe size **4187648**, "Rise of the
+Elves"); address-based menu/features refuse to install on any other version (`detectVersion()`
+gate). Structure offsets are version-independent (from the D2ModdingToolset headers) unless noted.
+Verified against `.idare/Discipl2.exe.i64`.
 
 Hook kinds: **IAT** = import-table swap, **Detour** = MS-Detours trampoline, **vftable** = vtable-slot
 overwrite, **patch** = raw byte patch, **call** = we call a game function by address.
 
-## Renderer embed (`patches/cnc-ddraw-mss32.patch`, `dllmain.c`)
+## Renderer embed (`patches/cnc-ddraw-c4dll-r.patch`, `dllmain.c`)
 
 | Kind | Target | Purpose |
 | --- | --- | --- |
 | IAT | game import `DDRAW.dll!DirectDrawCreate` / `DirectDrawCreateEx` | route to the embedded cnc-ddraw (`dd_CreateEx`); no standalone `ddraw.dll` |
+
+## Save handling (`features/savelogic.cpp`, all executable variants)
+
+No game addresses or structures are used. The hooks filter only `.sg` operations; other wrapper,
+plugin and game file I/O passes through unchanged.
+
+| Kind | Target | Purpose |
+| --- | --- | --- |
+| Detour | `kernel32!CreateFileA` | Ctrl `QuickSaveNNN.sg`, remember completed save writes, capture Shift force-archive |
+| Detour | `kernel32!CloseHandle` | after the tracked save is closed, copy it to the dated archive when enabled |
+| Detour | `kernel32!FindFirstFileA` / `FindNextFileA` / `FindClose` | optional recursive `.sg` enumeration for `[Wrapper] IncludeSubdirectories=1`; child search handles are closed explicitly |
 
 ## Menu + WndProc (`features/featuremenu.cpp`)
 
@@ -22,6 +34,18 @@ overwrite, **patch** = raw byte patch, **call** = we call a game function by add
 | patch | `0x5628BE` | always-active: skip the lose-focus pause |
 | call | `0x401D35` | `CMidgard::instance()` → `data(+8) → settings(+60)` = `GameSettings**` (battle/player/opponent speed) |
 | exports | `DDReloadConfig` / `DDTakeScreenshot` | own exports: live re-apply `ddraw.ini` / screenshot |
+
+## Simple zoom + Scenario Editor menu (address-free)
+
+No `Discipl2.exe`, `ScenEdit.exe`, or `mss32.dll` address/API is used. The supported editor is still
+identified by the validated PE size (2895872); all zoom/editor message routing is then wrapper-owned.
+
+| Kind | Target | Purpose |
+| --- | --- | --- |
+| call from patched cnc-ddraw WndProc | `DDHandleSimpleZoom` | reproduce DisciplesGL 2.0.2 Ctrl+Wheel steps (+0.1/-0.4, clamp 1..8, cursor anchor), then forward Up/Down |
+| call from OpenGL/D3D9/GDI final output | `DDApplySimpleZoomViewport` | apply the process-local zoom to the final destination rectangle |
+| call from patched cnc-ddraw WndProc | `featuremenu_renderer_message` | route ScenEdit menu commands without detouring an editor function |
+| Win32 profile write | `Disciple.ini` `[Disciple] ScenEditDatabase` | switch Scenarios/Campaigns; restart required |
 
 ## Animation speed (`features/featuremenu.cpp`)
 
@@ -88,5 +112,7 @@ Detour the event-popup VO-start, arm on a real VO, close after the sample finish
 ## Diagnostics
 
 `[menu] debugLog=1` in `C4menu.ini` (or the `C4DLL_DEBUG` env var) writes an `OutputDebugString` +
-`C4menu-<pid>.log` trace. Dialog-VO lines are tagged `[dvo]` (`armed` / `eos` / `poll` / `VO done` / SEH).
+`C4menu-<pid>.log` trace. The same gate drives the timer host (`timerhost.cpp`, same log file) and
+the plugin host (`pluginhost.cpp` -> `C4plugins.log`), so a default release build writes no log
+files at all. Dialog-VO lines are tagged `[dvo]` (`armed` / `eos` / `poll` / `VO done` / SEH).
 The voiced-dialog text log is `dialog-vo-log.txt` (append-only, UTF-8), independent of `debugLog`.

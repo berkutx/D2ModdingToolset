@@ -12,9 +12,14 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 | Path | What it is | Committed |
 | --- | --- | --- |
 | `upstream/cnc-ddraw/` | The cnc-ddraw renderer as a **git submodule**, pinned at upstream `a0b81b11` (a 7.1.0.1-dev snapshot, 80 commits past the v7.1.0.0 tag). Never edited in place. | submodule pointer |
-| `patches/cnc-ddraw-mss32.patch` | Our diff over upstream: DirectDraw embed + `DDReloadConfig`/`DDTakeScreenshot` exports + the `featuremenu_install()` call (`dllmain.c`, `winapi_hooks.c`, `exports.def`) | yes |
+| `patches/cnc-ddraw-c4dll-r.patch` | Minimal integration diff over upstream: redirect the exe's `DirectDrawCreate(Ex)` imports and call the single `c4features_install()` bootstrap (`dllmain.c` only) | yes |
 | `patches/cnc-ddraw-render-null.patch` | The `render_null` headless backend: `dd.c` renderer branch + vcxproj entries + new `inc/render_null.h`, `src/render_null.c` | yes |
+| `patches/cnc-ddraw-default-ini.patch` | The Disciples II tuned `ddraw.ini` template written by `cfg_create_ini` (`config.c`) when no ini exists on first run | yes |
+| `patches/cnc-ddraw-simple-zoom.patch` | Narrow WndProc + OpenGL/D3D9/GDI integration for wrapper-owned Ctrl+Wheel zoom and address-free editor menu routing | yes |
 | `features/featuremenu.cpp` | The in-game menu + feature hooks, self-contained (no mss32 deps) | yes |
+| `features/rendererbridge.c` | Wrapper-owned adapters to cnc-ddraw internals: live reload, screenshot, coordinate mapping and simple-zoom state/formula | yes |
+| `features/localization.cpp` | Locale/encoding bridge modelled after the legacy wrapper; no hard-coded Russian code pages | yes |
+| `features/savelogic.cpp`, `cursorfix.cpp` | Version-independent save/archive hooks and the Disciples II edge-scroll guard | yes |
 | `docs/hook-points.md` | Every game address/structure C4dll-R attaches to (Russobit) | yes |
 | `forwarder/C4dll-R.cb63.def` | The 483 CB63 export forwards (`Name=CB63.Name @ord`) | yes |
 | `build.ps1` | Reproducible build + deploy/restore | yes |
@@ -29,15 +34,16 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
    to the embedded cnc-ddraw implementation. The game's static `DDRAW.dll` import still loads the
    system `ddraw.dll`, but its create entry points are bypassed, so the embedded renderer is used.
    No separate `ddraw.dll` is shipped. (Everything stays inside the single `C4dll-R.dll`.)
-4. `featuremenu_install()` then adds the in-game menu: it detours the game window procedure by
+4. The one `c4features_install()` bootstrap starts the wrapper-owned modules. `featuremenu_install()`
+   then adds the in-game menu: it detours the game window procedure by
    address to receive `WM_COMMAND` and attaches a real menu bar (Game / Video / Performance / Plugins)
    under cnc-ddraw's title bar. Renderer settings are written to `ddraw.ini` and re-applied live via the
    renderer's own `DDReloadConfig`; screenshots use `DDTakeScreenshot`.
 5. The **Game** menu also carries gameplay features that hook the exe by address (Russobit only, all
    SEH-guarded, most default-off): live battle/map animation-speed multipliers and per-hit attack burst,
-   map drag-scroll, and **Skip voiced event dialogs** (auto-close a `DLG_EVENT_POPUP` after its voiceover
-   finishes and append its text to `dialog-vo-log.txt`). Every game address and structure these touch is
-   listed in [`docs/hook-points.md`](docs/hook-points.md).
+   map drag-scroll and **Skip voiced event dialogs** (auto-close a `DLG_EVENT_POPUP` after its
+   voiceover finishes and append its text to `dialog-vo-log.txt`). Every game address and structure
+   these touch is listed in [`docs/hook-points.md`](docs/hook-points.md).
 
 ## Build
 
@@ -47,8 +53,10 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 ./build.ps1 -Restore        # put the baseline C4dll-R.dll + standalone ddraw.dll back
 ```
 
-`build.ps1` copies the pinned `upstream/cnc-ddraw` submodule to `build/`, applies both patches
-(`cnc-ddraw-mss32` + `cnc-ddraw-render-null`), copies in `features/featuremenu.cpp`,
+`build.ps1` copies the pinned `upstream/cnc-ddraw` submodule to `build/`, applies the four patches
+(`cnc-ddraw-c4dll-r` integration + `render-null` + `default-ini` + `simple-zoom`), copies in the
+wrapper-owned `features/*.c*` sources (renderer bridge, menu, plugins, locale, saves, cursor guard
+and headless mode),
 generates `C4dll-R.def` (the CB63 forwards plus the two exports), retargets the vcxproj
 (`TargetName` + `.def` + the extra source), stamps the version identity (`-Version <ver>`, default
 `dev-<repo sha>`: writes `inc/git.h` from the outer repo, edits `res.rc` to identify as C4dll-R,
@@ -88,9 +96,9 @@ Put `C4dll-R.dll` next to `Discipl2.exe` (replacing the CodeBase copy), keep `CB
 
 `upstream/cnc-ddraw/` is a git submodule pinned at an exact commit. To move to a newer upstream:
 bump the submodule (`git -C upstream/cnc-ddraw fetch && git -C upstream/cnc-ddraw checkout <sha>`, then
-`git add upstream/cnc-ddraw`), re-apply both patches against the new tree (`git apply`), resolve any
+`git add upstream/cnc-ddraw`), re-apply the patches against the new tree (`git apply`), resolve any
 reject, and regenerate. `build.ps1` always builds from the pinned submodule + the patches, so the
-upstream tree is never edited in place. Both patches touch disjoint files, so order does not matter.
+upstream tree is never edited in place. The patches touch disjoint files, so order does not matter.
 
 ## What exactly is linked into C4dll-R.dll
 
@@ -101,7 +109,7 @@ One binary, three layers:
 | cnc-ddraw core | all upstream `src/*.c`: `dd`, `ddsurface`, `blt`, `config`, renderers `render_ogl` / `render_d3d9` / `render_gdi`, `winapi_hooks`, `wndproc`, `hook`, `fps_limiter`, `utils`, `lodepng` (screenshots), the `IDirectDraw*` / `IDirect3D*` COM shims | the DirectDraw replacement itself |
 | render_null | added by `patches/cnc-ddraw-render-null.patch` | headless backend (`renderer=null`) for test harnesses, no visible output |
 | Microsoft Detours | upstream `src/detours/` | function/IAT hooking used by cnc-ddraw and the feature layer |
-| Feature layer | `features/featuremenu.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `cyrillic.cpp`, `headless.cpp` | in-game menu, `Mods\*.c4p` plugin host, game-event keystones for plugins, RU text codepage fix, headless windowing |
+| C4dll-R layer | `features/rendererbridge.c`, `c4features.cpp`, `featuremenu.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `localization.cpp`, `savelogic.cpp`, `cursorfix.cpp`, `headless.cpp` | wrapper integration, menu, plugins, locale conversion, save/archive logic, D2 cursor guard and headless windowing |
 
 Exports: the 483 CodeBase forwards (`name=CB63.name`) plus `DDReloadConfig` (live settings
 reload) and `DDTakeScreenshot`. `Mods\timer.c4p` is built separately from `plugins/timer/` and is
@@ -117,9 +125,9 @@ Three files, three owners:
 
 | File | Who creates it | What lives there |
 | --- | --- | --- |
-| `ddraw.ini` | shipped in the release zip (recommended defaults); if absent, the embedded cnc-ddraw generates a stock one on first launch | renderer, window mode, resolution, shader, performance caps |
-| `C4menu.ini` | generated by the menu on first launch | gameplay toggles: always active, animation speed, attack burst, drag-scroll; plus `language` (auto/en/ru) and `debugLog` (0 = no C4menu-<pid>.log files, default; 1 or the `C4DLL_DEBUG` env var enables diagnostics) |
-| `Disciple.ini` | the game's own file | only the two "game option" presets are written there (`BattleSpeed`, `PlayerSpeed` + `OpponentSpeed`), because they are native game options |
+| `ddraw.ini` | shipped in the release zip (recommended defaults); if absent, C4dll-R generates a Disciples II tuned one on first launch (`patches/cnc-ddraw-default-ini.patch`) | renderer, window mode, resolution, shader, performance caps |
+| `C4menu.ini` | generated by the menu on first launch | gameplay toggles: always active, animation speed, attack burst, drag-scroll and unit-hire auto-confirm; plus `language` (auto/en/ru) and `debugLog` (0 = no C4menu-<pid>.log / C4plugins.log files, default; 1 or the `C4DLL_DEBUG` env var enables diagnostics) |
+| `Disciple.ini` | the game's own/wrapper-compatible file | native speed presets, editor `ScenEditDatabase`, `[Wrapper] Locale`, `Archive` and `IncludeSubdirectories` |
 
 Old settings conversion: on first launch (no `C4menu.ini` yet) the menu reads the legacy
 `mss32menu.ini` `[menu]` section (the old mss32-mod menu config) and converts it: `alwaysActive`
@@ -127,9 +135,16 @@ carries over as is; old `animationSpeedEnabled=1` maps to battle speed 1.5x, oth
 2x is used. Nothing else is read, and the conversion never touches the game's `Disciple.ini` or
 `Scripts\settings.lua`. Once `C4menu.ini` exists it is never regenerated: the user owns it.
 
-Without our `ddraw.ini` the auto-generated stock one means upstream defaults: exclusive
-fullscreen (no title bar, so the menu bar is not visible), `renderer=auto` (picks D3D9 first, so
-no shader filters) and `maxgameticks=0`. That is exactly why the zip ships a tuned `ddraw.ini`.
+If `ddraw.ini` is missing entirely, the generated default is no longer the upstream stock one:
+`cfg_create_ini` writes a Disciples II tuned config (`patches/cnc-ddraw-default-ini.patch`) -
+`fake_mode=1024x768x16`, `renderer=opengl`, windowed with a real title bar (`windowed=true`,
+`border=true`, `resizable=false`), `width=800`/`height=600`, `maintas=true`, the xBRZ freescale
+shader, `devmode=true`, `singlecpu=true`, `nonexclusive=true`, `noactivateapp=true`, `maxfps=144`,
+`maxgameticks=100`, `vsync=true`, the usual hotkeys, and `savesettings=0` so cnc-ddraw never
+rewrites the file and strips its comments. The comments are carried in the file and explain every
+choice; the ini parser takes everything after `=` as the value, so all comments sit on their own
+lines. The zip still ships the recommended `ddraw.ini` (native resolution, resizable window,
+Lanczos shader, `savesettings=1`) - delete it to compare against the generated one.
 
 ## Settings reference: ddraw.ini (shipped defaults)
 
@@ -183,12 +198,28 @@ thread.
 
 ## In-game menu
 
-Russobit exe only: on other builds the menu does not install (the renderer still works). The bar
-appears under the title bar in windowed mode: **Game / Video / Performance / Plugins**.
+The full gameplay menu installs on the Russobit exe. The validated Scenario Editor exe gets the
+address-free **File / Video / Performance / Plugins** menu; unsupported executables keep the
+renderer only. In windowed mode the bar appears under the title bar.
 
 The menu is bilingual: `C4menu.ini` `[menu] language` = `auto` (default) / `en` / `ru`. With
 `auto` the menu is Russian when the Windows UI language is Russian or the system codepage is 1251,
 English otherwise. Submenus carry grayed one-line hints explaining each option.
+
+### Simple zoom
+
+`Ctrl+Mouse Wheel` reproduces the DisciplesGL 2.0.2 simple zoom in both the game and Scenario
+Editor: wheel up adds 0.1x, wheel down subtracts 0.4x, range 1.0x..8.0x, and the image stays anchored
+at the cursor. It is process-local, not persisted, and works in OpenGL, D3D9/Auto and GDI. Ordinary
+wheel input retains the original wrapper behavior (an Up/Down key press). It does not inspect or call
+`mss32.dll`.
+
+### Scenario Editor
+
+**File > Editor mode > Scenarios / Campaigns** writes the editor's native
+`Disciple.ini` `[Disciple] ScenEditDatabase=0/1` setting and asks for an editor restart, exactly like
+the legacy wrapper. The switch uses no executable or `mss32.dll` addresses; the exact supported
+`ScenEdit.exe` is still validated by the existing PE-size check.
 
 ### Game
 
@@ -196,6 +227,7 @@ English otherwise. Submenus carry grayed one-line hints explaining each option.
 | --- | --- | --- | --- |
 | Always active | the game keeps running (no pause) when the window loses focus; an in-place patch of the activation check, verified against the original bytes before writing | `C4menu.ini` `alwaysActive` | live |
 | Map drag-scroll (left button) | hold LMB on the map and drag to pan; a plain click still selects (delivered on release); window-edge scroll is off while enabled | `C4menu.ini` `dragScroll` | live |
+| Auto-confirm unit hire | skips only “Do you want to hire this unit?” by invoking its normal `BTN_YES` callback during the local player's turn; off by default | `C4menu.ini` `autoConfirmUnitHire` | live |
 | Battle speed (whole battle): Off / 1.5x / 2x (default) / 3x / 4x / 5x / 15x | multiplies all battle animation timing via a virtual clock (a `timeGetTime` redirect); no game memory is patched | `C4menu.ini` `battleAnimEnabled` + `battleAnimSpeed` | live |
 | Attack speed-up (burst on each hit): Off / 1.5x .. 5x (default) / 15x | an extra multiplier only while a hit/effect plays (about 1.2 s, easing back over 0.7 s), on top of the battle speed | `C4menu.ini` `battleAttackEnabled` + `battleAttackSpeed` | live |
 | Map animation speed: Off (default) / 1.5x .. 15x | the same virtual clock on the strategic map (water, flags, effects) | `C4menu.ini` `mapAnimEnabled` + `mapAnimSpeed` | live |
@@ -230,6 +262,33 @@ The 15x entries are test presets, exaggerated on purpose.
 Appears when `Mods\` contains plugins: `Native (.c4p)` and `Legacy (.mod)` submenus, each grafting
 the plugin's own menu. The bundled Timer plugin is configured via `C4plugins.ini` and is
 documented separately.
+
+## Save handling (all game versions)
+
+`features/savelogic.cpp` ports the legacy wrapper's file-level save conveniences without using a
+single `Discipl2.exe` address. It detours Win32 file enumeration/open/close APIs, so the same code
+applies to the Akella, Russobit, GOG and editor executables:
+
+- hold **Ctrl** while confirming a normal save to write the next `QuickSaveNNN.sg` beside it;
+- `[Wrapper] Archive=1` in `Disciple.ini` (default when the key is absent) copies each closed save
+  to `Archive\YYYYMMDD\~name-YYYYMMDD-HHMMSS-marker.sg`;
+- hold **Shift** while saving to force that one archive copy even when `Archive=0`;
+- `[Wrapper] IncludeSubdirectories=1` (default `0`) recursively exposes `.sg` files under
+  `Archive\` in the game's ordinary save/load list.
+
+These settings are read when the operation happens, so editing `Disciple.ini` needs no rebuild and
+no game restart. The game's `[Settings] AutoSave` key is unrelated and is not implemented here.
+With `[menu] debugLog=1`, save events also go to `C4saves-<pid>.log`.
+
+## Game text locale (all game versions)
+
+`features/localization.cpp` implements the legacy wrapper's `[Wrapper] Locale=<LCID>` behavior
+without hard-coding Russian 866/1251. The selected Windows locale supplies its OEM and ANSI code
+pages and msvcrt `LC_CTYPE`; the `OemToCharA`/`CharToOemA` bridge can be switched live. The default
+is `GetUserDefaultLCID`; `Locale=0` disables wrapper recoding. On the Russobit build it is exposed as
+**Game > Game text locale**, enumerating the locales installed in Windows and writing the selected
+LCID to `Disciple.ini`. Other game builds use the same address-free bridge and can set the key by
+hand even though their address-specific in-game menu is not installed.
 
 ## Experimental
 
@@ -277,9 +336,14 @@ C4dll-R.
 | Путь | Что это | В репозитории |
 | --- | --- | --- |
 | `upstream/cnc-ddraw/` | Рендерер cnc-ddraw как **git submodule**, запинен на апстрим `a0b81b11` (dev-снапшот линии 7.1.0.1, 80 коммитов после тега v7.1.0.0). На месте не редактируется. | указатель submodule |
-| `patches/cnc-ddraw-mss32.patch` | Наш дифф: встраивание DirectDraw + экспорты `DDReloadConfig`/`DDTakeScreenshot` + вызов `featuremenu_install()` (`dllmain.c`, `winapi_hooks.c`, `exports.def`) | да |
+| `patches/cnc-ddraw-c4dll-r.patch` | Минимальный интеграционный дифф: перенаправление импортов `DirectDrawCreate(Ex)` exe и один вызов `c4features_install()` (только `dllmain.c`) | да |
 | `patches/cnc-ddraw-render-null.patch` | Headless-бэкенд `render_null`: ветка рендерера в `dd.c` + записи vcxproj + новые `inc/render_null.h`, `src/render_null.c` | да |
+| `patches/cnc-ddraw-default-ini.patch` | Настроенный под Disciples II шаблон `ddraw.ini`, который `cfg_create_ini` (`config.c`) пишет при первом запуске, если файла нет | да |
+| `patches/cnc-ddraw-simple-zoom.patch` | Узкая интеграция WndProc и OpenGL/D3D9/GDI для `Ctrl+колесо` и адресно-независимой маршрутизации меню редактора | да |
 | `features/featuremenu.cpp` | Внутриигровое меню + хуки фич, самодостаточное (без зависимостей mss32) | да |
+| `features/rendererbridge.c` | Собственные адаптеры врапера к внутренностям cnc-ddraw: live reload, скриншот, перевод координат, состояние и формула simple zoom | да |
+| `features/localization.cpp` | Мост локали/кодировок по образцу старого врапера, без жёстких русских кодовых страниц | да |
+| `features/savelogic.cpp`, `cursorfix.cpp` | Независимые от версии хуки сейвов/архива и защита edge-scroll для Disciples II | да |
 | `docs/hook-points.md` | Все адреса/структуры игры, к которым цепляется C4dll-R (Russobit) | да |
 | `forwarder/C4dll-R.cb63.def` | 483 форварда экспортов CB63 (`Name=CB63.Name @ord`) | да |
 | `build.ps1` | Воспроизводимая сборка + deploy/restore | да |
@@ -294,15 +358,16 @@ C4dll-R.
    встроенную реализацию cnc-ddraw. Статический импорт `DDRAW.dll` всё ещё грузит системный
    `ddraw.dll`, но его точки создания обходятся, поэтому используется встроенный рендерер. Отдельный
    `ddraw.dll` не поставляется. (Всё остаётся внутри единого `C4dll-R.dll`.)
-4. Далее `featuremenu_install()` добавляет меню: детурит оконную процедуру игры по адресу, чтобы
+4. Единственный bootstrap `c4features_install()` запускает собственные модули врапера. Затем
+   `featuremenu_install()` добавляет меню: детурит оконную процедуру игры по адресу, чтобы
    получать `WM_COMMAND`, и крепит настоящий меню-бар (Game / Video / Performance / Plugins) под
    заголовком cnc-ddraw. Настройки рендерера пишутся в `ddraw.ini` и применяются вживую через собственный
    `DDReloadConfig`; скриншоты делает `DDTakeScreenshot`.
 5. Меню **Game** также несёт геймплейные фичи, которые цепляются к exe по адресам (только Russobit, всё
    под SEH, большинство по умолчанию выключены): живые множители скорости анимации боя/карты и бонус на
-   удар, перетаскивание карты, и **пропуск озвученных диалогов** (авто-закрытие `DLG_EVENT_POPUP` после
-   озвучки + запись текста в `dialog-vo-log.txt`). Все адреса и структуры игры, к которым они цепляются,
-   перечислены в [`docs/hook-points.md`](docs/hook-points.md).
+   удар, перетаскивание карты и **пропуск озвученных диалогов** (авто-закрытие `DLG_EVENT_POPUP`
+   после озвучки + запись текста в `dialog-vo-log.txt`). Все адреса и структуры игры, к которым
+   они цепляются, перечислены в [`docs/hook-points.md`](docs/hook-points.md).
 
 ## Сборка
 
@@ -312,8 +377,9 @@ C4dll-R.
 ./build.ps1 -Restore        # вернуть baseline C4dll-R.dll + отдельный ddraw.dll
 ```
 
-`build.ps1` копирует запиненный submodule `upstream/cnc-ddraw` в `build/`, накладывает оба патча
-(`cnc-ddraw-mss32` + `cnc-ddraw-render-null`), копирует `features/featuremenu.cpp`,
+`build.ps1` копирует запиненный submodule `upstream/cnc-ddraw` в `build/`, накладывает четыре патча
+(`cnc-ddraw-c4dll-r` + `render-null` + `default-ini` + `simple-zoom`) и копирует собственные
+`features/*.c*` (renderer bridge, меню, плагины, локаль, сейвы, cursor guard и headless),
 генерирует `C4dll-R.def` (форварды CB63 плюс два экспорта), перенацеливает vcxproj (`TargetName` +
 `.def` + доп. исходник), зашивает версию (`-Version <ver>`, по умолчанию `dev-<sha репо>`: пишет
 `inc/git.h` из внешнего репо, правит `res.rc` на идентичность C4dll-R, вырезает апстримный
@@ -351,9 +417,9 @@ git push origin c4dll-r-v1.0
 
 `upstream/cnc-ddraw/` это git submodule, запиненный на точный коммит. Чтобы перейти на новый апстрим:
 сдвиньте submodule (`git -C upstream/cnc-ddraw fetch && git -C upstream/cnc-ddraw checkout <sha>`, затем
-`git add upstream/cnc-ddraw`), наложите оба патча на новое дерево (`git apply`), разрешите конфликты и
+`git add upstream/cnc-ddraw`), наложите патчи на новое дерево (`git apply`), разрешите конфликты и
 пересоберите. `build.ps1` всегда собирает из запиненного submodule + патчи, поэтому дерево апстрима не
-редактируется на месте. Оба патча трогают непересекающиеся файлы, поэтому порядок не важен.
+редактируется на месте. Патчи трогают непересекающиеся файлы, поэтому порядок не важен.
 
 ## Что именно слинковано внутри C4dll-R.dll
 
@@ -364,7 +430,7 @@ git push origin c4dll-r-v1.0
 | Ядро cnc-ddraw | все апстримные `src/*.c`: `dd`, `ddsurface`, `blt`, `config`, рендереры `render_ogl` / `render_d3d9` / `render_gdi`, `winapi_hooks`, `wndproc`, `hook`, `fps_limiter`, `utils`, `lodepng` (скриншоты), COM-прослойки `IDirectDraw*` / `IDirect3D*` | сама замена DirectDraw |
 | render_null | добавляется `patches/cnc-ddraw-render-null.patch` | headless-бэкенд (`renderer=null`) для тест-харнессов, без видимого вывода |
 | Microsoft Detours | апстримный `src/detours/` | function/IAT-хуки для cnc-ddraw и слоя фич |
-| Слой фич | `features/featuremenu.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `cyrillic.cpp`, `headless.cpp` | внутриигровое меню, хост плагинов `Mods\*.c4p`, игровые события для плагинов, фикс кодировки русского текста, headless-окна |
+| Слой C4dll-R | `features/rendererbridge.c`, `c4features.cpp`, `featuremenu.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `localization.cpp`, `savelogic.cpp`, `cursorfix.cpp`, `headless.cpp` | интеграция врапера, меню, плагины, локаль, сейвы/архив, защита курсора D2 и headless-окна |
 
 Экспорты: 483 форварда CodeBase (`name=CB63.name`) плюс `DDReloadConfig` (живое перечтение
 настроек) и `DDTakeScreenshot`. `Mods\timer.c4p` собирается отдельно из `plugins/timer/` и внутрь
@@ -380,9 +446,9 @@ DLL НЕ входит.
 
 | Файл | Кто создаёт | Что хранит |
 | --- | --- | --- |
-| `ddraw.ini` | лежит в релизном zip (рекомендованные значения); если отсутствует, встроенный cnc-ddraw при первом запуске создаст стоковый | рендерер, режим окна, разрешение, шейдер, капы производительности |
-| `C4menu.ini` | создаётся меню при первом запуске | игровые тумблеры: always active, скорости анимаций, attack burst, drag-scroll; плюс `language` (auto/en/ru) и `debugLog` (0 = не писать файлы C4menu-<pid>.log, по умолчанию; 1 или env `C4DLL_DEBUG` включает диагностику) |
-| `Disciple.ini` | собственный файл игры | туда пишутся только два «родных» пресета (`BattleSpeed`, `PlayerSpeed` + `OpponentSpeed`), потому что это опции самой игры |
+| `ddraw.ini` | лежит в релизном zip (рекомендованные значения); если отсутствует, C4dll-R при первом запуске создаст настроенный под Disciples II (`patches/cnc-ddraw-default-ini.patch`) | рендерер, режим окна, разрешение, шейдер, капы производительности |
+| `C4menu.ini` | создаётся меню при первом запуске | игровые тумблеры: always active, скорости анимаций, attack burst, drag-scroll и автоподтверждение найма; плюс `language` (auto/en/ru) и `debugLog` (0 = не писать файлы C4menu-<pid>.log / C4plugins.log, по умолчанию; 1 или env `C4DLL_DEBUG` включает диагностику) |
+| `Disciple.ini` | собственный/совместимый со старым врапером файл игры | родные пресеты скорости, редакторский `ScenEditDatabase`, `[Wrapper] Locale`, `Archive` и `IncludeSubdirectories` |
 
 Конвертация старых настроек: при первом запуске (когда `C4menu.ini` ещё нет) меню читает
 легаси-файл `mss32menu.ini`, секцию `[menu]` (старый конфиг меню mss32-мода), и конвертирует:
@@ -391,9 +457,16 @@ DLL НЕ входит.
 `Scripts\settings.lua` игры конвертация не трогает никогда. Существующий `C4menu.ini` повторно не
 генерируется: файл принадлежит пользователю.
 
-Без нашего `ddraw.ini` автосозданный стоковый означает апстрим-дефолты: эксклюзивный полный экран
-(нет заголовка окна, значит не виден меню-бар), `renderer=auto` (сначала D3D9, то есть без
-шейдерных фильтров) и `maxgameticks=0`. Именно поэтому в zip лежит настроенный `ddraw.ini`.
+Если `ddraw.ini` отсутствует совсем, автосозданный файл - это больше не апстрим-сток:
+`cfg_create_ini` пишет настроенный под Disciples II конфиг (`patches/cnc-ddraw-default-ini.patch`) -
+`fake_mode=1024x768x16`, `renderer=opengl`, окно с настоящим заголовком (`windowed=true`,
+`border=true`, `resizable=false`), `width=800`/`height=600`, `maintas=true`, шейдер xBRZ freescale,
+`devmode=true`, `singlecpu=true`, `nonexclusive=true`, `noactivateapp=true`, `maxfps=144`,
+`maxgameticks=100`, `vsync=true`, привычные горячие клавиши и `savesettings=0`, чтобы cnc-ddraw
+не переписывал файл и не срезал комментарии. Комментарии лежат прямо в файле и объясняют каждый
+выбор; парсер ini берёт значением всё после `=`, поэтому все комментарии - отдельными строками.
+В zip по-прежнему лежит рекомендованный `ddraw.ini` (родное разрешение, тянущееся окно, шейдер
+Lanczos, `savesettings=1`) - удалите его, если хотите сравнить с генерируемым.
 
 ## Справочник настроек: ddraw.ini (значения из комплекта)
 
@@ -447,19 +520,38 @@ DLL НЕ входит.
 
 ## Внутриигровое меню
 
-Только для exe Русобита: на других сборках меню не устанавливается (рендерер работает). Бар
-появляется под заголовком окна в оконном режиме: **Игра / Видео / Производительность / Плагины**.
+Полное игровое меню устанавливается для exe Русобита. Проверенный exe редактора сценариев получает
+адресно-независимое меню **Файл / Видео / Производительность / Плагины**; для неподдерживаемых
+exe остаётся только рендерер. В оконном режиме бар появляется под заголовком окна.
 
 Меню двуязычное: `C4menu.ini` `[menu] language` = `auto` (по умолчанию) / `en` / `ru`. При `auto`
-меню русское, когда язык интерфейса Windows русский или системная кодовая страница 1251, иначе
-английское. В подменю есть серые строки-подсказки, объясняющие каждую опцию.
+меню русское, когда язык интерфейса Windows русский, системная кодовая страница 1251 или выбрана
+русская локаль текста игры; иначе английское. Выбор доступен в **Игра > Язык меню** и применяется
+после перезапуска игры. В подменю есть серые строки-подсказки, объясняющие каждую опцию.
+
+### Простое увеличение
+
+`Ctrl+колесо мыши` повторяет simple zoom из DisciplesGL 2.0.2 и в игре, и в редакторе сценариев:
+колесо вверх добавляет 0,1x, вниз убавляет 0,4x, диапазон 1,0x..8,0x, изображение остаётся
+привязанным к позиции курсора. Масштаб действует до завершения процесса, не сохраняется и работает
+в OpenGL, D3D9/Auto и GDI. Обычное колесо сохраняет поведение оригинального врапера — передаёт
+стрелку вверх/вниз. `mss32.dll` не проверяется и не вызывается.
+
+### Редактор сценариев
+
+**Файл > Режим редактора > Сценарии / Кампании** пишет штатный ключ
+`Disciple.ini` `[Disciple] ScenEditDatabase=0/1` и просит перезапустить редактор — как старый
+врапер. Для переключателя не используются адреса ни `ScenEdit.exe`, ни `mss32.dll`; при этом сам
+поддерживаемый `ScenEdit.exe` по-прежнему проверяется существующим условием по размеру PE.
 
 ### Игра
 
 | Пункт | Что делает | Куда пишет | Применение |
 | --- | --- | --- | --- |
+| Язык меню | `Авто` / `English` / `Русский`; автоматический режим учитывает язык Windows, CP1251 и выбранную локаль текста игры | `C4menu.ini` `language` | после перезапуска |
 | Всегда активна | игра продолжает работать (без паузы), когда окно теряет фокус; точечный патч проверки активации, сверяется с оригинальными байтами перед записью | `C4menu.ini` `alwaysActive` | сразу |
 | Перетаскивание карты | зажать ЛКМ на карте и тянуть = панорамирование; обычный клик по-прежнему выбирает (доставляется при отпускании); скролл от края окна при включённом пункте отключён | `C4menu.ini` `dragScroll` | сразу |
+| Автоподтверждение найма воинов | пропускает только вопрос «Хотите нанять этого воина?» штатным callback `BTN_YES` в активный ход локального игрока; по умолчанию выключено | `C4menu.ini` `autoConfirmUnitHire` | сразу |
 | Скорость боя (весь бой): Выкл / 1.5x / 2x (по умолчанию) / 3x / 4x / 5x / 15x | умножает тайминг всех боевых анимаций через виртуальные часы (редирект `timeGetTime`); память игры не патчится | `C4menu.ini` `battleAnimEnabled` + `battleAnimSpeed` | сразу |
 | Ускорение атак (рывок на каждый удар): Выкл / 1.5x .. 5x (по умолчанию) / 15x | дополнительный множитель только пока проигрывается удар/эффект (около 1.2 с, плавный спад за 0.7 с), поверх скорости боя | `C4menu.ini` `battleAttackEnabled` + `battleAttackSpeed` | сразу |
 | Скорость анимаций карты: Выкл (по умолчанию) / 1.5x .. 15x | те же виртуальные часы на стратегической карте (вода, флаги, эффекты) | `C4menu.ini` `mapAnimEnabled` + `mapAnimSpeed` | сразу |
@@ -494,6 +586,35 @@ DLL НЕ входит.
 Появляется, когда в `Mods\` есть плагины: подменю `Нативные (.c4p)` и `Старые (.mod)`, каждое
 подцепляет собственное меню плагина. Комплектный плагин Timer настраивается через
 `C4plugins.ini` и документируется отдельно.
+
+## Работа с сейвами (все версии игры)
+
+`features/savelogic.cpp` переносит файловую логику старого врапера без единого адреса
+`Discipl2.exe`. Перехватываются WinAPI-функции открытия, закрытия и перечисления файлов, поэтому
+одна реализация работает с exe Акеллы, Русобита, GOG и редактора:
+
+- зажать **Ctrl** при подтверждении обычного сохранения — записать следующий `QuickSaveNNN.sg`
+  рядом с выбранным сейвом;
+- `[Wrapper] Archive=1` в `Disciple.ini` (дефолт, если ключа нет) — после закрытия сейва скопировать
+  его в `Archive\YYYYMMDD\~имя-YYYYMMDD-HHMMSS-маркер.sg`;
+- зажать **Shift** при сохранении — принудительно архивировать именно этот сейв даже при
+  `Archive=0`;
+- `[Wrapper] IncludeSubdirectories=1` (дефолт `0`) — рекурсивно показывать `.sg` из `Archive\` в
+  обычном игровом списке загрузки/сохранения.
+
+Параметры перечитываются в момент операции: после правки `Disciple.ini` не нужны ни пересборка,
+ни перезапуск игры. Игровой ключ `[Settings] AutoSave` к этому коду не относится. При
+`[menu] debugLog=1` события сейвов дополнительно пишутся в `C4saves-<pid>.log`.
+
+## Локализация текста игры (все версии игры)
+
+`features/localization.cpp` реализует совместимый со старым врапером ключ
+`[Wrapper] Locale=<LCID>` без жёсткой пары 866/1251. OEM- и ANSI-кодовые страницы и `LC_CTYPE`
+msvcrt берутся из выбранной локали Windows; мост `OemToCharA`/`CharToOemA` переключается вживую.
+По умолчанию используется `GetUserDefaultLCID`, `Locale=0` отключает перекодировку врапером.
+В сборке Русобита это вынесено в **Игра > Локализация текста игры**: список собирается из локалей,
+установленных в Windows, выбранный LCID пишется в `Disciple.ini`. На остальных версиях тот же
+безадресный мост работает, но ключ пока задаётся вручную, поскольку их адресное меню не ставится.
 
 ## Экспериментальное
 

@@ -17,11 +17,33 @@ extern "C" void pluginhost_turn_reset(void);
 extern "C" int featuremenu_current_day(void);
 // "Is it my turn" = CPhaseGameData.clientTakesTurn (sub-dialog-immune); -1 if unavailable -> fallback.
 extern "C" int featuremenu_my_turn(void);
+// Shared diagnostics gate ([menu] debugLog / C4DLL_DEBUG): OFF by default in release.
+extern "C" int featuremenu_debug_enabled(void);
 
 namespace {
 
+// C4menu-<pid>.log next to the exe (featuremenu.cpp's mlog writes the same file).
+const char* exeDirFile(const char* leaf)
+{
+    static char base[MAX_PATH] = {};
+    if (!base[0]) {
+        GetModuleFileNameA(nullptr, base, sizeof(base));
+        char* slash = strrchr(base, '\\');
+        if (slash)
+            slash[1] = 0;
+        else
+            base[0] = 0;
+    }
+    static char path[MAX_PATH];
+    lstrcpynA(path, base, sizeof(path));
+    lstrcatA(path, leaf);
+    return path;
+}
+
 void tlog(const char* fmt, ...)
 {
+    if (!featuremenu_debug_enabled()) // release stays silent: no C4menu-<pid>.log unless asked
+        return;
     char buf[512];
     va_list ap;
     va_start(ap, fmt);
@@ -32,7 +54,7 @@ void tlog(const char* fmt, ...)
     int n = wsprintfA(line, "%s\r\n", buf);
     static char logName[40] = {0};
     if (!logName[0]) wsprintfA(logName, "C4menu-%lu.log", GetCurrentProcessId()); // per-process (MP host/client split)
-    HANDLE h = CreateFileA(logName, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+    HANDLE h = CreateFileA(exeDirFile(logName), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h != INVALID_HANDLE_VALUE) {
         DWORD w = 0;

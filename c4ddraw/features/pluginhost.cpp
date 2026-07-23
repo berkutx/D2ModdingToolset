@@ -31,8 +31,13 @@ const char* exeDirFile(const char* leaf)
     return path;
 }
 
+// Shared diagnostics gate (featuremenu.cpp: [menu] debugLog / C4DLL_DEBUG; OFF by default).
+extern "C" int featuremenu_debug_enabled(void);
+
 void plog(const char* fmt, ...)
 {
+    if (!featuremenu_debug_enabled()) // release stays silent: no C4plugins.log unless asked
+        return;
     char buf[600];
     va_list ap;
     va_start(ap, fmt);

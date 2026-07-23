@@ -1,4 +1,4 @@
-﻿/*
+/*
  * C4dll-R monolith: in-game menu bar + feature toggles, embedded in the cnc-ddraw renderer.
  * Self-contained: no mss32 dependency; game version + GameSettings chain inlined as raw addresses.
  * Russobit-only patch sites. Original from D2ModdingToolset (GPLv3+, see repo LICENSE).
@@ -7,6 +7,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cwchar>
 #include <cstring>
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -14,11 +15,15 @@
 #include <intrin.h>
 #pragma intrinsic(_ReturnAddress)
 
-// Renderer exports (dllmain.c, same module): DDReloadConfig re-reads ddraw.ini + dd_SetDisplayMode;
+// Renderer bridge (rendererbridge.c, same module): DDReloadConfig re-reads ddraw.ini + dd_SetDisplayMode;
 // DDTakeScreenshot saves a PNG. Both no-op safely before the renderer is initialized.
 extern "C" void DDReloadConfig(void);
 extern "C" void DDTakeScreenshot(void);
 extern "C" void DDMapClientToGame(long cx, long cy, long* gx, long* gy); // Win32 client -> game coords
+
+// Game text locale bridge (localization.cpp): LCID supplies OEM/ANSI code pages; Locale=0 disables it.
+extern "C" unsigned localization_get_locale(void);
+extern "C" int localization_set_locale(unsigned locale);
 
 // Plugin host (pluginhost.cpp): builds the "Plugins" menu (legacy .mod / native .c4p).
 extern "C" void pluginhost_wait_ready(unsigned ms);
@@ -63,8 +68,10 @@ const char* logLeaf()
 const char* iniFile(); // defined below (C4menu.ini next to the exe)
 
 // Diagnostics are OFF by default (no C4menu-<pid>.log noise in the game folder).
-// Enable with [menu] debugLog=1 in C4menu.ini or the C4DLL_DEBUG env var.
-void mlog(const char* fmt, ...)
+// Enable with [menu] debugLog=1 in C4menu.ini or the C4DLL_DEBUG env var. The same gate
+// silences the timer host and the plugin host (featuremenu_debug_enabled below), so a
+// release build writes no log files unless diagnostics are explicitly enabled.
+bool debugLogEnabled()
 {
     static int enabled = -1;
     if (enabled < 0) {
@@ -74,7 +81,12 @@ void mlog(const char* fmt, ...)
                       ? 1
                       : 0;
     }
-    if (!enabled)
+    return enabled != 0;
+}
+
+void mlog(const char* fmt, ...)
+{
+    if (!debugLogEnabled())
         return;
     char buf[600];
     va_list ap;
@@ -95,7 +107,7 @@ void mlog(const char* fmt, ...)
     }
 }
 
-// --- game version detection (by exe file size) ---
+// --- game/editor version detection (validated executable PE sizes) ---
 enum GameVer
 {
     VerUnknown,
@@ -114,6 +126,7 @@ void detectVersion()
     WIN32_FILE_ATTRIBUTE_DATA fa{};
     if (GetFileAttributesExA(exe, GetFileExInfoStandard, &fa) && fa.nFileSizeHigh == 0)
         g_exeSize = fa.nFileSizeLow;
+
     switch (g_exeSize) {
     case 3907200:
         g_ver = VerAkella;
@@ -385,6 +398,8 @@ enum : UINT
     kIdAnim4 = 0xA114,
     kIdAnim5 = 0xA115,
     kIdAnim6 = 0xA116, // 15x (test/exaggerate)
+    kIdEditorScenarios = 0xA120, // Disciple.ini [Disciple] ScenEditDatabase=0
+    kIdEditorCampaigns = 0xA121, // Disciple.ini [Disciple] ScenEditDatabase=1
     // cnc-ddraw (ddraw.ini) settings
     kIdRendOpenGL = 0xA130,
     kIdRendGdi = 0xA131,
@@ -430,16 +445,65 @@ enum : UINT
     kIdPerUnit = 0xA1E8, // toggle: attack burst speeds ONLY acting units (experimental)
     kIdDialogVo = 0xA1E9, // toggle: auto-close voiced event popups after VO (logs dialog-vo-log.txt)
     kIdDialogVoInfo = 0xA1EA, // disabled info line: where the voiced-dialog log is written
-    kIdLast = 0xA1FF, // upper bound of our WM_COMMAND id block
+    kIdMenuLanguageAuto = 0xA1EC,
+    kIdMenuLanguageEn = 0xA1ED,
+    kIdMenuLanguageRu = 0xA1EE,
+    kIdAutoConfirmUnitHire = 0xA1EF, // toggle: confirm X005TA0285 via normal BTN_YES functor
+    kIdLocaleNone = 0xA200, // disable wrapper OEM/ANSI recoding
+    kIdLocaleBase = 0xA201, // + index into installed Windows locales
+    kIdLast = 0xA2FF, // upper bound of our WM_COMMAND id block
 };
 
 // --- menu language (EN/RU). [menu] language = auto|en|ru; auto = Russian when the Windows UI
 // language is Russian or the system codepage is 1251 (the Russobit audience). Wide strings +
 // AppendMenuW keep the Cyrillic correct on any system codepage.
 bool g_ru = false;
+int g_menuLanguage = 0; // 0=auto, 1=en, 2=ru; selected from the Game menu, applied on restart
 static const wchar_t* L(const wchar_t* en, const wchar_t* ru)
 {
     return g_ru ? ru : en;
+}
+
+struct LocaleOption
+{
+    LCID locale;
+    wchar_t label[160];
+};
+
+// 0xA201..0xA2FE: leave 0xA2FF as the command-block sentinel.
+LocaleOption g_localeOptions[254] = {};
+int g_localeCount = 0;
+
+BOOL CALLBACK collectInstalledLocale(LPWSTR localeText)
+{
+    if (g_localeCount >= static_cast<int>(sizeof(g_localeOptions) / sizeof(g_localeOptions[0])))
+        return FALSE;
+
+    wchar_t* end = nullptr;
+    const unsigned long value = wcstoul(localeText, &end, 16);
+    if (!value || end == localeText || *end)
+        return TRUE;
+
+    wchar_t name[128] = {};
+    const LCID locale = static_cast<LCID>(value);
+    if (!GetLocaleInfoW(locale, LOCALE_SLANGUAGE, name,
+                        static_cast<int>(sizeof(name) / sizeof(name[0]))))
+        swprintf_s(name, L"LCID 0x%04lX", value);
+
+    LocaleOption& option = g_localeOptions[g_localeCount++];
+    option.locale = locale;
+    if (locale == GetUserDefaultLCID())
+        swprintf_s(option.label, L"%s — %lu (%s)", name, value,
+                   L(L"system default", L"системная по умолчанию"));
+    else
+        swprintf_s(option.label, L"%s — %lu", name, value);
+    return TRUE;
+}
+
+void collectInstalledLocales()
+{
+    g_localeCount = 0;
+    EnumSystemLocalesW(collectInstalledLocale, LCID_INSTALLED);
 }
 
 // cnc-ddraw renderer + shader tables (menu labels EN/RU + exact ddraw.ini value).
@@ -547,6 +611,8 @@ bool g_maintas = false, g_vsync = false, g_boxing = false;
 bool g_singlecpu = true; // ddraw.ini singlecpu (cnc-ddraw default true); OFF = experimental
 bool g_dragScroll = false; // grab+drag map panning (ini [menu] dragScroll, default off)
 bool g_dialogVoSkip = false; // auto-close voiced event popups after VO + log their text (default off)
+bool g_autoConfirmUnitHire = false; // skip X005TA0285 through its BTN_YES functor (default off)
+int g_editorDatabase = 0; // ScenEditDatabase: 0=scenarios, 1=campaigns (restart required)
 int g_ticksIdx = -1;    // index into kTicksValues
 int g_resIdx = -1;      // index into kRes
 int g_fpsIdx = -1;      // index into kFpsValues
@@ -560,6 +626,8 @@ HMENU g_battleAnimMenu = nullptr, g_mapAnimMenu = nullptr, g_battleAtkMenu = nul
 HMENU g_rendMenu = nullptr, g_shaderMenu = nullptr;
 HMENU g_ticksMenu = nullptr, g_resMenu = nullptr, g_fpsMenu = nullptr;
 HMENU g_battleMenu = nullptr, g_mapMenu = nullptr, g_modeMenu = nullptr;
+HMENU g_menuLanguageMenu = nullptr, g_localeMenu = nullptr;
+HMENU g_editorModeMenu = nullptr;
 int g_ncCursorShown = 0;  // 1 while we've bumped the OS cursor visible for the non-client area
 int g_ncCursorAdded = 0;  // how many ShowCursor(TRUE) we added (to remove exactly that many)
 
@@ -578,6 +646,8 @@ void persist()
 {
     const char* f = iniFile();
     char buf[8];
+    static const char* const menuLanguages[] = {"auto", "en", "ru"};
+    WritePrivateProfileStringA("menu", "language", menuLanguages[g_menuLanguage], f);
     WritePrivateProfileStringA("menu", "alwaysActive", g_alwaysActive ? "1" : "0", f);
     WritePrivateProfileStringA("menu", "battleAnimEnabled", g_battleAnimEnabled ? "1" : "0", f);
     wsprintfA(buf, "%d", g_battleAnimSpeed);
@@ -591,6 +661,8 @@ void persist()
     WritePrivateProfileStringA("menu", "perUnitBurst", g_perUnitBurst ? "1" : "0", f);
     WritePrivateProfileStringA("menu", "dragScroll", g_dragScroll ? "1" : "0", f);
     WritePrivateProfileStringA("menu", "dialogVoSkip", g_dialogVoSkip ? "1" : "0", f);
+    WritePrivateProfileStringA("menu", "autoConfirmUnitHire",
+                               g_autoConfirmUnitHire ? "1" : "0", f);
 }
 
 // First run: if C4menu.ini is absent, generate a commented one (converting any old mss32menu.ini).
@@ -598,12 +670,17 @@ void persist()
 // WritePrivateProfileStringA cannot emit comments.
 void seedConfigFirstRun()
 {
-    const char* f = iniFile();
+    // exeDirFile() intentionally reuses one scratch buffer. Keep both names locally: otherwise
+    // resolving mss32menu.ini below overwrites the C4menu.ini pointer and CREATE_NEW targets the
+    // legacy file instead of our own config.
+    char f[MAX_PATH] = {};
+    lstrcpynA(f, iniFile(), sizeof(f));
     if (GetFileAttributesA(f) != INVALID_FILE_ATTRIBUTES)
         return; // already present -> the user owns it
 
     // Convert from the old single-global anim config if mss32menu.ini is present.
-    const char* old = exeDirFile("mss32menu.ini");
+    char old[MAX_PATH] = {};
+    lstrcpynA(old, exeDirFile("mss32menu.ini"), sizeof(old));
     const int aa = GetPrivateProfileIntA("menu", "alwaysActive", 0, old) ? 1 : 0;
     const int oldAnimOn = GetPrivateProfileIntA("menu", "animationSpeedEnabled", 0, old);
     // Defaults: battle animation ON at 2x, map animation OFF. (Old single-global "on" -> battle speed 1.)
@@ -612,8 +689,8 @@ void seedConfigFirstRun()
     const int bSp = oldAnimOn ? 1 : 2; // battle default 2x
     const int mSp = 2;
 
-    char buf[2048];
-    const int n = wsprintfA(buf,
+    char buf[3072];
+    const int n = sprintf_s(buf, sizeof(buf),
         "; C4dll-R menu settings (auto-generated on first run).\r\n"
         "; Edit by hand, or use the in-game \"Game\" menu - changes are saved back here.\r\n"
         "; SEPARATE from the game's own Disciple.ini / Scripts\\settings.lua, which C4dll-R\r\n"
@@ -643,9 +720,16 @@ void seedConfigFirstRun()
         "; Their text is appended to dialog-vo-log.txt in the game folder.  0 = off (default), 1 = on.\r\n"
         "dialogVoSkip=0\r\n"
         "\r\n"
-        "; Write C4menu-<pid>.log diagnostics next to the exe.  0 = off (default), 1 = on.\r\n"
+        "; Auto-confirm \"Do you want to hire this unit?\" through the normal BTN_YES action.\r\n"
+        "; Applies only during the local player's active turn.  0 = off (default), 1 = on.\r\n"
+        "autoConfirmUnitHire=0\r\n"
+        "\r\n"
+        "; Write C4menu-<pid>.log / C4plugins.log diagnostics next to the exe.\r\n"
+        "; 0 = off (default), 1 = on.\r\n"
         "debugLog=0\r\n",
         aa, battleEn, bSp, mapEn, mSp);
+    if (n <= 0)
+        return;
 
     HANDLE h = CreateFileA(f, GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h != INVALID_HANDLE_VALUE) {
@@ -757,6 +841,19 @@ const char* discipleIni()
     return exeDirFile("Disciple.ini");
 }
 
+void readEditorDatabase()
+{
+    g_editorDatabase =
+        GetPrivateProfileIntA("Disciple", "ScenEditDatabase", 0, discipleIni()) != 0 ? 1 : 0;
+}
+
+void writeEditorDatabase(int value)
+{
+    g_editorDatabase = value ? 1 : 0;
+    WritePrivateProfileStringA("Disciple", "ScenEditDatabase",
+                               g_editorDatabase ? "1" : "0", discipleIni());
+}
+
 // In-memory GameSettings (Russobit). CMidgardApi::instance() @0x401d35 (__cdecl) -> CMidgard.data @+8
 // -> CMidgardData.settings @+60 is GameSettings**; fields: playerSpeed @+360, opponentSpeed @+364,
 // battleSpeed @+372 (struct size 468).
@@ -781,6 +878,12 @@ static bool isUserPtr(const void* p)
 {
     uintptr_t v = reinterpret_cast<uintptr_t>(p);
     return v >= 0x10000 && v < 0x7FFF0000;
+}
+
+// Shared diagnostics gate for the other feature TUs (timerhost tlog, pluginhost plog).
+extern "C" int featuremenu_debug_enabled(void)
+{
+    return debugLogEnabled() ? 1 : 0;
 }
 
 // Battle state for the timer plugin's Combat Pause (g_inBattle = the 0x6F4294 vftable discriminator).
@@ -892,6 +995,62 @@ extern "C" int featuremenu_my_turn(void)
         return -1;
     }
     return r;
+}
+
+// X005TA0285 ("Do you want to hire this unit?") is created at the sole Russobit
+// call site 0x503990 (`mov ecx,edi; call [eax+20h]`). The intercepted call
+// already has the game's generic BTN_YES functor as argument 3. When explicitly
+// enabled, invoke that functor with okPressed=true and destroy it normally; no
+// mouse coordinates, resources or stack data are synthesized.
+//
+// Disabled/off-turn/invalid-state paths tail-jump to the untouched message-box
+// virtual method with the original four arguments.
+__declspec(naked) void unitHireConfirmThunk()
+{
+    __asm {
+        cmp byte ptr [g_autoConfirmUnitHire], 0
+        je manual
+        call featuremenu_my_turn
+        cmp eax, 1
+        jne manual
+        mov ecx, dword ptr [esp + 0x0C] // generic BTN_YES functor (argument 3)
+        test ecx, ecx
+        je manual
+        mov eax, dword ptr [ecx]
+        push 1                          // okPressed
+        push 0                          // unused sender
+        call dword ptr [eax + 4]        // functor->invoke(nullptr, true)
+        mov ecx, dword ptr [esp + 0x0C]
+        mov eax, dword ptr [ecx]
+        push 1
+        call dword ptr [eax]            // virtual destructor(delete=true)
+        xor eax, eax
+        ret 0x10                        // original virtual call has four arguments
+    manual:
+        mov ecx, edi
+        mov eax, dword ptr [edi]
+        jmp dword ptr [eax + 0x20]      // original message-box creation
+    }
+}
+
+void installUnitHireConfirmHook()
+{
+    constexpr uintptr_t siteVa = 0x503990;
+    static const std::uint8_t expected[5] = {0x8B, 0xCF, 0xFF, 0x50, 0x20};
+    const auto* site = reinterpret_cast<const std::uint8_t*>(siteVa);
+    if (memcmp(site, expected, sizeof(expected)) != 0) {
+        mlog("[hire-confirm] unexpected bytes at %#x; hook not installed", (unsigned)siteVa);
+        return;
+    }
+    std::uint8_t call[5] = {0xE8, 0, 0, 0, 0};
+    const std::int32_t rel = static_cast<std::int32_t>(
+        reinterpret_cast<uintptr_t>(&unitHireConfirmThunk) - (siteVa + sizeof(call)));
+    memcpy(call + 1, &rel, sizeof(rel));
+    if (writeBytes(siteVa, call, sizeof(call)))
+        mlog("[hire-confirm] hook installed (default %s)",
+             g_autoConfirmUnitHire ? "on" : "off");
+    else
+        mlog("[hire-confirm] hook installation FAILED");
 }
 
 // Current turn player for the timer's host-driven turn detection (pluginhost.cpp polls this off-thread).
@@ -1754,6 +1913,10 @@ void refreshChecks()
 {
     if (!g_gameMenu)
         return;
+    if (g_editorModeMenu)
+        CheckMenuRadioItem(g_editorModeMenu, kIdEditorScenarios, kIdEditorCampaigns,
+                           g_editorDatabase ? kIdEditorCampaigns : kIdEditorScenarios,
+                           MF_BYCOMMAND);
     // Game
     CheckMenuItem(g_gameMenu, kIdAlwaysActive,
                   MF_BYCOMMAND | (g_alwaysActive ? MF_CHECKED : MF_UNCHECKED));
@@ -1761,6 +1924,25 @@ void refreshChecks()
                   MF_BYCOMMAND | (g_dragScroll ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_gameMenu, kIdDialogVo,
                   MF_BYCOMMAND | (g_dialogVoSkip ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_gameMenu, kIdAutoConfirmUnitHire,
+                  MF_BYCOMMAND | (g_autoConfirmUnitHire ? MF_CHECKED : MF_UNCHECKED));
+    if (g_menuLanguageMenu)
+        CheckMenuRadioItem(g_menuLanguageMenu, kIdMenuLanguageAuto, kIdMenuLanguageRu,
+                           kIdMenuLanguageAuto + static_cast<UINT>(g_menuLanguage),
+                           MF_BYCOMMAND);
+    if (g_localeMenu) {
+        const LCID current = static_cast<LCID>(localization_get_locale());
+        UINT selected = kIdLocaleNone;
+        for (int i = 0; i < g_localeCount; ++i) {
+            if (g_localeOptions[i].locale == current) {
+                selected = kIdLocaleBase + static_cast<UINT>(i);
+                break;
+            }
+        }
+        CheckMenuRadioItem(g_localeMenu, kIdLocaleNone,
+                           kIdLocaleBase + static_cast<UINT>(g_localeCount - 1), selected,
+                           MF_BYCOMMAND);
+    }
     const UINT bSel = g_battleAnimEnabled ? (kIdAnim1 + static_cast<UINT>(g_battleAnimSpeed - 1)) : kIdAnimOff;
     if (g_battleAnimMenu)
         CheckMenuRadioItem(g_battleAnimMenu, kIdAnimOff, kIdAnim6, bSel, MF_BYCOMMAND);
@@ -1809,13 +1991,45 @@ void refreshChecks()
 void onMenuCommand(UINT id)
 {
     bool restartItem = false;
-    if (id == kIdAlwaysActive) {
+    if (id == kIdEditorScenarios || id == kIdEditorCampaigns) {
+        const int value = id == kIdEditorCampaigns ? 1 : 0;
+        if (value != g_editorDatabase) {
+            writeEditorDatabase(value);
+            refreshChecks();
+            MessageBoxW(g_gameHwnd,
+                        L(L"The editor database was changed. Restart the scenario editor to apply it.",
+                          L"База редактора изменена. Перезапустите редактор сценариев для применения."),
+                        L(L"Scenario editor", L"Редактор сценариев"),
+                        MB_OK | MB_ICONINFORMATION);
+        }
+        return;
+    } else if (id == kIdAlwaysActive) {
         g_alwaysActive = !g_alwaysActive;
         applyAlwaysActive(g_alwaysActive);
     } else if (id == kIdDragScroll) {
         g_dragScroll = !g_dragScroll; // live: the detour reads this flag (persist() saves it)
     } else if (id == kIdDialogVo) {
         g_dialogVoSkip = !g_dialogVoSkip; // live: the detours read this flag (persist() saves it)
+    } else if (id == kIdAutoConfirmUnitHire) {
+        g_autoConfirmUnitHire = !g_autoConfirmUnitHire; // live pass-through hook; default off
+    } else if (id >= kIdMenuLanguageAuto && id <= kIdMenuLanguageRu) {
+        g_menuLanguage = static_cast<int>(id - kIdMenuLanguageAuto);
+        persist();
+        refreshChecks();
+        return; // the full menu tree (including plugin-owned submenus) is rebuilt on next launch
+    } else if (id == kIdLocaleNone) {
+        if (!localization_set_locale(0))
+            mlog("[menu] failed to persist Wrapper/Locale=0");
+        refreshChecks();
+        return;
+    } else if (id >= kIdLocaleBase &&
+               id < kIdLocaleBase + static_cast<UINT>(g_localeCount)) {
+        const LCID locale = g_localeOptions[id - kIdLocaleBase].locale;
+        if (!localization_set_locale(static_cast<unsigned>(locale)))
+            mlog("[menu] failed to apply/persist Wrapper/Locale=%lu",
+                 static_cast<unsigned long>(locale));
+        refreshChecks();
+        return;
     } else if (id == kIdAnimOff) {
         g_battleAnimEnabled = false;
         applyAnimSpeed(0, false, g_battleAnimSpeed);
@@ -2021,11 +2235,54 @@ void buildMenu()
     // before reading the list. Loading takes milliseconds vs seconds to the game window, so this
     // effectively never blocks; the timeout just means "build without plugins" if loading hangs.
     pluginhost_wait_ready(5000);
-    readDdrawState();   // reflect current ddraw.ini in the checks/radios
-    readNativeSpeeds(); // reflect current Disciple.ini battle/map speeds
+    readDdrawState(); // reflect current ddraw.ini in the checks/radios
+    if (g_ver == VerEditor)
+        readEditorDatabase();
+    else
+        readNativeSpeeds(); // reflect current Disciple.ini battle/map speeds
 
-    // ===== "Game" - gameplay / animation =====
-    g_gameMenu = CreatePopupMenu();
+    if (g_ver == VerEditor) {
+        // The original wrapper exposes this only in ScenEdit: [Disciple] ScenEditDatabase selects
+        // the scenario or campaign database, and the editor must be restarted after changing it.
+        // No editor or mss32 addresses are involved, so this is shared by every supported mod build.
+        g_gameMenu = CreatePopupMenu();
+        g_editorModeMenu = CreatePopupMenu();
+        AppendMenuW(g_editorModeMenu, MF_STRING, kIdEditorScenarios,
+                    L(L"Scenarios", L"Сценарии"));
+        AppendMenuW(g_editorModeMenu, MF_STRING, kIdEditorCampaigns,
+                    L(L"Campaigns", L"Кампании"));
+        AppendMenuW(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_editorModeMenu),
+                    L(L"Editor mode", L"Режим редактора"));
+        AppendMenuW(g_gameMenu, MF_SEPARATOR, 0, nullptr);
+
+        g_menuLanguageMenu = CreatePopupMenu();
+        AppendMenuW(g_menuLanguageMenu, MF_STRING, kIdMenuLanguageAuto,
+                    L(L"Auto (Windows / editor locale)", L"Авто (Windows / локаль редактора)"));
+        AppendMenuW(g_menuLanguageMenu, MF_STRING, kIdMenuLanguageEn, L"English");
+        AppendMenuW(g_menuLanguageMenu, MF_STRING, kIdMenuLanguageRu, L"Русский");
+        AppendMenuW(g_menuLanguageMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(g_menuLanguageMenu, MF_STRING | MF_GRAYED, 0,
+                    L(L"Applied after restarting the editor",
+                      L"Применяется после перезапуска редактора"));
+        AppendMenuW(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_menuLanguageMenu),
+                    L(L"Menu language", L"Язык меню"));
+
+        g_localeMenu = CreatePopupMenu();
+        AppendMenuW(g_localeMenu, MF_STRING, kIdLocaleNone,
+                    L(L"No wrapper recoding", L"Без перекодировки врапером"));
+        collectInstalledLocales();
+        for (int i = 0; i < g_localeCount; ++i)
+            AppendMenuW(g_localeMenu, MF_STRING, kIdLocaleBase + static_cast<UINT>(i),
+                        g_localeOptions[i].label);
+        AppendMenuW(g_localeMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(g_localeMenu, MF_STRING | MF_GRAYED, 0,
+                    L(L"Writes [Wrapper] Locale in Disciple.ini; applies immediately",
+                      L"Пишет [Wrapper] Locale в Disciple.ini; применяется сразу"));
+        AppendMenuW(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_localeMenu),
+                    L(L"Editor text locale", L"Локализация текста редактора"));
+    } else {
+        // ===== "Game" - gameplay / animation =====
+        g_gameMenu = CreatePopupMenu();
     AppendMenuW(g_gameMenu, MF_STRING, kIdAlwaysActive,
                 L(L"Always active - keep playing when the window loses focus",
                   L"Всегда активна - игра не встаёт на паузу без фокуса"));
@@ -2038,6 +2295,33 @@ void buildMenu()
     AppendMenuW(g_gameMenu, MF_STRING | MF_GRAYED, kIdDialogVoInfo,
                 L(L"    (their text is saved to dialog-vo-log.txt in the game folder)",
                   L"    (их текст пишется в dialog-vo-log.txt в папке игры)"));
+    AppendMenuW(g_gameMenu, MF_STRING, kIdAutoConfirmUnitHire,
+                L(L"Auto-confirm unit hire - skip the confirmation question",
+                  L"Автоподтверждать найм воинов - не задавать вопрос"));
+    AppendMenuW(g_gameMenu, MF_SEPARATOR, 0, nullptr);
+    g_menuLanguageMenu = CreatePopupMenu();
+    AppendMenuW(g_menuLanguageMenu, MF_STRING, kIdMenuLanguageAuto,
+                L(L"Auto (Windows / game locale)", L"Авто (Windows / локаль игры)"));
+    AppendMenuW(g_menuLanguageMenu, MF_STRING, kIdMenuLanguageEn, L"English");
+    AppendMenuW(g_menuLanguageMenu, MF_STRING, kIdMenuLanguageRu, L"Русский");
+    AppendMenuW(g_menuLanguageMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_menuLanguageMenu, MF_STRING | MF_GRAYED, 0,
+                L(L"Applied after restarting the game", L"Применяется после перезапуска игры"));
+    AppendMenuW(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_menuLanguageMenu),
+                L(L"Menu language", L"Язык меню"));
+    g_localeMenu = CreatePopupMenu();
+    AppendMenuW(g_localeMenu, MF_STRING, kIdLocaleNone,
+                L(L"No wrapper recoding", L"Без перекодировки врапером"));
+    collectInstalledLocales();
+    for (int i = 0; i < g_localeCount; ++i)
+        AppendMenuW(g_localeMenu, MF_STRING, kIdLocaleBase + static_cast<UINT>(i),
+                    g_localeOptions[i].label);
+    AppendMenuW(g_localeMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_localeMenu, MF_STRING | MF_GRAYED, 0,
+                L(L"Writes [Wrapper] Locale in Disciple.ini; applies immediately",
+                  L"Пишет [Wrapper] Locale в Disciple.ini; применяется сразу"));
+    AppendMenuW(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_localeMenu),
+                L(L"Game text locale", L"Локализация текста игры"));
     g_battleAnimMenu = CreatePopupMenu();
     AppendMenuW(g_battleAnimMenu, MF_STRING, kIdAnimOff, L(L"Off (vanilla)", L"Выкл (оригинал)"));
     AppendMenuW(g_battleAnimMenu, MF_STRING, kIdAnim1, L"1.5x");
@@ -2105,6 +2389,7 @@ void buildMenu()
     AppendMenuW(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_mapMenu),
                 L(L"Map movement speed (game option)",
                   L"Скорость передвижения на карте (опция игры)"));
+    }
 
     // ===== "Video" - look (all live except Renderer) =====
     g_videoMenu = CreatePopupMenu();
@@ -2189,7 +2474,8 @@ void buildMenu()
                   L"Экспериментально: OFF снимает привязку к ядру 0; верните ON при заикании звука"));
 
     g_bar = CreateMenu();
-    AppendMenuW(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_gameMenu), L(L"Game", L"Игра"));
+    AppendMenuW(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_gameMenu),
+                g_ver == VerEditor ? L(L"File", L"Файл") : L(L"Game", L"Игра"));
     AppendMenuW(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_videoMenu), L(L"Video", L"Видео"));
     AppendMenuW(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_perfMenu),
                 L(L"Performance", L"Производительность"));
@@ -2321,6 +2607,55 @@ void installWndProcDetour()
 
 } // namespace
 
+/*
+ * Address-free ScenEdit message bridge. cnc-ddraw's fake WndProc calls this before forwarding to the
+ * editor WndProc, so editor menu commands do not need a version-specific function detour.
+ */
+extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                            LRESULT* result)
+{
+    if (g_ver != VerEditor || !result)
+        return 0;
+
+    if (!g_gameHwnd)
+        g_gameHwnd = hwnd;
+
+    switch (msg) {
+    case WM_NCMOUSEMOVE:
+    case WM_ENTERMENULOOP:
+        setNonClientCursor(true);
+        break;
+    case WM_MOUSEMOVE:
+        setNonClientCursor(false);
+        break;
+    default:
+        break;
+    }
+
+    if (g_relayoutMsg && msg == g_relayoutMsg) {
+        applyDdrawLive();
+        *result = 0;
+        return 1;
+    }
+
+    if (msg == WM_COMMAND && lParam == 0 && HIWORD(wParam) == 0) {
+        const UINT id = LOWORD(wParam);
+        if (id >= kIdAlwaysActive && id <= kIdLast) {
+            onMenuCommand(id);
+            *result = 0;
+            return 1;
+        }
+        if (id >= 0xB000 && id < 0xC000 && pluginhost_command(id)) {
+            *result = 0;
+            return 1;
+        }
+    } else if (msg == WM_INITMENUPOPUP) {
+        refreshChecks();
+    }
+
+    return 0;
+}
+
 // ===== Map drag-scroll (DGL-faithful grab+drag pan) =====
 // Detours the in-game iso-view mouse handler (CStratInterf sub_48E8A0). While g_dragScroll is on, a
 // left-press on open map terrain grabs the tile under the cursor; dragging pans so it stays put (like
@@ -2339,11 +2674,20 @@ void* g_origIsoMouse = nullptr; // Detours trampoline to the original CStratInte
 void* g_origScrollDir = nullptr; // trampoline to the game's directional map scroll (edge-scroll executor)
 int g_scrollDirDiag = 0;         // first-N diagnostic counter for the edge-scroll hook
 bool g_dragScrollActive = false;
-extern "C" int g_c4dll_dragActive = 0; // winapi_hooks reads this: 1 = suppress game edge-scroll while dragging
+extern "C" int g_c4dll_dragActive = 0; // cursorfix.cpp reads this: suppress edge-scroll while dragging
 bool g_dragMoved = false;
 PointI g_dragAnchorTile{}; // map tile grabbed at drag start
 PointI g_dragStart{};      // cursor at drag start (to detect movement)
 bool g_dragAnchorSet = false; // anchor grabbed on the FIRST WndProc move (same transform as the pans)
+constexpr int kDragStartThreshold = 4; // game pixels; tolerate normal hand jitter on a map click
+
+bool dragThresholdExceeded(int x, int y)
+{
+    const int dx = x - g_dragStart.x;
+    const int dy = y - g_dragStart.y;
+    return dx <= -kDragStartThreshold || dx >= kDragStartThreshold
+        || dy <= -kDragStartThreshold || dy >= kDragStartThreshold;
+}
 
 int callOrigIsoMouse(void* view, int msgId, PointI* pt)
 {
@@ -2422,10 +2766,25 @@ int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
                 return 1; // consume the down so the game does not select yet
             }
         } else if (g_dragScrollActive && msgId == WM_MOUSEMOVE) {
-            if (pt->x != g_dragStart.x || pt->y != g_dragStart.y)
-                g_dragMoved = true;
+            // Do not turn a slightly shaky click into a drag.  This matters
+            // especially on a capital tile, where losing the click makes the
+            // visiting hero very hard to select.
+            if (!g_dragMoved && !dragThresholdExceeded(pt->x, pt->y))
+                return 1;
+            g_dragMoved = true;
             void* mg = mapGraphicsPtr();
             if (mg) {
+                // Normally WndProc establishes the anchor first.  Keep the
+                // iso-handler path self-contained in case a move reaches it
+                // directly on a particular wrapper/window configuration.
+                if (!g_dragAnchorSet) {
+                    PointI tile{};
+                    if (reinterpret_cast<ScreenToMapFn>(0x5418BA)(mg, pt, &tile, nullptr)) {
+                        g_dragAnchorTile = tile;
+                        g_dragAnchorSet = true;
+                    }
+                    return 1;
+                }
                 RectI* vr = reinterpret_cast<GetViewRectFn>(0x56B8DF)(mg);
                 if (isUserPtr(vr)) {
                     // place the grabbed tile under the cursor: tileScreen = viewLeft + halfW - 32 - extraDx
@@ -2460,6 +2819,12 @@ int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
 // vtable handler stops receiving moves while the button is held; the captured WndProc does not.
 void dragScrollWndMove(int gameX, int gameY)
 {
+    // The old implementation flipped g_dragMoved on the first one-pixel
+    // WM_MOUSEMOVE.  Normal hand jitter therefore swallowed ordinary map
+    // clicks.  Stay in click mode until a deliberate drag crosses the
+    // threshold; button-up will then replay the selection click.
+    if (!g_dragMoved && !dragThresholdExceeded(gameX, gameY))
+        return;
     g_dragMoved = true; // a real drag (the button-up will not replay a select-click)
     __try {
         void* mg = mapGraphicsPtr();
@@ -2524,14 +2889,13 @@ extern "C" void featuremenu_install(void)
 {
     detectVersion();
 
-    // The menu + byte patches use Russobit-only addresses (WndProc, always-active, timeGetTime IAT,
-    // battle-viewer vftable, CMidgard chain). On any other build we don't install (renderer still works).
-    if (g_ver != VerRussobit) {
+    // Game feature patches use Russobit-only addresses. The validated scenario editor gets only the
+    // address-free renderer/menu integration; all other executables keep renderer-only operation.
+    if (g_ver != VerRussobit && g_ver != VerEditor) {
         mlog("[menu] unsupported game version (exe %lu bytes): menu/patches disabled", g_exeSize);
         return;
     }
 
-    // ---- Russobit: full menu + feature install ----
     // First run: generate a commented C4menu.ini (converting any old mss32menu.ini); never touches
     // the game's own Disciple.ini / settings.lua.
     seedConfigFirstRun();
@@ -2541,12 +2905,33 @@ extern "C" void featuremenu_install(void)
     // Russian or the system codepage is 1251 (Russobit audience runs both kinds of systems).
     char lang[8] = {};
     GetPrivateProfileStringA("menu", "language", "auto", lang, sizeof(lang), f);
-    if (lstrcmpiA(lang, "ru") == 0)
+    if (lstrcmpiA(lang, "ru") == 0) {
+        g_menuLanguage = 2;
         g_ru = true;
-    else if (lstrcmpiA(lang, "en") == 0)
+    } else if (lstrcmpiA(lang, "en") == 0) {
+        g_menuLanguage = 1;
         g_ru = false;
-    else
-        g_ru = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_RUSSIAN || GetACP() == 1251;
+    } else {
+        g_menuLanguage = 0;
+        g_ru = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_RUSSIAN || GetACP() == 1251 ||
+               PRIMARYLANGID(LANGIDFROMLCID(localization_get_locale())) == LANG_RUSSIAN;
+    }
+
+    // menuWorker posts this after SetMenu; renderer fake_WndProc handles it for ScenEdit, while the
+    // Russobit game detour handles it in wndProcHook.
+    g_relayoutMsg = RegisterWindowMessageA("C4dllR_MenuRelayout");
+
+    if (g_ver == VerEditor) {
+        readEditorDatabase();
+        HANDLE thread = CreateThread(nullptr, 0, &menuWorker, nullptr, 0, nullptr);
+        if (thread)
+            CloseHandle(thread);
+        mlog("[menu] ScenEdit menu scheduled (database=%s, exe=%lu bytes)",
+             g_editorDatabase ? "campaigns" : "scenarios", g_exeSize);
+        return;
+    }
+
+    // ---- Russobit game: full menu + feature install ----
     g_alwaysActive = GetPrivateProfileIntA("menu", "alwaysActive", 0, f) != 0;
     // Defaults: battle animation x2, attack burst x5 (fast hits, calm-ish battle). Map anim off.
     g_battleAnimEnabled = GetPrivateProfileIntA("menu", "battleAnimEnabled", 1, f) != 0;
@@ -2569,7 +2954,8 @@ extern "C" void featuremenu_install(void)
         g_battleAttackSpeed = 6;
     g_dragScroll = GetPrivateProfileIntA("menu", "dragScroll", 0, f) != 0;
     g_dialogVoSkip = GetPrivateProfileIntA("menu", "dialogVoSkip", 0, f) != 0;
-
+    g_autoConfirmUnitHire =
+        GetPrivateProfileIntA("menu", "autoConfirmUnitHire", 0, f) != 0;
     // Apply now (DllMain, before the game's main loop / anim init). The IAT is already populated by the
     // loader, so the time-scale hook installs cleanly; the battle discriminator patches the idle vftable.
     applyAlwaysActive(g_alwaysActive);
@@ -2578,13 +2964,9 @@ extern "C" void featuremenu_install(void)
     timerhost_install(); // timer keystone: capture dialog/battle buttons + combat/animation state
     installDragScrollDetour(); // map grab+drag panning (gated by g_dragScroll; pass-through when off)
     dvoInstall(); // voiced-dialog auto-skip + logger (gated by g_dialogVoSkip; pass-through when off)
+    installUnitHireConfirmHook(); // X005TA0285; pass-through unless explicitly enabled in Game menu
     applyAnimSpeed(0, g_battleAnimEnabled, g_battleAnimSpeed);
     applyAnimSpeed(1, g_mapAnimEnabled, g_mapAnimSpeed);
-
-    // Registered window message: menuWorker posts it so the one-time relayout (DDReloadConfig ->
-    // dd_SetDisplayMode restarts the render thread) runs on the GUI thread, not the worker. Register
-    // BEFORE the detour + worker so both observe the same non-zero id.
-    g_relayoutMsg = RegisterWindowMessageA("C4dllR_MenuRelayout");
 
     installWndProcDetour();
 
