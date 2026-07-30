@@ -1,0 +1,128 @@
+diff --git a/src/render_d3d9.c b/src/render_d3d9.c
+--- a/src/render_d3d9.c
++++ b/src/render_d3d9.c
+@@ -14,6 +14,9 @@
+ #include "hook.h"
+ #include "config.h"
+ 
++extern const void* DDGetDecoratedSurface(
++    const void* source, int width, int height, int pitch, int bpp, int rgb555);
++
+ 
+ #ifdef _DEBUG
+ #define FAILEDX(stmt) d3d9_check_failed(stmt, #stmt)
+@@ -628,6 +632,14 @@ DWORD WINAPI d3d9_render_main(void)
+ 
+                 RECT rc = { 0, 0, g_ddraw.width, g_ddraw.height };
+ 
++                const void* present_surface = DDGetDecoratedSurface(
++                    g_ddraw.primary->surface,
++                    g_ddraw.primary->width,
++                    g_ddraw.primary->height,
++                    g_ddraw.primary->pitch,
++                    g_ddraw.primary->bpp,
++                    g_config.rgb555);
++
+                 if (SUCCEEDEDX(IDirect3DDevice9_SetTexture(g_d3d9.device, 0, (IDirect3DBaseTexture9*)g_d3d9.surface_tex[tex_index])) &&
+                     SUCCEEDEDX(IDirect3DTexture9_LockRect(g_d3d9.surface_tex[tex_index], 0, &lock_rc, &rc, 0)))
+                 {
+@@ -639,7 +651,7 @@ DWORD WINAPI d3d9_render_main(void)
+                         g_ddraw.primary->width,
+                         g_ddraw.primary->height,
+                         lock_rc.Pitch,
+-                        g_ddraw.primary->surface,
++                        (void*)present_surface,
+                         0,
+                         0,
+                         g_ddraw.primary->pitch,
+diff --git a/src/render_gdi.c b/src/render_gdi.c
+--- a/src/render_gdi.c
++++ b/src/render_gdi.c
+@@ -12,5 +12,8 @@
+ extern void DDApplySimpleZoomViewport(
+     int bottom_origin, int* x, int* y, int* width, int* height);
+ 
++extern const void* DDGetDecoratedSurface(
++    const void* source, int width, int height, int pitch, int bpp, int rgb555);
++
+ DWORD WINAPI gdi_render_main(void)
+ {
+@@ -84,6 +88,14 @@ DWORD WINAPI gdi_render_main(void)
+                     warning_end_tick = 0;
+                 }
+             }
++
++            const void* present_surface = DDGetDecoratedSurface(
++                g_ddraw.primary->surface,
++                g_ddraw.primary->width,
++                g_ddraw.primary->height,
++                g_ddraw.primary->pitch,
++                g_ddraw.primary->bpp,
++                g_config.rgb555);
+ 
+             BOOL upscale_hack = g_config.vhack && util_detect_low_res_screen();
+ 
+@@ -119,6 +131,6 @@ DWORD WINAPI gdi_render_main(void)
+                     g_ddraw.upscale_hack_width,
+                     g_ddraw.upscale_hack_height,
+-                    g_ddraw.primary->surface,
++                    present_surface,
+                     g_ddraw.primary->bmi,
+                     DIB_RGB_COLORS,
+                     SRCCOPY);
+@@ -137,7 +149,7 @@ DWORD WINAPI gdi_render_main(void)
+                     0,
+                     g_ddraw.width,
+                     g_ddraw.height,
+-                    g_ddraw.primary->surface,
++                    present_surface,
+                     g_ddraw.primary->bmi,
+                     DIB_RGB_COLORS,
+                     SRCCOPY);
+@@ -155,7 +167,7 @@ DWORD WINAPI gdi_render_main(void)
+                     0,
+                     0,
+                     g_ddraw.height,
+-                    g_ddraw.primary->surface,
++                    present_surface,
+                     g_ddraw.primary->bmi,
+                     DIB_RGB_COLORS);
+             }
+diff --git a/src/render_ogl.c b/src/render_ogl.c
+--- a/src/render_ogl.c
++++ b/src/render_ogl.c
+@@ -9,7 +9,10 @@
+ #include "render_ogl.h"
+ #include "utils.h"
+ #include "debug.h"
+
++extern const void* DDGetDecoratedSurface(
++    const void* source, int width, int height, int pitch, int bpp, int rgb555);
++
+ 
+ static HGLRC ogl_create_core_context(HDC hdc);
+ static void ogl_build_programs();
+@@ -1070,6 +1073,14 @@ static void ogl_render()
+ 
+                 glBindTexture(GL_TEXTURE_2D, g_ogl.surface_tex_ids[tex_index]);
+ 
++                const void* present_surface = DDGetDecoratedSurface(
++                    g_ddraw.primary->surface,
++                    g_ddraw.primary->width,
++                    g_ddraw.primary->height,
++                    g_ddraw.primary->pitch,
++                    g_ddraw.primary->bpp,
++                    g_config.rgb555);
++
+                 DWORD row_len = g_ddraw.primary->pitch ? g_ddraw.primary->pitch / g_ddraw.primary->bytes_pp : 0;
+ 
+                 if (row_len != g_ddraw.primary->width)
+@@ -1084,7 +1095,7 @@ static void ogl_render()
+                     g_ddraw.height,
+                     g_ogl.surface_format,
+                     g_ogl.surface_type,
+-                    g_ddraw.primary->surface);
++                    present_surface);
+ 
+                 if (row_len != g_ddraw.primary->width)
+                     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);

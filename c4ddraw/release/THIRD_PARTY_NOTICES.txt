@@ -1,0 +1,113 @@
+Third-party notices for C4dll-R
+================================
+
+C4dll-R is distributed under GPL-3.0. See the bundled LICENSE file. Matching
+source is published at https://github.com/berkutx/D2ModdingToolset under the
+release tag.
+
+1. cnc-ddraw
+------------
+
+https://github.com/FunkyFr3sh/cnc-ddraw
+
+MIT License
+
+Copyright (c) 2025 github.com/FunkyFr3sh
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+2. Microsoft Detours
+--------------------
+
+https://github.com/microsoft/Detours
+
+Copyright (c) Microsoft Corporation
+All rights reserved.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+3. DisciplesGL-derived feature logic
+------------------------------------
+
+The Widescreen Battle hook behavior, DLG_BATTLE_B layout, true Hor+ canvas
+sizing/strategic-layout formulae, optional IsoClouds.ff package/cloud-layout
+hook behavior, and decorative-background compositor are derived from
+DisciplesGL:
+https://github.com/HSerg/DisciplesGL
+
+The bundled back.png, alt.png and alt_widest.png decorative resources come
+from that upstream repository. This notice records their upstream source and
+does not claim a separate license or provenance for the underlying
+Disciples II artwork.
+
+MIT License
+
+Copyright (c) 2019 Verokster
+Copyright (c) 2020 Oleksiy Ryabchun
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+4. GLSL shader presets
+----------------------
+
+The Shaders directory contains the exact presets exposed by the C4dll-R menu,
+from the cnc-ddraw/libretro GLSL shader package:
+https://github.com/libretro/glsl-shaders
+
+Copyright and license notices are retained inside the individual shader files.
+Most selected presets use MIT or Unlicense terms. The xBRZ multipass preset
+also contains GPL-3.0 code and is distributed under GPL-3.0, consistently with
+C4dll-R's own license.

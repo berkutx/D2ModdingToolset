@@ -106,14 +106,26 @@ struct State
     LONG volatile anyCombat;  // any battle present
     LONG volatile pendingEndDay;  // queued by plugin on elapse; consumed on game thread (pump)
     LONG volatile pendingRetreat;
-    LONG volatile inAction;       // re-entry guard around the game-thread press (legacy dword_10008388)
+    LONG volatile inAction;       // local re-entry guard around the game-thread press
+    // Original timer.mod's separate one-shot off[13] flag: consumed only by the END_TURN
+    // confirmation-query callsite, so an automatic timeout never opens X005TA0000.
+    LONG volatile suppressEndTurnConfirm;
     void* g_orig_dlgCreate;
     void* g_orig_btnDtor;
     void* g_orig_scenInit;
     void* g_orig_turnInfo;
+    void* g_origConfirmQuery;
     int lastTurnPlayer;     // last off[6] player byte (debounce: ignore same-player bursts)
+    int confirmHookInstalled;
     int installed;
 } g;
+
+void clearPendingActions()
+{
+    InterlockedExchange(&g.pendingEndDay, 0);
+    InterlockedExchange(&g.pendingRetreat, 0);
+    InterlockedExchange(&g.suppressEndTurnConfirm, 0);
+}
 
 // off[9] dialog/button-create capture. int __stdcall sub_5C93D6(iface, btnName, dlgName, a4, a5).
 int __stdcall hook_dlgCreate(int ifaceObj, char* btnName, const char* dlgName, int cb1, int cb2)
@@ -194,6 +206,7 @@ int __fastcall hook_scenarioInit(void* self, void* /*edx*/, int a2)
     g.endTurn = g.capBack = g.diploBack = g.briefCont = nullptr;
     g.btnRetreat = g.btnDefend = g.btnClose = g.btnResolve = nullptr;
     g.animFlag = g.pvpFlag = g.anyCombat = 0;
+    clearPendingActions();
     pluginhost_turn_reset();   // game/scenario change -> clear off[6] in-game flag
     g.lastTurnPlayer = -1;     // re-arm player debounce for the new game's first turn
     return reinterpret_cast<int(__thiscall*)(void*, int)>(g.g_orig_scenInit)(self, a2);
@@ -225,6 +238,9 @@ int __fastcall hook_turnInfo(void* self, void* /*edx*/, int a2)
     // DOUBLE time (joiner's first turn showed ~90s instead of 45s).
     if (player >= 0 && player != g.lastTurnPlayer) {
         g.lastTurnPlayer = player;
+        // A queued press belongs only to the turn in which the timer elapsed. Never let it cross a
+        // network turn boundary and fire against the next player's fresh, positive clock.
+        clearPendingActions();
         pluginhost_bump_turn(player);
         static LONG n = 0;
         if (InterlockedIncrement(&n) <= 60)
@@ -257,10 +273,58 @@ void pressBtn(void* btn)
     }
 }
 
+// off[13] in the legacy timer is deliberately a CALL-SITE hook, not a global detour of the shared
+// query at 0x61B781. sub_48FC7F calls it at 0x48FCA3; a non-zero result opens X005TA0000 (the normal
+// "end turn?" question), while zero proceeds directly. Suppress exactly one query made by our forced
+// END_TURN press and leave every user click untouched.
+char __fastcall hookEndTurnConfirm(void* self, void* /*edx*/)
+{
+    if (InterlockedExchange(&g.suppressEndTurnConfirm, 0)) {
+        tlog("[timer] forced END_TURN confirmation suppressed");
+        return 0;
+    }
+    return reinterpret_cast<char(__thiscall*)(void*)>(g.g_origConfirmQuery)(self);
+}
+
+bool installEndTurnConfirmHook()
+{
+    constexpr uintptr_t kCallSite = 0x48FCA3;
+    const unsigned char expected[5] = {0xE8, 0xD9, 0xBA, 0x18, 0x00}; // call 0x61B781
+    __try {
+        if (memcmp(reinterpret_cast<const void*>(kCallSite), expected, sizeof(expected)) != 0) {
+            tlog("[timer] off13 confirmation callsite signature mismatch; forced End Day disabled");
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    unsigned char patch[5] = {0xE8, 0, 0, 0, 0};
+    const intptr_t delta = reinterpret_cast<intptr_t>(hookEndTurnConfirm) -
+                           static_cast<intptr_t>(kCallSite + sizeof(patch));
+    const int32_t rel = static_cast<int32_t>(delta);
+    memcpy(patch + 1, &rel, sizeof(rel));
+    g.g_origConfirmQuery = reinterpret_cast<void*>(0x61B781);
+    if (!writeBytes(kCallSite, patch, sizeof(patch)))
+        return false;
+
+    g.confirmHookInstalled = 1;
+    tlog("[timer] off13 forced-END_TURN confirmation hook installed (callsite 0x48FCA3)");
+    return true;
+}
+
 } // namespace
 
 // Exported read accessors (lock-free volatile reads; called by pluginhost thunks).
-extern "C" int timerhost_is_animating(void) { return g.animFlag ? 1 : 0; }
+extern "C" int timerhost_is_animating(void)
+{
+    // BTN_DEFEND survives for the battle dialog but its enabled byte changes around each action.
+    // Reading it only at button creation freezes a stale value for the whole battle; sample the live
+    // state on every plugin poll, as the original timer did.
+    if (!isUserPtr(g.btnDefend))
+        return 0;
+    return btnEnabled(g.btnDefend) ? 0 : 1;
+}
 extern "C" int timerhost_battle_kind(void) { return g.pvpFlag ? 1 : (g.anyCombat ? 2 : 0); }
 // Local player's turn is active when strategic END_TURN exists AND is enabled. Captured PER CLIENT,
 // so valid on host AND joiner - unlike the server currentPlayerIndex (host-only). Transitions logged.
@@ -289,7 +353,19 @@ extern "C" int timerhost_turn_player_id(void) { return -1; } // set by off[6] (P
 // Phase 2 on-elapse: plugin (worker thread) QUEUES the press; timerhost_pump() performs it on each
 // idle WM_TIMER (featuremenu's 32ms timer), retrying until the turn ends - like the legacy 0x113 case.
 extern "C" int timerhost_retreat(void) { InterlockedExchange(&g.pendingRetreat, 1); tlog("[timer] retreat QUEUED by plugin"); return 1; }
-extern "C" int timerhost_end_day(void) { InterlockedExchange(&g.pendingEndDay, 1); tlog("[timer] end_day QUEUED by plugin"); return 1; }
+extern "C" int timerhost_end_day(void)
+{
+    if (!g.confirmHookInstalled)
+        return 0; // never replace a timeout with an unavoidable confirmation dialog
+    InterlockedExchange(&g.pendingEndDay, 1);
+    tlog("[timer] end_day QUEUED by plugin");
+    return 1;
+}
+extern "C" int timerhost_cancel_elapse(void)
+{
+    clearPendingActions();
+    return 1;
+}
 
 extern "C" void timerhost_pump(void)
 {
@@ -316,18 +392,28 @@ extern "C" void timerhost_pump(void)
             InterlockedExchange(&g.pendingRetreat, 0); // retreat does not apply outside combat
             if (g.pendingEndDay) {
                 // Retry each idle WM_TIMER until the turn ends (no give-up cap: dropping it would leave
-                // the turn un-skipped). Press the first enabled advance button.
-                if (isUserPtr(g.endTurn) && btnEnabled(g.endTurn)) {
+                // the turn un-skipped). A sub-dialog normally disables END_TURN, so do not use that
+                // button as an outer guard: first close/continue the active view, exactly like the
+                // original priority chain, then reach END_TURN on a later idle pump.
+                if (featuremenu_my_turn() != 0) { // -1 = temporarily unknown: keep/retry, never drop
                     void* order[5] = { g.btnClose, g.briefCont, g.capBack, g.diploBack, g.endTurn };
                     for (int i = 0; i < 5; ++i) {
                         if (isUserPtr(order[i]) && btnEnabled(order[i])) {
                             tlog("[timer] pressing btn[%d]=%p (WM_TIMER idle)", i, order[i]);
+                            const bool forcedEndTurn = order[i] == g.endTurn;
+                            if (forcedEndTurn)
+                                InterlockedExchange(&g.suppressEndTurnConfirm, 1);
                             pressBtn(order[i]);
+                            // Normally hookEndTurnConfirm consumes this synchronously. If the button
+                            // rejected the press before reaching the query, do not leak suppression
+                            // into a later manual click; the pending action may retry on the next idle.
+                            if (forcedEndTurn)
+                                InterlockedExchange(&g.suppressEndTurnConfirm, 0);
                             break;
                         }
                     }
                 } else {
-                    InterlockedExchange(&g.pendingEndDay, 0); // turn ended (or no longer ours) -> done
+                    clearPendingActions(); // turn ended (or no longer ours) -> done
                 }
             }
         }
@@ -361,6 +447,10 @@ extern "C" void timerhost_install(void)
     g.g_orig_btnDtor = patchVtableSlot(0x6E3294, 0, reinterpret_cast<void*>(hook_btnDestroy));
     // off[5] CMidClient::vftable[0] scenario-init -> drop all captures.
     g.g_orig_scenInit = patchVtableSlot(0x6CEB5C, 0, reinterpret_cast<void*>(hook_scenarioInit));
+
+    // Exact Russobit/MNS 3.01a callsite used by the original timer.mod off[13] table. Signature-gated:
+    // on another executable this remains a clean no-op and automatic End Day is not queued.
+    installEndTurnConfirmHook();
 
     tlog("[timer] keystone capture installed (off9 dlg-create 0x5C93D6, off8 btn-dtor 0x6E3294, "
          "off5 scen-init 0x6CEB5C)");

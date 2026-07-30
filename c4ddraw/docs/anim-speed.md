@@ -3,7 +3,7 @@
 All animation-speed options live in the in-game **Game** menu and are implemented in
 [`features/featuremenu.cpp`](../features/featuremenu.cpp). Settings persist to `C4menu.ini`
 (`[menu]` section), separate from the game's own `Disciple.ini` / `settings.lua`. Addresses are for
-the Russobit "slasher_mns_2_4" build.
+the MNS/SMNS "slasher_mns_2_4" build.
 
 ## Two independent mechanisms
 
@@ -45,14 +45,22 @@ To change only the hero's map walk without touching other map animation, use **M
 Goal: keep idle units calm but speed up attacks. There is no native idle/attack split, so we drive
 mechanism A from a live "attack playing" signal.
 
-- **Signal.** Battle-viewer vftable `0x6F4294` slot `[2]` (`showAttackEffect`, `0x63203B`) calls
-  `sub_639743(1)` when an attack effect begins; the per-frame update (slot `[1]`, `0x630DE3`) calls
-  `sub_639743(0)` to reset. So slot `[2]` fires once per hit/effect. Our `batShowThunk` (already
-  patched into that slot for `g_inBattle`) also sets `g_attackPulse = 1`.
-- **Window + ramp.** The 32ms `WM_TIMER` pump calls `updateBattleBurst()`. Each pulse arms a
-  `kAttackHoldMs` (1200ms) window at the attack factor; after it, the factor eases linearly back to
-  the idle base over `kAttackRampMs` (700ms) instead of snapping. The idle base is the Battle animation
-  setting (vanilla `10` unless set), so between attacks idle stays calm.
+- **Start signal.** Battle-viewer vftable `0x6F4294` slot `[2]` (`showAttackEffect`, `0x63203B`)
+  fires at effect start. `batShowThunk` publishes visual event `1`. Slot `[1]` (`0x630DE3`) is a
+  choose-action message handler, not a reliable per-frame/end callback.
+- **Exact end signal.** `CBatViewerUtils::CAnimCounter` is decremented for every visual component.
+  Its final-zero branch calls `sub_639743(0)` at `0x638AD9`, immediately before the battle UI is
+  restored. A 14-byte signature is validated and only that call is redirected through
+  `batAttackEndThunk`, which publishes visual event `2` and tail-jumps to the original target. A
+  single last-writer-wins event preserves ordering if instant/x15 visuals start and end inside one
+  32ms pump interval. Detouring
+  `sub_639743` itself would be wrong because it has several unrelated callsites.
+- **End-driven ramp.** The 32ms `WM_TIMER` pump calls `updateBattleBurst()`. The attack factor remains
+  active from the start pulse to the exact final-counter pulse, then returns linearly to the idle
+  base over `kAttackRampMs` (300ms, roughly ten pump steps). A 5-second watchdog is only an emergency
+  safety net. If the executable signature is unknown, `attackHoldMs()` retains the previous
+  speed-aware timed fallback instead of patching. The idle base is the Battle animation setting
+  (vanilla `10` unless set), so between attacks idle stays calm.
 - **Limitation.** Because mechanism A is the global clock, idle units also speed up *during* the burst
   window. The split is "calm between attacks", not true per-unit isolation. See `BACKLOG.md`.
 - **Per-unit (experimental, default off).** The "per-unit" toggle respects the menu: the global battle
@@ -68,10 +76,12 @@ mechanism A from a live "attack playing" signal.
 | Symbol | Role |
 | --- | --- |
 | `timeGetTimeHook`, `installTimeScaleHook` | virtual clock over IAT `0x6CE420` |
-| `installBattleDiscriminator`, `batUpdateThunk`/`batShowThunk`/`batEndThunk`/`batDtorThunk` | latch `g_inBattle`; `batShowThunk` also sets `g_attackPulse` |
+| `installBattleDiscriminator`, `batUpdateThunk`/`batShowThunk`/`batEndThunk`/`batDtorThunk` | latch/reset battle and burst state; `batShowThunk` sets the start pulse |
+| `batAttackEndThunk`, callsite `0x638AD9` | signature-gated exact end of the final visual component |
 | `kAnimFactor[]`, `applyAnimSpeed` | speed 1..6 -> clock factor |
 | `gameSettings`, `setNativeSpeed`, `readNativeSpeeds` | native `GameSettings` + `Disciple.ini` |
-| `updateBattleBurst` | attack-burst window + ease-down, run from the `WM_TIMER` pump |
+| `updateBattleBurst`, `kAttackRampMs` | exact start/end burst + 300ms return, run from the `WM_TIMER` pump |
+| `attackHoldMs` | timed fallback only when the exact-end signature is unavailable |
 | `persist`, `loadSettings` (`C4menu.ini`), `onMenuCommand`, `refreshChecks` | menu state |
 
 ---
@@ -81,7 +91,7 @@ mechanism A from a live "attack playing" signal.
 Все опции скорости анимации находятся во внутриигровом меню **Game** и реализованы в
 [`features/featuremenu.cpp`](../features/featuremenu.cpp). Настройки сохраняются в `C4menu.ini`
 (секция `[menu]`), отдельно от собственных `Disciple.ini` / `settings.lua` игры. Адреса даны для
-сборки Russobit "slasher_mns_2_4".
+сборки MNS/SMNS "slasher_mns_2_4".
 
 ## Два независимых механизма
 
@@ -123,14 +133,22 @@ speed** (механизм B), а не Map animation (механизм A).
 Цель: оставить idle-юнитов спокойными, но ускорить атаки. Нативного разделения idle/атака нет, поэтому
 мы управляем механизмом A по живому сигналу "идёт атака".
 
-- **Сигнал.** Слот `[2]` vftable боевого вьюера `0x6F4294` (`showAttackEffect`, `0x63203B`) вызывает
-  `sub_639743(1)` в начале эффекта атаки; покадровый апдейт (слот `[1]`, `0x630DE3`) вызывает
-  `sub_639743(0)` для сброса. То есть слот `[2]` срабатывает раз на удар/эффект. Наш `batShowThunk`
-  (уже стоит в этом слоте ради `g_inBattle`) дополнительно ставит `g_attackPulse = 1`.
-- **Окно + плавность.** Пул `WM_TIMER` (32мс) зовёт `updateBattleBurst()`. Каждый пульс взводит окно
-  `kAttackHoldMs` (1200мс) на факторе атаки; после него фактор линейно возвращается к базе idle за
-  `kAttackRampMs` (700мс), без мгновенного скачка. База idle = настройка Battle animation (vanilla
-  `10`, если не задано), поэтому между атаками idle остаётся спокойным.
+- **Сигнал начала.** Слот `[2]` vftable боевого вьюера `0x6F4294` (`showAttackEffect`,
+  `0x63203B`) срабатывает в начале эффекта. `batShowThunk` публикует visual event `1`. Слот `[1]`
+  (`0x630DE3`) — обработчик сообщения выбора действия, а не надёжный покадровый/end callback.
+- **Точный сигнал конца.** `CBatViewerUtils::CAnimCounter` декрементируется для каждой визуальной
+  части. Ветка финального нуля вызывает `sub_639743(0)` по адресу `0x638AD9`, прямо перед
+  восстановлением интерфейса боя. Проверяется 14-байтовая сигнатура, и только этот call направляется
+  через `batAttackEndThunk`: он публикует visual event `2` и tail-jump'ом продолжает оригинал.
+  Одно last-writer-wins событие сохраняет порядок, даже если мгновенная/x15-анимация началась и
+  закончилась внутри одного 32мс шага пула.
+  Перехватывать весь `sub_639743` нельзя — у него есть несколько посторонних callsite.
+- **Спад от реального конца.** Пул `WM_TIMER` (32мс) зовёт `updateBattleBurst()`. Фактор атаки
+  держится от start pulse до финального pulse счётчика, затем линейно возвращается к базе idle за
+  `kAttackRampMs` (300мс, примерно десять шагов пула). Watchdog 5 секунд — только аварийная
+  страховка. Если сигнатура exe неизвестна, `attackHoldMs()` оставляет прежний безопасный
+  временной fallback и ничего не патчит. База idle = настройка Battle animation (vanilla `10`,
+  если не задано), поэтому между атаками idle остаётся спокойным.
 - **Ограничение.** Так как механизм A это глобальные часы, idle-юниты тоже ускоряются *во время* окна
   burst. Это разделение "спокойно между атаками", а не настоящая пер-юнит изоляция. См. `BACKLOG.md`.
 - **Пер-юнит (экспериментально, по умолчанию off).** Тогл "per-unit" уважает меню: глобальные часы боя
@@ -145,8 +163,10 @@ speed** (механизм B), а не Map animation (механизм A).
 | Символ | Роль |
 | --- | --- |
 | `timeGetTimeHook`, `installTimeScaleHook` | виртуальные часы над IAT `0x6CE420` |
-| `installBattleDiscriminator`, `batUpdateThunk`/`batShowThunk`/`batEndThunk`/`batDtorThunk` | ставят `g_inBattle`; `batShowThunk` также ставит `g_attackPulse` |
+| `installBattleDiscriminator`, `batUpdateThunk`/`batShowThunk`/`batEndThunk`/`batDtorThunk` | ставят/сбрасывают состояние боя и burst; `batShowThunk` даёт start pulse |
+| `batAttackEndThunk`, callsite `0x638AD9` | точный конец последней визуальной части с проверкой сигнатуры |
 | `kAnimFactor[]`, `applyAnimSpeed` | скорость 1..6 -> фактор часов |
 | `gameSettings`, `setNativeSpeed`, `readNativeSpeeds` | нативный `GameSettings` + `Disciple.ini` |
-| `updateBattleBurst` | окно burst атаки + плавный спад, из пула `WM_TIMER` |
+| `updateBattleBurst`, `kAttackRampMs` | burst по точным start/end + возврат 300мс, из пула `WM_TIMER` |
+| `attackHoldMs` | временной fallback только при недоступной сигнатуре точного конца |
 | `persist`, `loadSettings` (`C4menu.ini`), `onMenuCommand`, `refreshChecks` | состояние меню |

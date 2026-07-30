@@ -1,6 +1,5 @@
 /*
- * C4dll-R plugin host: restores hosting of mods\*.c4p (new 32bpp) and *.mod (legacy) plugins
- * that the original renderer used to composite. Renderer-agnostic: composites via a transparent,
+ * C4dll-R native plugin host: loads mods\*.c4p (BGRA32) plugins. Renderer-agnostic: composites via a transparent,
  * click-through, topmost LAYERED window over the game client area (UpdateLayeredWindow).
  */
 
@@ -9,7 +8,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <detours.h>
 
 namespace {
 
@@ -137,6 +135,7 @@ extern "C" int timerhost_battle_kind(void);
 extern "C" int timerhost_turn_player_id(void);
 extern "C" int timerhost_retreat(void);
 extern "C" int timerhost_end_day(void);
+extern "C" int timerhost_cancel_elapse(void);
 
 volatile LONG g_turnSerial = 0; // bumped on every detected turn change (including a skip)
 volatile LONG g_turnPlayer = -1; // current turn player index, -1 if unknown / not in a game (cross-thread)
@@ -194,56 +193,44 @@ int __cdecl host_battle_kind(void) { return timerhost_battle_kind(); }
 int __cdecl host_turn_player_id(void) { return timerhost_turn_player_id(); }
 int __cdecl host_retreat(void) { return timerhost_retreat(); }
 int __cdecl host_end_day(void) { return timerhost_end_day(); }
+int __cdecl host_cancel_elapse(void) { return timerhost_cancel_elapse(); }
 
 C4P_Host g_host = {sizeof(C4P_Host),     host_get_hwnd,        host_invalidate,
                    host_get_config_int,  host_set_config_int,  host_config_path_cb,
                    host_get_turn_serial, host_get_turn_player, host_is_in_game,
                    host_is_in_battle,    host_get_day,
                    host_turn_active,     host_is_animating,    host_battle_kind,
-                   host_turn_player_id,  host_retreat,         host_end_day};
+                   host_turn_player_id,  host_retreat,         host_end_day,
+                   host_cancel_elapse};
 
 // plugin records
-using ModGetId = const void*(__stdcall*)(); // 12-byte plugin id (for dedup)
-using ModGetName = const char*(__stdcall*)();
-using ModGetMenu = HMENU(__stdcall*)(int baseCmdId); // builds the plugin's config submenu
-using ModSetHWND = void(__stdcall*)(HWND);
-using ModLaunch = void(__stdcall*)();
-// DrawFrame(originX, originY, width, height, stride, formatFlags, scan0). flags bit0=1 -> 32bpp ARGB.
-using ModDrawFrame = int(__stdcall*)(int, int, int, int, int, int, void*);
 using C4pQuery = int(__cdecl*)(C4P_Info*);
 using C4pInit = int(__cdecl*)(const C4P_Host*);
 using C4pTick = void(__cdecl*)(uint32_t);
 using C4pDraw = int(__cdecl*)(C4P_Canvas*);
 using C4pMenu = HMENU(__cdecl*)(int);  // optional: build the plugin's config submenu
 using C4pCommand = void(__cdecl*)(int); // optional: handle a menu WM_COMMAND in its id block
+using C4pMouse = int(__cdecl*)(UINT, WPARAM, int, int); // optional: physical client input
 
 struct Plugin
 {
     HMODULE mod;
-    bool isNew;
-    bool hwndSet;
-    bool hasId;
-    char id[12]; // legacy plugin id (GetId), for dedup
-    bool hasSupersede;     // new plugin: declares a legacy id it replaces
-    char supersedeId[12];  // the 12-byte legacy GetId this .c4p supersedes
+    char id[64];
     char name[64];
-    UINT menuBase; // base command id passed to GetMenu (plugin's WM_COMMAND base)
+    UINT menuBase; // base command id passed to c4p_menu (plugin's WM_COMMAND base)
     HMENU menu; // plugin's config submenu, grafted into the bar; null if none
-    ModSetHWND setHwnd;
-    ModLaunch launch;
-    ModDrawFrame drawFrame;
     C4pTick tick;
     C4pDraw draw;
     C4pCommand command; // new-plugin menu command handler (c4p_command), or null
+    C4pMouse mouse; // optional click-through overlay interaction (c4p_mouse), or null
 };
 
 Plugin g_plugins[16];
 int g_pluginCount = 0;
-bool g_hasLegacy = false;
 HANDLE g_pluginsReady = nullptr; // manual-reset event: signaled by the worker once plugins loaded
 
 // loading
-void loadOne(const char* path, const char* fileName, bool isNew)
+void loadOne(const char* path, const char* fileName)
 {
     if (g_pluginCount >= (int)(sizeof(g_plugins) / sizeof(g_plugins[0])))
         return;
@@ -254,95 +241,53 @@ void loadOne(const char* path, const char* fileName, bool isNew)
     }
     Plugin p = {};
     p.mod = m;
-    p.isNew = isNew;
 
-    if (isNew) {
-        auto query = (C4pQuery)GetProcAddress(m, "c4p_query");
-        auto init = (C4pInit)GetProcAddress(m, "c4p_init");
-        p.tick = (C4pTick)GetProcAddress(m, "c4p_tick");
-        p.draw = (C4pDraw)GetProcAddress(m, "c4p_draw");
-        C4P_Info info = {sizeof(C4P_Info), 0, nullptr, nullptr, nullptr};
-        if (!query || !init || !p.draw || query(&info) != 1) {
-            plog("[plugins] %s: not a valid .c4p (missing exports / query failed)", fileName);
-            FreeLibrary(m);
-            return;
-        }
-        if (info.abi_version != C4P_ABI_VERSION) {
-            plog("[plugins] %s: ABI %u != host %u; skipped", fileName, info.abi_version,
-                 (unsigned)C4P_ABI_VERSION);
-            FreeLibrary(m);
-            return;
-        }
-        lstrcpynA(p.name, info.name ? info.name : fileName, sizeof(p.name));
-        if (info.supersedes_legacy_id) {
-            memcpy(p.supersedeId, info.supersedes_legacy_id, sizeof(p.supersedeId));
-            p.hasSupersede = true;
-        }
-        if (init(&g_host) != 1) {
-            plog("[plugins] %s: c4p_init failed", fileName);
-            FreeLibrary(m);
-            return;
-        }
-        plog("[plugins] loaded NEW '%s' (%s)", p.name, fileName);
-        // optional config submenu (grafted under "Plugins" by featuremenu) + command handler;
-        // reserve a 0x100-wide WM_COMMAND id block per plugin (same scheme as legacy)
-        p.menuBase = 0xB000 + g_pluginCount * 0x100;
-        p.command = (C4pCommand)GetProcAddress(m, "c4p_command");
-        if (auto buildPluginMenu = (C4pMenu)GetProcAddress(m, "c4p_menu"))
-            p.menu = buildPluginMenu(p.menuBase);
-    } else {
-        auto getId = (ModGetId)GetProcAddress(m, "GetId");
-        auto getName = (ModGetName)GetProcAddress(m, "GetName");
-        p.setHwnd = (ModSetHWND)GetProcAddress(m, "SetHWND");
-        p.launch = (ModLaunch)GetProcAddress(m, "Launch");
-        p.drawFrame = (ModDrawFrame)GetProcAddress(m, "DrawFrame");
-        if (!p.drawFrame || !p.launch) {
-            plog("[plugins] %s: not a valid .mod (missing DrawFrame/Launch)", fileName);
-            FreeLibrary(m);
-            return;
-        }
-        // dedup by the 12-byte GetId (as the original host did): same plugin dropped in twice
-        // is not loaded/hooked twice
-        if (getId) {
-            const void* idp = getId();
-            if (idp) {
-                memcpy(p.id, idp, sizeof(p.id));
-                p.hasId = true;
-                for (int i = 0; i < g_pluginCount; ++i)
-                    if (g_plugins[i].hasId && memcmp(g_plugins[i].id, p.id, sizeof(p.id)) == 0) {
-                        plog("[plugins] %s: duplicate id; skipped", fileName);
-                        FreeLibrary(m);
-                        return;
-                    }
-            }
-        }
-        // if an already-loaded .c4p declares it replaces this legacy id, drop the legacy one (no
-        // double timer). .c4p load before .mod, so the superseding plugin is already present.
-        if (p.hasId) {
-            for (int i = 0; i < g_pluginCount; ++i)
-                if (g_plugins[i].isNew && g_plugins[i].hasSupersede &&
-                    memcmp(g_plugins[i].supersedeId, p.id, sizeof(p.id)) == 0) {
-                    plog("[plugins] %s: superseded by new '%s'; legacy not loaded", fileName,
-                         g_plugins[i].name);
-                    FreeLibrary(m);
-                    return;
-                }
-        }
-        auto getMenu = (ModGetMenu)GetProcAddress(m, "GetMenu");
-        const char* nm = getName ? getName() : nullptr;
-        lstrcpynA(p.name, nm ? nm : fileName, sizeof(p.name));
-        p.launch();
-        // build config submenu, grafted under "Plugins"; id base kept clear of featuremenu's 0xA1xx
-        p.menuBase = 0xB000 + g_pluginCount * 0x100;
-        if (getMenu)
-            p.menu = getMenu(p.menuBase);
-        g_hasLegacy = true;
-        plog("[plugins] loaded LEGACY '%s' (%s), menu=%p", p.name, fileName, (void*)p.menu);
+    auto query = (C4pQuery)GetProcAddress(m, "c4p_query");
+    auto init = (C4pInit)GetProcAddress(m, "c4p_init");
+    p.tick = (C4pTick)GetProcAddress(m, "c4p_tick");
+    p.draw = (C4pDraw)GetProcAddress(m, "c4p_draw");
+    C4P_Info info = {sizeof(C4P_Info), 0, nullptr, nullptr, nullptr};
+    if (!query || !init || !p.draw || query(&info) != 1) {
+        plog("[plugins] %s: not a valid .c4p (missing exports / query failed)", fileName);
+        FreeLibrary(m);
+        return;
     }
+    if (info.abi_version != C4P_ABI_VERSION) {
+        plog("[plugins] %s: ABI %u != host %u; skipped", fileName, info.abi_version,
+             (unsigned)C4P_ABI_VERSION);
+        FreeLibrary(m);
+        return;
+    }
+    if (!info.id || !*info.id) {
+        plog("[plugins] %s: empty native plugin id; skipped", fileName);
+        FreeLibrary(m);
+        return;
+    }
+    for (int i = 0; i < g_pluginCount; ++i) {
+        if (!lstrcmpiA(g_plugins[i].id, info.id)) {
+            plog("[plugins] %s: duplicate native id '%s'; skipped", fileName, info.id);
+            FreeLibrary(m);
+            return;
+        }
+    }
+    lstrcpynA(p.id, info.id, sizeof(p.id));
+    lstrcpynA(p.name, info.name ? info.name : fileName, sizeof(p.name));
+    if (init(&g_host) != 1) {
+        plog("[plugins] %s: c4p_init failed", fileName);
+        FreeLibrary(m);
+        return;
+    }
+    plog("[plugins] loaded '%s' (%s)", p.name, fileName);
+    // Optional config submenu (grafted under "Plugins" by featuremenu) + command handler.
+    p.menuBase = 0xB000 + g_pluginCount * 0x100;
+    p.command = (C4pCommand)GetProcAddress(m, "c4p_command");
+    p.mouse = (C4pMouse)GetProcAddress(m, "c4p_mouse");
+    if (auto buildPluginMenu = (C4pMenu)GetProcAddress(m, "c4p_menu"))
+        p.menu = buildPluginMenu(p.menuBase);
     g_plugins[g_pluginCount++] = p;
 }
 
-void loadFolder(const char* pattern, bool isNew)
+void loadFolder(const char* pattern)
 {
     char dir[MAX_PATH];
     lstrcpynA(dir, exeDirFile("mods\\"), sizeof(dir));
@@ -360,68 +305,9 @@ void loadFolder(const char* pattern, bool isNew)
         char full[MAX_PATH];
         lstrcpynA(full, dir, sizeof(full));
         lstrcatA(full, fd.cFileName);
-        loadOne(full, fd.cFileName, isNew);
+        loadOne(full, fd.cFileName);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
-}
-
-// Drive the legacy timer's per-turn RESET, including on a SKIPPED turn. timer.mod resets on a normal
-// turn via its own off[7] hook, but a skip takes an unhooked path, so the next player keeps the old
-// countdown. We detour the timer's per-frame turn callback (RVA 0x1B90 = its off[6] handler, which
-// reads the current player every frame) and post its RESET command (base+3) on a player change.
-// RVA/layout is specific to the user's timer.mod; gated on name "Timer" + a valid off_10008000 table.
-using TimerTurnFn = unsigned char*(__cdecl*)();
-TimerTurnFn g_realTimerTurn = nullptr;
-HWND g_timerHwnd = nullptr;
-UINT g_timerResetCmd = 0;
-int g_lastTurnPlayer = -1;
-bool g_timerFixDone = false;
-
-unsigned char* __cdecl timerTurnHook()
-{
-    unsigned char* obj = g_realTimerTurn(); // run the timer's own callback
-    if (obj) {
-        const int player = obj[0]; // turn-controller object's first byte = current player index
-        if (g_lastTurnPlayer >= 0 && player != g_lastTurnPlayer && g_timerHwnd)
-            PostMessageA(g_timerHwnd, WM_COMMAND, g_timerResetCmd, 0); // reset for the new player
-        g_lastTurnPlayer = player;
-    }
-    return obj;
-}
-
-void installTimerTurnFix(HWND gameHwnd)
-{
-    if (g_timerFixDone)
-        return;
-    for (int i = 0; i < g_pluginCount; ++i) {
-        Plugin& p = g_plugins[i];
-        if (p.isNew || lstrcmpiA(p.name, "Timer") != 0)
-            continue;
-        const uintptr_t base = (uintptr_t)p.mod;
-        // sanity: off_10008000 (RVA 0x8000) must hold a table whose off[6] is a game code address
-        // (game base 0x400000), else this is not the known timer - do not patch a wrong RVA
-        uint32_t* table = *reinterpret_cast<uint32_t**>(base + 0x8000);
-        if (!table)
-            continue;
-        const uint32_t off6 = table[6];
-        if (off6 < 0x401000 || off6 > 0x700000)
-            continue;
-        g_realTimerTurn = reinterpret_cast<TimerTurnFn>(base + 0x1B90);
-        g_timerHwnd = gameHwnd;
-        g_timerResetCmd = p.menuBase + 3; // base+3 = the timer's RESET menu command
-        DetourTransactionBegin();
-        DetourUpdateThread(GetCurrentThread());
-        DetourAttach(&reinterpret_cast<PVOID&>(g_realTimerTurn), timerTurnHook);
-        if (DetourTransactionCommit() == NO_ERROR) {
-            g_timerFixDone = true;
-            plog("[plugins] timer turn-fix installed (reset on every turn change incl. skip; cmd "
-                 "%#x, off6 %#x)",
-                 g_timerResetCmd, off6);
-        } else {
-            plog("[plugins] timer turn-fix: detour failed");
-        }
-        return;
-    }
 }
 
 // transparent layered overlay window + BGRA32 DIB
@@ -493,24 +379,12 @@ HWND createOverlayWindow(HWND owner)
 void rebuildOverlay(int w, int h)
 {
     memset(g_dib, 0, (size_t)w * h * 4);
-    HWND game = gameHwnd();
     C4P_Canvas canvas = {sizeof(C4P_Canvas), g_dib, w, h, w * 4};
     for (int i = 0; i < g_pluginCount; ++i) {
         Plugin& p = g_plugins[i];
-        if (p.isNew) {
-            if (p.draw)
-                p.draw(&canvas);
-        } else {
-            if (p.setHwnd && !p.hwndSet && game) {
-                p.setHwnd(game);
-                p.hwndSet = true;
-            }
-            p.drawFrame(0, 0, w, h, w * 4, 1, g_dib); // 32bpp ARGB (flags bit0=1), full area
-        }
+        if (p.draw)
+            p.draw(&canvas);
     }
-    // once legacy plugins have their HWND (subclass active), arm the timer skip fix
-    if (game)
-        installTimerTurnFix(game);
 
     // diagnostic: C4PLUGINS_TESTMARK=1 draws a visible box to confirm the overlay composites
     if (GetEnvironmentVariableA("C4PLUGINS_TESTMARK", nullptr, 0)) {
@@ -539,12 +413,11 @@ void rebuildOverlay(int w, int h)
 DWORD WINAPI overlayWorker(LPVOID)
 {
     // Load plugins HERE on the worker thread, NOT in DllMain: LoadLibrary + c4p_init (GdiplusStartup)
-    // + legacy Launch() are loader-lock-unsafe in DLL_PROCESS_ATTACH (deadlock). featuremenu buildMenu
+    // are loader-lock-unsafe in DLL_PROCESS_ATTACH (deadlock). featuremenu buildMenu
     // waits on g_pluginsReady before reading the list (loading no longer serialized by the loader lock).
-    loadFolder("*.c4p", true);  // native format first
-    loadFolder("*.mod", false); // legacy *.mod
+    loadFolder("*.c4p");
     if (g_pluginCount)
-        plog("[plugins] %d plugin(s) loaded (legacy present: %d)", g_pluginCount, g_hasLegacy ? 1 : 0);
+        plog("[plugins] %d plugin(s) loaded", g_pluginCount);
     if (g_pluginsReady)
         SetEvent(g_pluginsReady);
     if (!g_pluginCount)
@@ -568,7 +441,6 @@ DWORD WINAPI overlayWorker(LPVOID)
     ShowWindow(g_overlayWnd, SW_SHOWNOACTIVATE);
     plog("[plugins] overlay window up; compositing %d plugin(s)", g_pluginCount);
 
-    DWORD lastRebuild = 0;
     bool announced = false;
     for (;;) {
         MSG msg;
@@ -602,12 +474,10 @@ DWORD WINAPI overlayWorker(LPVOID)
                     }
                 }
                 for (int i = 0; i < g_pluginCount; ++i)
-                    if (g_plugins[i].isNew && g_plugins[i].tick)
+                    if (g_plugins[i].tick)
                         g_plugins[i].tick(now);
                 const bool dirty = InterlockedExchange(&g_dirty, 0) != 0;
-                // legacy plugins redraw periodically (~6 fps is plenty for a clock)
-                const bool legacyDue = g_hasLegacy && (now - lastRebuild >= 160);
-                if (g_dib && (sizeChanged || dirty || legacyDue)) {
+                if (g_dib && (sizeChanged || dirty)) {
                     rebuildOverlay(w, h);
                     POINT src{0, 0};
                     POINT dst{tl.x, tl.y};
@@ -615,7 +485,6 @@ DWORD WINAPI overlayWorker(LPVOID)
                     BLENDFUNCTION bf{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
                     UpdateLayeredWindow(g_overlayWnd, nullptr, &dst, &sz, g_memDC, &src, 0, &bf,
                                         ULW_ALPHA);
-                    lastRebuild = now;
                     if (!announced) {
                         plog("[plugins] overlay first paint (%dx%d at %d,%d)", w, h, tl.x, tl.y);
                         announced = true;
@@ -656,25 +525,38 @@ extern "C" const char* pluginhost_name(int i)
 {
     return (i >= 0 && i < g_pluginCount) ? g_plugins[i].name : "";
 }
-extern "C" int pluginhost_is_new(int i)
-{
-    return (i >= 0 && i < g_pluginCount && g_plugins[i].isNew) ? 1 : 0;
-}
 extern "C" void* pluginhost_menu(int i) // plugin config submenu HMENU, or null
 {
     return (i >= 0 && i < g_pluginCount) ? g_plugins[i].menu : nullptr;
 }
 
-// Route a menu WM_COMMAND to the owning NEW plugin's c4p_command (ids in the 0xB000+ plugin block).
-// Returns 1 if handled; 0 otherwise (legacy ids reach the plugin via the WndProc forward chain).
+// Route a menu WM_COMMAND to the owning plugin's c4p_command (ids in the 0xB000+ plugin block).
+// Returns 1 if handled; 0 otherwise.
 extern "C" int pluginhost_command(unsigned id)
 {
     for (int i = 0; i < g_pluginCount; ++i) {
         Plugin& p = g_plugins[i];
-        if (p.isNew && p.command && id >= p.menuBase && id < p.menuBase + 0x100) {
+        if (p.command && id >= p.menuBase && id < p.menuBase + 0x100) {
             p.command((int)id);
             return 1;
         }
+    }
+    return 0;
+}
+
+// Forward mouse input without making the layered overlay itself interactive. The game WndProc's
+// lParam has already been transformed to logical game coordinates by cnc-ddraw, whereas c4p_draw's
+// canvas is the physical client size, so sample the OS cursor and map it to physical client pixels.
+extern "C" int pluginhost_mouse(UINT msg, WPARAM wParam)
+{
+    HWND game = gameHwnd();
+    POINT pt{};
+    if (!game || !GetCursorPos(&pt) || !ScreenToClient(game, &pt))
+        return 0;
+    for (int i = 0; i < g_pluginCount; ++i) {
+        Plugin& p = g_plugins[i];
+        if (p.mouse && p.mouse(msg, wParam, pt.x, pt.y))
+            return 1;
     }
     return 0;
 }

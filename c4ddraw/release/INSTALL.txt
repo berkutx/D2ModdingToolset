@@ -1,15 +1,19 @@
 ================================================================================
- C4dll-R  -  standalone renderer + turn timer for Disciples II (Russobit)
+ C4dll-R  -  self-contained DirectDraw wrapper for Disciples II
 ================================================================================
 
 WHAT THIS IS
-  C4dll-R.dll replaces the lost-source DisciplesGL renderer with cnc-ddraw,
-  embedded in one drop-in DLL. It does NOT depend on or modify the mss32 mod.
-  Included plugin: Mods\timer.c4p - the reconstructed turn timer (the host
-  resets it on every turn, including a skipped turn).
+  C4dll-R.dll embeds cnc-ddraw in one drop-in DirectDraw wrapper.
+  Included plugin: Mods\timer.c4p - the reconstructed turn timer. Automatic
+  reset on every turn (including a skipped turn) is available on MNS/SMNS;
+  other executable layouts can use the plugin controls without automatic reset.
 
 REQUIREMENTS
-  - Disciples II, Russobit build (Mortling's mod exe).
+  - Disciples II. Renderer, video/performance menu, language and locale work on
+    other builds too. Game resolution and Widescreen Battle recognize the nine
+    original game layouts (D2 2.00-3.01). Remaining exact-address options are
+    labelled (MNS/SMNS) and disabled elsewhere; MNS/SMNS means the validated
+    4,187,648-byte and 4,214,272-byte Discipl2.exe layouts.
   - The game's existing CB63.dll, Mss23.dll and mss32.dll stay as they are.
 
 INSTALL
@@ -18,44 +22,99 @@ INSTALL
   3. Copy ddraw.ini next to Discipl2.exe - these are the recommended renderer
      defaults (windowed with the menu bar, OpenGL, game speed cap 100).
      Upgrading and already tuned your ddraw.ini? Keep yours.
-  4. Copy Mods\timer.c4p into the game's Mods\ folder.
-  5. (Optional) Copy C4plugins.ini next to Discipl2.exe to configure the timer.
-  6. Delete any standalone ddraw.dll in the game folder (the renderer is built
-     into C4dll-R.dll - a separate ddraw.dll would shadow it).
-  7. Launch the game.
+  4. Copy the Shaders\ folder next to Discipl2.exe. It contains the exact eight
+     OpenGL filters shown by the Video menu, including required multipass files.
+  5. Copy Mods\timer.c4p into the game's Mods\ folder.
+  6. (Optional) Copy C4plugins.ini next to Discipl2.exe to configure the timer.
+  7. (Optional) Keep an existing Imgs\IsoClouds.ff from a DisciplesGL install
+     if you want to enable Game > Map clouds. The archive is not redistributed
+     in this package. The required 30393-byte file has SHA-256:
+     962F334E1CFA3226AF27B953AF0F6EBA6C1F82EF708A948C0D4C2A76FF804EE6
+     If it is absent or its exact hash differs, clouds cannot be enabled. An
+     already-requested invalid setting remains clickable only so it can be
+     switched OFF. Clouds default to OFF and require a full game restart.
+  8. If the game folder contains a standalone ddraw.dll from another wrapper,
+     rename or remove it. A clean installation normally has no such file; if it
+     is absent, do nothing.
+  9. Launch the game.
 
-  Note: without ddraw.ini the renderer generates a stock config on first run:
-  exclusive fullscreen (no title bar, so no menu bar visible) and no game
-  speed cap tuning. Alt+Enter switches to a window; still, copying the
-  bundled ddraw.ini is the intended setup.
+  Note: without ddraw.ini the renderer generates its tuned first-run config:
+  a bordered window with the menu, OpenGL, automatic output following the game
+  resolution, and game speed cap 100. The bundled ddraw.ini additionally enables
+  resizing and remembers window size/position, so copying it remains the intended setup.
 
 USING IT
   - In-game menu (under the title bar): Game / Video / Performance / Plugins.
     Renderer, shader, windowed/fullscreen etc. are in Video / Performance.
-  - Game holds the gameplay options: Always active (keeps running while
-    unfocused), Battle animation and Map animation (live x1.5..x5 speed-up),
-    plus Battle speed / Map turn speed (engine presets, saved per game).
-  - The turn timer is configured in C4plugins.ini, section [Timer]
-    (Enabled, Duration, position, font size). It is ON by default in the
-    bundled C4plugins.ini (5-minute countdown).
+    The menu bar is intentionally hidden in borderless and exclusive
+    fullscreen. F4 switches either fullscreen mode back to a normal window
+    (and returns to the last fullscreen kind); Alt+Enter is also available.
+  - Video > Decorative background around classic screens is ON by default when
+    a widescreen game resolution is active. It decorates fixed-size screens
+    inside that game canvas. In a stock native resolution the item is gray;
+    separate output letter/pillar bars are renderer space and remain black.
+  - If the game randomly crashes or freezes on any map, enable
+    Performance > 1 CPU stability (restart). It is ON by default; changing it
+    requires a full game restart.
+  - Entries labelled (MNS/SMNS) are exact-address gameplay options: Battle animation and Map animation
+     (live x1.5..x5 speed-up),
+     map drag-scroll (ON by default; exact button-down anchor, movement starts on
+     the first changed game pixel; native edge-scroll remains available),
+     plus Battle speed / Map turn speed (engine presets, saved per game) and
+     restart-only Map clouds (the game's native option; requires external IsoClouds.ff).
+  - Video > Resolution is one popup. Automatic for monitor is the default: a
+    4:3/5:4 monitor uses one of the game's three `★` stock DisplaySize modes,
+    while a 3:2 or wider monitor uses one of ten validated Hor+ game-view modes
+    (1066x600 through 2560x1440). It prefers clean integer Fit scaling, then the
+    largest canvas that fits. The selected family and scale are shown in the
+    menu. A game-resolution change shows a dialog and needs a full game restart.
+    Explicit manual stock/Hor+ choices remain authoritative.
+  - Video > Scaling controls Fit, Integer and Stretch and shows the actual
+    output, coefficient, viewport and bars. `1:1` means one game pixel equals one
+    output pixel. A resizable window may be smaller than the game canvas: the
+    renderer filters it down and remaps the mouse. Borderless fullscreen always
+    adapts to the desktop.
+  - Resolution > Window/stream only... sets the saved output/window target. Automatic stores
+    `0x0` and follows the game resolution in a normal window; a custom width of
+    320–8192 and height of 240–8192 apply immediately and are saved to the
+    effective ddraw.ini section. This does not change the game canvas. Borderless
+    always uses the desktop. If mouse remapping was disabled by hand, the current
+    game canvas becomes the minimum safe custom size.
+  - `fake_mode=1024x768x16` is only an internal virtual 16-bit compatibility
+    bootstrap. It is not the game resolution, output size or scaling mode; the
+    widescreen startup fix adjusts process-local geometry without rewriting it.
+  - Widescreen Battle is automatic and ON by default on a recognized original
+    layout; there is no menu switch in 1.5. It selects a fixed 990-wide
+    battle layout and shows both unit panels when the game resolution is at
+    least 990 pixels wide; it does not select or replace the game resolution.
+  - The turn timer is configured in C4plugins.ini, section [Timer]. The bundled
+    PvP defaults use a 5-minute Force countdown, pause for battle animations and
+    player-vs-player combat, then end the turn without retreat. Hold Ctrl+Alt
+    and drag the clock with LMB to reposition it.
 
 UNINSTALL / REVERT
   - Restore your backed-up C4dll-R.dll and remove Mods\timer.c4p.
 
 This package is independent of the mss32 mod and is versioned separately.
+It is distributed under GPL-3.0; see LICENSE. Matching source for 1.5 is at
+https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.5
 
 ================================================================================
- C4dll-R  -  обособленный рендерер + таймер хода для Disciples II (Русобит)
+ C4dll-R  -  самодостаточный DirectDraw-врапер для Disciples II
 ================================================================================
 
 ЧТО ЭТО
-  C4dll-R.dll заменяет рендерер DisciplesGL (исходники утеряны) на cnc-ddraw,
-  встроенный в одну подключаемую DLL. Не зависит от мода mss32 и не меняет его.
-  В комплекте плагин Mods\timer.c4p - воссозданный таймер хода (хост сбрасывает
-  его на каждой смене хода, включая пропуск).
+  C4dll-R.dll встраивает cnc-ddraw в одну подключаемую DirectDraw-DLL.
+  В комплекте плагин Mods\timer.c4p - воссозданный таймер хода. Автоматический
+  сброс на каждой смене хода, включая пропуск, поддержан на MNS/SMNS; на других
+  раскладках exe доступны ручные команды плагина без автоматического сброса.
 
 ТРЕБОВАНИЯ
-  - Disciples II, сборка Русобит (exe мода Mortling).
+  - Disciples II. Рендерер, меню видео/производительности, язык и локаль работают
+    и на других сборках. Разрешение игры и «Широкий бой» распознают девять
+    исходных игровых layout’ов D2 2.00–3.01. Остальные точные адресные опции
+    помечены (MNS/SMNS) и заблокированы на других exe; MNS/SMNS означает две
+    проверенные раскладки Discipl2.exe размером 4 187 648 и 4 214 272 байта.
   - Имеющиеся CB63.dll, Mss23.dll и mss32.dll игры остаются как есть.
 
 УСТАНОВКА
@@ -64,29 +123,81 @@ This package is independent of the mss32 mod and is versioned separately.
   3. Скопируйте ddraw.ini рядом с Discipl2.exe - это рекомендованные настройки
      рендерера (окно с меню-баром, OpenGL, кап скорости игры 100).
      Обновляетесь и уже настроили свой ddraw.ini? Оставьте свой.
-  4. Скопируйте Mods\timer.c4p в папку Mods\ игры.
-  5. (Необязательно) Скопируйте C4plugins.ini рядом с Discipl2.exe для настройки
+  4. Скопируйте папку Shaders\ рядом с Discipl2.exe. В ней находятся ровно восемь
+     OpenGL-фильтров из меню Video и необходимые файлы multipass.
+  5. Скопируйте Mods\timer.c4p в папку Mods\ игры.
+  6. (Необязательно) Скопируйте C4plugins.ini рядом с Discipl2.exe для настройки
      таймера.
-  6. Удалите отдельный ddraw.dll в папке игры (рендерер встроен в C4dll-R.dll,
-     отдельный ddraw.dll его перекроет).
-  7. Запустите игру.
+  7. (Необязательно) Сохраните имеющийся Imgs\IsoClouds.ff от установки
+     DisciplesGL, если хотите включить «Game > Облака на карте». Этот архив не
+     распространяется в комплекте. SHA-256 нужного файла размером 30393 байта:
+     962F334E1CFA3226AF27B953AF0F6EBA6C1F82EF708A948C0D4C2A76FF804EE6
+     Если файла нет или точный хеш отличается, включить облака нельзя. Уже
+     запрошенная ошибочная настройка остаётся доступной только для выключения.
+     По умолчанию облака выключены; их смена требует полного перезапуска игры.
+  8. Если в папке игры есть отдельный ddraw.dll от другого врапера, переименуйте
+     или удалите его. В чистой установке такого файла обычно нет; если его нет,
+     ничего делать не нужно.
+  9. Запустите игру.
 
-  Примечание: без ddraw.ini рендерер при первом запуске создаст стоковый
-  конфиг: эксклюзивный полный экран (нет заголовка окна, значит не виден и
-  меню-бар) и без настройки капа скорости. Alt+Enter переключит в окно, но
-  задуманный вариант установки - скопировать комплектный ddraw.ini.
+  Примечание: без ddraw.ini рендерер при первом запуске создаст свой настроенный
+  конфиг: окно с рамкой и меню, OpenGL, автоматическое следование вывода
+  разрешению игры и кап скорости игры 100. Комплектный ddraw.ini дополнительно
+  разрешает менять размер окна и запоминает его размер/позицию, поэтому его
+  копирование остаётся задуманным вариантом.
 
 КАК ПОЛЬЗОВАТЬСЯ
   - Внутриигровое меню (под заголовком окна): Game / Video / Performance /
     Plugins. Рендерер, шейдер, окно/полный экран - в Video / Performance.
-  - В меню Game собраны игровые опции: Always active (работает без фокуса),
-    Battle animation и Map animation (живое ускорение x1.5..x5), а также
-    Battle speed / Map turn speed (пресеты движка, хранятся в сейве).
-  - Таймер хода настраивается в C4plugins.ini, секция [Timer] (Enabled,
-    Duration, позиция, размер шрифта). В комплектном C4plugins.ini он включён
-    по умолчанию (обратный отсчёт 5 минут).
+    В безрамочном и эксклюзивном полном экране меню-бар намеренно скрыт. F4
+    возвращает из обоих режимов в обычное окно (и обратно в последний вид
+    полного экрана); также доступен Alt+Enter.
+  - «Видео > Декоративный фон вокруг классических экранов» включён по умолчанию
+    при активном широком разрешении игры и оформляет фиксированные экраны внутри
+    этого кадра. В штатном разрешении пункт серый; отдельные поля вывода
+    принадлежат рендереру и остаются чёрными.
+  - Если игра случайно вылетает или зависает на любой карте, включите
+    Производительность > 1 CPU: стабильность (рестарт). По умолчанию режим уже
+    включён; после изменения полностью перезапустите игру.
+  - Пункты с пометкой (MNS/SMNS) — точные адресные игровые опции: Battle animation и Map animation
+     (живое ускорение x1.5..x5),
+     перетаскивание карты (включено по умолчанию; точка нажатия сохраняется без
+     стартового рывка, штатный краевой скролл остаётся), а также Battle speed / Map turn speed (пресеты движка,
+     хранятся в сейве), и restart-only «Облака на карте» (штатная опция игры;
+     нужен внешний IsoClouds.ff).
+  - Видео > Разрешение — один popup. По умолчанию работает «Авто под монитор»:
+     для монитора 4:3/5:4 выбирается один из трёх штатных режимов DisplaySize со
+     `★`, для 3:2 и шире — один из десяти проверенных режимов Hor+ (1066x600–
+     2560x1440). Сначала предпочитается чёткий целый масштаб «Вписать», затем
+     самый крупный помещающийся кадр. Семейство и коэффициент видны прямо в меню.
+     Смена разрешения показывает сообщение и требует полного перезапуска;
+     явный ручной выбор автоматика не заменяет.
+  - Видео > Масштаб содержит «Вписать», «Целые» и «Растянуть» и показывает
+     фактический вывод, коэффициент, viewport и поля. `1:1` означает один игровой
+     пиксель на один выходной. Окно разрешено уменьшать ниже кадра: рендерер
+     фильтрует картинку и пересчитывает мышь. Безрамочный полный экран всегда
+     адаптируется к рабочему столу.
+  - Разрешение > Только окно/стрим... задаёт сохраняемый размер окна/вывода. «Автоматически»
+     сохраняет `0×0` и в обычном окне следует разрешению игры; пользовательская
+     ширина 320–8192 и высота 240–8192 применяются сразу и записываются в
+     эффективную секцию ddraw.ini. Игровой кадр от этого не меняется. Безрамочный
+     режим всегда берёт рабочий стол. Если пересчёт мыши был вручную выключен,
+     текущий игровой кадр становится минимальным безопасным размером.
+  - `fake_mode=1024x768x16` — только внутренний виртуальный 16-битный bootstrap
+     совместимости. Это не разрешение игры, вывод или режим масштаба; исправление
+     широкого запуска меняет process-local геометрию без перезаписи значения.
+  - «Широкий бой» включается автоматически и по умолчанию на распознанной
+     исходной раскладке; отдельного пункта меню в 1.5 нет. Он выбирает
+     фиксированную боевую раскладку шириной 990 и показывает обе панели при
+     разрешении игры не уже 990; само разрешение игры она не выбирает и не заменяет.
+  - Таймер хода настраивается в C4plugins.ini, секция [Timer]. Комплектные PvP-
+    настройки включают принудительный отсчёт 5 минут, паузу на анимациях и в бою
+    игрок-против-игрока, затем завершают ход без retreat. Для перемещения часов
+    зажмите Ctrl+Alt и перетащите их ЛКМ.
 
 УДАЛЕНИЕ / ОТКАТ
   - Верните сохранённый C4dll-R.dll и удалите Mods\timer.c4p.
 
-Пакет независим от мода mss32 и версионируется отдельно.
+Пакет независим от мода mss32 и версионируется отдельно. Лицензия — GPL-3.0,
+см. LICENSE. Соответствующие исходники 1.5:
+https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.5

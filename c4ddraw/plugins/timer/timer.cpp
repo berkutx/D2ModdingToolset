@@ -31,12 +31,12 @@ FontFamily* g_family = nullptr;
 Font* g_font = nullptr;
 
 // ---- config (C4plugins.ini [Timer] keys) ----
-int g_state = 0;        // 0 = off, 1 = Simple (count up), 2 = Force Turn (count down)
+int g_state = 2;        // 0 = off, 1 = Simple (count up), 2 = Force Turn (count down)
 int g_dayTurn = 10;     // bitmask: b0/1/2 = On Day Start Pause/Unpause/Reset; b3/4/5 = On Day End ...
-int g_pauseOn = 0;      // Combat Pause: 0 = Off, 1 = PvP, 2 = PvAny
+int g_pauseOn = 1;      // Combat Pause: 0 = Off, 1 = PvP, 2 = PvAny
 int g_pauseAnim = 1;    // Animation Pause
 int g_turnDay = 1;      // On Elapse -> End Day
-int g_retreat = 1;      // On Elapse -> Retreat
+int g_retreat = 0;      // On Elapse -> Retreat
 int g_elapseFired = 0;  // latch: on-elapse action fired this turn (re-armed when clock is positive)
 int g_resetExtra = 0;   // Reset Extra Time
 int g_alwaysVisible = 1;
@@ -45,8 +45,8 @@ int g_durBase = 300;    // TableDuration_0 (seconds): per-turn budget in Force m
 int g_tblActive[3] = {0, 0, 0};
 int g_tblDay[3] = {0, 0, 0};
 int g_tblDur[3] = {300, 300, 300};
-int g_anchorX = 0;      // 0..100 position in free space (0 = left/top)
-int g_anchorY = 0;
+int g_anchorX = 0;      // 0..10000 position in free space (0 = left/top)
+int g_anchorY = 0;      // high-resolution form avoids visible percentage-sized jumps
 REAL g_fontSize = 28.0f;
 
 // ---- runtime clock ----
@@ -84,7 +84,7 @@ uint32_t g_lastSerial = 0; // last processed turn serial; a bump = a real turn c
 CRITICAL_SECTION g_lock;
 
 // ---- menu ----
-HMENU g_menu = nullptr; // our top-level popup (grafted under Plugins -> Native -> Timer)
+HMENU g_menu = nullptr; // our top-level popup (grafted directly under Plugins -> Timer)
 int g_base = 0;         // base command id the host gave us (our 0x100 block)
 // command offsets = legacy resource-3 ids (decompiled sub_10004D40 WndProc):
 // +0x13 Timetable (res 5), +0x15 Help (msgbox), +0x16 About (res 4)
@@ -103,9 +103,9 @@ DWORD g_textColor = 0xFFCC9900;
 DWORD g_shadowColor = 0xFF660000;
 bool g_visible = false;
 unsigned g_sig = 0;
-
-// timer.mod's exact GetId (12 bytes) so the host drops the legacy .mod when this plugin is present.
-const uint8_t kLegacyId[12] = {0xd5, 0x0e, 0x9b, 0xfd, 0xc8, 0x89, 0x67, 0x49, 0x8c, 0x31, 0xac, 0x64};
+int g_hitLeft = 0, g_hitTop = 0, g_hitWidth = 0, g_hitHeight = 0;
+int g_canvasWidth = 0, g_canvasHeight = 0;
+int g_dragging = 0, g_dragDx = 0, g_dragDy = 0;
 
 // ---- time formatting + colours (faithful to timer.mod DrawFrame) ----
 void formatTime(int v9, wchar_t* out)
@@ -192,6 +192,11 @@ void hostRetreat()
     if (g_host && g_host->struct_size >= sizeof(C4P_Host) && g_host->retreat)
         g_host->retreat();
 }
+void hostCancelElapse()
+{
+    if (g_host && g_host->struct_size >= sizeof(C4P_Host) && g_host->cancel_elapse)
+        g_host->cancel_elapse();
+}
 int hostBattleKind()
 {
     return (g_host && g_host->struct_size >= sizeof(C4P_Host) && g_host->battle_kind)
@@ -216,15 +221,15 @@ int budgetSecForDay(int day)
 
 void readConfig()
 {
-    g_state = g_host->get_config_int(iniSection(), "Enabled", 0);
-    if (g_state < 0 || g_state > 2) g_state = 0;
+    g_state = g_host->get_config_int(iniSection(), "Enabled", 2);
+    if (g_state < 0 || g_state > 2) g_state = 2;
     { const int dt = g_host->get_config_int(iniSection(), "DayTurn", 10);
       g_dayTurn = ((unsigned)dt <= 0x3Fu) ? dt : 10; } // legacy: reset to default 0x0A if out of range
-    g_pauseOn = g_host->get_config_int(iniSection(), "PauseOn", 0);
-    if (g_pauseOn < 0 || g_pauseOn > 2) g_pauseOn = 0;
+    g_pauseOn = g_host->get_config_int(iniSection(), "PauseOn", 1);
+    if (g_pauseOn < 0 || g_pauseOn > 2) g_pauseOn = 1;
     g_pauseAnim = g_host->get_config_int(iniSection(), "PauseAnimation", 1) ? 1 : 0;
     g_turnDay = g_host->get_config_int(iniSection(), "TurnDay", 1) ? 1 : 0;
-    g_retreat = g_host->get_config_int(iniSection(), "Retreat", 1) ? 1 : 0;
+    g_retreat = g_host->get_config_int(iniSection(), "Retreat", 0) ? 1 : 0;
     g_resetExtra = g_host->get_config_int(iniSection(), "ResetExtraTime", 0) ? 1 : 0;
     g_alwaysVisible = g_host->get_config_int(iniSection(), "AlwaysVisible", 1) ? 1 : 0;
     g_durBase = g_host->get_config_int(iniSection(), "TableDuration_0", 300);
@@ -235,10 +240,14 @@ void readConfig()
         wsprintfA(k, "TableDay_%d", i + 1);      g_tblDay[i] = g_host->get_config_int(iniSection(), k, 0);
         wsprintfA(k, "TableDuration_%d", i + 1); { int d = g_host->get_config_int(iniSection(), k, 300); g_tblDur[i] = d < 1 ? 1 : d; }
     }
-    g_anchorX = g_host->get_config_int(iniSection(), "AnchorX", 0);
-    g_anchorY = g_host->get_config_int(iniSection(), "AnchorY", 0);
-    if (g_anchorX < 0) g_anchorX = 0; if (g_anchorX > 100) g_anchorX = 100;
-    if (g_anchorY < 0) g_anchorY = 0; if (g_anchorY > 100) g_anchorY = 100;
+    // AnchorX/Y were whole percentages in the first c4p build. Keep them as a fallback, but use
+    // 1/10000 anchors for smooth dragging at modern client sizes.
+    const int oldAnchorX = g_host->get_config_int(iniSection(), "AnchorX", 0);
+    const int oldAnchorY = g_host->get_config_int(iniSection(), "AnchorY", 0);
+    g_anchorX = g_host->get_config_int(iniSection(), "AnchorX10000", oldAnchorX * 100);
+    g_anchorY = g_host->get_config_int(iniSection(), "AnchorY10000", oldAnchorY * 100);
+    if (g_anchorX < 0) g_anchorX = 0; if (g_anchorX > 10000) g_anchorX = 10000;
+    if (g_anchorY < 0) g_anchorY = 0; if (g_anchorY > 10000) g_anchorY = 10000;
     int fs = g_host->get_config_int(iniSection(), "FontSize", 28);
     if (fs < 6) fs = 6; if (fs > 200) fs = 200;
     g_fontSize = (REAL)fs;
@@ -318,7 +327,14 @@ void setPaused(int on)
     g_paused = on;
 }
 
-void restart() { g_baseline = GetTickCount(); g_pausedAt = g_baseline; g_extra = 0; }
+void restart()
+{
+    g_baseline = GetTickCount();
+    g_pausedAt = g_baseline;
+    g_extra = 0;
+    g_elapseFired = 0;
+    hostCancelElapse();
+}
 
 } // namespace
 
@@ -339,7 +355,7 @@ extern "C" int __cdecl c4p_query(C4P_Info* out)
     out->abi_version = C4P_ABI_VERSION;
     out->id = "c4dll.timer";
     out->name = "Timer";
-    out->supersedes_legacy_id = kLegacyId;
+    out->reserved_v2 = nullptr;
     return 1;
 }
 
@@ -378,7 +394,10 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
     if (!inGame) {
         // Main menu / between games: timer does NOT run. Keep g_lastSerial synced so the first real
         // turn-start inside a game is seen as a change.
+        if (g_running || g_elapseFired)
+            hostCancelElapse();
         g_running = 0;
+        g_elapseFired = 0;
         g_lastSerial = serial;
     } else if (active && !g_wasActive) {
         // MY turn just started (turn_active 0->1) - the reliable per-CLIENT trigger that fires EVERY
@@ -388,6 +407,7 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         const int newPlayer = g_host->get_turn_player();
         const int firstTurn = !g_running;
         g_lastSerial = serial;
+        hostCancelElapse();
         g_elapseFired = 0; // re-arm the on-elapse latch (even an out-of-time turn auto-skips)
         if (firstTurn) {
             bankClear(); // fresh game
@@ -436,7 +456,7 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         wantPause = 1;
     } else if (g_running && g_state == 2) {
         const int kind = hostBattleKind();
-        if (g_pauseAnim && (hostInBattle() || hostAnimating()))
+        if (g_pauseAnim && hostAnimating())
             wantPause = 1;
         else if (g_pauseOn == 1)
             wantPause = (kind == 1) ? 1 : 0; // PvP only
@@ -477,9 +497,13 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         }
         formatTime(v9, text);
         pickColors(v9, state, paused, &tc, &sc);
-        // On Elapse: when a Force-mode turn runs out, fire the queued action ONCE per turn. Re-armed as
-        // soon as the clock is positive again (turn change / Set / Reset).
+        // On Elapse: when a Force-mode turn runs out, fire the queued action ONCE per turn. The UI
+        // thread can Reset/Set/toggle this at the same time, so serialize the latch and host queue with
+        // the same lock as c4p_command; this also prevents a just-cancelled action being queued late.
+        EnterCriticalSection(&g_lock);
         if (v9 >= 0) {
+            if (g_elapseFired)
+                hostCancelElapse();
             g_elapseFired = 0;
         } else if (state == 2 && running && inGame && !g_elapseFired) {
             g_elapseFired = 1;
@@ -492,6 +516,7 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
                 if (g_retreat) hostRetreat();
             }
         }
+        LeaveCriticalSection(&g_lock);
     }
 
     unsigned sig = visible ? 1u : 0u;
@@ -513,6 +538,10 @@ extern "C" int __cdecl c4p_draw(C4P_Canvas* canvas)
 {
     if (!canvas || !g_font || !g_visible || !g_text[0])
         return 0;
+    EnterCriticalSection(&g_lock);
+    const int anchorX = g_anchorX;
+    const int anchorY = g_anchorY;
+    LeaveCriticalSection(&g_lock);
     Bitmap bmp(canvas->width, canvas->height, canvas->stride, PixelFormat32bppARGB,
                (BYTE*)canvas->pixels);
     Graphics g(&bmp);
@@ -521,8 +550,20 @@ extern "C" int __cdecl c4p_draw(C4P_Canvas* canvas)
     RectF layout(0.0f, 0.0f, (REAL)canvas->width, (REAL)canvas->height);
     RectF bounds;
     g.MeasureString(g_text, -1, g_font, layout, fmt, &bounds);
-    const REAL x = (canvas->width - bounds.Width) * (g_anchorX / 100.0f);
-    const REAL y = (canvas->height - bounds.Height) * (g_anchorY / 100.0f);
+    // Use one integer extent for both drawing and drag normalization. Mixing the fractional GDI+
+    // measure with a rounded hit rectangle produces a visible sub-pixel re-anchor on first move.
+    const int textWidth = (int)(bounds.Width + 0.999f);
+    const int textHeight = (int)(bounds.Height + 0.999f);
+    const REAL x = (canvas->width - textWidth) * (anchorX / 10000.0f);
+    const REAL y = (canvas->height - textHeight) * (anchorY / 10000.0f);
+    EnterCriticalSection(&g_lock);
+    g_canvasWidth = canvas->width;
+    g_canvasHeight = canvas->height;
+    g_hitLeft = (int)x;
+    g_hitTop = (int)y;
+    g_hitWidth = textWidth;
+    g_hitHeight = textHeight;
+    LeaveCriticalSection(&g_lock);
     const REAL w = (REAL)canvas->width, h = (REAL)canvas->height;
     Color shadowCol(g_shadowColor);
     SolidBrush shadowBrush(shadowCol);
@@ -533,6 +574,78 @@ extern "C" int __cdecl c4p_draw(C4P_Canvas* canvas)
     RectF textRect(x, y, w, h);
     g.DrawString(g_text, -1, g_font, textRect, fmt, &textBrush);
     return 1;
+}
+
+// Optional input export. The host forwards physical game-client coordinates while its layered
+// overlay remains click-through. This mirrors timer.mod: Ctrl+Alt+LMB captures the point inside the
+// rendered clock, then the same point stays under the cursor throughout the drag (no initial jump).
+extern "C" int __cdecl c4p_mouse(UINT msg, WPARAM, int x, int y)
+{
+    if (!g_host)
+        return 0;
+
+    if (msg == WM_LBUTTONDOWN) {
+        if (GetKeyState(VK_CONTROL) >= 0 || GetKeyState(VK_MENU) >= 0)
+            return 0;
+        EnterCriticalSection(&g_lock);
+        const bool hit = g_visible && g_hitWidth > 0 && x >= g_hitLeft && y >= g_hitTop &&
+                         x < g_hitLeft + g_hitWidth && y < g_hitTop + g_hitHeight;
+        if (hit) {
+            g_dragging = 1;
+            g_dragDx = x - g_hitLeft;
+            g_dragDy = y - g_hitTop;
+        }
+        LeaveCriticalSection(&g_lock);
+        if (!hit)
+            return 0;
+        SetCapture(g_host->get_hwnd());
+        return 1;
+    }
+
+    if (msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP) {
+        int anchorX = 0, anchorY = 0;
+        EnterCriticalSection(&g_lock);
+        if (!g_dragging) {
+            LeaveCriticalSection(&g_lock);
+            return 0;
+        }
+        const int freeX = g_canvasWidth > g_hitWidth ? g_canvasWidth - g_hitWidth : 0;
+        const int freeY = g_canvasHeight > g_hitHeight ? g_canvasHeight - g_hitHeight : 0;
+        int left = x - g_dragDx;
+        int top = y - g_dragDy;
+        if (left < 0) left = 0; else if (left > freeX) left = freeX;
+        if (top < 0) top = 0; else if (top > freeY) top = freeY;
+        g_anchorX = freeX ? (left * 10000 + freeX / 2) / freeX : 0;
+        g_anchorY = freeY ? (top * 10000 + freeY / 2) / freeY : 0;
+        g_hitLeft = left;
+        g_hitTop = top;
+        anchorX = g_anchorX;
+        anchorY = g_anchorY;
+        if (msg == WM_LBUTTONUP)
+            g_dragging = 0;
+        LeaveCriticalSection(&g_lock);
+
+        g_host->invalidate();
+        if (msg == WM_LBUTTONUP) {
+            // Persist only on drop, retaining the old whole-percent keys for config readability.
+            g_host->set_config_int(iniSection(), "AnchorX10000", anchorX);
+            g_host->set_config_int(iniSection(), "AnchorY10000", anchorY);
+            g_host->set_config_int(iniSection(), "AnchorX", (anchorX + 50) / 100);
+            g_host->set_config_int(iniSection(), "AnchorY", (anchorY + 50) / 100);
+            if (GetCapture() == g_host->get_hwnd())
+                ReleaseCapture();
+        }
+        return 1;
+    }
+
+    if (msg == WM_CANCELMODE || msg == WM_CAPTURECHANGED) {
+        EnterCriticalSection(&g_lock);
+        const int wasDragging = g_dragging;
+        g_dragging = 0;
+        LeaveCriticalSection(&g_lock);
+        return wasDragging;
+    }
+    return 0;
 }
 
 extern "C" void __cdecl c4p_shutdown(void)
@@ -638,6 +751,8 @@ INT_PTR CALLBACK setDlgProc(HWND h, UINT m, WPARAM w, LPARAM)
             }
             g_pausedAt = now;
             g_running = 1; // a set time implies the clock is active
+            g_elapseFired = 0;
+            hostCancelElapse();
             LeaveCriticalSection(&g_lock);
             if (g_host) g_host->invalidate();
             EndDialog(h, 1);
@@ -723,6 +838,7 @@ extern "C" void __cdecl c4p_command(int cmd)
         const int target = (off == kForceOn) ? 2 : 1;
         g_state = (g_state == target) ? 0 : target;
         if (g_state) restart();
+        else { g_elapseFired = 0; hostCancelElapse(); }
         g_paused = 0;
         persist("Enabled", g_state);
         break;
@@ -743,7 +859,11 @@ extern "C" void __cdecl c4p_command(int cmd)
     case kCombatPvP:
     case kCombatPvAny:     g_pauseOn = off - kCombatOff;        persist("PauseOn", g_pauseOn); break;
     case kAnimPause:       g_pauseAnim = !g_pauseAnim;          persist("PauseAnimation", g_pauseAnim); break;
-    case kElapseEndDay:    g_turnDay = !g_turnDay;              persist("TurnDay", g_turnDay); break;
+    case kElapseEndDay:
+        g_turnDay = !g_turnDay;
+        if (!g_turnDay) { g_elapseFired = 0; hostCancelElapse(); }
+        persist("TurnDay", g_turnDay);
+        break;
     case kElapseRetreat:   g_retreat = !g_retreat;             persist("Retreat", g_retreat); break;
     case kResetExtra:      g_resetExtra = !g_resetExtra;        persist("ResetExtraTime", g_resetExtra); break;
     case kAlwaysVis:       g_alwaysVisible = !g_alwaysVisible;  persist("AlwaysVisible", g_alwaysVisible); break;

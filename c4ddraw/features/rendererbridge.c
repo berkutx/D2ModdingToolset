@@ -15,6 +15,36 @@
 #include "debug.h"
 #include "mouse.h"
 #include "screenshot.h"
+#include "utils.h"
+
+extern const void* DDGetDecoratedSurface(
+    const void* source, int width, int height, int pitch, int bpp, int rgb555);
+
+/*
+ * Keep cnc-ddraw's live fake desktop geometry aligned with a validated Hor+
+ * canvas. Disciples II clamps its requested windowed mode to
+ * GetSystemMetrics() before looking it up in the DirectDraw mode list. Leaving
+ * the persisted 1024x768 fallback in memory for a 1280x720 canvas would create
+ * the impossible key 1024x720x16. This is process-local and does not rewrite
+ * ddraw.ini.
+ */
+void DDSetGameCanvasMetrics(int width, int height)
+{
+    if (width >= 800 && height >= 600)
+        wsprintfA(g_config.fake_mode, "%dx%dx16", width, height);
+}
+
+/* A game-side bordered-dialog transition can happen without a renderer config
+ * change. Force OpenGL/D3D9 to upload the corresponding raw/decorated frame. */
+void DDInvalidateDecorativeFrame(void)
+{
+    if (!g_ddraw.ref)
+        return;
+
+    InterlockedExchange(&g_ddraw.render.surface_updated, TRUE);
+    if (g_ddraw.render.sem)
+        ReleaseSemaphore(g_ddraw.render.sem, 1, NULL);
+}
 
 /*
  * DisciplesGL 2.0.2 "simple zoom" state. Keep this in the wrapper-owned bridge rather than an
@@ -25,6 +55,12 @@
 static volatile LONG g_simple_zoom_1000 = 1000; /* 1.0 .. 8.0 */
 static volatile LONG g_simple_anchor_x_100000 = 50000; /* client point / outer window width */
 static volatile LONG g_simple_anchor_y_100000 = 50000; /* client point / outer window height */
+
+/* Menu-side status only: a zoomed viewport is no longer a true 1:1 presentation. */
+int DDGetSimpleZoom1000(void)
+{
+    return (int)InterlockedExchangeAdd(&g_simple_zoom_1000, 0);
+}
 
 /*
  * Exact wheel policy from DisciplesGL 2.0.2:
@@ -100,7 +136,10 @@ void DDApplySimpleZoomViewport(int bottom_origin, int* x, int* y, int* width, in
     *height = (int)(base_h * zoom);
 }
 
-void DDReloadConfig(void)
+static void dd_reload_config(
+    BOOL preserve_output_size,
+    BOOL preserve_display_mode,
+    BOOL clear_pending_display_mode)
 {
     TRACE("%s [%p]\n", __FUNCTION__, _ReturnAddress());
 
@@ -109,13 +148,52 @@ void DDReloadConfig(void)
 
     LONG saved_left = g_config.window_rect.left;
     LONG saved_top = g_config.window_rect.top;
+    LONG saved_width = g_config.window_rect.right;
+    LONG saved_height = g_config.window_rect.bottom;
+    BOOL saved_windowed = g_config.windowed;
+    BOOL saved_fullscreen = g_config.fullscreen;
+    BOOL saved_toggle_borderless = g_config.toggle_borderless;
+    BOOL saved_toggle_upscaled = g_config.toggle_upscaled;
+    BOOL saved_singlecpu = g_config.singlecpu;
     cfg_load();
+    /* singlecpu is startup-latched. A later live renderer reload must not expose its pending
+     * next-start value to DLL_THREAD_ATTACH while existing threads retain the startup policy. */
+    g_config.singlecpu = saved_singlecpu;
     if (g_config.window_rect.left == -32000)
         g_config.window_rect.left = saved_left;
     if (g_config.window_rect.top == -32000)
         g_config.window_rect.top = saved_top;
+    if (preserve_output_size)
+    {
+        g_config.window_rect.right = saved_width;
+        g_config.window_rect.bottom = saved_height;
+    }
+    if (preserve_display_mode)
+    {
+        g_config.windowed = saved_windowed;
+        g_config.fullscreen = saved_fullscreen;
+        g_config.toggle_borderless = saved_toggle_borderless;
+        g_config.toggle_upscaled = saved_toggle_upscaled;
+    }
+    if (clear_pending_display_mode)
+    {
+        /*
+         * An explicit menu choice has already been written to the effective ini section. Do not
+         * let window_state/upscaled_state left by an earlier hotkey overwrite it in cfg_save().
+         */
+        g_config.window_state = -1;
+        g_config.upscaled_state = -1;
+    }
 
+    /*
+     * C4dll-R owns its normal-window menu. Migrated/custom cnc-ddraw configs may contain
+     * remove_menu=true; letting dd_SetDisplayMode consume our freshly attached bar would create an
+     * attach/remove loop on every health poll. Preserve the setting, but suppress it for our relayout.
+     */
+    BOOL saved_remove_menu = g_config.remove_menu;
+    g_config.remove_menu = FALSE;
     dd_SetDisplayMode(0, 0, 0, 0);
+    g_config.remove_menu = saved_remove_menu;
 
     if (g_mouse_locked)
     {
@@ -129,32 +207,277 @@ void DDReloadConfig(void)
     RedrawWindow(g_ddraw.hwnd, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_UPDATENOW);
 }
 
+void DDReloadConfig(void)
+{
+    dd_reload_config(FALSE, FALSE, FALSE);
+}
+
+/*
+ * Menu reload policy is two-dimensional. A width/height choice applies the newly written output
+ * while preserving a live hotkey mode; a display-mode choice applies the newly written mode while
+ * preserving a manual resize; every other choice preserves both. Explicit mode selection also
+ * supersedes pending window_state/upscaled_state left by an earlier F4/Alt+Enter.
+ */
+void DDReloadConfigForMenu(int output_size_changed, int display_mode_changed)
+{
+    dd_reload_config(
+        output_size_changed ? FALSE : TRUE,
+        display_mode_changed ? FALSE : TRUE,
+        display_mode_changed ? TRUE : FALSE);
+}
+
+/*
+ * Recompute the window/client/viewport after C4dll-R attaches or detaches its Win32 menu.
+ * Unlike DDReloadConfig(), this deliberately keeps the live mode selected by cnc-ddraw's
+ * Alt+Enter hotkey instead of re-reading and restoring the persisted ddraw.ini state.
+ */
+void DDRelayoutCurrentMode(void)
+{
+    TRACE("%s [%p]\n", __FUNCTION__, _ReturnAddress());
+
+    if (!g_ddraw.ref || !g_ddraw.hwnd || !g_ddraw.width)
+        return;
+
+    BOOL saved_remove_menu = g_config.remove_menu;
+    g_config.remove_menu = FALSE;
+    dd_SetDisplayMode(0, 0, 0, 0);
+    g_config.remove_menu = saved_remove_menu;
+
+    if (g_mouse_locked)
+    {
+        mouse_unlock();
+        mouse_lock();
+    }
+
+    InterlockedExchange(&g_ddraw.render.clear_screen, TRUE);
+    if (g_ddraw.render.sem)
+        ReleaseSemaphore(g_ddraw.render.sem, 1, NULL);
+    RedrawWindow(g_ddraw.hwnd, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_UPDATENOW);
+}
+
+/* 0 = normal window, 1 = borderless, 2 = exclusive, -1 = renderer not ready. */
+int DDGetDisplayMode(void)
+{
+    if (!g_ddraw.ref || !g_ddraw.hwnd || !g_ddraw.width)
+        return -1;
+
+    return !g_config.windowed ? 2 : (g_config.fullscreen ? 1 : 0);
+}
+
+/*
+ * C4dll-R <=1.4 persisted exclusive as windowed=false, fullscreen=true. cnc-ddraw treats
+ * fullscreen as a desktop-output modifier, so leaving that stale live bit set makes the first
+ * Alt+Enter land in borderless. Normalize only this unambiguous legacy pair.
+ */
+void DDNormalizeLegacyExclusive(void)
+{
+    if (!g_config.windowed && g_config.fullscreen)
+    {
+        g_config.fullscreen = FALSE;
+        g_config.toggle_borderless = FALSE;
+    }
+}
+
+/* Logical DirectDraw surface width requested by the game, not the output/window width. */
+int DDGetGameWidth(void)
+{
+    return g_ddraw.ref ? (int)g_ddraw.width : 0;
+}
+
+/*
+ * Live geometry after cnc-ddraw has applied output scaling, desktop borderless sizing and any
+ * exclusive display-mode fallback. The menu uses this instead of duplicating renderer arithmetic.
+ */
+int DDGetScaleMetrics(
+    int* game_width,
+    int* game_height,
+    int* output_width,
+    int* output_height,
+    int* viewport_x,
+    int* viewport_y,
+    int* viewport_width,
+    int* viewport_height)
+{
+    if (!g_ddraw.ref || !g_ddraw.hwnd || !g_ddraw.width || !g_ddraw.height)
+        return 0;
+
+    if (game_width)
+        *game_width = (int)g_ddraw.width;
+    if (game_height)
+        *game_height = (int)g_ddraw.height;
+    if (output_width)
+        *output_width = (int)g_ddraw.render.width;
+    if (output_height)
+        *output_height = (int)g_ddraw.render.height;
+    if (viewport_x)
+        *viewport_x = (int)g_ddraw.render.viewport.x;
+    if (viewport_y)
+        *viewport_y = (int)g_ddraw.render.viewport.y;
+    if (viewport_width)
+        *viewport_width = (int)g_ddraw.render.viewport.width;
+    if (viewport_height)
+        *viewport_height = (int)g_ddraw.render.viewport.height;
+
+    return 1;
+}
+
+/*
+ * The output size that cnc-ddraw currently owns in g_config.  Unlike render.width/height this
+ * remains the normal-window request while borderless uses the desktop. A manual resize updates
+ * this pair immediately. The third result is true only when cfg_save()'s destination cannot be
+ * shadowed by the currently active per-process section on the next start.
+ */
+int DDGetOutputConfig(int* width, int* height, int* persists_next_start)
+{
+    int persists = 0;
+    if (!g_ddraw.ref)
+        return 0;
+
+    if (width)
+        *width = (int)g_config.window_rect.right;
+    if (height)
+        *height = (int)g_config.window_rect.bottom;
+    /*
+     * cfg_save() writes savesettings=1 to [ddraw], and every other nonzero value to
+     * [process_file_name] -- not necessarily to the currently selected game_section. Be
+     * conservative when a /2, /wine, or other active override can shadow that destination.
+     */
+    if (g_config.save_settings == 1) {
+        if (!g_config.game_section[0])
+            persists = 1;
+    } else if (g_config.save_settings != 0) {
+        if (g_config.game_section[0] &&
+            lstrcmpiA(g_config.game_section,
+                      g_config.process_file_name) == 0) {
+            persists = 1;
+        }
+    }
+    if (persists_next_start)
+        *persists_next_start = persists;
+    return 1;
+}
+
+/*
+ * Read/write the same effective section as cnc-ddraw. A matching per-process section overrides
+ * [ddraw]. Explicit menu writes must target that effective section; cfg_save() has its own,
+ * narrower destination policy handled separately above.
+ */
+int DDReadConfigString(
+    const char* key,
+    const char* default_value,
+    char* value,
+    unsigned int capacity)
+{
+    if (!key || !value || !capacity || !g_config.ini_path[0])
+        return 0;
+
+    if (g_config.game_section[0] &&
+        GetPrivateProfileStringA(
+            g_config.game_section, key, "", value, capacity,
+            g_config.ini_path) > 0)
+        return 1;
+
+    GetPrivateProfileStringA(
+        "ddraw", key, default_value ? default_value : "", value, capacity,
+        g_config.ini_path);
+    return 1;
+}
+
+int DDWriteConfigString(const char* key, const char* value)
+{
+    const char* section;
+    if (!key || !value || !g_config.ini_path[0])
+        return 0;
+
+    section = g_config.game_section[0] ? g_config.game_section : "ddraw";
+    return WritePrivateProfileStringA(
+        section, key, value, g_config.ini_path) != FALSE;
+}
+
+/*
+ * F4 is owned by C4dll-R so it also works with an existing ddraw.ini that predates the hotkey.
+ * Remember which kind of fullscreen was left, but always make the return trip a real normal
+ * window. Temporarily selecting cnc-ddraw's borderless toggle gives util_toggle_fullscreen()
+ * the right transition without persisting or reloading the user's configuration.
+ */
+void DDToggleWindowedMode(void)
+{
+    static LONG last_fullscreen_mode = 1; /* safest first transition: normal -> borderless */
+    const int mode = DDGetDisplayMode();
+    BOOL saved_toggle_borderless;
+
+    if (mode < 0)
+        return;
+
+    saved_toggle_borderless = g_config.toggle_borderless;
+
+    if (mode == 0)
+    {
+        if (InterlockedExchangeAdd(&last_fullscreen_mode, 0) == 2)
+        {
+            g_config.fullscreen = FALSE;
+            g_config.toggle_borderless = FALSE;
+        }
+        else
+        {
+            g_config.toggle_borderless = TRUE;
+        }
+    }
+    else
+    {
+        InterlockedExchange(&last_fullscreen_mode, mode);
+        if (mode == 1)
+        {
+            g_config.toggle_borderless = TRUE;
+        }
+        else
+        {
+            /* Old configs sometimes encoded exclusive as false+true. Normalize the live state so
+             * cnc-ddraw's exclusive -> window transition cannot land in borderless instead. */
+            g_config.fullscreen = FALSE;
+            g_config.toggle_borderless = FALSE;
+        }
+    }
+
+    util_toggle_fullscreen();
+    /*
+     * Keep the live transition policy coherent with the mode we just entered. In particular, after
+     * F4 creates borderless from a config whose persisted toggle_borderless was false, Alt+Enter
+     * must return to the window rather than unexpectedly jumping from borderless to exclusive.
+     * Once back in a normal window restore the user's prior preference for the next transition.
+     */
+    {
+        const int after = DDGetDisplayMode();
+        if (after == 1)
+            g_config.toggle_borderless = TRUE;
+        else if (after == 2)
+            g_config.toggle_borderless = FALSE;
+        else
+            g_config.toggle_borderless = saved_toggle_borderless;
+    }
+}
+
 void DDTakeScreenshot(void)
 {
     TRACE("%s [%p]\n", __FUNCTION__, _ReturnAddress());
-    if (g_ddraw.ref && g_ddraw.primary)
-        ss_take_screenshot(g_ddraw.primary);
-}
+    if (!g_ddraw.ref || !g_ddraw.primary)
+        return;
 
-void DDMapClientToGame(long cx, long cy, long* gx, long* gy)
-{
-    int x = (int)cx - g_ddraw.mouse.x_adjust;
-    int y = (int)cy - g_ddraw.mouse.y_adjust;
-    if (g_config.adjmouse && !g_ddraw.child_window_exists)
+    /* Keep screenshots consistent with the presented frame.  Use a shallow
+     * surface descriptor with the presentation-only scratch pointer; the
+     * game-owned primary surface and its lifetime remain untouched. */
+    EnterCriticalSection(&g_ddraw.cs);
+    if (g_ddraw.ref && g_ddraw.primary)
     {
-        x = (int)(x * g_ddraw.mouse.unscale_x + (x >= 0 ? 0.5f : -0.5f));
-        y = (int)(y * g_ddraw.mouse.unscale_y + (y >= 0 ? 0.5f : -0.5f));
+        IDirectDrawSurfaceImpl presented = *g_ddraw.primary;
+        presented.surface = (void*)DDGetDecoratedSurface(
+            g_ddraw.primary->surface,
+            g_ddraw.primary->width,
+            g_ddraw.primary->height,
+            g_ddraw.primary->pitch,
+            g_ddraw.primary->bpp,
+            g_config.rgb555);
+        ss_take_screenshot(&presented);
     }
-    if (x < 0)
-        x = 0;
-    else if (x > (int)g_ddraw.width - 1)
-        x = (int)g_ddraw.width - 1;
-    if (y < 0)
-        y = 0;
-    else if (y > (int)g_ddraw.height - 1)
-        y = (int)g_ddraw.height - 1;
-    if (gx)
-        *gx = x;
-    if (gy)
-        *gy = y;
+    LeaveCriticalSection(&g_ddraw.cs);
 }

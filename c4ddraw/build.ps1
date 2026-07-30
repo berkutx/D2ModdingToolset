@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Build the monolith C4dll-R.dll = pristine upstream cnc-ddraw + our patch + CB63 export
-  forwarder + the DirectDraw embed, in ONE assembly (DisciplesGL-style). No separate ddraw.dll.
+  forwarder + the DirectDraw embed, in one self-contained wrapper. No separate ddraw.dll.
 
 .DESCRIPTION
   Build only:     .\build.ps1
@@ -32,6 +32,8 @@ $patch = Join-Path $root "patches\cnc-ddraw-c4dll-r.patch"
 $patchNull = Join-Path $root "patches\cnc-ddraw-render-null.patch"
 $patchIni = Join-Path $root "patches\cnc-ddraw-default-ini.patch"
 $patchZoom = Join-Path $root "patches\cnc-ddraw-simple-zoom.patch"
+$patchDownscale = Join-Path $root "patches\cnc-ddraw-output-downscale.patch"
+$patchDecorative = Join-Path $root "patches\cnc-ddraw-decorative-background.patch"
 $cb63def = Join-Path $root "forwarder\C4dll-R.cb63.def"
 $out = Join-Path $build "bin\Release\C4dll-R.dll"
 $pluginProj = Join-Path $root "plugins\timer\timer.vcxproj"
@@ -71,7 +73,7 @@ if ($Restore) {
     if (Test-Path $bC4) { Copy-Item $bC4 (Join-Path $Game "C4dll-R.dll") -Force; [System.IO.File]::Delete($bC4) }
     if (Test-Path $dOff) { Move-Item $dOff (Join-Path $Game "ddraw.dll") -Force }
     $depC4p = Join-Path $Game "Mods\timer.c4p"
-    if (Test-Path $depC4p) { [System.IO.File]::Delete($depC4p) }  # remove our plugin -> legacy timer.mod takes over
+    if (Test-Path $depC4p) { [System.IO.File]::Delete($depC4p) }
     Write-Host "Restored vanilla baseline (C4dll-R = CB63 copy, standalone ddraw.dll back, timer.c4p removed)." -ForegroundColor Cyan
     return
 }
@@ -93,13 +95,14 @@ Copy-Item $upstream $build -Recurse -Force
 # the submodule working tree carries a .git gitlink file; drop it so the throwaway git-apply repo below is clean
 Remove-Item (Join-Path $build ".git") -Force -Recurse -ErrorAction SilentlyContinue
 
-Write-Host "[3/6] apply our patches (embed + render_null + defaults + simple zoom)" -ForegroundColor Cyan
+Write-Host "[3/6] apply our patches (embed + render_null + defaults + zoom + downscale + decorative seam)" -ForegroundColor Cyan
 # Apply inside a throwaway repo so git apply resolves paths cleanly (it "Skipped patch" when
 # run outside a working tree). autocrlf=false keeps the patch context matching the upstream EOLs.
-# Four patches: the minimal C4dll-R integration point (dllmain.c only) + render-null
+# Six patches: the minimal C4dll-R integration point (dllmain.c only) + render-null
 # (dd.c renderer branch + vcxproj + inc/render_null.h + src/render_null.c) + default-ini
 # (config.c cfg_create_ini: the Disciples II tuned ddraw.ini generated on first run)
-# + the narrow WndProc/final-render integration for wrapper-owned Ctrl+Wheel simple zoom.
+# + the narrow WndProc/final-render integration for wrapper-owned Ctrl+Wheel simple zoom
+# + filtered output downscaling with matching mouse-coordinate remapping.
 Push-Location $build
 try {
     & git init -q
@@ -113,6 +116,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "git apply (default-ini) failed (exit $LASTEXITCODE)" }
     & git -c core.autocrlf=false apply --ignore-whitespace "$patchZoom"
     if ($LASTEXITCODE -ne 0) { throw "git apply (simple zoom) failed (exit $LASTEXITCODE)" }
+    & git -c core.autocrlf=false apply --ignore-whitespace "$patchDownscale"
+    if ($LASTEXITCODE -ne 0) { throw "git apply (output downscale) failed (exit $LASTEXITCODE)" }
+    & git -c core.autocrlf=false apply --ignore-whitespace "$patchDecorative"
+    if ($LASTEXITCODE -ne 0) { throw "git apply (decorative-background seam) failed (exit $LASTEXITCODE)" }
 }
 finally { Pop-Location }
 if (-not (Select-String -Path (Join-Path $build "src\dllmain.c") -Pattern "c4features_install" -Quiet)) {
@@ -127,6 +134,14 @@ if (-not (Select-String -Path (Join-Path $build "src\config.c") -Pattern "fake_m
 if (-not (Select-String -Path (Join-Path $build "src\wndproc.c") -Pattern "DDHandleSimpleZoom" -Quiet)) {
     throw "simple-zoom patch did not apply: DDHandleSimpleZoom missing from src/wndproc.c"
 }
+if (-not (Select-String -Path (Join-Path $build "src\dd.c") -Pattern "allow_downscale" -Quiet)) {
+    throw "output-downscale patch did not apply: allow_downscale missing from src/dd.c"
+}
+foreach ($rendererSource in @("render_ogl.c", "render_d3d9.c", "render_gdi.c")) {
+    if (-not (Select-String -Path (Join-Path $build "src\$rendererSource") -Pattern "DDGetDecoratedSurface" -Quiet)) {
+        throw "decorative-background patch did not apply: adapter missing from $rendererSource"
+    }
+}
 
 # Add our self-contained C4dll-R sources. They are NOT part of upstream cnc-ddraw; the integration
 # patch only redirects DirectDraw imports and calls c4features_install() from DllMain. Renderer
@@ -134,6 +149,39 @@ if (-not (Select-String -Path (Join-Path $build "src\wndproc.c") -Pattern "DDHan
 Copy-Item (Join-Path $root "features\c4features.cpp") (Join-Path $build "src\c4features.cpp") -Force
 Copy-Item (Join-Path $root "features\rendererbridge.c") (Join-Path $build "src\rendererbridge.c") -Force
 Copy-Item (Join-Path $root "features\featuremenu.cpp") (Join-Path $build "src\featuremenu.cpp") -Force
+Copy-Item (Join-Path $root "features\featuremenu_resources.h") (Join-Path $build "src\featuremenu_resources.h") -Force
+Copy-Item (Join-Path $root "features\featuremenu_resources.rc") (Join-Path $build "src\featuremenu_resources.rc") -Force
+Copy-Item (Join-Path $root "features\horplus.cpp") (Join-Path $build "src\horplus.cpp") -Force
+Copy-Item (Join-Path $root "features\widebattle.cpp") (Join-Path $build "src\widebattle.cpp") -Force
+Copy-Item (Join-Path $root "features\decorative.cpp") (Join-Path $build "src\decorative.cpp") -Force
+Copy-Item (Join-Path $root "features\clouds.cpp") (Join-Path $build "src\clouds.cpp") -Force
+Copy-Item (Join-Path $root "features\DLG_BATTLE_B.dlg") (Join-Path $build "src\DLG_BATTLE_B.dlg") -Force
+# The upstream DisciplesGL resource is a 3728-byte ASCII/CRLF stream. Git may materialize our text
+# source with LF only; normalize the generated build copy so fgetsHook sees the exact known-good bytes.
+$wideDlg = Join-Path $build "src\DLG_BATTLE_B.dlg"
+$wideDlgText = [IO.File]::ReadAllText($wideDlg)
+$wideDlgText = [regex]::Replace($wideDlgText, "\r?\n", "`r`n")
+[IO.File]::WriteAllText($wideDlg, $wideDlgText, [Text.Encoding]::ASCII)
+$wideDlgHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $wideDlg).Hash
+if ($wideDlgHash -ne "1F42AC95F97F6D36E575385525E9667E7416C9DAD1007A11827749B2728B8F75") {
+    throw "DLG_BATTLE_B resource differs from the reviewed DisciplesGL layout ($wideDlgHash)"
+}
+$decorDir = Join-Path $build "src\decor"
+New-Item -ItemType Directory -Force -Path $decorDir | Out-Null
+$decorAssets = @{
+    "back.png" = "42803D006490416A8EC913F8FDF7769BCDA95A4FDBE370E1C1B8119E4C1A2154"
+    "alt.png" = "412723496E2ED180BFEAE5E15CE3DB9126959284692F25CF16D4F4324DF31E9B"
+    "alt_widest.png" = "941D8ADD8F46F5930EFF71CF4A425D1EC2A446FED5AAB775AE324403995B7D51"
+}
+foreach ($asset in $decorAssets.Keys) {
+    $source = Join-Path $root ("features\decor\" + $asset)
+    $target = Join-Path $decorDir $asset
+    Copy-Item -LiteralPath $source -Destination $target -Force
+    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash
+    if ($hash -ne $decorAssets[$asset]) {
+        throw "decorative DisciplesGL resource differs from the reviewed asset: $asset ($hash)"
+    }
+}
 Copy-Item (Join-Path $root "features\pluginhost.cpp") (Join-Path $build "src\pluginhost.cpp") -Force
 Copy-Item (Join-Path $root "features\localization.cpp") (Join-Path $build "src\localization.cpp") -Force
 Copy-Item (Join-Path $root "features\savelogic.cpp") (Join-Path $build "src\savelogic.cpp") -Force
@@ -144,7 +192,7 @@ Copy-Item (Join-Path $root "features\c4plugin.h") (Join-Path $build "src\c4plugi
 if (-not (Select-String -Path (Join-Path $build "src\rendererbridge.c") -Pattern "DDReloadConfig" -Quiet)) {
     throw "C4dll-R source copy failed: DDReloadConfig missing from src/rendererbridge.c"
 }
-foreach ($sym in @("localization_install", "savelogic_install", "cursorfix_install", "featuremenu_install", "pluginhost_install", "headless_install")) {
+foreach ($sym in @("localization_install", "savelogic_install", "cursorfix_install", "horplus_install", "widebattle_install", "decorative_install", "clouds_install", "featuremenu_install", "pluginhost_install", "headless_install")) {
     if (-not (Select-String -Path (Join-Path $build "src\c4features.cpp") -Pattern $sym -Quiet)) {
         throw "feature bootstrap incomplete: $sym() call missing"
     }
@@ -164,12 +212,12 @@ $vcx = Join-Path $build "cnc-ddraw.vcxproj"
     -replace '<ClCompile>', "<ClCompile>`r`n      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>" `
     -replace '<TargetName>ddraw</TargetName>', '<TargetName>C4dll-R</TargetName>' `
     -replace '<ModuleDefinitionFile>exports\.def</ModuleDefinitionFile>', '<ModuleDefinitionFile>C4dll-R.def</ModuleDefinitionFile>' `
-    -replace '<ClCompile Include="src\\dllmain\.c" />', "<ClCompile Include=`"src\rendererbridge.c`" />`r`n    <ClCompile Include=`"src\c4features.cpp`" />`r`n    <ClCompile Include=`"src\featuremenu.cpp`" />`r`n    <ClCompile Include=`"src\pluginhost.cpp`" />`r`n    <ClCompile Include=`"src\localization.cpp`" />`r`n    <ClCompile Include=`"src\savelogic.cpp`" />`r`n    <ClCompile Include=`"src\cursorfix.cpp`" />`r`n    <ClCompile Include=`"src\timerhost.cpp`" />`r`n    <ClCompile Include=`"src\headless.cpp`" />`r`n    <ClCompile Include=`"src\dllmain.c`" />" |
+    -replace '<ClCompile Include="src\\dllmain\.c" />', "<ClCompile Include=`"src\rendererbridge.c`" />`r`n    <ClCompile Include=`"src\c4features.cpp`" />`r`n    <ClCompile Include=`"src\featuremenu.cpp`" />`r`n    <ClCompile Include=`"src\horplus.cpp`" />`r`n    <ClCompile Include=`"src\widebattle.cpp`" />`r`n    <ClCompile Include=`"src\decorative.cpp`" />`r`n    <ClCompile Include=`"src\clouds.cpp`" />`r`n    <ClCompile Include=`"src\pluginhost.cpp`" />`r`n    <ClCompile Include=`"src\localization.cpp`" />`r`n    <ClCompile Include=`"src\savelogic.cpp`" />`r`n    <ClCompile Include=`"src\cursorfix.cpp`" />`r`n    <ClCompile Include=`"src\timerhost.cpp`" />`r`n    <ClCompile Include=`"src\headless.cpp`" />`r`n    <ClCompile Include=`"src\dllmain.c`" />" |
 Set-Content -Path $vcx -Encoding UTF8
 if (-not (Select-String -Path $vcx -SimpleMatch '<AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>' -Quiet)) {
     throw "vcxproj retarget failed: compiler UTF-8 source/execution charset missing"
 }
-foreach ($src in @('rendererbridge\.c', 'c4features\.cpp', 'featuremenu\.cpp', 'pluginhost\.cpp', 'localization\.cpp', 'savelogic\.cpp', 'cursorfix\.cpp', 'timerhost\.cpp', 'headless\.cpp')) {
+foreach ($src in @('rendererbridge\.c', 'c4features\.cpp', 'featuremenu\.cpp', 'horplus\.cpp', 'widebattle\.cpp', 'decorative\.cpp', 'clouds\.cpp', 'pluginhost\.cpp', 'localization\.cpp', 'savelogic\.cpp', 'cursorfix\.cpp', 'timerhost\.cpp', 'headless\.cpp')) {
     if (-not (Select-String -Path $vcx -Pattern $src -Quiet)) {
         throw "vcxproj retarget failed: $src not added to the project"
     }
@@ -203,9 +251,26 @@ $rcRaw = $rcRaw -replace '"OriginalFileName",\s*"ddraw\.dll"', '"OriginalFileNam
 $rcRaw = $rcRaw -replace '"ProductName",\s*"cnc-ddraw"', '"ProductName", "C4dll-R"'
 $rcRaw = $rcRaw -replace '"FileVersion",\s*VERSION_STRING[^\r\n]*', ('"FileVersion", "' + $verValue + '"')
 $rcRaw = $rcRaw -replace '"ProductVersion",\s*VERSION_STRING[^\r\n]*', ('"ProductVersion", "' + $verValue + '"')
+$rcRaw += "`r`n// Embedded 990-wide battle dialog (DisciplesGL-compatible text format).`r`n"
+$rcRaw += "10 RCDATA DISCARDABLE `"src\\DLG_BATTLE_B.dlg`"`r`n"
+$rcRaw += "`r`n// DisciplesGL Alternative decorative background/frame resources.`r`n"
+$rcRaw += "2200 RCDATA DISCARDABLE `"src\\decor\\back.png`"`r`n"
+$rcRaw += "2201 RCDATA DISCARDABLE `"src\\decor\\alt.png`"`r`n"
+$rcRaw += "2202 RCDATA DISCARDABLE `"src\\decor\\alt_widest.png`"`r`n"
+$rcRaw += "`r`n// C4dll-R window/output-size dialog.`r`n"
+$rcRaw += "#include `"src\\featuremenu_resources.rc`"`r`n"
 Set-Content -Path $rc -Value $rcRaw -Encoding ASCII
 if (-not (Select-String -Path $rc -Pattern 'C4dll-R renderer for Disciples II' -Quiet)) {
     throw "res.rc version stamp failed"
+}
+if (-not (Select-String -Path $rc -SimpleMatch '10 RCDATA DISCARDABLE "src\\DLG_BATTLE_B.dlg"' -Quiet)) {
+    throw "res.rc WideBattle dialog resource missing"
+}
+if (-not (Select-String -Path $rc -SimpleMatch '2200 RCDATA DISCARDABLE "src\\decor\\back.png"' -Quiet)) {
+    throw "res.rc decorative background resource missing"
+}
+if (-not (Select-String -Path $rc -SimpleMatch '#include "src\\featuremenu_resources.rc"' -Quiet)) {
+    throw "res.rc output-size dialog resource missing"
 }
 Write-Host ("  version: {0} (git {1})" -f $Version, $mainSha)
 
@@ -231,8 +296,8 @@ if (-not $wideImage.Contains($russianGameLabel)) {
 }
 Write-Host "  menu localization: UTF-8 -> UTF-16 validation passed" -ForegroundColor Green
 
-# Build the native timer plugin (timer.c4p). Self-contained Win32 DLL (GDI+, static CRT, embedded
-# clock font) reconstructed from the legacy timer.mod; the host (pluginhost) drives its turn reset.
+# Build the native timer plugin (timer.c4p). Self-contained Win32 DLL (GDI+, static CRT, system-font
+# fallback); on MNS/SMNS the host drives its turn reset and timeout actions.
 Write-Host "[7/7] build timer.c4p plugin" -ForegroundColor Cyan
 $pbArgs = @($pluginProj, '/t:Rebuild', '/p:Configuration=Release', '/p:Platform=Win32',
     "/p:PlatformToolset=$Toolset", '/nologo', '/v:minimal')
@@ -253,5 +318,5 @@ if ($Deploy) {
     if (-not (Test-Path $modsDir)) { New-Item -ItemType Directory -Force -Path $modsDir | Out-Null }
     Copy-Item $pluginOut (Join-Path $modsDir "timer.c4p") -Force                            # native timer plugin
     Write-Host "Deployed monolith C4dll-R.dll + Mods\timer.c4p; standalone ddraw.dll parked." -ForegroundColor Green
-    Write-Host "(legacy Mods\timer.mod, if present, is auto-superseded by timer.c4p. .\build.ps1 -Restore to revert)" -ForegroundColor Green
+    Write-Host "(.\build.ps1 -Restore restores the previous wrapper and removes timer.c4p)" -ForegroundColor Green
 }

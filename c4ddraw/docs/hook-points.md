@@ -1,9 +1,13 @@
 # C4dll-R hook points (game join points)
 
 Every place C4dll-R attaches to `Discipl2.exe`, plus its version-independent Win32 API hooks.
-**All explicit game addresses are for the Russobit build** (exe size **4187648**, "Rise of the
-Elves"); address-based menu/features refuse to install on any other version (`detectVersion()`
-gate). Structure offsets are version-independent (from the D2ModdingToolset headers) unless noted.
+Most gameplay hooks still target the validated MNS/SMNS layout (reference exe size
+**4187648**; the **4214272** custom-icon variant is treated as the same code layout).
+The two exceptions are **game resolution (Hor+)** and **Widescreen Battle**: they select one of the
+nine original Disciples II 2.00-3.01 address layouts by PE `ProductVersion` plus that row's code
+probe. An unknown version or a mismatched signature leaves those menu items disabled and writes no
+game bytes. All other address-based features retain the `detectVersion()` MNS/SMNS gate.
+Structure offsets are version-independent (from the D2ModdingToolset headers) unless noted.
 Verified against `.idare/Discipl2.exe.i64`.
 
 Hook kinds: **IAT** = import-table swap, **Detour** = MS-Detours trampoline, **vftable** = vtable-slot
@@ -31,9 +35,10 @@ plugin and game file I/O passes through unchanged.
 | Kind | Address | Purpose |
 | --- | --- | --- |
 | Detour | `0x562E0F` | game WndProc — receive `WM_COMMAND` (menu), our 32 ms `WM_TIMER` pump, drag-scroll |
+| Detour | cnc-ddraw `keyboard_hook_proc` | observe a completed Alt+Enter/custom-hotkey mode change and post GUI-thread menu sync; original hotkey semantics and return value are unchanged |
 | patch | `0x5628BE` | always-active: skip the lose-focus pause |
 | call | `0x401D35` | `CMidgard::instance()` → `data(+8) → settings(+60)` = `GameSettings**` (battle/player/opponent speed) |
-| exports | `DDReloadConfig` / `DDTakeScreenshot` | own exports: live re-apply `ddraw.ini` / screenshot |
+| bridge | `DDReloadConfig` / `DDTakeScreenshot` / `DDGetScaleMetrics` | live re-apply `ddraw.ini`, screenshot, and actual game/output/viewport geometry for menu diagnostics |
 
 ## Simple zoom + Scenario Editor menu (address-free)
 
@@ -52,7 +57,8 @@ identified by the validated PE size (2895872); all zoom/editor message routing i
 | Kind | Address | Purpose |
 | --- | --- | --- |
 | IAT | `0x6CE420` (`winmm!timeGetTime`) | virtual clock: scale battle/map animation (factor/10), gated by `g_inBattle` |
-| vftable | `0x6F4294` (IBatViewer) | battle discriminator. slots: [0] dtor `0x645900`, [1] update `0x630DE3`, **[2] showAttackEffect `0x63203B`** (attack-burst pulse), [3] battleEnd `0x631FFC` |
+| vftable | `0x6F4294` (IBatViewer) | battle discriminator. slots: [0] dtor `0x645900`, [1] choose-action handler `0x630DE3`, **[2] showAttackEffect `0x63203B`** (attack-start pulse), [3] battleEnd `0x631FFC` |
+| patched call | `0x638AD9` (original `0x639743`) | exact attack-end pulse after `CBatViewerUtils::CAnimCounter` reaches zero; 14-byte context signature at `0x638AD0` is required |
 | vftable | `0x6F48CC` slot[1] (patch at `0x6F48D0`) | per-unit frame-speed; orig `CBatUnitAnim::update` = `0x65615E` (experimental) |
 | native | `GameSettings.battleSpeed` / `playerSpeed`(+0x168) / `opponentSpeed` | map/battle speed (no hook; written via the CMidgard chain) |
 
@@ -62,6 +68,54 @@ identified by the validated PE size (2895872); all zoom/editor message routing i
 | --- | --- | --- |
 | Detour | `0x48E8A0` | iso-view mouse handler — grab+drag map pan |
 | Detour | `0x54249C` | edge-scroll — suppress while dragging |
+| call | `0x5414BC` | capture the exact map center and its sub-tile screen offset on LMB down |
+| call | `0x541588` | pan from that saved center using `button-down anchor - current cursor` |
+| call | `0x5418BA` | native screen-to-map hit test; prevents drag capture over non-map UI |
+
+## Game resolution / Hor+ (`features/horplus.cpp`, original D2 2.00-3.01 layouts)
+
+The selector uses the same five PE `ProductVersion` values and nine per-build probes as the original
+`AddressSpaceV2` table. Each row supplies the resolution switch, strategic-map allocation/grid and
+drawing sites, limit operands, battle surface class and background-centering site. All derived
+instructions, absolute operands and call targets are validated before the transaction is written.
+The addresses below are the 3.01/R7 reference row; the other eight rows are carried beside it in
+`horplus.cpp` and follow the same derived `+N` relationships.
+
+| Kind | 3.01/R7 reference | Purpose |
+| --- | --- | --- |
+| signature | `0x5676DA` | `push 0x00CA0000` row probe, paired with `ProductVersion 2003.12.11.1` |
+| jump | `0x61A6C5` -> `0x61A72A` | replace the game's logical DirectDraw width/height |
+| patch | `0x402444`, `0x40245A` | accept the expanded image path |
+| patch | sites derived from `0x5191B2`, `0x51D6E0`, `0x5188A2` | resize canvas-dependent allocations |
+| patch | sites derived from `0x5CCA34`, `0x5CC9F5`, `0x48BF35`, `0x488B9E` | resize/enable the strategic grid and minimap path |
+| patch | sites derived from `0x5195BF`, `0x5196CE`, `0x672E84` | redirect width/height limits for canvases above 1152 |
+| call | `0x53DAA9`, `0x48BF35`, `0x5335EC`, `0x487AB9`, `0x487ADB` | surface state and horizontal/vertical drawing offsets |
+| shared call | `0x6482A8`, `0x6482C3` | battle-background centering; normally owned by WideBattle, otherwise installed by Hor+ alone |
+
+## Widescreen Battle (`features/widebattle.cpp`, original D2 2.00-3.01 layouts)
+
+All original bytes and call targets are validated before any write; unsupported executables keep
+the stock battle path. The selector mirrors the original table: five `ProductVersion` values and
+nine layouts (including duplicate-version variants distinguished by their exact code probe). The
+user choice is latched when a battle opens and becomes active only when the game's logical
+DirectDraw width is at least 990. RCDATA `10` contains the reviewed `DLG_BATTLE_B` layout and is
+prepended once through the selected layout's CRT reader while the startup interface database is
+parsed. The addresses below are the 3.01/R7 reference row; `widebattle.cpp` carries and validates
+the corresponding address in every selected row, plus the distinct V2/V3 object offsets and ABI.
+
+| Kind | 3.01/R7 reference | Purpose |
+| --- | --- | --- |
+| signature | `0x62E345` | exact V3 battle-class marker; capability gate only |
+| patch + call | `0x6482A8`, `0x6482C3` | center the battle background for stock/wide layouts |
+| call | `0x62ED86`, `0x62ED9B` (original `0x62F4CE`) | disable stock unit centering in wide battles |
+| call | `0x63289E` (original `0x633FA8`) | remove the left-group mouse-side restriction in wide battles |
+| jump / call | `0x639858`, `0x62F068` | keep both unit groups visible and active |
+| call | `0x62ED48` | select the V3 reversed-group field (`+0x14F6` / `+0x14F7`) |
+| call | `0x62FE08`, `0x62FE36`, `0x6302BC`, `0x6302F0` | initialize both V3 group objects with the correct `+0x1384` / `+0x1398` offsets |
+| call | `0x62F1D2` (original `0x62B9C0`) | install the 990x200/11-sprite battle interface indices |
+| call | `0x63A8A7` (stock branch `0x63AC33`) | correct item-use rectangles for the visible side |
+| call | `0x62E27A`, `0x62E585` | choose `DLG_BATTLE_A` or embedded `DLG_BATTLE_B` |
+| reader | `0x6CE274` (`msvcrt!fgets` IAT) | prepend the embedded wide-dialog definition once, then pass through forever; rows R2/R6 patch their original local reader call instead |
 
 ## Turn timer keystone (`features/timerhost.cpp`)
 
@@ -107,7 +161,7 @@ Detour the event-popup VO-start, arm on a real VO, close after the sample finish
 - `__thiscall` game functions are detoured via `__fastcall(self, dummyEdx, ...)`. `0x4BE403` is
   `__thiscall(this)`; `0x521352` is `__thiscall(this, a2, a3)`.
 - `sub_4BE403` has an `_EH_prolog` frame; the Detours trampoline handles it. All game-memory reads in the
-  hooks are SEH-guarded; the feature is default-OFF and Russobit-gated, so a bad read fails safe.
+  hooks are SEH-guarded; the feature is default-OFF and MNS/SMNS-gated, so a bad read fails safe.
 
 ## Diagnostics
 

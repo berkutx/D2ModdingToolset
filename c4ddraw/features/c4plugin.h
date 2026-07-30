@@ -1,7 +1,7 @@
 /*
  * C4dll-R plugin API v2 (.c4p): BGRA32 overlay DLLs in <game>\mods\, composited over the 8bpp game frame.
  * c4p_draw runs only when the plugin marks itself dirty (host->invalidate); the cached overlay is composited every frame.
- * Turn detection is host-driven so plugins stay portable. Legacy .mod is still loaded (redraws every frame) for back-compat.
+ * Turn detection is host-driven so plugins stay portable. Only native .c4p plugins are loaded.
  */
 #ifndef C4PLUGIN_H
 #define C4PLUGIN_H
@@ -57,13 +57,15 @@ typedef struct C4P_Host
      * is_animating:  1 while a battle attack animation plays (Animation Pause).
      * battle_kind:   0 none / 1 PvP / 2 any combat (Combat Pause PvP vs PvAny).
      * turn_player_id: current turn player identity byte, or -1.
-     * retreat/end_day: on-elapse actions - queue the press (host performs it on its idle WM_TIMER); return 1. */
+     * retreat/end_day: on-elapse actions - queue the press (host performs it on its idle WM_TIMER); return 1.
+     * cancel_elapse: discard queued actions when the clock becomes positive or its turn changes. */
     int(__cdecl* turn_active)(void);
     int(__cdecl* is_animating)(void);
     int(__cdecl* battle_kind)(void);
     int(__cdecl* turn_player_id)(void);
     int(__cdecl* retreat)(void);
     int(__cdecl* end_day)(void);
+    int(__cdecl* cancel_elapse)(void);
 } C4P_Host;
 
 /* Plugin self-report, queried before init. */
@@ -73,8 +75,8 @@ typedef struct C4P_Info
     uint32_t abi_version;  /* must equal C4P_ABI_VERSION */
     const char* id;        /* stable unique id (dedup) */
     const char* name;      /* display name */
-    /* Optional (ABI v2): 12-byte GetId of a legacy .mod this plugin replaces; host drops that .mod. NULL = none. */
-    const uint8_t* supersedes_legacy_id;
+    /* Reserved ABI-v2 pointer slot. Ignored by the host; keep NULL. */
+    const void* reserved_v2;
 } C4P_Info;
 
 /* ---- exports a .c4p must provide (extern "C", __cdecl) ---- */
@@ -100,6 +102,10 @@ HMENU __cdecl c4p_menu(int base_cmd_id);
 
 /* Optional: handle a WM_COMMAND in this plugin's block (base_cmd_id .. base_cmd_id+0xFF). Runs on the game UI thread. */
 void __cdecl c4p_command(int cmd);
+
+/* Optional: receive selected game-window input while the overlay remains click-through. Coordinates
+ * are physical client pixels, matching C4P_Canvas. Return non-zero to consume the message. */
+int __cdecl c4p_mouse(UINT msg, WPARAM wparam, int x, int y);
 
 #ifdef __cplusplus
 }

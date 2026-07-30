@@ -89,6 +89,9 @@ jobs:
           Copy-Item "c4ddraw/release/INSTALL.txt" "$stage/INSTALL.txt"
           Copy-Item "c4ddraw/release/C4plugins.ini" "$stage/C4plugins.ini"
           Copy-Item "c4ddraw/release/ddraw.ini" "$stage/ddraw.ini"
+          Copy-Item "c4ddraw/release/Shaders" "$stage/Shaders" -Recurse
+          Copy-Item "c4ddraw/release/THIRD_PARTY_NOTICES.txt" "$stage/THIRD_PARTY_NOTICES.txt"
+          Copy-Item "LICENSE" "$stage/LICENSE"
           $zip = "C4dll-R-$ver.zip"
           Compress-Archive -Path "$stage" -DestinationPath $zip -Force
           # matching symbols for crash triage, published next to the zip

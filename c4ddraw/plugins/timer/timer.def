@@ -7,3 +7,4 @@ EXPORTS
     c4p_shutdown
     c4p_menu
     c4p_command
+    c4p_mouse
