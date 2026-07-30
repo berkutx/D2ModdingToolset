@@ -1382,6 +1382,26 @@ extern "C" void horplus_install(void)
         return;
     }
 
+    // DisplaySize is more than the stock canvas selector: code outside the
+    // patched size switch still uses it to choose native layout/resources.
+    // In particular, carrying DisplaySize=2 (1280x1024) into a 1600x900 Hor+
+    // request makes the game terminate with -1 during startup.  The legacy
+    // wrapper always based its arbitrary DisplayWidth/DisplayHeight override
+    // on DisplaySize=0, so normalize both new and pre-existing wide requests
+    // before the game reads the remaining startup settings.
+    const ProfileValueSnapshot storedDisplaySize =
+        snapshotProfileValueInSection("Disciple", "DisplaySize");
+    int compatibilityDisplaySize = 0;
+    const bool validCompatibilityDisplaySize =
+        readProfileInt("Disciple", "DisplaySize", &compatibilityDisplaySize);
+    if (storedDisplaySize.present &&
+        (!validCompatibilityDisplaySize || compatibilityDisplaySize != 0) &&
+        !writeProfileIntInSection("Disciple", "DisplaySize", 0)) {
+        OutputDebugStringA(
+            "C4dll-R: Hor+ disabled (could not normalize DisplaySize=0)\n");
+        return;
+    }
+
     InterlockedExchange(&g_activeCanvas[0], requested.width);
     InterlockedExchange(&g_activeCanvas[1], requested.height);
     prepareLegacyZoomState();
@@ -1507,13 +1527,46 @@ extern "C" int horplus_set_requested(int mode, int width, int height)
     }
 
     if (mode == 2) {
-        if (!writeProfileInt("GameCanvasMode", 2))
+        int outputWidth = 0;
+        int outputHeight = 0;
+        int nativeDisplaySize = -1;
+        if (!primaryOutputPixels(&outputWidth, &outputHeight) ||
+            !adaptiveCanvasForOutput(outputWidth, outputHeight,
+                                     nullptr, nullptr,
+                                     &nativeDisplaySize))
             return 0;
-        WritePrivateProfileStringA("Wrapper", "LegacyDisplaySizeMigrated", "1",
-                                   discipleIni());
+
+        const ProfileValueSnapshot oldDisplaySize =
+            snapshotProfileValueInSection("Disciple", "DisplaySize");
+        const ProfileValueSnapshot oldMode =
+            snapshotProfileValue("GameCanvasMode");
+        const ProfileValueSnapshot oldMigration =
+            snapshotProfileValue("LegacyDisplaySizeMigrated");
+        // A wide adaptive canvas uses stock layout 0 as its compatibility
+        // base. A 4:3/5:4 output keeps the actual native DisplaySize selected
+        // by adaptiveCanvasForOutput().
+        const int compatibilityDisplaySize =
+            nativeDisplaySize >= 0 ? nativeDisplaySize : 0;
+        if (!writeProfileIntInSection("Disciple", "DisplaySize",
+                                      compatibilityDisplaySize) ||
+            !writeProfileInt("GameCanvasMode", 2) ||
+            !writeProfileInt("LegacyDisplaySizeMigrated", 1)) {
+            bool restored = restoreProfileValueInSection(
+                "Disciple", "DisplaySize", oldDisplaySize);
+            if (!restoreProfileValue("GameCanvasMode", oldMode))
+                restored = false;
+            if (!restoreProfileValue("LegacyDisplaySizeMigrated", oldMigration))
+                restored = false;
+            if (!restored)
+                OutputDebugStringA(
+                    "C4dll-R: could not fully roll back a failed adaptive-canvas setting write\n");
+            return 0;
+        }
         return 1;
     }
 
+    const ProfileValueSnapshot oldDisplaySize =
+        snapshotProfileValueInSection("Disciple", "DisplaySize");
     const ProfileValueSnapshot oldMode =
         snapshotProfileValue("GameCanvasMode");
     const ProfileValueSnapshot oldWidth =
@@ -1525,10 +1578,15 @@ extern "C" int horplus_set_requested(int mode, int width, int height)
     // native DisplaySize, never start with a mixed pair. If a normal API write
     // fails, restore the exact previous strings before reporting failure.
     if (!writeProfileInt("GameCanvasMode", 0) ||
+        !writeProfileIntInSection("Disciple", "DisplaySize", 0) ||
         !writeProfileInt("GameCanvasWidth", width) ||
         !writeProfileInt("GameCanvasHeight", height) ||
         !writeProfileInt("GameCanvasMode", 1)) {
-        if (!restoreRequestedCanvas(oldMode, oldWidth, oldHeight))
+        bool restored = restoreRequestedCanvas(oldMode, oldWidth, oldHeight);
+        if (!restoreProfileValueInSection("Disciple", "DisplaySize",
+                                          oldDisplaySize))
+            restored = false;
+        if (!restored)
             OutputDebugStringA(
                 "C4dll-R: could not fully roll back a failed Hor+ setting write\n");
         return 0;

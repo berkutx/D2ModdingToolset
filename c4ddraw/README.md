@@ -205,6 +205,9 @@ The equal-height pairs make the relationship easy to compare: 800x600 -> 1066x60
 1024x768 -> 1366x768, and 1280x1024 -> 1820x1024. Widescreen expands the logical map view rather
 than stretching the output. Explicit `GameCanvasMode=0` selects the stock `DisplaySize`;
 `GameCanvasMode=1` keeps an explicitly selected Hor+ canvas; `GameCanvasMode=2` is monitor-adaptive.
+While either wide mode is selected, the wrapper stores `DisplaySize=0` as the game's compatibility
+base. The Hor+ width and height remain authoritative; keeping `DisplaySize=2` from an earlier native
+1280x1024 choice can make some wide combinations (notably 1600x900) terminate during startup.
 When the key is absent on a recognized layout, adaptive mode is the default. For example, 1920x1080
 selects Hor+ 1920x1080 at 1x, 3840x2160 selects Hor+ 1920x1080 at 2x, and 1280x1024 selects the
 game's stock 1280x1024 mode. Manual stock and Hor+ selections are never replaced by the automation.
@@ -713,7 +716,11 @@ Lanczos, `savesettings=1`) - удалите его, если хотите сра
 1280x1024 -> 1820x1024. Широкий кадр расширяет логический обзор карты, а не растягивает вывод.
 Явный `GameCanvasMode=0` выбирает штатный `DisplaySize`, `1` сохраняет вручную выбранный Hor+,
 `2` включает автоподбор. Если ключ отсутствует на распознанной раскладке, по умолчанию включается
-авто. Например, 1920x1080 выбирает Hor+ 1920x1080 при 1x, 3840x2160 — Hor+ 1920x1080 при 2x,
+авто. При любом широком режиме враппер хранит `DisplaySize=0` как совместимую базу внутренних
+веток игры; фактический размер по-прежнему задают ширина и высота Hor+. Оставшийся от штатного
+1280x1024 `DisplaySize=2` несовместим с некоторыми широкими сочетаниями (в частности, 1600x900) и
+может завершить игру ещё при запуске.
+Например, 1920x1080 выбирает Hor+ 1920x1080 при 1x, 3840x2160 — Hor+ 1920x1080 при 2x,
 а 1280x1024 — штатный режим игры 1280x1024. Явный ручной выбор автоматика не заменяет.
 
 Защищённые сигнатурами хуки меняют режим DirectDraw, раскладку стратегической карты и зависящие от
