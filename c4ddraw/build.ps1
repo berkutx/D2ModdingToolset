@@ -182,6 +182,15 @@ foreach ($asset in $decorAssets.Keys) {
         throw "decorative DisciplesGL resource differs from the reviewed asset: $asset ($hash)"
     }
 }
+$cursorDir = Join-Path $build "src\cursor"
+New-Item -ItemType Directory -Force -Path $cursorDir | Out-Null
+$cursorSource = Join-Path $root "features\cursor\default.cur"
+$cursorTarget = Join-Path $cursorDir "default.cur"
+Copy-Item -LiteralPath $cursorSource -Destination $cursorTarget -Force
+$cursorHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $cursorTarget).Hash
+if ($cursorHash -ne "F854DD9AA8524EFA2D542ABE6625578EF63B99705AE9B1F6F7662E6FCF032A2D") {
+    throw "embedded Disciples II default cursor differs from the reviewed asset ($cursorHash)"
+}
 Copy-Item (Join-Path $root "features\pluginhost.cpp") (Join-Path $build "src\pluginhost.cpp") -Force
 Copy-Item (Join-Path $root "features\localization.cpp") (Join-Path $build "src\localization.cpp") -Force
 Copy-Item (Join-Path $root "features\savelogic.cpp") (Join-Path $build "src\savelogic.cpp") -Force
@@ -257,6 +266,8 @@ $rcRaw += "`r`n// DisciplesGL Alternative decorative background/frame resources.
 $rcRaw += "2200 RCDATA DISCARDABLE `"src\\decor\\back.png`"`r`n"
 $rcRaw += "2201 RCDATA DISCARDABLE `"src\\decor\\alt.png`"`r`n"
 $rcRaw += "2202 RCDATA DISCARDABLE `"src\\decor\\alt_widest.png`"`r`n"
+$rcRaw += "`r`n// Disciples II DEFAULT sword cursor for wrapper-owned pixels.`r`n"
+$rcRaw += "2203 CURSOR DISCARDABLE `"src\\cursor\\default.cur`"`r`n"
 $rcRaw += "`r`n// C4dll-R window/output-size dialog.`r`n"
 $rcRaw += "#include `"src\\featuremenu_resources.rc`"`r`n"
 Set-Content -Path $rc -Value $rcRaw -Encoding ASCII
@@ -268,6 +279,9 @@ if (-not (Select-String -Path $rc -SimpleMatch '10 RCDATA DISCARDABLE "src\\DLG_
 }
 if (-not (Select-String -Path $rc -SimpleMatch '2200 RCDATA DISCARDABLE "src\\decor\\back.png"' -Quiet)) {
     throw "res.rc decorative background resource missing"
+}
+if (-not (Select-String -Path $rc -SimpleMatch '2203 CURSOR DISCARDABLE "src\\cursor\\default.cur"' -Quiet)) {
+    throw "res.rc default cursor resource missing"
 }
 if (-not (Select-String -Path $rc -SimpleMatch '#include "src\\featuremenu_resources.rc"' -Quiet)) {
     throw "res.rc output-size dialog resource missing"

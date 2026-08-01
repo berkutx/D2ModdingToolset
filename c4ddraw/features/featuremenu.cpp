@@ -60,6 +60,9 @@ extern "C" int horplus_get_primary_adaptive(int* outputWidth,
                                                int* outputHeight,
                                                int* width, int* height,
                                                int* nativeDisplaySize);
+extern "C" int horplus_get_decor_layout(int* contentWidth,
+                                           int* contentHeight,
+                                           int* wideBattle);
 
 // Presentation-only DisciplesGL Alternative wallpaper/frame for fixed 4:3 screens.
 extern "C" int decorative_set_enabled(int enabled);
@@ -801,7 +804,7 @@ HMENU g_battleMenu = nullptr, g_mapMenu = nullptr, g_modeMenu = nullptr;
 HMENU g_menuLanguageMenu = nullptr, g_localeMenu = nullptr;
 HMENU g_editorModeMenu = nullptr;
 int g_resolutionMenuPosition = -1; // position of the one Video -> Resolution popup
-int g_ncCursorShown = 0;  // 1 while we've bumped the OS cursor visible for the non-client area
+int g_ncCursorShown = 0;  // 1 while we've bumped the OS cursor visible over wrapper-owned pixels
 int g_ncCursorAdded = 0;  // how many ShowCursor(TRUE) we added (to remove exactly that many)
 
 using WndProcFn = LRESULT(CALLBACK*)(HWND, UINT, WPARAM, LPARAM);
@@ -3843,12 +3846,25 @@ void onMenuCommand(UINT id)
     }
 }
 
-// With devmode the game hides the OS cursor (draws its own in the client), so it's invisible over our
-// caption + menu bar. Bump it visible over the non-client area, restore in the client. ShowCursor is a
-// global counter, so keep our +1/-1 balanced.
-void setNonClientCursor(bool overNonClient)
+// With devmode the game hides the OS cursor and draws its own inside the active game surface.  That
+// software cursor is unavailable over our renderer-owned caption/menu and over the decorative area
+// outside a fixed 800x600/990x600 screen.  DisciplesGL solves the equivalent renderer-owned region
+// in WM_SETCURSOR by restoring the WNDCLASS cursor outside its active viewport. Use an embedded
+// copy of the game's default sword for the same role and keep ShowCursor adjustments balanced.
+void setWrapperCursorVisible(bool visible)
 {
-    if (overNonClient) {
+    // The game's visible cursor is software-rendered into the primary surface and is consequently
+    // lost when the decorative compositor replaces pixels outside the centered fixed screen. Use
+    // the game's DEFAULT sword, embedded as a native cursor resource, over wrapper-owned pixels.
+    // Keeping the handle in this module also makes the result independent of the active game mod.
+    static HCURSOR wrapperCursor = nullptr;
+    if (!wrapperCursor) {
+        wrapperCursor = LoadCursorA(g_ddraw_module, MAKEINTRESOURCEA(2203));
+        if (!wrapperCursor)
+            wrapperCursor = LoadCursorA(nullptr, IDC_ARROW);
+    }
+
+    if (visible) {
         if (!g_ncCursorShown) {
             // Force the global show-count non-negative (game may have hidden it well below -1),
             // tracking how many we added so we can remove exactly that many.
@@ -3860,14 +3876,114 @@ void setNonClientCursor(bool overNonClient)
                 ++g_ncCursorAdded;
             }
             g_ncCursorShown = 1;
+            mlog("[cursor] OS pointer shown over wrapper-owned area (counter increments=%d)",
+                 g_ncCursorAdded);
         }
-        SetCursor(LoadCursorA(nullptr, IDC_ARROW));
+        SetCursor(wrapperCursor);
     } else if (g_ncCursorShown) {
         for (int i = 0; i < g_ncCursorAdded; ++i)
             ShowCursor(FALSE);
+        mlog("[cursor] OS pointer hidden over game-rendered content (counter decrements=%d)",
+             g_ncCursorAdded);
         g_ncCursorAdded = 0;
         g_ncCursorShown = 0;
     }
+}
+
+bool cursorOverDecorativeArea(HWND hwnd, const POINT* mappedGamePoint = nullptr)
+{
+    static int lastProbe = -1;
+    auto traceProbe = [&](int probe, const char* detail) {
+        if (probe != lastProbe) {
+            mlog("[cursor] area probe=%s", detail);
+            lastProbe = probe;
+        }
+    };
+
+    if (!hwnd || !decorative_get_enabled()) {
+        traceProbe(0, "inactive (window missing or decoration disabled)");
+        return false;
+    }
+
+    int contentWidth = 0;
+    int contentHeight = 0;
+    if (!horplus_get_decor_layout(&contentWidth, &contentHeight, nullptr) ||
+        contentWidth <= 0 || contentHeight <= 0) {
+        traceProbe(1, "inactive (fixed-screen compositor not active)");
+        return false;
+    }
+
+    int gameWidth = 0;
+    int gameHeight = 0;
+    int viewportX = 0;
+    int viewportY = 0;
+    int viewportWidth = 0;
+    int viewportHeight = 0;
+    if (!DDGetScaleMetrics(&gameWidth, &gameHeight, nullptr, nullptr,
+                           &viewportX, &viewportY,
+                           &viewportWidth, &viewportHeight) ||
+        gameWidth <= 0 || gameHeight <= 0 ||
+        viewportWidth <= 0 || viewportHeight <= 0 ||
+        contentWidth > gameWidth || contentHeight > gameHeight) {
+        traceProbe(2, "inactive (renderer metrics unavailable)");
+        return false;
+    }
+
+    int gameX = 0;
+    int gameY = 0;
+    if (mappedGamePoint) {
+        // The exact MNS/SMNS game WndProc receives WM_MOUSEMOVE after cnc-ddraw has already mapped
+        // lParam to game coordinates.  Prefer those coordinates: unlike GetCursorPos they cannot
+        // race cursor clipping/snapping and they also make synthetic input deterministic.
+        gameX = mappedGamePoint->x;
+        gameY = mappedGamePoint->y;
+        if (gameX < 0 || gameY < 0 || gameX >= gameWidth || gameY >= gameHeight) {
+            traceProbe(3, "renderer-owned outer margin");
+            return true;
+        }
+    } else {
+        POINT point = {};
+        if (!GetCursorPos(&point) || !ScreenToClient(hwnd, &point) ||
+            point.x < viewportX || point.y < viewportY ||
+            point.x >= viewportX + viewportWidth ||
+            point.y >= viewportY + viewportHeight) {
+            traceProbe(3, "renderer-owned outer margin");
+            return true;
+        }
+        gameX = static_cast<int>(
+            static_cast<long long>(point.x - viewportX) * gameWidth /
+            viewportWidth);
+        gameY = static_cast<int>(
+            static_cast<long long>(point.y - viewportY) * gameHeight /
+            viewportHeight);
+    }
+    const int left = (gameWidth - contentWidth) / 2;
+    const int top = (gameHeight - contentHeight) / 2;
+    const bool overDecor =
+        gameX < left || gameX >= left + contentWidth ||
+        gameY < top || gameY >= top + contentHeight;
+    traceProbe(overDecor ? 5 : 4,
+               overDecor ? "decorative margin" : "game-rendered content");
+    return overDecor;
+}
+
+bool handleDecorativeCursor(HWND hwnd, UINT msg, LPARAM lParam,
+                            bool mouseMoveUsesGameCoords)
+{
+    if (msg == WM_SETCURSOR && LOWORD(lParam) == HTCLIENT) {
+        const bool overDecor = cursorOverDecorativeArea(hwnd);
+        setWrapperCursorVisible(overDecor);
+        return overDecor;
+    }
+    if (msg == WM_MOUSEMOVE) {
+        POINT mapped = {
+            static_cast<short>(LOWORD(lParam)),
+            static_cast<short>(HIWORD(lParam))
+        };
+        setWrapperCursorVisible(cursorOverDecorativeArea(
+            hwnd, mouseMoveUsesGameCoords ? &mapped : nullptr));
+    }
+    return false;
 }
 
 extern "C" void timerhost_pump(void); // perform any queued on-elapse press on the game thread
@@ -3892,6 +4008,11 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         timerhost_pump();
         return 0;
     }
+
+    // Do this before the game handles WM_SETCURSOR: its software cursor is clipped away by the
+    // presentation-only decorative compositor outside the centered fixed screen.
+    if (handleDecorativeCursor(hwnd, msg, lParam, true))
+        return TRUE;
 
     // Legacy C4dll-R used F4 for a one-key normal-window/fullscreen toggle. Keep it wrapper-owned:
     // old ddraw.ini files have no keytogglefullscreen2, and Alt+F4 remains a WM_SYSKEYDOWN.
@@ -3921,10 +4042,7 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     switch (msg) {
     case WM_NCMOUSEMOVE:
     case WM_ENTERMENULOOP:
-        setNonClientCursor(true);
-        break;
-    case WM_MOUSEMOVE:
-        setNonClientCursor(false);
+        setWrapperCursorVisible(true);
         break;
     default:
         break;
@@ -4428,7 +4546,7 @@ void syncChrome(HWND hwnd)
     if (wantMenu && !hasOurMenu) {
         changed = SetMenu(hwnd, g_bar) != FALSE;
     } else if (!wantMenu && hasOurMenu) {
-        setNonClientCursor(false);
+        setWrapperCursorVisible(false);
         changed = SetMenu(hwnd, nullptr) != FALSE;
     }
 
@@ -4544,13 +4662,18 @@ extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, 
     if (!g_gameHwnd)
         g_gameHwnd = hwnd;
 
+    // Generic/Akella/GOG/Steam path: fake_WndProc calls this bridge before it transforms mouse
+    // coordinates or forwards WM_SETCURSOR to the game, so use the OS cursor position + renderer
+    // viewport just like the exact MNS/SMNS path above.
+    if (handleDecorativeCursor(hwnd, msg, lParam, false)) {
+        *result = TRUE;
+        return 1;
+    }
+
     switch (msg) {
     case WM_NCMOUSEMOVE:
     case WM_ENTERMENULOOP:
-        setNonClientCursor(true);
-        break;
-    case WM_MOUSEMOVE:
-        setNonClientCursor(false);
+        setWrapperCursorVisible(true);
         break;
     default:
         break;
