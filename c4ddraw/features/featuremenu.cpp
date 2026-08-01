@@ -3859,7 +3859,11 @@ void setWrapperCursorVisible(bool visible)
     // Keeping the handle in this module also makes the result independent of the active game mod.
     static HCURSOR wrapperCursor = nullptr;
     if (!wrapperCursor) {
-        wrapperCursor = LoadCursorA(g_ddraw_module, MAKEINTRESOURCEA(2203));
+        // LoadCursor scales every custom resource to SM_CXCURSOR x SM_CYCURSOR (normally 32x32),
+        // distorting this deliberately tall sword and changing its apparent angle. Request the
+        // original game dimensions explicitly.
+        wrapperCursor = reinterpret_cast<HCURSOR>(LoadImageA(
+            g_ddraw_module, MAKEINTRESOURCEA(2203), IMAGE_CURSOR, 24, 54, LR_SHARED));
         if (!wrapperCursor)
             wrapperCursor = LoadCursorA(nullptr, IDC_ARROW);
     }
