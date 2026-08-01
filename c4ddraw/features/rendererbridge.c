@@ -25,13 +25,20 @@ extern const void* DDGetDecoratedSurface(
  * canvas. Disciples II clamps its requested windowed mode to
  * GetSystemMetrics() before looking it up in the DirectDraw mode list. Leaving
  * the persisted 1024x768 fallback in memory for a 1280x720 canvas would create
- * the impossible key 1024x720x16. This is process-local and does not rewrite
- * ddraw.ini.
+ * the impossible key 1024x720x16. Hor+ also has to advertise its exact custom
+ * mode through cnc-ddraw's single injected-resolution slot: fake_mode alone is
+ * deliberately not returned by EnumDisplayModes, and the game aborts before
+ * DirectDraw initialization when the requested mode is absent. Both changes
+ * are process-local and do not rewrite ddraw.ini.
  */
-void DDSetGameCanvasMetrics(int width, int height)
+void DDSetGameCanvasMetrics(int width, int height, int inject_resolution)
 {
     if (width >= 800 && height >= 600)
+    {
         wsprintfA(g_config.fake_mode, "%dx%dx16", width, height);
+        if (inject_resolution)
+            wsprintfA(g_config.inject_resolution, "%dx%d", width, height);
+    }
 }
 
 /* A game-side bordered-dialog transition can happen without a renderer config

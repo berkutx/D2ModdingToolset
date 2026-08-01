@@ -19,8 +19,9 @@ Since 1.4 the wrapper gained a unified RU/EN menu, monitor-adaptive selection be
 Проверьте чистую установку и обновление поверх 1.4 с сохранёнными INI. Особое
 внимание:
 
-- запуск широкого 1280×720 при включённой эмуляции 16-битного экрана: служебная
-  геометрия не должна подменять разрешение игры или ломать инициализацию;
+- запуск любого широкого режима при включённой эмуляции 16-битного экрана:
+  выбранный Hor+ должен присутствовать в списке DirectDraw, игра не должна
+  показывать ошибку инициализации, а `ddraw.ini` не должен переписываться;
 - единое меню «Разрешение»: «Авто под монитор», три штатных пункта со `★`, затем
   все десять проверенных широких режимов и внизу размер окна/вывода. На экранах
   4:3/5:4 авто должно выбрать штатный DisplaySize, на 3:2 и шире — Hor+; после
@@ -133,9 +134,9 @@ Since 1.4 the wrapper gained a unified RU/EN menu, monitor-adaptive selection be
 - `GameCanvasMode=0` selects stock DisplaySize, `1` selects manual Hor+, and `2`
   selects monitor-adaptive mode; a missing key defaults to Auto on a supported
   layout. Every logical game size is applied only after a full restart.
-- Fixed widescreen startup with 16-bit screen emulation: its service geometry is
-  aligned with the selected game canvas for the current process only, without
-  rewriting `ddraw.ini`.
+- Fixed widescreen startup with 16-bit screen emulation: C4dll-R advertises the
+  selected Hor+ mode in DirectDraw and aligns the service geometry for the
+  current process only, without rewriting `ddraw.ini`.
 - Game resolution is separated from scaling. The long output-preset list was
   replaced with one **Resolution > Window/output...** dialog. Automatic stores `0x0`;
   a custom width of 320–8192 and height of 240–8192 are written to the effective

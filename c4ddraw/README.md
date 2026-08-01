@@ -205,9 +205,11 @@ The equal-height pairs make the relationship easy to compare: 800x600 -> 1066x60
 1024x768 -> 1366x768, and 1280x1024 -> 1820x1024. Widescreen expands the logical map view rather
 than stretching the output. Explicit `GameCanvasMode=0` selects the stock `DisplaySize`;
 `GameCanvasMode=1` keeps an explicitly selected Hor+ canvas; `GameCanvasMode=2` is monitor-adaptive.
-While either wide mode is selected, the wrapper stores `DisplaySize=0` as the game's compatibility
-base. The Hor+ width and height remain authoritative; keeping `DisplaySize=2` from an earlier native
-1280x1024 choice can make some wide combinations (notably 1600x900) terminate during startup.
+While either wide mode is selected, the wrapper stores `DisplaySize=0` only as the internal
+compatibility selector used by the original Hor+ patch. It does **not** reduce the actual game
+resolution to 800x600: the Hor+ width and height are the DirectDraw canvas. Stock `DisplaySize` and
+Hor+ are alternative layout families, so placing 1280x1024 underneath Hor+ would not add pixels or
+remove bars; it would only mix an unpatched stock layout with the wide hooks.
 When the key is absent on a recognized layout, adaptive mode is the default. For example, 1920x1080
 selects Hor+ 1920x1080 at 1x, 3840x2160 selects Hor+ 1920x1080 at 2x, and 1280x1024 selects the
 game's stock 1280x1024 mode. Manual stock and Hor+ selections are never replaced by the automation.
@@ -222,8 +224,9 @@ the running game changed. After a different game size is successfully saved, an 
 asks you to close the whole game and start it again; selecting the already-requested canvas does not
 show a false restart prompt. `fake_mode=1024x768x16` is only cnc-ddraw's internal virtual 16-bit
 compatibility bootstrap; it is not the game resolution, window/output size, or scaling mode. With a
-validated widescreen canvas, C4dll-R corrects that process-local bootstrap geometry without writing
-the adjusted dimensions back to `ddraw.ini`.
+validated widescreen canvas, C4dll-R corrects that process-local bootstrap geometry and advertises
+the exact Hor+ mode during DirectDraw enumeration without writing the adjusted dimensions back to
+`ddraw.ini`.
 
 The legacy wrapper could override `DisplaySize=0` with `[Wrapper] DisplayWidth` /
 `DisplayHeight`. That is why an old config containing `DisplaySize=0`, `DisplayWidth=1024` and
@@ -716,10 +719,11 @@ Lanczos, `savesettings=1`) - удалите его, если хотите сра
 1280x1024 -> 1820x1024. Широкий кадр расширяет логический обзор карты, а не растягивает вывод.
 Явный `GameCanvasMode=0` выбирает штатный `DisplaySize`, `1` сохраняет вручную выбранный Hor+,
 `2` включает автоподбор. Если ключ отсутствует на распознанной раскладке, по умолчанию включается
-авто. При любом широком режиме враппер хранит `DisplaySize=0` как совместимую базу внутренних
-веток игры; фактический размер по-прежнему задают ширина и высота Hor+. Оставшийся от штатного
-1280x1024 `DisplaySize=2` несовместим с некоторыми широкими сочетаниями (в частности, 1600x900) и
-может завершить игру ещё при запуске.
+авто. При любом широком режиме враппер хранит `DisplaySize=0` только как внутренний переключатель
+совместимости исходного Hor+-патча. Это **не** уменьшает игру до 800x600: настоящей DirectDraw-
+поверхностью становятся выбранные ширина и высота Hor+. Штатный `DisplaySize` и Hor+ — два
+альтернативных семейства раскладки; подложенный под Hor+ режим 1280x1024 не добавит пикселей и не
+уберёт поля, а лишь смешает непатченую штатную раскладку с широкими хуками.
 Например, 1920x1080 выбирает Hor+ 1920x1080 при 1x, 3840x2160 — Hor+ 1920x1080 при 2x,
 а 1280x1024 — штатный режим игры 1280x1024. Явный ручной выбор автоматика не заменяет.
 
@@ -734,8 +738,8 @@ Lanczos, `savesettings=1`) - удалите его, если хотите сра
 просит полностью закрыть игру и запустить заново; повторный выбор уже запрошенного кадра не показывает
 ложное требование перезапуска. `fake_mode=1024x768x16` — только внутренний виртуальный 16-битный
 bootstrap совместимости cnc-ddraw, а не разрешение игры/окна или режим масштаба. При активном
-проверенном широком кадре C4dll-R исправляет лишь process-local геометрию bootstrap, не записывая
-подставленные размеры в `ddraw.ini`.
+проверенном широком кадре C4dll-R исправляет process-local геометрию bootstrap и добавляет точный
+Hor+-режим в перечисление DirectDraw, не записывая подставленные размеры в `ddraw.ini`.
 
 Старый враппер умел подменить `DisplaySize=0` через `[Wrapper] DisplayWidth` /
 `DisplayHeight`. Поэтому старый конфиг с `DisplaySize=0`, `DisplayWidth=1024` и

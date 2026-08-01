@@ -32,7 +32,7 @@
 extern "C" int widebattle_canvas_hook_is_available(void);
 extern "C" int widebattle_get_enabled(void);
 extern "C" int widebattle_is_active(void);
-extern "C" void DDSetGameCanvasMetrics(int width, int height);
+extern "C" void DDSetGameCanvasMetrics(int width, int height, int injectResolution);
 extern "C" void DDInvalidateDecorativeFrame(void);
 
 namespace {
@@ -1371,7 +1371,7 @@ extern "C" void horplus_install(void)
         // fake_mode is only a virtual 16-bit desktop/mode advertisement.  It
         // must follow the selected native canvas too (not just Hor+), otherwise
         // DisplaySize 0/2 can be mixed with the persisted 1024x768 fallback.
-        DDSetGameCanvasMetrics(requested.width, requested.height);
+        DDSetGameCanvasMetrics(requested.width, requested.height, 0);
         char message[160] = {};
         wsprintfA(message,
                   "C4dll-R: native DisplaySize=%d canvas active at %dx%d (%s); Hor+ wrote no game bytes\n",
@@ -1384,11 +1384,11 @@ extern "C" void horplus_install(void)
 
     // DisplaySize is more than the stock canvas selector: code outside the
     // patched size switch still uses it to choose native layout/resources.
-    // In particular, carrying DisplaySize=2 (1280x1024) into a 1600x900 Hor+
-    // request makes the game terminate with -1 during startup.  The legacy
-    // wrapper always based its arbitrary DisplayWidth/DisplayHeight override
-    // on DisplaySize=0, so normalize both new and pre-existing wide requests
-    // before the game reads the remaining startup settings.
+    // The original Hor+ implementation replaces the DisplaySize=0 path and
+    // uses its 800x600 layout origin while the requested width/height become
+    // the real DirectDraw canvas. Keep that compatibility selector stable;
+    // selecting a larger stock mode underneath Hor+ would not increase the
+    // canvas and would mix an unpatched stock layout with the wide hooks.
     const ProfileValueSnapshot storedDisplaySize =
         snapshotProfileValueInSection("Disciple", "DisplaySize");
     int compatibilityDisplaySize = 0;
@@ -1416,11 +1416,10 @@ extern "C" void horplus_install(void)
         return;
     }
 
-    // The persisted fake desktop is the native 1024x768x16 fallback. Match its
-    // live geometry to the validated canvas before the game asks
-    // GetSystemMetrics(), otherwise the game clamps (for example) 1280x720 to
-    // an invalid 1024x720 mode before its DirectDraw lookup.
-    DDSetGameCanvasMetrics(requested.width, requested.height);
+    // Match both the fake desktop and cnc-ddraw's single injected mode to the
+    // validated canvas. The game must find the exact Hor+ dimensions during
+    // EnumDisplayModes or it exits before creating DirectDraw surfaces.
+    DDSetGameCanvasMetrics(requested.width, requested.height, 1);
     InterlockedExchange(&g_active, 1);
     char message[160] = {};
     wsprintfA(message,
