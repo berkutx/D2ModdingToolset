@@ -213,17 +213,18 @@ diff --git a/src/wndproc.c b/src/wndproc.c
 index 35550582..cc11daec 100644
 --- a/src/wndproc.c
 +++ b/src/wndproc.c
-@@ -15,6 +15,9 @@
+@@ -15,6 +15,10 @@
  #include "debug.h"
  #include "versionhelpers.h"
  
 +extern int DDHandleSimpleZoom(HWND hwnd, WPARAM wParam, LPARAM lParam);
++extern void DDApplySimpleZoomMouse(int* x, int* y, int game_width, int game_height);
 +extern int featuremenu_renderer_message(
 +    HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, LRESULT* result);
  
  LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
  {
-@@ -40,6 +43,12 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
+@@ -40,6 +44,12 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
      static BOOL in_size_move = FALSE;
      static int redraw_count = 0;
  
@@ -236,15 +237,23 @@ index 35550582..cc11daec 100644
      switch (uMsg)
      {
      case WM_NULL:
-@@ -934,9 +943,8 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
+@@ -934,9 +944,11 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
  
          if (uMsg == WM_MOUSEWHEEL)
          {
--            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
--            real_ScreenToClient(g_ddraw.hwnd, &pt);
--            lParam = MAKELPARAM(pt.x, pt.y);
-+            int key = DDHandleSimpleZoom(hWnd, wParam, lParam);
-+            return CallWindowProcA(g_ddraw.wndproc, hWnd, WM_KEYDOWN, key, 1);
++            if (DDHandleSimpleZoom(hWnd, wParam, lParam))
++                return 0;
+             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+             real_ScreenToClient(g_ddraw.hwnd, &pt);
+             lParam = MAKELPARAM(pt.x, pt.y);
          }
  
          int x = max(GET_X_LPARAM(lParam) - g_ddraw.mouse.x_adjust, 0);
+@@ -951,5 +963,7 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
+             }
+         }
+ 
++        DDApplySimpleZoomMouse(&x, &y, g_ddraw.width, g_ddraw.height);
++
+         x = min(x, g_ddraw.width - 1);
+         y = min(y, g_ddraw.height - 1);

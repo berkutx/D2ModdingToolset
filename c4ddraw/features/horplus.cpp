@@ -34,6 +34,8 @@ extern "C" int widebattle_get_enabled(void);
 extern "C" int widebattle_is_active(void);
 extern "C" void DDSetGameCanvasMetrics(int width, int height, int injectResolution);
 extern "C" void DDInvalidateDecorativeFrame(void);
+extern "C" int DDReadConfigString(const char* key, const char* defaultValue,
+                                    char* value, unsigned int capacity);
 
 namespace {
 
@@ -316,7 +318,6 @@ bool adaptiveCanvasForOutput(int outputWidth, int outputHeight,
         ? sizeof(kCanvasPresets) / sizeof(kCanvasPresets[0])
         : sizeof(kNativeCanvasPresets) / sizeof(kNativeCanvasPresets[0]);
 
-    const CanvasPreset* bestInteger = nullptr;
     const CanvasPreset* bestFit = nullptr;
     for (size_t i = 0; i < presetCount; ++i) {
         const CanvasPreset& preset = presets[i];
@@ -328,32 +329,13 @@ bool adaptiveCanvasForOutput(int outputWidth, int outputHeight,
                 static_cast<long long>(bestFit->width) * bestFit->height) {
             bestFit = &preset;
         }
-
-        const int factorW = outputWidth / preset.width;
-        const int factorH = outputHeight / preset.height;
-        const int factor = factorW < factorH ? factorW : factorH;
-        if (factor < 1)
-            continue;
-
-        // With aspect-preserving Fit, an integer scale is used only when the
-        // scaled canvas reaches at least one output edge exactly. Extra space
-        // on the other axis is a normal letter/pillar bar (ultrawide included).
-        const bool exactInteger =
-            preset.width * factor == outputWidth ||
-            preset.height * factor == outputHeight;
-        if (exactInteger &&
-            (!bestInteger ||
-             static_cast<long long>(preset.width) * preset.height >
-                 static_cast<long long>(bestInteger->width) *
-                     bestInteger->height)) {
-            bestInteger = &preset;
-        }
     }
 
-    // Prefer the largest validated canvas with an exact integer Fit. If the
-    // monitor has an unusual geometry, keep the largest canvas that fits and
-    // let the selected shader handle the unavoidable fractional scale.
-    const CanvasPreset* selected = bestInteger ? bestInteger : bestFit;
+    // Prefer visible game area over a lower integer-scale canvas. Modern
+    // shaders make a fractional fit acceptable, while choosing (for example)
+    // 1920x1080 merely because it is 2x on a 4K monitor would discard map that
+    // the validated 2560x1440 canvas can show.
+    const CanvasPreset* selected = bestFit;
     if (!selected)
         selected = &presets[0]; // filtered down only on very small outputs
     if (width)
@@ -367,14 +349,49 @@ bool adaptiveCanvasForOutput(int outputWidth, int outputHeight,
     return true;
 }
 
-bool primaryOutputPixels(int* width, int* height)
+bool ddrawBool(const char* key, bool fallback)
+{
+    char raw[16] = {};
+    if (!DDReadConfigString(key, fallback ? "true" : "false", raw,
+                            static_cast<unsigned int>(sizeof(raw))))
+        return fallback;
+    return lstrcmpiA(raw, "true") == 0 || lstrcmpiA(raw, "yes") == 0 ||
+           lstrcmpiA(raw, "on") == 0 || lstrcmpA(raw, "1") == 0;
+}
+
+bool automaticOutputPixels(int* width, int* height)
 {
     // cnc-ddraw establishes per-monitor DPI awareness before installing this
     // feature, so GetSystemMetrics returns the physical primary-output pixels.
-    const int outputWidth = GetSystemMetrics(SM_CXSCREEN);
-    const int outputHeight = GetSystemMetrics(SM_CYSCREEN);
+    int outputWidth = GetSystemMetrics(SM_CXSCREEN);
+    int outputHeight = GetSystemMetrics(SM_CYSCREEN);
     if (outputWidth <= 0 || outputHeight <= 0)
         return false;
+
+    // A normal window needs room for its title, frame, one-row C4 menu and the
+    // taskbar. Borderless/exclusive modes own the monitor and use all pixels.
+    // This is the missing distinction in a monitor-only Auto policy: on a
+    // 1920x1080 desktop, 1920x1080 is ideal fullscreen but cannot be a usable
+    // 1920x1080 client without pushing chrome off-screen.
+    const bool normalWindow =
+        ddrawBool("windowed", true) && !ddrawBool("fullscreen", false);
+    if (normalWindow) {
+        RECT work = {};
+        if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
+            const int workWidth = work.right - work.left;
+            const int workHeight = work.bottom - work.top;
+            RECT frame = {0, 0, 100, 100};
+            if (AdjustWindowRectEx(&frame, WS_OVERLAPPEDWINDOW, TRUE, 0)) {
+                const int extraWidth = (frame.right - frame.left) - 100;
+                const int extraHeight = (frame.bottom - frame.top) - 100;
+                if (workWidth - extraWidth > 0)
+                    outputWidth = workWidth - extraWidth;
+                if (workHeight - extraHeight > 0)
+                    outputHeight = workHeight - extraHeight;
+            }
+        }
+    }
+
     if (width)
         *width = outputWidth;
     if (height)
@@ -397,7 +414,7 @@ bool readRequestedCanvas(RequestedCanvas* requested)
     if (widescreenAvailable) {
         int outputWidth = 0;
         int outputHeight = 0;
-        if (!primaryOutputPixels(&outputWidth, &outputHeight) ||
+        if (!automaticOutputPixels(&outputWidth, &outputHeight) ||
             !adaptiveCanvasForOutput(outputWidth, outputHeight,
                                      &requested->width,
                                      &requested->height,
@@ -435,7 +452,7 @@ bool readRequestedCanvas(RequestedCanvas* requested)
         int outputHeight = 0;
         requested->mode = 2;
         const bool valid =
-            primaryOutputPixels(&outputWidth, &outputHeight) &&
+            automaticOutputPixels(&outputWidth, &outputHeight) &&
             adaptiveCanvasForOutput(outputWidth, outputHeight,
                                     &requested->width,
                                     &requested->height,
@@ -1499,7 +1516,7 @@ extern "C" int horplus_get_primary_adaptive(int* outputWidth,
 {
     int monitorWidth = 0;
     int monitorHeight = 0;
-    if (!primaryOutputPixels(&monitorWidth, &monitorHeight) ||
+    if (!automaticOutputPixels(&monitorWidth, &monitorHeight) ||
         !adaptiveCanvasForOutput(monitorWidth, monitorHeight, width, height,
                                  nativeDisplaySize))
         return 0;
@@ -1529,7 +1546,7 @@ extern "C" int horplus_set_requested(int mode, int width, int height)
         int outputWidth = 0;
         int outputHeight = 0;
         int nativeDisplaySize = -1;
-        if (!primaryOutputPixels(&outputWidth, &outputHeight) ||
+        if (!automaticOutputPixels(&outputWidth, &outputHeight) ||
             !adaptiveCanvasForOutput(outputWidth, outputHeight,
                                      nullptr, nullptr,
                                      &nativeDisplaySize))

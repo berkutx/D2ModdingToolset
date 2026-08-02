@@ -110,13 +110,18 @@ struct State
     // Original timer.mod's separate one-shot off[13] flag: consumed only by the END_TURN
     // confirmation-query callsite, so an automatic timeout never opens X005TA0000.
     LONG volatile suppressEndTurnConfirm;
+    // DLG_BEGIN_TURN's real BTN_OK callback increments this only after the game has accepted the
+    // acknowledgement. The plugin uses the edge, rather than dialog visibility, as its clock start.
+    LONG volatile beginTurnAckSerial;
     void* g_orig_dlgCreate;
     void* g_orig_btnDtor;
     void* g_orig_scenInit;
     void* g_orig_turnInfo;
     void* g_origConfirmQuery;
+    void* g_origBeginTurnOk;
     int lastTurnPlayer;     // last off[6] player byte (debounce: ignore same-player bursts)
     int confirmHookInstalled;
+    int beginTurnAckHookInstalled;
     int installed;
 } g;
 
@@ -313,6 +318,49 @@ bool installEndTurnConfirmHook()
     return true;
 }
 
+// CBeginTurnInterf::BTN_OK callback. The dialog is the daily/turn summary (income + turn number),
+// and 0x4BA8BB is the exact callback placed into BTN_OK's ordinary game functor by the constructor.
+// Chain first: only a successfully completed native callback publishes the acknowledgement.
+void* __fastcall hookBeginTurnOk(void* self, void* /*edx*/)
+{
+    void* result = reinterpret_cast<void*(__thiscall*)(void*)>(g.g_origBeginTurnOk)(self);
+    const LONG serial = InterlockedIncrement(&g.beginTurnAckSerial);
+    tlog("[timer] DLG_BEGIN_TURN BTN_OK accepted (ack=%ld)", serial);
+    return result;
+}
+
+bool installBeginTurnAckHook()
+{
+    constexpr uintptr_t kCallback = 0x4BA8BB;
+    // mov eax,[ecx+20h]; mov ecx,[eax]; jmp 0x4D97E3
+    const unsigned char expected[10] = {
+        0x8B, 0x41, 0x20, 0x8B, 0x08, 0xE9, 0x1E, 0xEF, 0x01, 0x00};
+    __try {
+        if (memcmp(reinterpret_cast<const void*>(kCallback), expected,
+                   sizeof(expected)) != 0) {
+            tlog("[timer] begin-turn BTN_OK signature mismatch; delayed start unavailable");
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    g.g_origBeginTurnOk = reinterpret_cast<void*>(kCallback);
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(&g.g_origBeginTurnOk,
+                 reinterpret_cast<void*>(hookBeginTurnOk));
+    if (DetourTransactionCommit() != NO_ERROR) {
+        g.g_origBeginTurnOk = reinterpret_cast<void*>(kCallback);
+        tlog("[timer] begin-turn BTN_OK detour FAILED");
+        return false;
+    }
+
+    g.beginTurnAckHookInstalled = 1;
+    tlog("[timer] begin-turn BTN_OK acknowledgement hook installed (0x4BA8BB)");
+    return true;
+}
+
 } // namespace
 
 // Exported read accessors (lock-free volatile reads; called by pluginhost thunks).
@@ -365,6 +413,13 @@ extern "C" int timerhost_cancel_elapse(void)
 {
     clearPendingActions();
     return 1;
+}
+extern "C" uint32_t timerhost_begin_turn_ack_serial(void)
+{
+    return g.beginTurnAckHookInstalled
+        ? static_cast<uint32_t>(InterlockedExchangeAdd(
+              &g.beginTurnAckSerial, 0))
+        : UINT32_MAX;
 }
 
 extern "C" void timerhost_pump(void)
@@ -451,6 +506,9 @@ extern "C" void timerhost_install(void)
     // Exact Russobit/MNS 3.01a callsite used by the original timer.mod off[13] table. Signature-gated:
     // on another executable this remains a clean no-op and automatic End Day is not queued.
     installEndTurnConfirmHook();
+    // Exact Russobit begin-turn confirmation callback. Other executable families deliberately keep
+    // the existing active-turn edge because this address is not assumed to be portable.
+    installBeginTurnAckHook();
 
     tlog("[timer] keystone capture installed (off9 dlg-create 0x5C93D6, off8 btn-dtor 0x6E3294, "
          "off5 scen-init 0x6CEB5C)");

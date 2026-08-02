@@ -161,25 +161,62 @@ Lanczos shader, `savesettings=1`) - delete it to compare against the generated o
 (borderless on the first use), and either fullscreen kind back to a normal window. `Alt+Enter`
 retains cnc-ddraw's configured window/fullscreen toggle; `Alt+F4` still closes the game.
 
+## 1.6: как выбирается режим экрана
+
+Основной путь теперь снова похож на один пункт Resolution старого DisciplesGL: **Видео ->
+Разрешение -> Автоматическое разрешение** одновременно выбирает логический кадр игры и возвращает
+обычное окно в режим `width=0`, `height=0`, то есть окно следует кадру без скрытого второго размера.
+Для обычного окна автоматика вычитает из рабочей области рамку, заголовок, строку меню и панель
+задач; для borderless/exclusive использует весь монитор. Из подходящего семейства она берёт самый
+крупный проверенный кадр, который помещается: штатный `DisplaySize` на 4:3/5:4 или настоящий Hor+
+на широком экране. Целый коэффициент больше не важнее обзора карты — дробное увеличение аккуратно
+делает шейдер. Пример: на 1920x1080 полноэкранный режим выбирает Hor+ 1920x1080, а обычное окно на
+том же мониторе обычно 1600x900, чтобы системные элементы оставались на экране; на 3840x2160
+выбирается 2560x1440, а не уменьшенный 1920x1080 ради 2x.
+
+Ручные штатные и широкие размеры находятся в двух компактных подменю и тоже привязывают обычное
+окно к выбранному кадру; нужен полный перезапуск игры. Только пункт **Дополнительно: изменить только
+окно/вывод для стрима** снова разъединяет размеры: он меняет внешний вывод сразу, но не добавляет
+обзор карты. **Вписать / Целые блоки / Растянуть** определяют лишь геометрию уже выбранной пары.
+
+## 1.6: how the screen mode is selected
+
+The main path is again close to the original DisciplesGL's single Resolution command: **Video ->
+Resolution -> Automatic resolution** selects the logical game canvas and resets the normal-window
+output to `width=0`, `height=0`, so the window follows that canvas instead of retaining a hidden
+second size. For a normal window Auto subtracts the frame, title, menu row and taskbar from the work
+area; borderless/exclusive uses the full monitor. It then picks the largest fitting validated canvas
+from the appropriate family: stock `DisplaySize` on 4:3/5:4, true Hor+ on a wide display. Integer
+scaling no longer wins at the cost of map area; the selected shader handles a fractional scale. For
+example, a 1920x1080 monitor selects Hor+ 1920x1080 fullscreen but normally 1600x900 in a decorated
+window, while 3840x2160 selects 2560x1440 instead of dropping to 1920x1080 merely for 2x.
+
+Manual stock and widescreen sizes live in two compact submenus and also re-link the normal window;
+they require a full game restart. Only **Advanced: change window/stream output only** separates the
+sizes again: it changes the outer output live without adding map view. **Fit / Integer pixel blocks /
+Stretch** only decide how the already selected pair is mapped.
+
 ## Resolution pipeline: game resolution -> window/screen -> scaling
 
-“Resolution” refers to four different stages here. They are deliberately independent:
+“Resolution” still has four internal stages. The regular Resolution commands keep the first two
+linked; only the explicitly Advanced output command separates them:
 
 | Stage | Setting | What it changes | Applies |
 | --- | --- | --- | --- |
 | Game resolution | stock `[Disciple] DisplaySize`, or the widescreen `[Wrapper] GameCanvasMode/Width/Height` override | how many logical pixels the game creates and lays out: strategic view, UI and battle room | full game restart |
-| Window / screen size | **Video -> Resolution -> Window/stream only**, `ddraw.ini` `width`/`height`, or manual resize | render target around the selected game resolution; it never adds game content | live or resize |
+| Window / screen size | **Video -> Resolution -> Advanced output**, `ddraw.ini` `width`/`height`, or manual resize | render target around the selected game resolution; it never adds game content | live or resize |
 | Output geometry | `maintas`, `boxing`, `aspect_ratio` | how the game resolution is mapped into the output viewport | live |
 | Sampling | `shader` | how source pixels are reconstructed after the geometry is known | live, OpenGL only |
 
 The nine recognized D2 2.00-3.01 executable layouts create their DirectDraw surfaces and dependent
 map buffers once during startup. In the unified **Video -> Resolution** popup, three entries marked
-`★` are the game's stock modes and a separately labelled block shows all validated widescreen modes;
-the right column gives each aspect ratio. **Automatic for monitor** chooses between both families:
-4:3/5:4 displays use one of the three stock `DisplaySize` modes, while 3:2 and wider displays use a
-validated Hor+ canvas. It prefers the largest canvas with clean integer Fit scaling, otherwise the
-largest canvas that fits. Every game-view entry changes the logical game size and therefore requires
-a full restart. The live Window/output dialog remains at the bottom of this popup.
+`★` are the game's stock modes and a separately labelled submenu shows all validated widescreen
+modes; the right column gives each aspect ratio. **Automatic resolution** chooses between both
+families: 4:3/5:4 targets use one of the three stock `DisplaySize` modes, while 3:2 and wider targets
+use a validated Hor+ canvas. It selects the largest canvas that fits the current normal-window work
+area or the fullscreen monitor. Every game-view entry changes the logical game size, re-links normal
+output to it and therefore requires a full restart. The live Advanced output dialog remains at the
+bottom of this popup.
 
 | Stock game modes | Setting |
 | ---: | --- |
@@ -211,8 +248,9 @@ resolution to 800x600: the Hor+ width and height are the DirectDraw canvas. Stoc
 Hor+ are alternative layout families, so placing 1280x1024 underneath Hor+ would not add pixels or
 remove bars; it would only mix an unpatched stock layout with the wide hooks.
 When the key is absent on a recognized layout, adaptive mode is the default. For example, 1920x1080
-selects Hor+ 1920x1080 at 1x, 3840x2160 selects Hor+ 1920x1080 at 2x, and 1280x1024 selects the
-game's stock 1280x1024 mode. Manual stock and Hor+ selections are never replaced by the automation.
+fullscreen selects Hor+ 1920x1080 at 1x, 3840x2160 selects Hor+ 2560x1440 at 1.5x, and 1280x1024
+fullscreen selects the game's stock 1280x1024 mode. A normal decorated window may deliberately use
+the next smaller fitting canvas. Manual stock and Hor+ selections are never replaced by automation.
 
 The signature-gated game hooks change the DirectDraw mode, strategic-map layout and
 dimension-dependent allocations. If the executable is not one of the nine validated game layouts or
@@ -251,13 +289,12 @@ number of output pixels and is not rewritten when the game resolution changes. W
 to the window and maps mouse coordinates back to game pixels. Exclusive fullscreen can additionally
 fall back to a supported display mode, so its requested size is not guaranteed.
 
-The menu preserves that boundary: selecting a game resolution writes only restart-latched
-`Disciple.ini` values and does not call the live renderer reload. The scaling lines preview the
-selected next canvas while still identifying the live game resolution and output. One **Video ->
-Resolution** popup now contains both clearly separated concepts, like the legacy wrapper's single
-Resolution entry: stock/widescreen game-view presets first, then a **Window/output** dialog.
-Automatic output writes `0,0`, while
-a custom image area from 320x240 through 8192x8192 writes `width`/`height` to the effective
+The menu preserves the boundary without exposing two equal-weight choices: selecting a game
+resolution writes restart-latched `Disciple.ini` values, sets next-start output to `0,0`, and does
+not reload the running game's canvas. The scaling lines preview the selected next canvas while still
+identifying live game resolution and output. One **Video -> Resolution** popup contains Automatic,
+compact manual stock/widescreen submenus, and one explicitly **Advanced output** dialog. A custom
+image area from 320x240 through 8192x8192 writes `width`/`height` to the effective
 `ddraw.ini` section and applies it live. The full downscale range uses the shipped `adjmouse=true`;
 if mouse remapping was disabled by hand, the dialog raises its minimum to the running game canvas
 so clicks cannot become desynchronized. Existing hand-edited values remain supported.
@@ -388,9 +425,10 @@ English otherwise. Submenus carry grayed one-line hints explaining each option.
 
 `Ctrl+Mouse Wheel` reproduces the DisciplesGL 2.0.2 simple zoom in both the game and Scenario
 Editor: wheel up adds 0.1x, wheel down subtracts 0.4x, range 1.0x..8.0x, and the image stays anchored
-at the cursor. It is process-local, not persisted, and works in OpenGL, D3D9/Auto and GDI. Ordinary
-wheel input retains the original wrapper behavior (an Up/Down key press). It does not inspect or call
-`mss32.dll`.
+at the cursor. It is process-local, not persisted, and works in OpenGL, D3D9/Auto and GDI. Ctrl+Wheel
+is consumed after changing zoom; an ordinary wheel remains a normal `WM_MOUSEWHEEL` and no longer
+generates artificial Up/Down map movement. Mouse hit coordinates follow the zoomed image. It does
+not inspect or call `mss32.dll`.
 
 ### Scenario Editor
 
@@ -409,7 +447,7 @@ the legacy wrapper. The switch uses no executable or `mss32.dll` addresses; the 
 | (MNS/SMNS) Auto-confirm unit hire | skips only “Do you want to hire this unit?” by invoking its normal `BTN_YES` callback during the local player's turn; off by default | `C4menu.ini` `autoConfirmUnitHire` | live |
 | (MNS/SMNS) Battle speed (whole battle): Off / 1.5x / 2x (default) / 3x / 4x / 5x / 15x | multiplies all battle animation timing via a virtual clock (a `timeGetTime` redirect); no game memory is patched | `C4menu.ini` `battleAnimEnabled` + `battleAnimSpeed` | live |
 | (MNS/SMNS) Attack speed-up (burst on each hit): Off / 1.5x .. 5x (default) / 15x | switches the battle clock to the selected factor from the effect-start callback until the engine reports that the final visual component ended, then returns to idle linearly over 300 ms. A signature-gated hook supplies the exact end, with the timed fallback retained if that hook is unavailable | `C4menu.ini` `battleAttackEnabled` + `battleAttackSpeed` | live |
-| (MNS/SMNS) Map animation speed: Off (default) / 1.5x .. 15x | the same virtual clock on the strategic map (water, flags, effects) | `C4menu.ini` `mapAnimEnabled` + `mapAnimSpeed` | live |
+| (MNS/SMNS) Map animation speed: Off (default) / 1.5x .. 15x | the same virtual clock on the strategic map (water, flags, effects). `+/-` changes this preset on the map and the battle-animation preset while a battle is visible; main and numpad keys are supported | `C4menu.ini` `mapAnimEnabled` + `mapAnimSpeed` | live |
 | (MNS/SMNS) Battle speed (game option): Slow / Normal / Fast / Instant | the game's OWN option, same as its settings screen | `Disciple.ini` `BattleSpeed` | next battle |
 | (MNS/SMNS) Map movement speed (game option): Normal / Fast / Very fast | the game's OWN option: walk speed of player and AI stacks, read when a move starts | `Disciple.ini` `PlayerSpeed` + `OpponentSpeed` | next move |
 | (MNS/SMNS) Map clouds | loads and animates the real external `Imgs\IsoClouds.ff` through the legacy allocation/archive/resource pipeline; the menu aliases the game's native visibility option and is unavailable without the validated archive or matching executable signatures | `Disciple.ini` `[Settings] IsoBirds` | full restart |
@@ -424,8 +462,8 @@ remains enabled by default and selects the fixed 990x600 two-panel dialog when t
 | --- | --- | --- | --- |
 | Display mode: Windowed / Fullscreen (adaptive borderless) / Fullscreen exclusive (advanced) | borderless automatically uses the desktop size; exclusive performs a real mode change and can fall back to borderless where impossible (RDP). The menu bar is shown only in a normal window. `F4` and `Alt+Enter` return to/from fullscreen | `ddraw.ini` `windowed` + `fullscreen` | live |
 | Decorative background around classic screens | on an active widescreen game canvas, fills the area outside a centered fixed-size screen with the DisciplesGL background and Alternative frame. It is enabled by default and included in wrapper screenshots. A stock native canvas has no internal free area, so the item is disabled there; a separately enlarged Window/stream output can still have renderer-owned black bars | `C4menu.ini` `decorativeBackground` | live after a widescreen game-resolution restart |
-| Resolution -> Original / Widescreen game view | the one Resolution popup explicitly separates three `★` stock modes from all ten validated widescreen modes: 1066x600, 1152x648, 1280x720, 1366x768, 1440x810, 1536x864, 1600x900, 1820x1024, 1920x1080 and 2560x1440. Widescreen shows more map rather than stretching output. Unsupported executable layouts keep the popup openable but gray only the unavailable game-view rows | stock `[Disciple] DisplaySize`; widescreen `[Wrapper] GameCanvasMode/Width/Height` | full restart |
-| Resolution -> Window/stream only | opens a numeric width/height dialog in the same popup. It explicitly does not change the game view. Automatic follows the selected game resolution; with mouse remapping enabled, a custom 320x240..8192x8192 value is the image area inside the window, excluding its frame/title/menu. If remapping was disabled by hand, the current game canvas becomes the minimum. Borderless still uses the desktop | effective `ddraw.ini` `width` + `height` | live and next start |
+| Resolution -> Automatic / Manual stock / Manual widescreen | Automatic selects the largest fitting validated game canvas for the persisted display mode; manual sizes live in two compact submenus. All regular choices re-link normal output to the game canvas. Widescreen shows more map rather than stretching output; unsupported executable layouts gray the unavailable game-view rows | stock `[Disciple] DisplaySize`; widescreen `[Wrapper] GameCanvasMode/Width/Height`; output `width=0`, `height=0` | full restart |
+| Resolution -> Advanced output | opens a numeric width/height dialog in the same popup and deliberately separates output from game view. Automatic follows the selected game resolution; with mouse remapping enabled, a custom 320x240..8192x8192 value is the image area inside the window, excluding frame/title/menu. Borderless still uses the desktop | effective `ddraw.ini` `width` + `height` | live and next start |
 | Scaling: Fit / Integer pixel blocks / Stretch / Custom | maps the logical game canvas into the actual window/desktop. The result line shows the coefficient, viewport and bars; `1:1` means one game pixel equals one output pixel. With mouse remapping active, the window may be smaller than the canvas and the selected shader filters it down | `ddraw.ini` `maintas` + `boxing` + `aspect_ratio` | live |
 | Filter: Lanczos / xBRZ / Bicubic / AMD FSR / xBR lv2 / Bilinear / None / CRT | OpenGL sampling filter for enlargement or reduction; all eight presets and required multipass files ship in `Shaders/`. Lanczos, Bicubic and Bilinear suit fractional downscaling | `ddraw.ini` `shader` | live, OpenGL only |
 | Renderer (restart): OpenGL (recommended) / GDI / Auto | rendering backend; Auto picks D3D9 first, which has no shader filters | `ddraw.ini` `renderer` | restart |
@@ -451,8 +489,10 @@ to follow the desktop.
 
 Loads only native `Mods\*.c4p` plugins and grafts each plugin directly under **Plugins**. The bundled
 Timer is configured via `C4plugins.ini`; its countdown uses `TableDuration_0`. Hold **Ctrl+Alt** and
-drag the clock with LMB to reposition it. Automatic turn handling is MNS/SMNS-only; other builds
-retain the Timer's manual controls.
+drag the clock with LMB to reposition it. On the exact Russobit/MNS layout, Force mode starts only
+after the player accepts the native beginning-of-turn summary with **OK**; the visible dialog does
+not consume time, and a started Force clock cannot be manually paused. Other builds keep the prior
+active-turn edge because no unverified callback address is used.
 
 ## Save handling (all game versions)
 
@@ -677,23 +717,23 @@ Lanczos, `savesettings=1`) - удалите его, если хотите сра
 
 ## Цепочка разрешения: разрешение игры -> окно/экран -> масштабирование
 
-Слово «разрешение» здесь обозначает четыре разных этапа. Они намеренно не подменяют друг друга:
+Внутри остаются четыре этапа. Обычный выбор «Разрешение» связывает первые два; разъединяет их
+только явно дополнительная настройка вывода:
 
 | Этап | Настройка | Что меняет | Применение |
 | --- | --- | --- | --- |
 | Разрешение игры | штатный `[Disciple] DisplaySize` или широкая подмена `[Wrapper] GameCanvasMode/Width/Height` | сколько логических пикселей создаёт и раскладывает сама игра: стратегический обзор, UI и поле боя | полный перезапуск игры |
-| Размер окна / экрана | **Видео -> Разрешение -> Только окно/стрим**, `ddraw.ini` `width`/`height` или ручной resize | цель вывода вокруг выбранного разрешения игры; нового игрового содержимого не добавляет | сразу или resize |
+| Размер окна / экрана | **Видео -> Разрешение -> Доп. вывод**, `ddraw.ini` `width`/`height` или ручной resize | цель вывода вокруг выбранного разрешения игры; нового игрового содержимого не добавляет | сразу или resize |
 | Геометрия вывода | `maintas`, `boxing`, `aspect_ratio` | как разрешение игры вписывается во viewport вывода | сразу |
 | Фильтрация | `shader` | как пересчитываются исходные пиксели после выбора геометрии | сразу, только OpenGL |
 
 Девять распознаваемых раскладок exe D2 2.00–3.01 создают поверхности DirectDraw и зависимые буферы
 карты один раз при старте. В едином меню **Видео -> Разрешение** три пункта со знаком `★` являются
-штатными режимами игры, а отдельный явно подписанный блок показывает все проверенные широкие
-варианты, а справа указан коэффициент сторон. «Авто под монитор» выбирает между этими семействами:
-на экранах 4:3/5:4 используется один из трёх штатных `DisplaySize`, на 3:2 и шире — проверенный
-кадр Hor+. Сначала выбирается самый крупный кадр с чётким целым масштабом «Вписать», а если такого
-нет — самый крупный помещающийся. Каждый пункт меняет логический размер игры и требует полного
-перезапуска.
+штатными режимами игры, а отдельное подменю показывает все проверенные широкие варианты; справа
+указаны пропорции. «Автоматическое разрешение» выбирает между семействами: для цели 4:3/5:4 — один
+из трёх штатных `DisplaySize`, для 3:2 и шире — проверенный кадр Hor+. Берётся самый крупный кадр,
+который помещается в рабочую область обычного окна либо в полный монитор. Каждый игровой пункт
+привязывает к кадру обычное окно и требует полного перезапуска.
 
 | Штатные режимы игры | Настройка |
 | ---: | --- |
@@ -724,8 +764,9 @@ Lanczos, `savesettings=1`) - удалите его, если хотите сра
 поверхностью становятся выбранные ширина и высота Hor+. Штатный `DisplaySize` и Hor+ — два
 альтернативных семейства раскладки; подложенный под Hor+ режим 1280x1024 не добавит пикселей и не
 уберёт поля, а лишь смешает непатченую штатную раскладку с широкими хуками.
-Например, 1920x1080 выбирает Hor+ 1920x1080 при 1x, 3840x2160 — Hor+ 1920x1080 при 2x,
-а 1280x1024 — штатный режим игры 1280x1024. Явный ручной выбор автоматика не заменяет.
+Например, полный экран 1920x1080 выбирает Hor+ 1920x1080 при 1x, 3840x2160 — Hor+ 2560x1440
+при 1.5x, а 1280x1024 — штатный режим игры 1280x1024. Обычное окно с рамкой может намеренно
+получить следующий меньший помещающийся кадр. Явный ручной выбор автоматика не заменяет.
 
 Защищённые сигнатурами хуки меняют режим DirectDraw, раскладку стратегической карты и зависящие от
 размеров аллокации. Если exe не относится к девяти проверенным игровым раскладкам или обязательные
@@ -764,11 +805,10 @@ fallback. Произвольный старый размер не использ
 готовое изображение до окна и пересчитывает мышь обратно в игровые координаты. Эксклюзивный режим
 может подобрать другой поддерживаемый видеорежим, поэтому точный запрошенный размер не гарантирован.
 
-Меню сохраняет эту границу: выбор разрешения игры пишет только restart-настройки `Disciple.ini` и
-не вызывает live reload рендерера. Строки масштабирования рассчитывают будущий кадр, но отдельно
-показывают живые разрешение игры и вывод. Один popup **Видео -> Разрешение**, как у старого врапера,
-содержит два явно разделённых блока: штатные/широкие режимы игрового обзора и внизу диалог
-**Окно/вывод**. «Автоматически» пишет `0,0`, а произвольная область изображения от
+Меню сохраняет границу, но не показывает два равноправных «разрешения»: игровой выбор пишет
+restart-настройки `Disciple.ini`, ставит выводу следующего запуска `0,0` и не перезагружает живой
+игровой кадр. Один popup **Видео -> Разрешение** содержит Авто, компактные ручные подменю штатных и
+широких режимов и один явно дополнительный диалог вывода. Произвольная область изображения от
 320x240 до 8192x8192 пишет `width`/`height` в эффективную секцию `ddraw.ini` и применяется сразу.
 Полный диапазон уменьшения использует комплектное `adjmouse=true`; если пересчёт мыши был вручную
 выключен, диалог поднимает минимум до текущего игрового кадра, чтобы клики не рассинхронизировались.
@@ -903,8 +943,9 @@ override его не отменит. Автосохранение состоян
 `Ctrl+колесо мыши` повторяет simple zoom из DisciplesGL 2.0.2 и в игре, и в редакторе сценариев:
 колесо вверх добавляет 0,1x, вниз убавляет 0,4x, диапазон 1,0x..8,0x, изображение остаётся
 привязанным к позиции курсора. Масштаб действует до завершения процесса, не сохраняется и работает
-в OpenGL, D3D9/Auto и GDI. Обычное колесо сохраняет поведение оригинального врапера — передаёт
-стрелку вверх/вниз. `mss32.dll` не проверяется и не вызывается.
+в OpenGL, D3D9/Auto и GDI. `Ctrl+колесо` поглощается после изменения масштаба; обычное колесо
+остаётся обычным `WM_MOUSEWHEEL` и больше не создаёт искусственное движение карты вверх/вниз.
+Координаты клика следуют увеличенному изображению. `mss32.dll` не проверяется и не вызывается.
 
 ### Редактор сценариев
 
@@ -922,7 +963,7 @@ override его не отменит. Автосохранение состоян
 | (MNS/SMNS) Автоподтверждение найма воинов | пропускает только вопрос «Хотите нанять этого воина?» штатным callback `BTN_YES` в активный ход локального игрока; по умолчанию выключено | `C4menu.ini` `autoConfirmUnitHire` | сразу |
 | (MNS/SMNS) Скорость боя (весь бой): Выкл / 1.5x / 2x (по умолчанию) / 3x / 4x / 5x / 15x | умножает тайминг всех боевых анимаций через виртуальные часы (редирект `timeGetTime`); память игры не патчится | `C4menu.ini` `battleAnimEnabled` + `battleAnimSpeed` | сразу |
 | (MNS/SMNS) Ускорение атак (рывок на каждый удар): Выкл / 1.5x .. 5x (по умолчанию) / 15x | включает выбранный фактор по callback начала эффекта и держит его до сообщения движка об окончании последней визуальной части, затем линейно возвращает idle за 300 мс. Точное окончание даёт hook с проверкой сигнатуры; для неизвестной раскладки exe сохраняется старый временной fallback | `C4menu.ini` `battleAttackEnabled` + `battleAttackSpeed` | сразу |
-| (MNS/SMNS) Скорость анимаций карты: Выкл (по умолчанию) / 1.5x .. 15x | те же виртуальные часы на стратегической карте (вода, флаги, эффекты) | `C4menu.ini` `mapAnimEnabled` + `mapAnimSpeed` | сразу |
+| (MNS/SMNS) Скорость анимаций карты: Выкл (по умолчанию) / 1.5x .. 15x | те же виртуальные часы на стратегической карте (вода, флаги, эффекты). `+/-` меняет этот пресет на карте и пресет всей боевой анимации во время боя; работают основные клавиши и numpad | `C4menu.ini` `mapAnimEnabled` + `mapAnimSpeed` | сразу |
 | (MNS/SMNS) Скорость боя (опция игры): Медленно / Нормально / Быстро / Мгновенно | СОБСТВЕННАЯ опция игры, та же, что в её настройках | `Disciple.ini` `BattleSpeed` | со следующего боя |
 | (MNS/SMNS) Скорость передвижения на карте (опция игры): Нормально / Быстро / Очень быстро | СОБСТВЕННАЯ опция игры: скорость шага ваших и вражеских отрядов, читается при старте движения | `Disciple.ini` `PlayerSpeed` + `OpponentSpeed` | со следующего движения |
 | (MNS/SMNS) Облака на карте | загружает и анимирует настоящий внешний `Imgs\IsoClouds.ff` через legacy-pipeline аллокации, архива и ресурсов; пункт меню управляет штатной видимостью и недоступен без валидированного архива или совпавших сигнатур exe | `Disciple.ini` `[Settings] IsoBirds` | полный перезапуск |
@@ -937,8 +978,8 @@ override его не отменит. Автосохранение состоян
 | --- | --- | --- | --- |
 | Режим экрана: Оконный / Полный экран (адаптивный без рамки) / Эксклюзивный полный экран (дополнительно) | безрамочный режим автоматически берёт размер рабочего стола; эксклюзивный делает настоящую смену видеорежима и может откатиться в безрамочный (например, в RDP). Меню-бар показывается только в обычном окне; `F4` и `Alt+Enter` возвращают в/из полного экрана | `ddraw.ini` `windowed` + `fullscreen` | сразу |
 | Декоративный фон вокруг классических экранов | при активном широком разрешении игры заполняет место вокруг центрированного фиксированного экрана фоном DisciplesGL и рамкой Alternative. Включён по умолчанию и попадает во встроенные скриншоты. В штатном кадре внутреннего свободного места нет, поэтому пункт серый; отдельное увеличение «окна/стрима» всё ещё может оставить чёрные поля самого рендерера | `C4menu.ini` `decorativeBackground` | сразу после перезапуска в широком разрешении игры |
-| Разрешение -> Штатный / Широкий обзор | один popup явно отделяет три штатных режима со `★` от всех десяти проверенных широких: 1066x600, 1152x648, 1280x720, 1366x768, 1440x810, 1536x864, 1600x900, 1820x1024, 1920x1080 и 2560x1440. Широкий режим показывает больше карты, а не растягивает вывод. На неизвестном exe popup остаётся доступным, серыми становятся только неподдержанные игровые строки | штатный `[Disciple] DisplaySize`; широкий `[Wrapper] GameCanvasMode/Width/Height` | полный перезапуск |
-| Разрешение -> Только окно/стрим | открывает в том же popup числовой диалог ширины/высоты и явно не меняет игровой обзор. «Автоматически» следует выбранному разрешению игры; при включённом пересчёте мыши произвольное значение 320x240..8192x8192 задаёт область изображения внутри окна без рамки, заголовка и меню. Если пересчёт вручную выключен, минимумом становится текущий игровой кадр. Borderless всё равно использует рабочий стол | эффективная секция `ddraw.ini`, `width` + `height` | сразу и при следующем запуске |
+| Разрешение -> Авто / Вручную штатное / Вручную широкое | Авто выбирает самый крупный помещающийся проверенный игровой кадр для сохранённого режима экрана; ручные размеры находятся в двух компактных подменю. Любой обычный выбор снова привязывает вывод окна к игровому кадру. Широкий режим добавляет обзор карты, а не растягивает вывод | штатный `[Disciple] DisplaySize`; широкий `[Wrapper] GameCanvasMode/Width/Height`; вывод `width=0`, `height=0` | полный перезапуск |
+| Разрешение -> Доп. вывод | открывает числовой диалог ширины/высоты и намеренно отделяет вывод от игрового обзора. «Автоматически» следует выбранному разрешению игры; при включённом пересчёте мыши произвольное значение 320x240..8192x8192 задаёт область изображения внутри окна без рамки, заголовка и меню. Borderless всё равно использует рабочий стол | эффективная секция `ddraw.ini`, `width` + `height` | сразу и при следующем запуске |
 | Масштаб: Вписать / Целые блоки пикселей / Растянуть / Custom | укладывает логический кадр игры в фактическое окно/рабочий стол. Строка результата показывает коэффициент, viewport и поля; `1:1` означает один игровой пиксель на один выходной. При пересчёте мыши окно может быть меньше кадра, тогда выбранный шейдер фильтрует изображение вниз | `ddraw.ini` `maintas` + `boxing` + `aspect_ratio` | сразу |
 | Фильтр: Lanczos / xBRZ / Bicubic / AMD FSR / xBR lv2 / Bilinear / Без фильтра / CRT | OpenGL-фильтр увеличения или уменьшения; все восемь пресетов и необходимые multipass-файлы входят в `Shaders/`. Для дробного downscale подходят Lanczos, Bicubic и Bilinear | `ddraw.ini` `shader` | сразу, только OpenGL |
 | Рендерер (рестарт): OpenGL (рекомендуется) / GDI / Auto | бэкенд рендера; Auto сначала берёт D3D9, у которого нет шейдерных фильтров | `ddraw.ini` `renderer` | рестарт |
@@ -963,8 +1004,10 @@ override его не отменит. Автосохранение состоян
 
 Загружаются только нативные плагины `Mods\*.c4p`; меню каждого сразу появляется в разделе
 **Плагины**. Комплектный Timer настраивается через `C4plugins.ini`, длина отсчёта —
-`TableDuration_0`. Для перемещения часов зажмите **Ctrl+Alt** и перетащите их ЛКМ. Автоматическая
-обработка хода работает только на MNS/SMNS; на других сборках остаются ручные команды Timer.
+`TableDuration_0`. Для перемещения часов зажмите **Ctrl+Alt** и перетащите их ЛКМ. На точной
+раскладке Russobit/MNS режим Force начинает отсчёт только после штатной кнопки **OK** в сводке
+начала хода: пока диалог открыт, время не уходит, а уже запущенный Force-таймер вручную не ставится
+на паузу. На других exe остаётся прежний сигнал активного хода — непроверенные адреса не применяются.
 
 ## Работа с сейвами (все версии игры)
 

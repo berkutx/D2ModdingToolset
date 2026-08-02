@@ -47,8 +47,9 @@ identified by the validated PE size (2895872); all zoom/editor message routing i
 
 | Kind | Target | Purpose |
 | --- | --- | --- |
-| call from patched cnc-ddraw WndProc | `DDHandleSimpleZoom` | reproduce DisciplesGL 2.0.2 Ctrl+Wheel steps (+0.1/-0.4, clamp 1..8, cursor anchor), then forward Up/Down |
+| call from patched cnc-ddraw WndProc | `DDHandleSimpleZoom` | reproduce DisciplesGL 2.0.2 Ctrl+Wheel steps (+0.1/-0.4, clamp 1..8, cursor anchor) and consume only the handled Ctrl+Wheel; ordinary wheel input remains `WM_MOUSEWHEEL` |
 | call from OpenGL/D3D9/GDI final output | `DDApplySimpleZoomViewport` | apply the process-local zoom to the final destination rectangle |
+| call from patched cnc-ddraw WndProc | `DDApplySimpleZoomMouse` | apply the inverse zoom transform to game-space mouse coordinates so hits follow the enlarged image |
 | call from patched cnc-ddraw WndProc | `featuremenu_renderer_message` | route ScenEdit menu commands without detouring an editor function |
 | Win32 profile write | `Disciple.ini` `[Disciple] ScenEditDatabase` | switch Scenarios/Campaigns; restart required |
 
@@ -57,6 +58,7 @@ identified by the validated PE size (2895872); all zoom/editor message routing i
 | Kind | Address | Purpose |
 | --- | --- | --- |
 | IAT | `0x6CE420` (`winmm!timeGetTime`) | virtual clock: scale battle/map animation (factor/10), gated by `g_inBattle` |
+| WndProc | `VK_OEM_PLUS/MINUS`, `VK_ADD/SUBTRACT` | live context-sensitive animation preset: map outside battle, whole-battle animation inside battle |
 | vftable | `0x6F4294` (IBatViewer) | battle discriminator. slots: [0] dtor `0x645900`, [1] choose-action handler `0x630DE3`, **[2] showAttackEffect `0x63203B`** (attack-start pulse), [3] battleEnd `0x631FFC` |
 | patched call | `0x638AD9` (original `0x639743`) | exact attack-end pulse after `CBatViewerUtils::CAnimCounter` reaches zero; 14-byte context signature at `0x638AD0` is required |
 | vftable | `0x6F48CC` slot[1] (patch at `0x6F48D0`) | per-unit frame-speed; orig `CBatUnitAnim::update` = `0x65615E` (experimental) |
@@ -123,8 +125,15 @@ the corresponding address in every selected row, plus the distinct V2/V3 object 
 | --- | --- | --- |
 | Detour | `0x5C93D6` | dialog-create — capture dialog/battle buttons |
 | Detour | `0x48A680` | turn-info (player/serial) |
+| Detour | `0x4BA8BB` | Russobit `CBeginTurnInterf` `DLG_BEGIN_TURN/BTN_OK` callback — publish the precise clock-start acknowledgement only after the native handler completes |
 | ref | `0x6CEB5C` | scenario-init (day source) |
 | ref | `0x6E3294` | button-dtor (button lifetime) |
+
+The `0x4BA8BB` detour is independently signature-gated (`8B 41 20 8B 08 E9 1E EF 01 00`).
+When unavailable, the host reports `UINT32_MAX` and Timer keeps the previous per-client
+`turn_active` edge on other executable layouts. In Force mode the Russobit clock stays frozen while
+`DLG_BEGIN_TURN` is visible and resets its baseline only after the player uses the ordinary OK
+functor; no dialog visibility polling or synthetic click is involved.
 
 ## Dialog-VO auto-skip (`features/featuremenu.cpp`, `dvo*`)
 

@@ -15,6 +15,7 @@
 #include <gdiplus.h>
 #include "../../features/c4plugin.h"
 #include "timer_dlg.h"
+#include <stddef.h>
 #include <stdint.h>
 
 #pragma comment(lib, "gdiplus.lib")
@@ -77,8 +78,10 @@ int* bankAccum(int playerId) // &accum for playerId; claims a free slot the firs
 }
 int g_lastPlayer = -1;  // player whose turn it was last (to bank their remaining on turn change)
 int g_wasActive = 0;    // previous tick's turn_active, to detect the 0->1 (my turn started) edge
+int g_turnAccepted = 0; // Force clock is allowed to run for this local turn (Russobit: only after OK)
 int g_curDayBudget = 0; // day captured at the current turn-start (for the previous turn's budget)
 uint32_t g_lastSerial = 0; // last processed turn serial; a bump = a real turn change (off[6] turn-info)
+uint32_t g_lastBeginTurnAck = UINT32_MAX; // UINT32_MAX = host/exe has no precise acknowledgement hook
 
 // Guards config + clock shared between c4p_command (game UI thread) and c4p_tick (worker thread).
 CRITICAL_SECTION g_lock;
@@ -204,6 +207,19 @@ int hostBattleKind()
                : 0;
 }
 
+// Russobit publishes a monotonic edge only after DLG_BEGIN_TURN's normal BTN_OK callback has
+// completed. Other executable layouts return UINT32_MAX and retain the active-turn-edge behavior.
+uint32_t hostBeginTurnAckSerial()
+{
+    const size_t required =
+        offsetof(C4P_Host, begin_turn_ack_serial) +
+        sizeof(g_host->begin_turn_ack_serial);
+    return (g_host && g_host->struct_size >= required &&
+            g_host->begin_turn_ack_serial)
+        ? g_host->begin_turn_ack_serial()
+        : UINT32_MAX;
+}
+
 // Per-turn budget (seconds) for a day: day-1 base until the first active Timetable entry, then the
 // duration of the active entry with the largest TableDay <= day.
 int budgetSecForDay(int day)
@@ -285,15 +301,19 @@ void refreshMenu()
 {
     if (!g_menu)
         return;
-    // legacy greys Pause/Reset/Set in Force mode until a real turn is active (g_running). Simple mode
-    // is always active when enabled.
-    const bool active = (g_state == 1) || (g_state == 2 && g_running != 0);
+    // Force/PvP is a non-stoppable clock: user Pause stays disabled, while automatic animation,
+    // combat and not-my-turn freezes still work internally. Reset becomes available only after this
+    // local turn has passed the precise begin-turn acknowledgement.
+    const bool resettable =
+        (g_state == 1) || (g_state == 2 && g_turnAccepted != 0);
     chk(kSimpleOn, g_state == 1);
     chk(kForceOn, g_state == 2);
-    ena(kPause, active);
+    ena(kPause, g_state == 1);
     chk(kPause, g_paused != 0);
-    ena(kReset, active);
-    ena(kSet, active);
+    ena(kReset, resettable);
+    // Set is useful before Force mode has detected a live turn and remains safe while paused.
+    // Only a completely disabled timer has no editable clock.
+    ena(kSet, g_state != 0);
     // On Day Start (b0 Pause / b1 Unpause / b2 Reset)
     chk(kDayStartPause, (g_dayTurn & 1) != 0);
     chk(kDayStartUnpause, (g_dayTurn & 2) != 0);
@@ -372,6 +392,8 @@ extern "C" int __cdecl c4p_init(const C4P_Host* host)
     readConfig();
     g_running = 0;                          // do NOT self-start; wait for a real turn (or a manual Reset)
     g_lastSerial = host->get_turn_serial(); // sync so the first real turn change is what starts the clock
+    g_lastBeginTurnAck = hostBeginTurnAckSerial();
+    g_turnAccepted = 0;
     if (!loadFont()) {
         c4p_shutdown();
         return 0;
@@ -387,6 +409,7 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
     const int inGame = g_host->is_in_game();
     const int dayNow = hostDay(); // read outside the lock; -1 (unknown) falls back to the day-1 base
     const int active = inGame ? hostTurnActive() : 0; // 1 = the LOCAL player's turn (per-client, MP-safe)
+    const uint32_t beginTurnAck = hostBeginTurnAckSerial();
     int state, durMs, alwaysVis, paused, running, extra;
     DWORD baseline, pausedAt;
     EnterCriticalSection(&g_lock);
@@ -397,52 +420,75 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         if (g_running || g_elapseFired)
             hostCancelElapse();
         g_running = 0;
+        g_turnAccepted = 0;
         g_elapseFired = 0;
         g_lastSerial = serial;
-    } else if (active && !g_wasActive) {
-        // MY turn just started (turn_active 0->1) - the reliable per-CLIENT trigger that fires EVERY
-        // turn. (off[6]/serial fires only ONCE per client at game start, so it cannot gate per-turn;
-        // gating the rebank on a serial change left every turn after the first un-reset.) Force =
-        // Fischer bank (each turn +budget, unused carries per player); Simple = count-up + On-Day bits.
-        const int newPlayer = g_host->get_turn_player();
-        const int firstTurn = !g_running;
-        g_lastSerial = serial;
-        hostCancelElapse();
-        g_elapseFired = 0; // re-arm the on-elapse latch (even an out-of-time turn auto-skips)
-        if (firstTurn) {
-            bankClear(); // fresh game
-            g_extra = 0;
-            g_baseline = now_ms;
-            g_pausedAt = now_ms;
-            if (dayNow >= 0) g_curDayBudget = dayNow;
-        } else if (g_state == 2) {
-            // Force: bank the PREVIOUS player's remaining (budget + extra - elapsed), then load the NEW
-            // player's bank and start a fresh budget. ResetExtraTime drops the carry.
-            if (g_lastPlayer >= 0) {
-                // FROZEN clock: the not-my-turn pause set g_pausedAt without advancing g_baseline, and
-                // this runs BEFORE the resume below. Clamp >=0 so a Set-future baseline or a GetTickCount
-                // wrap can't bank a huge negative-elapsed (= inflated carry).
-                int elapsedPrev = (int)((g_paused ? g_pausedAt : now_ms) - g_baseline);
-                if (elapsedPrev < 0) elapsedPrev = 0;
-                const int budgetPrev = budgetSecForDay(g_curDayBudget) * 1000;
-                *bankAccum(g_lastPlayer) = g_resetExtra ? 0 : (budgetPrev + g_extra - elapsedPrev);
+        g_lastBeginTurnAck = beginTurnAck;
+    } else {
+        // On Russobit, the clock edge is the native DLG_BEGIN_TURN BTN_OK callback, not dialog
+        // creation and not clientTakesTurn becoming true underneath the modal. If the callback ran
+        // just before active became observable, its serial remains pending and is consumed here.
+        // Other exe layouts have no validated callback and retain the reliable per-client 0->1 edge.
+        const bool preciseAck = beginTurnAck != UINT32_MAX;
+        const bool acceptedEdge =
+            active && preciseAck && beginTurnAck != g_lastBeginTurnAck;
+        const bool fallbackEdge = active && !preciseAck && !g_wasActive;
+        if (active && !g_wasActive)
+            g_turnAccepted = 0;
+
+        if (acceptedEdge || fallbackEdge) {
+            if (acceptedEdge)
+                g_lastBeginTurnAck = beginTurnAck;
+            g_turnAccepted = 1;
+            // MY turn is now usable. Force = Fischer bank (each turn +budget, unused carries per
+            // player); Simple = count-up + On-Day bits.
+            const int newPlayer = g_host->get_turn_player();
+            const int firstTurn = !g_running;
+            g_lastSerial = serial;
+            hostCancelElapse();
+            g_elapseFired = 0; // re-arm the on-elapse latch (even an out-of-time turn auto-skips)
+            if (firstTurn) {
+                bankClear(); // fresh game
+                g_extra = 0;
+                g_baseline = now_ms;
+                g_pausedAt = now_ms;
+                if (dayNow >= 0) g_curDayBudget = dayNow;
+            } else if (g_state == 2) {
+                // Force: bank the PREVIOUS player's remaining (budget + extra - elapsed), then load
+                // the NEW player's bank and start a fresh budget. ResetExtraTime drops the carry.
+                if (g_lastPlayer >= 0) {
+                    // FROZEN clock: the not-my-turn pause set g_pausedAt without advancing
+                    // g_baseline, and this runs BEFORE the resume below. Clamp >=0 so a Set-future
+                    // baseline or GetTickCount wrap cannot inflate carried time.
+                    int elapsedPrev =
+                        (int)((g_paused ? g_pausedAt : now_ms) - g_baseline);
+                    if (elapsedPrev < 0) elapsedPrev = 0;
+                    const int budgetPrev =
+                        budgetSecForDay(g_curDayBudget) * 1000;
+                    *bankAccum(g_lastPlayer) =
+                        g_resetExtra ? 0 : (budgetPrev + g_extra - elapsedPrev);
+                }
+                if (dayNow >= 0)
+                    g_curDayBudget = dayNow; // retain last-known day if get_day == -1
+                g_extra = (newPlayer >= 0) ? *bankAccum(newPlayer) : 0;
+                g_baseline = now_ms;
+                g_pausedAt = now_ms;
+            } else if (g_state == 1) {
+                // Simple (count-up): apply On-Day-End then On-Day-Start DayTurn bits; otherwise keep
+                // counting across turns (legacy resets only when a Reset bit fires).
+                if (g_dayTurn & 0x20) restart();         // DayEnd Reset
+                if (g_dayTurn & 0x08) setPaused(1);      // DayEnd Pause
+                else if (g_dayTurn & 0x10) setPaused(0); // DayEnd Unpause
+                if (g_dayTurn & 0x04) restart();         // DayStart Reset
+                if (g_dayTurn & 0x01) setPaused(1);      // DayStart Pause
+                else if (g_dayTurn & 0x02) setPaused(0); // DayStart Unpause
             }
-            if (dayNow >= 0) g_curDayBudget = dayNow; // keep last-known-good day if get_day == -1
-            g_extra = (newPlayer >= 0) ? *bankAccum(newPlayer) : 0;
-            g_baseline = now_ms;
-            g_pausedAt = now_ms;
-        } else if (g_state == 1) {
-            // Simple (count-up): apply On-Day-End then On-Day-Start DayTurn bits; otherwise keep counting
-            // across turns (legacy resets the stopwatch only if a Reset bit fires).
-            if (g_dayTurn & 0x20) restart();         // DayEnd Reset
-            if (g_dayTurn & 0x08) setPaused(1);      // DayEnd Pause
-            else if (g_dayTurn & 0x10) setPaused(0); // DayEnd Unpause
-            if (g_dayTurn & 0x04) restart();         // DayStart Reset
-            if (g_dayTurn & 0x01) setPaused(1);      // DayStart Pause
-            else if (g_dayTurn & 0x02) setPaused(0); // DayStart Unpause
+            g_running = 1;
+            g_lastPlayer = newPlayer;
         }
-        g_running = 1;
-        g_lastPlayer = newPlayer;
+
+        if (!active)
+            g_turnAccepted = 0;
     }
     g_wasActive = active;
 
@@ -450,9 +496,11 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
     // Pause (PvP-only vs any combat). Routed through setPaused so it composes with a manual pause without
     // double-counting; g_combatPausing remembers WE auto-paused so we never clear a user-set pause.
     int wantPause = 0;
-    if (g_running && inGame && !active) {
+    if (g_running && inGame &&
+        (!active || (g_state == 2 && !g_turnAccepted))) {
         // NOT the local player's turn: freeze so a client never counts another player's time (MP: waiting
-        // for the other player; SP: the AI / between turns).
+        // for the other player; SP: the AI / between turns). Russobit also remains frozen while the
+        // begin-turn summary is visible; acceptance resets the baseline before this freeze is released.
         wantPause = 1;
     } else if (g_running && g_state == 2) {
         const int kind = hostBattleKind();
@@ -844,10 +892,13 @@ extern "C" void __cdecl c4p_command(int cmd)
         break;
     }
     case kPause:
-        if (g_state) setPaused(g_paused ? 0 : 1);
+        if (g_state == 1) setPaused(g_paused ? 0 : 1);
         break;
     case kReset:
-        if (g_state) { restart(); g_running = 1; } // explicit (re)start from now
+        if (g_state == 1 || (g_state == 2 && g_turnAccepted)) {
+            restart();
+            g_running = 1;
+        }
         break;
     case kDayStartPause:   g_dayTurn = (g_dayTurn & 0x3C) | 1;  persist("DayTurn", g_dayTurn); break;
     case kDayStartUnpause: g_dayTurn = (g_dayTurn & 0x3C) | 2;  persist("DayTurn", g_dayTurn); break;

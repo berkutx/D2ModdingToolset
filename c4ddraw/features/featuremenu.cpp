@@ -791,8 +791,6 @@ int g_battleSpeed = 2;  // native GameSettings.battleSpeed (1..4)
 int g_mapSpeed = 1;     // native GameSettings.playerSpeed/opponentSpeed (1..3)
 int g_modeIdx = 0;      // persisted / next-start index into kModes
 int g_liveModeIdx = -1; // actual cnc-ddraw mode after F4 / Alt+Enter
-int g_adaptiveNoticeOutputW = 0, g_adaptiveNoticeOutputH = 0;
-int g_adaptiveNoticeCanvasW = 0, g_adaptiveNoticeCanvasH = 0;
 HMENU g_bar = nullptr;
 UINT g_relayoutMsg = 0; // registered msg: marshal menu/fullscreen chrome sync onto the GUI thread
 HMENU g_gameMenu = nullptr, g_videoMenu = nullptr, g_perfMenu = nullptr; // top-level bar menus
@@ -800,6 +798,7 @@ HMENU g_battleAnimMenu = nullptr, g_mapAnimMenu = nullptr, g_battleAtkMenu = nul
 HMENU g_rendMenu = nullptr, g_shaderMenu = nullptr;
 HMENU g_ticksMenu = nullptr, g_resMenu = nullptr, g_fpsMenu = nullptr, g_scaleMenu = nullptr;
 HMENU g_displaySizeMenu = nullptr;
+HMENU g_nativeResolutionMenu = nullptr, g_wideResolutionMenu = nullptr;
 HMENU g_battleMenu = nullptr, g_mapMenu = nullptr, g_modeMenu = nullptr;
 HMENU g_menuLanguageMenu = nullptr, g_localeMenu = nullptr;
 HMENU g_editorModeMenu = nullptr;
@@ -1224,6 +1223,35 @@ bool saveOutputSize(int width, int height, bool* rollbackComplete)
     return false;
 }
 
+// The original DisciplesGL Resolution command changed the logical game size and its output as one
+// choice. Preserve the advanced split internally, but every normal game-resolution selection
+// re-links the next normal window to the game canvas (0 x 0). A streamer can deliberately override
+// it afterwards through the one Advanced output dialog.
+bool resetOutputToFollowGame()
+{
+    if (g_requestedOutputW == 0 && g_requestedOutputH == 0)
+        return true;
+
+    bool rollbackComplete = true;
+    if (!saveOutputSize(0, 0, &rollbackComplete)) {
+        MessageBoxW(
+            g_gameHwnd,
+            rollbackComplete
+                ? L(L"The game resolution was saved, but the window/output size could not be reset to Automatic. The old output size remains; you can change it under Advanced window/stream output.",
+                    L"Разрешение игры сохранено, но размер окна/вывода не удалось вернуть в режим «Авто». Старый размер вывода сохранён; его можно изменить в дополнительной настройке окна/стрима.")
+                : L(L"The game resolution was saved, but updating the window/output pair failed and rollback was incomplete. Check ddraw.ini before restarting.",
+                    L"Разрешение игры сохранено, но обновление пары размера окна/вывода завершилось ошибкой, а откат — не полностью. Проверьте ddraw.ini перед перезапуском."),
+            L(L"Window/output size", L"Размер окна/вывода"),
+            MB_OK | MB_ICONWARNING);
+        return false;
+    }
+
+    g_requestedOutputW = 0;
+    g_requestedOutputH = 0;
+    g_resIdx = 0;
+    return true;
+}
+
 bool chooseOutputSize(HWND owner, int* width, int* height)
 {
     if (!width || !height)
@@ -1347,14 +1375,14 @@ void showGameResolutionRestartModal(int width, int height, int nativeDisplaySize
     if (nativeDisplaySize >= 0) {
         swprintf_s(
             message,
-            L(L"Original game mode %d x %d (DisplaySize %d) was saved. The wide game canvas will be disabled on the next launch.\n\nFully close the game and start it again to apply the change.\n\nWindow/output size and scaling are separate settings; Automatic output will normally match this game canvas pixel-for-pixel.",
-              L"Штатный режим игры %d x %d (DisplaySize %d) сохранён. При следующем запуске широкий игровой кадр будет выключен.\n\nЧтобы применить изменение, полностью закройте игру и запустите её снова.\n\nРазмер окна/вывода и масштаб — отдельные настройки; вывод «Авто» обычно совпадёт с игровым кадром пиксель в пиксель."),
+            L(L"Original game mode %d x %d (DisplaySize %d) was saved. The wide game canvas will be disabled on the next launch.\n\nThe normal window is linked to this game resolution. Fully close the game and start it again to apply both values. Advanced window/stream output can override only the outer size afterwards.",
+              L"Штатный режим игры %d x %d (DisplaySize %d) сохранён. При следующем запуске широкий игровой кадр будет выключен.\n\nОбычное окно привязано к этому разрешению игры. Полностью закройте игру и запустите её снова, чтобы применить оба значения. Дополнительная настройка окна/стрима затем может изменить только внешний размер."),
             width, height, nativeDisplaySize);
     } else {
         swprintf_s(
             message,
-            L(L"Widescreen game canvas %d x %d was saved. On the next launch it replaces the classic DisplaySize canvas and shows more map without stretching.\n\nFully close the game and start it again to apply the change.\n\nWindow/output size and scaling are separate settings; Automatic output will normally match this game canvas pixel-for-pixel.",
-              L"Широкий игровой кадр %d x %d сохранён. При следующем запуске он заменит штатный кадр DisplaySize и покажет больше карты без растягивания.\n\nЧтобы применить изменение, полностью закройте игру и запустите её снова.\n\nРазмер окна/вывода и масштаб — отдельные настройки; вывод «Авто» обычно совпадёт с игровым кадром пиксель в пиксель."),
+            L(L"Widescreen game canvas %d x %d was saved. On the next launch it replaces the classic DisplaySize canvas and shows more map without stretching.\n\nThe normal window is linked to this game resolution. Fully close the game and start it again to apply both values. Advanced window/stream output can override only the outer size afterwards.",
+              L"Широкий игровой кадр %d x %d сохранён. При следующем запуске он заменит штатный кадр DisplaySize и покажет больше карты без растягивания.\n\nОбычное окно привязано к этому разрешению игры. Полностью закройте игру и запустите её снова, чтобы применить оба значения. Дополнительная настройка окна/стрима затем может изменить только внешний размер."),
             width, height);
     }
     MessageBoxW(
@@ -1389,23 +1417,19 @@ void showAdaptiveResolutionRestartModal(int currentWidth, int currentHeight,
     if (nativeDisplaySize >= 0) {
         swprintf_s(
             message,
-            L(L"The current %dx%d game canvas is scaled to the %dx%d screen (%s).\n\nFor this 4:3/5:4 screen, Automatic selected the game's stock %dx%d mode (DisplaySize %d, %s). Hor+ widescreen is not needed.\n\nFully close the game and start it again to apply the new game resolution. Automatic mode will recalculate it when the monitor resolution changes.",
-              L"Сейчас игровой кадр %dx%d масштабируется на экран %dx%d (%s).\n\nДля этого экрана 4:3/5:4 автоматика выбрала штатный режим игры %dx%d (DisplaySize %d, %s). Широкий Hor+ здесь не нужен.\n\nПолностью закройте игру и запустите её снова, чтобы применить новое разрешение игры. При смене разрешения монитора автоматический режим пересчитает его."),
+            L(L"The current %dx%d game canvas is mapped to %dx%d usable output pixels (%s).\n\nFor the current display mode, Automatic selected the largest fitting stock game mode: %dx%d (DisplaySize %d, %s).\n\nThe normal window is reset to follow the game canvas. Fully close the game and start it again; Automatic recalculates after a display-mode or monitor change.",
+              L"Сейчас игровой кадр %dx%d выводится в доступную область %dx%d (%s).\n\nДля текущего режима экрана автоматика выбрала самый крупный помещающийся штатный режим игры: %dx%d (DisplaySize %d, %s).\n\nОбычное окно снова следует игровому кадру. Полностью закройте игру и запустите её заново; после смены режима экрана или монитора автоматика пересчитает выбор."),
             currentWidth, currentHeight, outputWidth, outputHeight,
             currentScale, selectedWidth, selectedHeight, nativeDisplaySize,
             selectedScale);
     } else {
         swprintf_s(
             message,
-            L(L"The current %dx%d game canvas is scaled to the %dx%d screen (%s).\n\nFor this widescreen display, Automatic selected the largest reviewed Hor+ game canvas with priority for clean integer scaling: %dx%d (%s).\n\nFully close the game and start it again to apply the new game resolution. Automatic mode will recalculate it when the monitor resolution changes.",
-              L"Сейчас игровой кадр %dx%d масштабируется на экран %dx%d (%s).\n\nДля этого широкого экрана автоматика выбрала самый крупный проверенный игровой кадр Hor+ с приоритетом чёткого целого масштаба: %dx%d (%s).\n\nПолностью закройте игру и запустите её снова, чтобы применить новое разрешение игры. При смене разрешения монитора автоматический режим пересчитает его."),
+            L(L"The current %dx%d game canvas is mapped to %dx%d usable output pixels (%s).\n\nFor the current display mode, Automatic selected the largest fitting reviewed Hor+ canvas: %dx%d (%s). Fractional scaling is left to the selected shader instead of discarding map area.\n\nThe normal window is reset to follow the game canvas. Fully close the game and start it again; Automatic recalculates after a display-mode or monitor change.",
+              L"Сейчас игровой кадр %dx%d выводится в доступную область %dx%d (%s).\n\nДля текущего режима экрана автоматика выбрала самый крупный помещающийся проверенный кадр Hor+: %dx%d (%s). Дробный масштаб обрабатывает выбранный шейдер — ради целого коэффициента обзор карты не уменьшается.\n\nОбычное окно снова следует игровому кадру. Полностью закройте игру и запустите её заново; после смены режима экрана или монитора автоматика пересчитает выбор."),
             currentWidth, currentHeight, outputWidth, outputHeight,
             currentScale, selectedWidth, selectedHeight, selectedScale);
     }
-    g_adaptiveNoticeOutputW = outputWidth;
-    g_adaptiveNoticeOutputH = outputHeight;
-    g_adaptiveNoticeCanvasW = selectedWidth;
-    g_adaptiveNoticeCanvasH = selectedHeight;
     MessageBoxW(
         g_gameHwnd, message,
         L(L"Automatic game resolution — restart required",
@@ -2653,24 +2677,39 @@ void refreshAdaptiveCanvasItem()
         formatScale(fitScale(canvasWidth, canvasHeight,
                              outputWidth, outputHeight),
                     scale, sizeof(scale) / sizeof(scale[0]));
+        const bool normalWindow = g_modeIdx == 0;
         if (nativeDisplaySize >= 0) {
-            swprintf_s(
-                label,
-                L(L"Automatic for monitor: stock %d x %d -> screen %d x %d (%s; restart)",
-                  L"Авто под монитор: штатное %d x %d -> экран %d x %d (%s; перезапуск)"),
-                canvasWidth, canvasHeight, outputWidth, outputHeight, scale);
+            if (normalWindow)
+                swprintf_s(
+                    label,
+                    L(L"Automatic: stock %d x %d fits the normal window (%dx%d usable; restart)",
+                      L"Авто: штатное %d x %d помещается в обычное окно (доступно %dx%d; перезапуск)"),
+                    canvasWidth, canvasHeight, outputWidth, outputHeight);
+            else
+                swprintf_s(
+                    label,
+                    L(L"Automatic: stock %d x %d for %dx%d fullscreen (%s; restart)",
+                      L"Авто: штатное %d x %d для полного экрана %dx%d (%s; перезапуск)"),
+                    canvasWidth, canvasHeight, outputWidth, outputHeight, scale);
         } else {
-            swprintf_s(
-                label,
-                L(L"Automatic for monitor: Hor+ %d x %d -> screen %d x %d (%s; restart)",
-                  L"Авто под монитор: Hor+ %d x %d -> экран %d x %d (%s; перезапуск)"),
-                canvasWidth, canvasHeight, outputWidth, outputHeight, scale);
+            if (normalWindow)
+                swprintf_s(
+                    label,
+                    L(L"Automatic: widescreen view %d x %d fits the normal window (%dx%d usable; restart)",
+                      L"Авто: широкий обзор %d x %d помещается в обычное окно (доступно %dx%d; перезапуск)"),
+                    canvasWidth, canvasHeight, outputWidth, outputHeight);
+            else
+                swprintf_s(
+                    label,
+                    L(L"Automatic: widescreen view %d x %d for %dx%d fullscreen (%s; restart)",
+                      L"Авто: широкий обзор %d x %d для полного экрана %dx%d (%s; перезапуск)"),
+                    canvasWidth, canvasHeight, outputWidth, outputHeight, scale);
         }
     } else {
         lstrcpynW(
             label,
-            L(L"Automatic for monitor (unavailable for this executable)",
-              L"Авто под монитор (недоступно для этого exe)"),
+            L(L"Automatic resolution (unavailable for this executable)",
+              L"Автоматическое разрешение (недоступно для этого exe)"),
             static_cast<int>(sizeof(label) / sizeof(label[0])));
     }
     ModifyMenuW(g_displaySizeMenu, kIdHorplusAuto,
@@ -2688,20 +2727,20 @@ void refreshOutputSizeItem()
     if (g_requestedOutputW == 0 && g_requestedOutputH == 0) {
         swprintf_s(
             label,
-            L(L"Window/stream only: Automatic (follows game resolution)...",
-              L"Только окно/стрим: автоматически (следует разрешению игры)..."));
+            L(L"Advanced output: Automatic (follows game resolution)...",
+              L"Доп. вывод: автоматически (следует разрешению игры)..."));
     } else if (g_requestedOutputW > 0 && g_requestedOutputH > 0) {
         swprintf_s(
             label,
-            L(L"Window/stream only: %d x %d (%s); game view unchanged...",
-              L"Только окно/стрим: %d x %d (%s); обзор не меняется..."),
+            L(L"Advanced output: %d x %d (%s); game view unchanged...",
+              L"Доп. вывод: %d x %d (%s); обзор не меняется..."),
             g_requestedOutputW, g_requestedOutputH,
             gameAspectLabel(g_requestedOutputW, g_requestedOutputH));
     } else {
         swprintf_s(
             label,
-            L(L"Window/stream only: invalid saved value (%d x %d)...",
-              L"Только окно/стрим: ошибочное значение (%d x %d)..."),
+            L(L"Advanced output: invalid saved value (%d x %d)...",
+              L"Доп. вывод: ошибочное значение (%d x %d)..."),
             g_requestedOutputW, g_requestedOutputH);
     }
     ModifyMenuW(g_displaySizeMenu, kIdOutputSizeCustom,
@@ -2913,20 +2952,23 @@ void refreshDisplaySizeInfo(int currentW, int currentH)
                     scale, sizeof(scale) / sizeof(scale[0]));
         const wchar_t* family = nativeDisplaySize >= 0
             ? L(L"stock", L"штатное")
-            : L"Hor+";
+            : L(L"widescreen", L"широкое");
+        const wchar_t* target = g_modeIdx == 0
+            ? L(L"normal-window capacity", L"область обычного окна")
+            : L(L"fullscreen", L"полный экран");
         if (pending) {
             swprintf_s(
                 line,
-                L(L"Automatic: monitor %dx%d selects %s %dx%d (%s); current %dx%d -> restart required",
-                  L"Авто: монитор %dx%d выбирает %s %dx%d (%s); сейчас %dx%d -> нужен перезапуск"),
-                outputWidth, outputHeight, family, adaptiveWidth,
+                L(L"Automatic: %s %dx%d selects %s %dx%d (%s); current %dx%d -> restart required",
+                  L"Авто: %s %dx%d выбирает %s %dx%d (%s); сейчас %dx%d -> нужен перезапуск"),
+                target, outputWidth, outputHeight, family, adaptiveWidth,
                 adaptiveHeight, scale, currentW, currentH);
         } else {
             swprintf_s(
                 line,
-                L(L"Automatic: monitor %dx%d -> %s game %dx%d (%s)",
-                  L"Авто: монитор %dx%d -> %s разрешение игры %dx%d (%s)"),
-                outputWidth, outputHeight, family, adaptiveWidth,
+                L(L"Automatic: %s %dx%d -> %s game %dx%d (%s)",
+                  L"Авто: %s %dx%d -> %s разрешение игры %dx%d (%s)"),
+                target, outputWidth, outputHeight, family, adaptiveWidth,
                 adaptiveHeight, scale);
         }
     } else if (g_displaySizeCurrent < 0 && !horplus_is_active() &&
@@ -3384,16 +3426,18 @@ void refreshChecks()
             horplus_is_available() || g_ver == VerRussobit;
         for (UINT id = kIdDisplaySize0; id <= kIdDisplaySize2; ++id)
         {
-            CheckMenuItem(g_displaySizeMenu, id, MF_BYCOMMAND | MF_UNCHECKED);
-            EnableMenuItem(g_displaySizeMenu, id,
+            CheckMenuItem(g_nativeResolutionMenu, id,
+                          MF_BYCOMMAND | MF_UNCHECKED);
+            EnableMenuItem(g_nativeResolutionMenu, id,
                            MF_BYCOMMAND |
                                (canvasMenuAvailable ? MF_ENABLED : MF_GRAYED));
         }
         for (UINT id = kIdHorplusBase;
              id < kIdHorplusBase + static_cast<UINT>(kHorplusSizeCount);
              ++id) {
-            CheckMenuItem(g_displaySizeMenu, id, MF_BYCOMMAND | MF_UNCHECKED);
-            EnableMenuItem(g_displaySizeMenu, id,
+            CheckMenuItem(g_wideResolutionMenu, id,
+                          MF_BYCOMMAND | MF_UNCHECKED);
+            EnableMenuItem(g_wideResolutionMenu, id,
                            MF_BYCOMMAND |
                                  (horplus_is_available() ? MF_ENABLED : MF_GRAYED));
         }
@@ -3411,19 +3455,19 @@ void refreshChecks()
                 if (custom >= 0) {
                     selected = kIdHorplusBase + static_cast<UINT>(custom);
                     CheckMenuRadioItem(
-                        g_displaySizeMenu, kIdHorplusBase,
+                        g_wideResolutionMenu, kIdHorplusBase,
                         kIdHorplusBase +
                             static_cast<UINT>(kHorplusSizeCount - 1),
                         selected, MF_BYCOMMAND);
                 }
             } else if (requestedMode == 2) {
                 selected = kIdHorplusAuto;
-                CheckMenuRadioItem(g_displaySizeMenu, kIdHorplusBase,
-                                   kIdHorplusAuto, selected, MF_BYCOMMAND);
+                CheckMenuItem(g_displaySizeMenu, selected,
+                              MF_BYCOMMAND | MF_CHECKED);
             } else {
                 selected =
                     kIdDisplaySize0 + static_cast<UINT>(g_displaySizePending);
-                CheckMenuRadioItem(g_displaySizeMenu, kIdDisplaySize0,
+                CheckMenuRadioItem(g_nativeResolutionMenu, kIdDisplaySize0,
                                    kIdDisplaySize2, selected, MF_BYCOMMAND);
             }
         }
@@ -3501,11 +3545,16 @@ void onMenuCommand(UINT id)
         int oldMode = 0, oldW = 0, oldH = 0;
         const bool oldValid =
             horplus_get_requested(&oldMode, &oldW, &oldH) != 0;
+        const bool outputWasCustom =
+            g_requestedOutputW != 0 || g_requestedOutputH != 0;
         const bool changed =
-            !oldValid || oldMode != 0 || g_displaySizePending != value;
+            !oldValid || oldMode != 0 || g_displaySizePending != value ||
+            outputWasCustom;
         const bool saved = horplus_set_native_requested(value) != 0;
-        if (saved)
+        if (saved) {
             g_gameCanvasExplicitlySelected = true;
+            resetOutputToFollowGame();
+        }
         if (!saved) {
             MessageBoxW(
                 g_gameHwnd,
@@ -3528,6 +3577,8 @@ void onMenuCommand(UINT id)
         int oldMode = 0, oldW = 0, oldH = 0;
         const bool oldValid =
             horplus_get_requested(&oldMode, &oldW, &oldH) != 0;
+        const bool outputWasCustom =
+            g_requestedOutputW != 0 || g_requestedOutputH != 0;
         int outputW = 0, outputH = 0;
         int selectedW = 0, selectedH = 0;
         int nativeDisplaySize = -1;
@@ -3549,9 +3600,10 @@ void onMenuCommand(UINT id)
                                nullptr, nullptr, nullptr, nullptr))
             horplus_get_active_size(&currentW, &currentH);
         const bool saved = horplus_set_requested(2, 0, 0) != 0;
-        if (saved)
+        if (saved) {
             g_gameCanvasExplicitlySelected = true;
-        else {
+            resetOutputToFollowGame();
+        } else {
             MessageBoxW(
                 g_gameHwnd,
                 L(L"Could not save automatic game resolution to Disciple.ini.",
@@ -3566,11 +3618,11 @@ void onMenuCommand(UINT id)
             showAdaptiveResolutionRestartModal(
                 currentW, currentH, outputW, outputH, selectedW, selectedH,
                 nativeDisplaySize);
-        } else if (!oldValid || oldMode != 2) {
+        } else if (!oldValid || oldMode != 2 || outputWasCustom) {
             MessageBoxW(
                 g_gameHwnd,
-                L(L"Automatic monitor selection is enabled. The current game resolution already matches the recommendation; future monitor-resolution changes are applied on the next full game start.",
-                  L"Автоподбор под монитор включён. Текущее разрешение игры уже совпадает с рекомендацией; будущая смена разрешения монитора применится при следующем полном запуске игры."),
+                L(L"Automatic resolution is enabled. The current game canvas already matches the automatic choice, and the normal window will follow it. Display-mode or monitor changes are recalculated on the next full game start.",
+                  L"Автоматическое разрешение включено. Текущий игровой кадр уже совпадает с выбором автоматики, а обычное окно будет следовать ему. Смена режима экрана или монитора пересчитывается при следующем полном запуске игры."),
                 L(L"Automatic game resolution",
                   L"Автоматическое разрешение игры"),
                 MB_OK | MB_ICONINFORMATION);
@@ -3583,16 +3635,19 @@ void onMenuCommand(UINT id)
         int oldMode = 0, oldW = 0, oldH = 0;
         const bool oldValid =
             horplus_get_requested(&oldMode, &oldW, &oldH) != 0;
+        const bool outputWasCustom =
+            g_requestedOutputW != 0 || g_requestedOutputH != 0;
         const bool changed =
             !oldValid || oldMode != 1 ||
             oldW != kHorplusSizes[value].w ||
-            oldH != kHorplusSizes[value].h;
+            oldH != kHorplusSizes[value].h || outputWasCustom;
         const bool saved =
             horplus_set_requested(1, kHorplusSizes[value].w,
                                   kHorplusSizes[value].h) != 0;
-        if (saved)
+        if (saved) {
             g_gameCanvasExplicitlySelected = true;
-        else
+            resetOutputToFollowGame();
+        } else
             MessageBoxW(
                 g_gameHwnd,
                 L(L"Could not save the game resolution to Disciple.ini.",
@@ -3992,6 +4047,41 @@ bool handleDecorativeCursor(HWND hwnd, UINT msg, LPARAM lParam,
 
 extern "C" void timerhost_pump(void); // perform any queued on-elapse press on the game thread
 
+// DisciplesGL exposed +/- as a live animation-speed control. Preserve our split battle/map model
+// and adjust whichever context is currently visible. Slot 0 is vanilla/off; slots 1..6 are the
+// same 1.5x..15x choices exposed by the menu. Both the main keyboard and numpad are accepted.
+bool handleAnimSpeedHotkey(WPARAM key)
+{
+    if (g_ver != VerRussobit || GetKeyState(VK_MENU) < 0)
+        return false;
+    if (key != VK_OEM_PLUS && key != VK_OEM_MINUS &&
+        key != VK_ADD && key != VK_SUBTRACT)
+        return false;
+
+    bool* enabled = g_inBattle ? &g_battleAnimEnabled : &g_mapAnimEnabled;
+    int* speed = g_inBattle ? &g_battleAnimSpeed : &g_mapAnimSpeed;
+    int slot = *enabled ? *speed : 0;
+    if (key == VK_OEM_PLUS || key == VK_ADD) {
+        if (slot < 6)
+            ++slot;
+    } else if (slot > 0) {
+        --slot;
+    }
+
+    *enabled = slot != 0;
+    if (slot != 0)
+        *speed = slot;
+    if (g_inBattle) {
+        applyAnimSpeed(0, *enabled, *speed);
+        updateBattleBurst();
+    } else {
+        applyAnimSpeed(1, *enabled, *speed);
+    }
+    persist();
+    refreshChecks();
+    return true;
+}
+
 LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     if (!g_gameHwnd) {
@@ -4017,6 +4107,9 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     // presentation-only decorative compositor outside the centered fixed screen.
     if (handleDecorativeCursor(hwnd, msg, lParam, true))
         return TRUE;
+
+    if (msg == WM_KEYDOWN && handleAnimSpeedHotkey(wParam))
+        return 0;
 
     // Legacy C4dll-R used F4 for a one-key normal-window/fullscreen toggle. Keep it wrapper-owned:
     // old ddraw.ini files have no keytogglefullscreen2, and Alt+F4 remains a WM_SYSKEYDOWN.
@@ -4289,43 +4382,45 @@ void buildMenu()
         const UINT wideFlags =
             MF_STRING | (horplus_is_available() ? 0u : MF_GRAYED);
         AppendMenuW(g_displaySizeMenu, wideFlags, kIdHorplusAuto,
-                    L(L"Automatic for monitor...",
-                      L"Авто под монитор..."));
+                    L(L"Automatic resolution...",
+                      L"Автоматическое разрешение..."));
         AppendMenuW(g_displaySizeMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(
-            g_displaySizeMenu, MF_STRING | MF_GRAYED, 0,
-            L(L"Original game modes — restart required",
-              L"Штатные режимы игры — нужен перезапуск"));
-        AppendMenuW(g_displaySizeMenu, nativeFlags, kIdDisplaySize0,
+        g_nativeResolutionMenu = CreatePopupMenu();
+        AppendMenuW(g_nativeResolutionMenu, nativeFlags, kIdDisplaySize0,
                     g_ru ? kDisplaySizeLabelsRu[0] : kDisplaySizeLabelsEn[0]);
-        AppendMenuW(g_displaySizeMenu, nativeFlags, kIdDisplaySize1,
+        AppendMenuW(g_nativeResolutionMenu, nativeFlags, kIdDisplaySize1,
                     g_ru ? kDisplaySizeLabelsRu[1] : kDisplaySizeLabelsEn[1]);
-        AppendMenuW(g_displaySizeMenu, nativeFlags, kIdDisplaySize2,
+        AppendMenuW(g_nativeResolutionMenu, nativeFlags, kIdDisplaySize2,
                     g_ru ? kDisplaySizeLabelsRu[2] : kDisplaySizeLabelsEn[2]);
-        AppendMenuW(g_displaySizeMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(
-            g_displaySizeMenu, MF_STRING | MF_GRAYED, 0,
-            horplus_is_available()
-                ? L(L"Widescreen game view — more map after restart",
-                    L"Широкий обзор — больше карты после перезапуска")
-                : L(L"Widescreen game view — unavailable for this executable",
-                    L"Широкий обзор — недоступен для этого exe"));
+            g_displaySizeMenu,
+            MF_POPUP | (canvasMenuAvailable ? 0u : MF_GRAYED),
+            reinterpret_cast<UINT_PTR>(g_nativeResolutionMenu),
+            L(L"Manual: original 4:3 / 5:4 game modes",
+              L"Вручную: штатные режимы игры 4:3 / 5:4"));
+
+        g_wideResolutionMenu = CreatePopupMenu();
         for (int i = 0; i < kHorplusSizeCount; ++i) {
-            AppendMenuW(g_displaySizeMenu, wideFlags,
+            AppendMenuW(g_wideResolutionMenu, wideFlags,
                         kIdHorplusBase + static_cast<UINT>(i),
                         g_ru ? kHorplusSizes[i].ru : kHorplusSizes[i].en);
         }
+        AppendMenuW(
+            g_displaySizeMenu,
+            MF_POPUP | (horplus_is_available() ? 0u : MF_GRAYED),
+            reinterpret_cast<UINT_PTR>(g_wideResolutionMenu),
+            horplus_is_available()
+                ? L(L"Manual: widescreen game view",
+                    L"Вручную: широкий игровой обзор")
+                : L(L"Manual: widescreen view unavailable for this exe",
+                    L"Вручную: широкий обзор недоступен для этого exe"));
         AppendMenuW(g_displaySizeMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(g_displaySizeMenu, MF_STRING | MF_GRAYED, kIdDisplaySizeState, L"...");
         AppendMenuW(g_displaySizeMenu, MF_SEPARATOR, 0, nullptr);
     }
-    AppendMenuW(
-        g_displaySizeMenu, MF_STRING | MF_GRAYED, 0,
-        L(L"Window / streaming output only — live; game view unchanged",
-          L"Только окно / вывод для стрима — сразу; обзор не меняется"));
     AppendMenuW(g_displaySizeMenu, MF_STRING, kIdOutputSizeCustom,
-                L(L"Change window/output only...",
-                  L"Изменить только окно/вывод..."));
+                L(L"Advanced: change window/stream output only...",
+                  L"Дополнительно: изменить только окно/вывод для стрима..."));
     g_resolutionMenuPosition = GetMenuItemCount(g_videoMenu);
     AppendMenuW(g_videoMenu, MF_POPUP,
                 reinterpret_cast<UINT_PTR>(g_displaySizeMenu),
@@ -4492,46 +4587,6 @@ void installKeyboardObserver(HWND hwnd)
     }
 }
 
-void maybeNotifyAdaptiveFullscreen(HWND hwnd, int liveMode)
-{
-    // Auto is deliberately based on the physical monitor. Borderless uses
-    // that exact output. An explicitly lower exclusive video mode is a
-    // separate renderer choice and must not masquerade as a new monitor
-    // recommendation that Auto would only undo on the next start.
-    if (!hwnd || liveMode != 1 || !horplus_is_available())
-        return;
-
-    int requestedMode = 0, requestedW = 0, requestedH = 0;
-    if (!horplus_get_requested(&requestedMode, &requestedW, &requestedH) ||
-        requestedMode != 2)
-        return; // a manual game resolution is always respected silently
-
-    int gameW = 0, gameH = 0, outputW = 0, outputH = 0;
-    if (!DDGetScaleMetrics(&gameW, &gameH, &outputW, &outputH,
-                           nullptr, nullptr, nullptr, nullptr) ||
-        gameW <= 0 || gameH <= 0 || outputW <= 0 || outputH <= 0)
-        return;
-
-    int selectedW = 0, selectedH = 0;
-    int nativeDisplaySize = -1;
-    if (!horplus_get_adaptive_for_output(outputW, outputH,
-                                         &selectedW, &selectedH,
-                                         &nativeDisplaySize) ||
-        (gameW == selectedW && gameH == selectedH))
-        return;
-
-    if (g_adaptiveNoticeOutputW == outputW &&
-        g_adaptiveNoticeOutputH == outputH &&
-        g_adaptiveNoticeCanvasW == selectedW &&
-        g_adaptiveNoticeCanvasH == selectedH)
-        return;
-
-    g_gameHwnd = hwnd;
-    showAdaptiveResolutionRestartModal(gameW, gameH, outputW, outputH,
-                                       selectedW, selectedH,
-                                       nativeDisplaySize);
-}
-
 void syncChrome(HWND hwnd)
 {
     // Install only after cnc-ddraw has created its GUI-thread WH_KEYBOARD hook. Its callback address
@@ -4560,7 +4615,9 @@ void syncChrome(HWND hwnd)
         persistsNextStart)
         g_modeIdx = liveMode;
     refreshChecks();
-    maybeNotifyAdaptiveFullscreen(hwnd, liveMode);
+    // Automatic canvas selection is restart-only and is already explained when explicitly chosen
+    // in the Resolution menu. Never show that modal from F4/Alt+Enter chrome synchronization: it
+    // blocks the hotkey and can repeat when attaching the menu changes the live client height.
 
     if (changed) {
         DrawMenuBar(hwnd);
@@ -4681,6 +4738,11 @@ extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, 
         break;
     default:
         break;
+    }
+
+    if (msg == WM_KEYDOWN && handleAnimSpeedHotkey(wParam)) {
+        *result = 0;
+        return 1;
     }
 
     if (msg == WM_KEYDOWN && wParam == VK_F4 && !(lParam & 0x40000000)) {

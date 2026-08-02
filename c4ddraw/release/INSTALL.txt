@@ -4,9 +4,9 @@
 
 WHAT THIS IS
   C4dll-R.dll embeds cnc-ddraw in one drop-in DirectDraw wrapper.
-  Included plugin: Mods\timer.c4p - the reconstructed turn timer. Automatic
-  reset on every turn (including a skipped turn) is available on MNS/SMNS;
-  other executable layouts can use the plugin controls without automatic reset.
+  Included plugin: Mods\timer.c4p - the reconstructed turn timer. On the exact
+  Russobit/MNS layout it starts after the normal begin-turn OK callback; other
+  executable layouts retain the safe active-turn-edge behavior.
 
 REQUIREMENTS
   - Disciples II. Renderer, video/performance menu, language and locale work on
@@ -62,19 +62,19 @@ USING IT
      the first changed game pixel; native edge-scroll remains available),
      plus Battle speed / Map turn speed (engine presets, saved per game) and
      restart-only Map clouds (the game's native option; requires external IsoClouds.ff).
-  - Video > Resolution is one popup. Automatic for monitor is the default: a
-    4:3/5:4 monitor uses one of the game's three `★` stock DisplaySize modes,
-    while a 3:2 or wider monitor uses one of ten validated Hor+ game-view modes
-    (1066x600 through 2560x1440). It prefers clean integer Fit scaling, then the
-    largest canvas that fits. The selected family and scale are shown in the
-    menu. A game-resolution change shows a dialog and needs a full game restart.
-    Explicit manual stock/Hor+ choices remain authoritative.
+  - Video > Resolution is one popup. Automatic resolution is the main choice;
+    the three `★` stock modes and ten validated widescreen game-view modes
+    (1066x600 through 2560x1440) are in two short manual submenus. Auto uses the
+    usable work area in a normal window and the full monitor in fullscreen, then
+    selects the largest fitting canvas. The shader handles fractional scaling.
+    A regular game-resolution choice also returns output to follow the game
+    canvas and needs a full restart; manual choices remain authoritative.
   - Video > Scaling controls Fit, Integer and Stretch and shows the actual
     output, coefficient, viewport and bars. `1:1` means one game pixel equals one
     output pixel. A resizable window may be smaller than the game canvas: the
     renderer filters it down and remaps the mouse. Borderless fullscreen always
     adapts to the desktop.
-  - Resolution > Window/stream only... sets the saved output/window target. Automatic stores
+  - Resolution > Advanced output... sets the saved output/window target. Automatic stores
     `0x0` and follows the game resolution in a normal window; a custom width of
     320–8192 and height of 240–8192 apply immediately and are saved to the
     effective ddraw.ini section. This does not change the game canvas. Borderless
@@ -90,7 +90,11 @@ USING IT
   - The turn timer is configured in C4plugins.ini, section [Timer]. The bundled
     PvP defaults use a 5-minute Force countdown, pause for battle animations and
     player-vs-player combat, then end the turn without retreat. Hold Ctrl+Alt
-    and drag the clock with LMB to reposition it.
+    and drag the clock with LMB to reposition it. On the exact Russobit/MNS
+    layout the countdown starts only after you accept the normal begin-turn
+    summary with OK; time does not run under that dialog. A running Force clock
+    cannot be paused manually, while Set remains available. Other executable
+    layouts keep the active-turn-edge fallback.
 
 UNINSTALL / REVERT
   - Restore your backed-up C4dll-R.dll and remove Mods\timer.c4p.
@@ -105,9 +109,9 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.5
 
 ЧТО ЭТО
   C4dll-R.dll встраивает cnc-ddraw в одну подключаемую DirectDraw-DLL.
-  В комплекте плагин Mods\timer.c4p - воссозданный таймер хода. Автоматический
-  сброс на каждой смене хода, включая пропуск, поддержан на MNS/SMNS; на других
-  раскладках exe доступны ручные команды плагина без автоматического сброса.
+  В комплекте плагин Mods\timer.c4p - воссозданный таймер хода. На точной
+  Russobit/MNS-раскладке он стартует после штатного callback кнопки OK в начале
+  хода; на других exe остаётся безопасный сигнал активного хода.
 
 ТРЕБОВАНИЯ
   - Disciples II. Рендерер, меню видео/производительности, язык и локаль работают
@@ -165,19 +169,19 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.5
      стартового рывка, штатный краевой скролл остаётся), а также Battle speed / Map turn speed (пресеты движка,
      хранятся в сейве), и restart-only «Облака на карте» (штатная опция игры;
      нужен внешний IsoClouds.ff).
-  - Видео > Разрешение — один popup. По умолчанию работает «Авто под монитор»:
-     для монитора 4:3/5:4 выбирается один из трёх штатных режимов DisplaySize со
-     `★`, для 3:2 и шире — один из десяти проверенных режимов Hor+ (1066x600–
-     2560x1440). Сначала предпочитается чёткий целый масштаб «Вписать», затем
-     самый крупный помещающийся кадр. Семейство и коэффициент видны прямо в меню.
-     Смена разрешения показывает сообщение и требует полного перезапуска;
-     явный ручной выбор автоматика не заменяет.
+  - Видео > Разрешение — один popup. Основной выбор — «Автоматическое
+     разрешение»; три штатных режима со `★` и десять проверенных широких
+     (1066x600–2560x1440) находятся в двух коротких ручных подменю. В обычном
+     окне авто использует область без рамки, меню и панели задач, в fullscreen —
+     весь монитор, затем выбирает самый крупный помещающийся кадр. Дробный
+     масштаб обрабатывает шейдер. Обычный выбор также снова привязывает вывод к
+     игровому кадру и требует полного перезапуска; ручной выбор сохраняется.
   - Видео > Масштаб содержит «Вписать», «Целые» и «Растянуть» и показывает
      фактический вывод, коэффициент, viewport и поля. `1:1` означает один игровой
      пиксель на один выходной. Окно разрешено уменьшать ниже кадра: рендерер
      фильтрует картинку и пересчитывает мышь. Безрамочный полный экран всегда
      адаптируется к рабочему столу.
-  - Разрешение > Только окно/стрим... задаёт сохраняемый размер окна/вывода. «Автоматически»
+  - Разрешение > Доп. вывод... задаёт сохраняемый размер окна/вывода. «Автоматически»
      сохраняет `0×0` и в обычном окне следует разрешению игры; пользовательская
      ширина 320–8192 и высота 240–8192 применяются сразу и записываются в
      эффективную секцию ddraw.ini. Игровой кадр от этого не меняется. Безрамочный
@@ -193,7 +197,10 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.5
   - Таймер хода настраивается в C4plugins.ini, секция [Timer]. Комплектные PvP-
     настройки включают принудительный отсчёт 5 минут, паузу на анимациях и в бою
     игрок-против-игрока, затем завершают ход без retreat. Для перемещения часов
-    зажмите Ctrl+Alt и перетащите их ЛКМ.
+    зажмите Ctrl+Alt и перетащите их ЛКМ. На точной Russobit/MNS-раскладке
+    отсчёт начинается только после штатного OK в сводке начала хода: под диалогом
+    время не уходит. Уже запущенный Force вручную на паузу не ставится, а Set
+    остаётся доступен. На других exe сохраняется прежний сигнал активного хода.
 
 УДАЛЕНИЕ / ОТКАТ
   - Верните сохранённый C4dll-R.dll и удалите Mods\timer.c4p.

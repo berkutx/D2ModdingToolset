@@ -136,6 +136,7 @@ extern "C" int timerhost_turn_player_id(void);
 extern "C" int timerhost_retreat(void);
 extern "C" int timerhost_end_day(void);
 extern "C" int timerhost_cancel_elapse(void);
+extern "C" uint32_t timerhost_begin_turn_ack_serial(void);
 
 volatile LONG g_turnSerial = 0; // bumped on every detected turn change (including a skip)
 volatile LONG g_turnPlayer = -1; // current turn player index, -1 if unknown / not in a game (cross-thread)
@@ -194,6 +195,10 @@ int __cdecl host_turn_player_id(void) { return timerhost_turn_player_id(); }
 int __cdecl host_retreat(void) { return timerhost_retreat(); }
 int __cdecl host_end_day(void) { return timerhost_end_day(); }
 int __cdecl host_cancel_elapse(void) { return timerhost_cancel_elapse(); }
+uint32_t __cdecl host_begin_turn_ack_serial(void)
+{
+    return timerhost_begin_turn_ack_serial();
+}
 
 C4P_Host g_host = {sizeof(C4P_Host),     host_get_hwnd,        host_invalidate,
                    host_get_config_int,  host_set_config_int,  host_config_path_cb,
@@ -201,7 +206,7 @@ C4P_Host g_host = {sizeof(C4P_Host),     host_get_hwnd,        host_invalidate,
                    host_is_in_battle,    host_get_day,
                    host_turn_active,     host_is_animating,    host_battle_kind,
                    host_turn_player_id,  host_retreat,         host_end_day,
-                   host_cancel_elapse};
+                   host_cancel_elapse,   host_begin_turn_ack_serial};
 
 // plugin records
 using C4pQuery = int(__cdecl*)(C4P_Info*);
@@ -490,9 +495,19 @@ DWORD WINAPI overlayWorker(LPVOID)
                         announced = true;
                     }
                 } else {
-                    // follow window moves without repainting or changing z-order
-                    SetWindowPos(g_overlayWnd, nullptr, tl.x, tl.y, 0, 0,
-                                 SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
+                    // cnc-ddraw promotes its renderer window to the topmost band when the user
+                    // clicks back into the client. An existing owned popup does not always follow
+                    // that promotion, leaving the timer behind the visible frame even though a
+                    // screen capture still sees it. Keep the overlay above the active game without
+                    // activating it, and drop it from the topmost band as soon as another app wins
+                    // focus so it can never float over unrelated windows.
+                    DWORD gamePid = 0, foregroundPid = 0;
+                    GetWindowThreadProcessId(game, &gamePid);
+                    GetWindowThreadProcessId(GetForegroundWindow(), &foregroundPid);
+                    const HWND z = gamePid && gamePid == foregroundPid
+                        ? HWND_TOPMOST : HWND_NOTOPMOST;
+                    SetWindowPos(g_overlayWnd, z, tl.x, tl.y, 0, 0,
+                                 SWP_NOSIZE | SWP_NOACTIVATE);
                 }
             }
         }

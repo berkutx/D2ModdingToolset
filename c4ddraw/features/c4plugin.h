@@ -58,7 +58,9 @@ typedef struct C4P_Host
      * battle_kind:   0 none / 1 PvP / 2 any combat (Combat Pause PvP vs PvAny).
      * turn_player_id: current turn player identity byte, or -1.
      * retreat/end_day: on-elapse actions - queue the press (host performs it on its idle WM_TIMER); return 1.
-     * cancel_elapse: discard queued actions when the clock becomes positive or its turn changes. */
+     * cancel_elapse: discard queued actions when the clock becomes positive or its turn changes.
+     * begin_turn_ack_serial: Russobit-only monotonic counter bumped after BTN_OK's normal
+     *   DLG_BEGIN_TURN callback finishes; UINT32_MAX means that this executable has no hook. */
     int(__cdecl* turn_active)(void);
     int(__cdecl* is_animating)(void);
     int(__cdecl* battle_kind)(void);
@@ -66,6 +68,7 @@ typedef struct C4P_Host
     int(__cdecl* retreat)(void);
     int(__cdecl* end_day)(void);
     int(__cdecl* cancel_elapse)(void);
+    uint32_t(__cdecl* begin_turn_ack_serial)(void);
 } C4P_Host;
 
 /* Plugin self-report, queried before init. */
