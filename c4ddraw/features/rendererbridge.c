@@ -442,7 +442,8 @@ int DDWriteConfigString(const char* key, const char* value)
  * F4 is owned by C4dll-R so it also works with an existing ddraw.ini that predates the hotkey.
  * Remember which kind of fullscreen was left, but always make the return trip a real normal
  * window. Temporarily selecting cnc-ddraw's borderless toggle gives util_toggle_fullscreen()
- * the right transition without persisting or reloading the user's configuration.
+ * the right transition without reloading the user's configuration. The feature-menu layer observes
+ * the completed transition and persists the final mode for the next process start.
  */
 void DDToggleWindowedMode(void)
 {

@@ -1,6 +1,6 @@
 /*
  * C4dll-R native plugin host: loads mods\*.c4p (BGRA32) plugins. Renderer-agnostic: composites via a transparent,
- * click-through, topmost LAYERED window over the game client area (UpdateLayeredWindow).
+ * click-through LAYERED window over the game client area (UpdateLayeredWindow).
  */
 
 #include "c4plugin.h"
@@ -144,6 +144,7 @@ int g_turnMiss = 0;             // consecutive -1 polls (debounce torn reads)
 int g_inGame = 0;               // 1 while a turn is in progress (server poll; reliable on HOST)
 volatile LONG g_hasServer = 0;  // 1 once in-process server seen -> trust g_inGame over off[6] (written
                                 // on the worker poll AND the game thread via pluginhost_turn_reset)
+volatile LONG g_menuLoopActive = 0; // game thread publishes native menu tracking to the overlay worker
 
 uint32_t __cdecl host_get_turn_serial(void)
 {
@@ -447,6 +448,7 @@ DWORD WINAPI overlayWorker(LPVOID)
     plog("[plugins] overlay window up; compositing %d plugin(s)", g_pluginCount);
 
     bool announced = false;
+    int topmostState = -1; // -1 unknown, 0 normal band, 1 topmost band
     for (;;) {
         MSG msg;
         while (PeekMessageA(&msg, g_overlayWnd, 0, 0, PM_REMOVE)) {
@@ -494,20 +496,29 @@ DWORD WINAPI overlayWorker(LPVOID)
                         plog("[plugins] overlay first paint (%dx%d at %d,%d)", w, h, tl.x, tl.y);
                         announced = true;
                     }
+                }
+
+                // A tracked native popup menu must always win over plugin pixels. Windows creates
+                // that popup above the active game's existing topmost windows; keep moving the
+                // overlay with the client but do not reassert its z-order while menu tracking is
+                // active. The timer therefore remains visible where the menu does not cover it.
+                if (InterlockedCompareExchange(&g_menuLoopActive, 0, 0) != 0) {
+                    SetWindowPos(g_overlayWnd, nullptr, tl.x, tl.y, 0, 0,
+                                 SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
                 } else {
-                    // cnc-ddraw promotes its renderer window to the topmost band when the user
-                    // clicks back into the client. An existing owned popup does not always follow
-                    // that promotion, leaving the timer behind the visible frame even though a
-                    // screen capture still sees it. Keep the overlay above the active game without
-                    // activating it, and drop it from the topmost band as soon as another app wins
-                    // focus so it can never float over unrelated windows.
-                    DWORD gamePid = 0, foregroundPid = 0;
-                    GetWindowThreadProcessId(game, &gamePid);
-                    GetWindowThreadProcessId(GetForegroundWindow(), &foregroundPid);
-                    const HWND z = gamePid && gamePid == foregroundPid
-                        ? HWND_TOPMOST : HWND_NOTOPMOST;
-                    SetWindowPos(g_overlayWnd, z, tl.x, tl.y, 0, 0,
-                                 SWP_NOSIZE | SWP_NOACTIVATE);
+                    // Promote only when the game window itself owns the foreground. A dialog from
+                    // the same process is a different HWND and must remain above the timer. Once a
+                    // band is selected, move the overlay without reasserting z-order every 33 ms;
+                    // otherwise a popup created later can be pulled back underneath it.
+                    const int wantTopmost = GetForegroundWindow() == game ? 1 : 0;
+                    UINT flags = SWP_NOSIZE | SWP_NOACTIVATE;
+                    HWND z = wantTopmost ? HWND_TOPMOST : HWND_NOTOPMOST;
+                    if (topmostState == wantTopmost) {
+                        flags |= SWP_NOZORDER;
+                        z = nullptr;
+                    }
+                    SetWindowPos(g_overlayWnd, z, tl.x, tl.y, 0, 0, flags);
+                    topmostState = wantTopmost;
                 }
             }
         }
@@ -516,6 +527,13 @@ DWORD WINAPI overlayWorker(LPVOID)
 }
 
 } // namespace
+
+// WM_ENTERMENULOOP / WM_EXITMENULOOP arrive on the game thread. The layered overlay belongs to the
+// worker thread, so publish only a lock-free flag here; that thread performs ShowWindow itself.
+extern "C" void pluginhost_menu_loop(int active)
+{
+    InterlockedExchange(&g_menuLoopActive, active ? 1 : 0);
+}
 
 // Called from cnc-ddraw's DllMain (after embed + featuremenu). Starts the overlay worker; zero cost
 // with no plugins. No teardown: a c4p_shutdown from DllMain/atexit would run under the loader lock

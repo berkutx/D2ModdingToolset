@@ -88,6 +88,7 @@ extern "C" const char* pluginhost_name(int i);
 extern "C" void* pluginhost_menu(int i);
 extern "C" int pluginhost_command(unsigned id); // route a plugin-block WM_COMMAND to its c4p_command
 extern "C" int pluginhost_mouse(UINT msg, WPARAM wParam); // physical client input for overlay plugins
+extern "C" void pluginhost_menu_loop(int active); // keep overlay pixels below tracked native menus
 
 // Map drag-scroll lives in global scope (defined after the anon namespace); forward-declared here.
 extern bool g_dragScrollActive;
@@ -967,18 +968,137 @@ int readDdrawInt(const char* key, int def)
                                : atoi(value);
 }
 
-void writeDdrawStr(const char* key, const char* value)
+bool writeDdrawStr(const char* key, const char* value)
 {
     // Preserves comment lines and writes a clean key=value (no inline comment), as cnc-ddraw's
     // strict parser needs.
     if (DDWriteConfigString(key, value))
-        return;
-    WritePrivateProfileStringA("ddraw", key, value, ddrawIni());
+        return true;
+    return WritePrivateProfileStringA("ddraw", key, value, ddrawIni()) != FALSE;
 }
 
-void writeDdrawBool(const char* key, bool on)
+bool writeDdrawBool(const char* key, bool on)
 {
-    writeDdrawStr(key, on ? "true" : "false");
+    return writeDdrawStr(key, on ? "true" : "false");
+}
+
+bool saveLiveDisplayModeForNextStart(int liveMode)
+{
+    if (liveMode < 0 || liveMode >= kModeCount)
+        return false;
+
+    const bool windowedSaved =
+        writeDdrawStr("windowed", kModes[liveMode].windowed);
+    const bool fullscreenSaved =
+        writeDdrawStr("fullscreen", kModes[liveMode].fullscreen);
+    bool transitionSaved = true;
+    if (liveMode == 1)
+        transitionSaved = writeDdrawBool("toggle_borderless", true);
+    else if (liveMode == 2)
+        transitionSaved = writeDdrawBool("toggle_borderless", false);
+
+    if (windowedSaved && fullscreenSaved && transitionSaved) {
+        g_modeIdx = liveMode;
+        return true;
+    }
+    return false;
+}
+
+bool resetOutputToFollowGame(); // defined with the transactional output-size helpers below
+void refreshChecks(); // menu tree is built later; this helper only updates it after an accepted Auto choice
+
+void showFirstFullscreenPersistenceNotice(HWND owner)
+{
+    const char* f = iniFile();
+    if (GetPrivateProfileIntA("menu", "fullscreenPersistenceNoticeShown", 0, f) != 0)
+        return;
+
+    // Mark before opening the modal: its message loop can receive another periodic chrome-sync.
+    WritePrivateProfileStringA("menu", "fullscreenPersistenceNoticeShown", "1", f);
+
+    int requestedMode = 0, requestedW = 0, requestedH = 0;
+    const bool requestedValid =
+        horplus_get_requested(&requestedMode, &requestedW, &requestedH) != 0;
+    if (requestedValid && requestedMode == 2 && horplus_is_available()) {
+        int outputW = 0, outputH = 0;
+        int selectedW = 0, selectedH = 0;
+        int nativeDisplaySize = -1;
+        int currentW = 0, currentH = 0;
+        DDGetScaleMetrics(&currentW, &currentH, nullptr, nullptr,
+                          nullptr, nullptr, nullptr, nullptr);
+        if (horplus_get_primary_adaptive(&outputW, &outputH,
+                                         &selectedW, &selectedH,
+                                         &nativeDisplaySize)) {
+            wchar_t message[1000] = {};
+            if (currentW != selectedW || currentH != selectedH) {
+                wsprintfW(
+                    message,
+                    L(L"Fullscreen is saved as the startup mode.\n\nAutomatic game resolution will use the full %d x %d display on the next complete game start: the current %d x %d game canvas will become %d x %d. A restart is required because the game canvas cannot change safely while the game is running.",
+                      L"Полноэкранный режим сохранён для следующих запусков.\n\nАвтоматическое разрешение игры при следующем полном запуске использует весь экран %d x %d: текущий игровой кадр %d x %d сменится на %d x %d. Нужен перезапуск, потому что игровой кадр нельзя безопасно менять во время работы игры."),
+                    outputW, outputH, currentW, currentH, selectedW, selectedH);
+            } else {
+                wsprintfW(
+                    message,
+                    L(L"Fullscreen is saved as the startup mode.\n\nAutomatic game resolution already selects %d x %d for the full %d x %d display. It will be recalculated after a monitor or display-mode change on the next complete game start.",
+                      L"Полноэкранный режим сохранён для следующих запусков.\n\nАвтоматическое разрешение уже выбирает %d x %d для полного экрана %d x %d. После смены монитора или режима экрана оно будет пересчитано при следующем полном запуске игры."),
+                    selectedW, selectedH, outputW, outputH);
+            }
+            MessageBoxW(owner, message,
+                        L(L"Fullscreen and game resolution",
+                          L"Полный экран и разрешение игры"),
+                        MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+    }
+
+    if (!requestedValid || requestedW <= 0 || requestedH <= 0)
+        DDGetScaleMetrics(&requestedW, &requestedH, nullptr, nullptr,
+                          nullptr, nullptr, nullptr, nullptr);
+    wchar_t message[1000] = {};
+    int outputW = 0, outputH = 0;
+    int selectedW = 0, selectedH = 0;
+    int nativeDisplaySize = -1;
+    if (requestedValid && horplus_is_available() &&
+        horplus_get_primary_adaptive(&outputW, &outputH,
+                                     &selectedW, &selectedH,
+                                     &nativeDisplaySize)) {
+        wsprintfW(
+            message,
+            L(L"Fullscreen is saved as the startup mode.\n\nThe game resolution is currently fixed manually at %d x %d. Fullscreen will scale that canvas but will not silently replace it. Automatic resolution would select %d x %d for the full %d x %d display on the next complete game start.\n\nEnable Automatic resolution now?",
+              L"Полноэкранный режим сохранён для следующих запусков.\n\nРазрешение игры сейчас закреплено вручную: %d x %d. Полный экран масштабирует этот кадр, но не заменяет его без спроса. Автоматическое разрешение выберет %d x %d для полного экрана %d x %d при следующем полном запуске игры.\n\nВключить автоматическое разрешение сейчас?"),
+            requestedW, requestedH, selectedW, selectedH, outputW, outputH);
+        if (MessageBoxW(owner, message,
+                        L(L"Fullscreen and game resolution",
+                          L"Полный экран и разрешение игры"),
+                        MB_YESNO | MB_ICONQUESTION) == IDYES) {
+            if (horplus_set_requested(2, 0, 0)) {
+                g_gameCanvasExplicitlySelected = true;
+                resetOutputToFollowGame();
+                refreshChecks();
+                mlog("[menu] automatic game resolution accepted from first-fullscreen notice (%dx%d for %dx%d)",
+                     selectedW, selectedH, outputW, outputH);
+            } else {
+                MessageBoxW(
+                    owner,
+                    L(L"Could not save Automatic resolution to Disciple.ini. The manually selected game canvas remains active.",
+                      L"Не удалось сохранить автоматическое разрешение в Disciple.ini. Выбранный вручную игровой кадр остаётся активным."),
+                    L(L"Automatic game resolution",
+                      L"Автоматическое разрешение игры"),
+                    MB_OK | MB_ICONERROR);
+            }
+        }
+        return;
+    }
+
+    wsprintfW(
+        message,
+        L(L"Fullscreen is saved as the startup mode.\n\nThe game resolution remains fixed manually at %d x %d because Automatic resolution is unavailable for this executable. Fullscreen scales the existing canvas without replacing it.",
+          L"Полноэкранный режим сохранён для следующих запусков.\n\nРазрешение игры остаётся закреплённым вручную: %d x %d, потому что автоматический выбор недоступен для этого exe. Полный экран масштабирует существующий кадр, не заменяя его."),
+        requestedW, requestedH);
+    MessageBoxW(owner, message,
+                L(L"Fullscreen and game resolution",
+                  L"Полный экран и разрешение игры"),
+                MB_OK | MB_ICONINFORMATION);
 }
 
 // Re-apply ddraw settings live: we ARE the renderer, so call DDReloadConfig directly. Runs on the UI thread.
@@ -3913,14 +4033,54 @@ void setWrapperCursorVisible(bool visible)
     // the game's DEFAULT sword, embedded as a native cursor resource, over wrapper-owned pixels.
     // Keeping the handle in this module also makes the result independent of the active game mod.
     static HCURSOR wrapperCursor = nullptr;
-    if (!wrapperCursor) {
-        // LoadCursor scales every custom resource to SM_CXCURSOR x SM_CYCURSOR (normally 32x32),
-        // distorting this deliberately tall sword and changing its apparent angle. Request the
-        // original game dimensions explicitly.
-        wrapperCursor = reinterpret_cast<HCURSOR>(LoadImageA(
-            g_ddraw_module, MAKEINTRESOURCEA(2203), IMAGE_CURSOR, 24, 54, LR_SHARED));
-        if (!wrapperCursor)
-            wrapperCursor = LoadCursorA(nullptr, IDC_ARROW);
+    static int wrapperCursorWidth = 0;
+    static int wrapperCursorHeight = 0;
+    static bool wrapperCursorOwned = false;
+    HCURSOR cursorToDestroy = nullptr;
+
+    if (visible) {
+        // The game's software cursor is part of the primary surface, so the renderer scales it by
+        // the viewport's independent X/Y factors. Apply those same factors to the OS copy used on
+        // the decorative frame. This deliberately permits a non-uniform size: Stretch mode changes
+        // the software cursor's proportions too, and the transition must remain visually seamless.
+        int targetWidth = 24;
+        int targetHeight = 54;
+        int gameWidth = 0;
+        int gameHeight = 0;
+        int viewportWidth = 0;
+        int viewportHeight = 0;
+        if (DDGetScaleMetrics(&gameWidth, &gameHeight, nullptr, nullptr,
+                              nullptr, nullptr, &viewportWidth, &viewportHeight) &&
+            gameWidth > 0 && gameHeight > 0 &&
+            viewportWidth > 0 && viewportHeight > 0) {
+            targetWidth = MulDiv(24, viewportWidth, gameWidth);
+            targetHeight = MulDiv(54, viewportHeight, gameHeight);
+            if (targetWidth < 1)
+                targetWidth = 1;
+            if (targetHeight < 1)
+                targetHeight = 1;
+        }
+
+        if (!wrapperCursor || targetWidth != wrapperCursorWidth ||
+            targetHeight != wrapperCursorHeight) {
+            HCURSOR scaledCursor = reinterpret_cast<HCURSOR>(LoadImageA(
+                g_ddraw_module, MAKEINTRESOURCEA(2203), IMAGE_CURSOR,
+                targetWidth, targetHeight, LR_DEFAULTCOLOR));
+            if (scaledCursor) {
+                if (wrapperCursorOwned)
+                    cursorToDestroy = wrapperCursor;
+                wrapperCursor = scaledCursor;
+                wrapperCursorWidth = targetWidth;
+                wrapperCursorHeight = targetHeight;
+                wrapperCursorOwned = true;
+                mlog("[cursor] wrapper sword scaled to %dx%d for viewport %dx%d / game %dx%d",
+                     targetWidth, targetHeight, viewportWidth, viewportHeight,
+                     gameWidth, gameHeight);
+            } else if (!wrapperCursor) {
+                wrapperCursor = LoadCursorA(nullptr, IDC_ARROW);
+                wrapperCursorOwned = false;
+            }
+        }
     }
 
     if (visible) {
@@ -3939,6 +4099,10 @@ void setWrapperCursorVisible(bool visible)
                  g_ncCursorAdded);
         }
         SetCursor(wrapperCursor);
+        // The replacement is current now, so an older non-shared LoadImage cursor is no longer in
+        // use and can be released safely after a live resize/display-mode change.
+        if (cursorToDestroy)
+            DestroyCursor(cursorToDestroy);
     } else if (g_ncCursorShown) {
         for (int i = 0; i < g_ncCursorAdded; ++i)
             ShowCursor(FALSE);
@@ -4009,12 +4173,11 @@ bool cursorOverDecorativeArea(HWND hwnd, const POINT* mappedGamePoint = nullptr)
             traceProbe(3, "renderer-owned outer margin");
             return true;
         }
-        gameX = static_cast<int>(
-            static_cast<long long>(point.x - viewportX) * gameWidth /
-            viewportWidth);
-        gameY = static_cast<int>(
-            static_cast<long long>(point.y - viewportY) * gameHeight /
-            viewportHeight);
+        // Match cnc-ddraw's round-to-nearest mouse transform. Using truncation here made
+        // WM_SETCURSOR (physical coordinates) and the following WM_MOUSEMOVE (already mapped
+        // coordinates on MNS/SMNS) disagree by one pixel at a scaled content/frame boundary.
+        gameX = MulDiv(point.x - viewportX, gameWidth, viewportWidth);
+        gameY = MulDiv(point.y - viewportY, gameHeight, viewportHeight);
     }
     const int left = (gameWidth - contentWidth) / 2;
     const int top = (gameHeight - contentHeight) / 2;
@@ -4138,8 +4301,14 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     // Keep the OS pointer visible over the caption + menu bar (non-client), invisible in the client.
     switch (msg) {
     case WM_NCMOUSEMOVE:
+        setWrapperCursorVisible(true);
+        break;
     case WM_ENTERMENULOOP:
         setWrapperCursorVisible(true);
+        pluginhost_menu_loop(1);
+        break;
+    case WM_EXITMENULOOP:
+        pluginhost_menu_loop(0);
         break;
     default:
         break;
@@ -4597,6 +4766,9 @@ void syncChrome(HWND hwnd)
     const int liveMode = DDGetDisplayMode();
     if (liveMode < 0 || !g_bar)
         return;
+    const int previousLiveMode = g_liveModeIdx;
+    const bool liveModeChanged =
+        previousLiveMode >= 0 && previousLiveMode != liveMode;
 
     const bool wantMenu = liveMode == 0;
     const bool hasOurMenu = GetMenu(hwnd) == g_bar;
@@ -4610,21 +4782,32 @@ void syncChrome(HWND hwnd)
     }
 
     g_liveModeIdx = liveMode;
-    int persistsNextStart = 0;
-    if (DDGetOutputConfig(nullptr, nullptr, &persistsNextStart) &&
-        persistsNextStart)
-        g_modeIdx = liveMode;
     refreshChecks();
-    // Automatic canvas selection is restart-only and is already explained when explicitly chosen
-    // in the Resolution menu. Never show that modal from F4/Alt+Enter chrome synchronization: it
-    // blocks the hotkey and can repeat when attaching the menu changes the live client height.
 
     if (changed) {
         DrawMenuBar(hwnd);
-        // Recompute the client area and mouse viewport without cfg_load(): Alt+Enter/F4 changes are
-        // live-only, and re-reading ddraw.ini here would immediately undo the hotkey transition.
+        // Recompute the client area and mouse viewport without cfg_load(): re-reading ddraw.ini here
+        // would immediately undo the hotkey transition. The observed final mode is persisted below.
         DDRelayoutCurrentMode();
         mlog("[menu] chrome %s (mode=%d)", wantMenu ? "attached" : "detached", liveMode);
+    }
+
+    // F4 and cnc-ddraw's Alt+Enter change only live g_config state. Persist the successfully
+    // observed result so the next process starts in the mode the user actually left selected.
+    // Do not write on the first sync: that is startup observation, not a user transition.
+    if (liveModeChanged) {
+        if (saveLiveDisplayModeForNextStart(liveMode)) {
+            mlog("[menu] live display mode %d saved for next start", liveMode);
+            if (liveMode != 0)
+                showFirstFullscreenPersistenceNotice(hwnd);
+        } else {
+            MessageBoxW(
+                hwnd,
+                L(L"The display mode changed for this session, but it could not be saved to ddraw.ini. The next game start may use the previous mode.",
+                  L"Режим экрана изменён для текущего сеанса, но сохранить его в ddraw.ini не удалось. При следующем запуске игра может вернуться к прежнему режиму."),
+                L(L"Display mode", L"Режим экрана"),
+                MB_OK | MB_ICONWARNING);
+        }
     }
 }
 
@@ -4733,8 +4916,14 @@ extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, 
 
     switch (msg) {
     case WM_NCMOUSEMOVE:
+        setWrapperCursorVisible(true);
+        break;
     case WM_ENTERMENULOOP:
         setWrapperCursorVisible(true);
+        pluginhost_menu_loop(1);
+        break;
+    case WM_EXITMENULOOP:
+        pluginhost_menu_loop(0);
         break;
     default:
         break;
