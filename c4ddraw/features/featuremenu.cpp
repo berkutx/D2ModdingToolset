@@ -27,6 +27,7 @@ extern "C" void DDRelayoutCurrentMode(void);
 extern "C" int DDGetDisplayMode(void);
 extern "C" void DDNormalizeLegacyExclusive(void);
 extern "C" void DDToggleWindowedMode(void);
+extern "C" int DDIsWindowModeToggleHotkey(int code, WPARAM key, LPARAM hookFlags);
 extern "C" void DDTakeScreenshot(void);
 extern "C" int DDGetScaleMetrics(int* gameWidth, int* gameHeight, int* outputWidth,
                                   int* outputHeight, int* viewportX, int* viewportY,
@@ -4725,11 +4726,22 @@ HWND g_keyboardObserverHwnd = nullptr;
 LRESULT CALLBACK keyboardHookObserver(int code, WPARAM wParam, LPARAM lParam)
 {
     const int before = DDGetDisplayMode();
-    const LRESULT result = g_origKeyboardHook(code, wParam, lParam);
+    LRESULT result = 0;
+
+    // Real exclusive mode can keep ordinary F4 WM_KEYDOWN away from the WndProc. Intercept at the
+    // same WH_KEYBOARD point that cnc-ddraw uses for Alt+Enter and route both through our normalized
+    // transition. Consuming the initial press also prevents cnc-ddraw from toggling a second time.
+    if (DDIsWindowModeToggleHotkey(code, wParam, lParam)) {
+        DDToggleWindowedMode();
+        result = 1;
+    } else {
+        result = g_origKeyboardHook(code, wParam, lParam);
+    }
     const int after = DDGetDisplayMode();
 
-    // cnc-ddraw's WH_KEYBOARD hook consumes Alt+Enter (and any configured secondary hotkey), so no
-    // WndProc key message follows. Marshal one private message after its synchronous mode change.
+    // The WH_KEYBOARD path consumes Alt+Enter/F4 (and any configured secondary hotkey), so no
+    // dependable WndProc key message follows. Marshal one private message after its synchronous
+    // mode change.
     if (before >= 0 && after >= 0 && before != after && g_relayoutMsg && g_keyboardObserverHwnd)
         PostMessageA(g_keyboardObserverHwnd, g_relayoutMsg, 0, 0);
 

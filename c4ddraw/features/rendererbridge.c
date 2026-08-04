@@ -502,6 +502,31 @@ void DDToggleWindowedMode(void)
     }
 }
 
+/*
+ * The renderer's WH_KEYBOARD hook is the only reliable input point in real exclusive mode: some
+ * DirectInput/game paths never deliver F4 to the window procedure. Let the feature layer route all
+ * configured fullscreen hotkeys through DDToggleWindowedMode instead of mixing its normalized F4
+ * transition with cnc-ddraw's raw Alt+Enter transition. Plain F4 is wrapper-owned; Alt+F4 is not.
+ */
+int DDIsWindowModeToggleHotkey(int code, WPARAM key, LPARAM hook_flags)
+{
+    const DWORD flags = (DWORD)hook_flags;
+    const BOOL alt_down = (flags & (1u << 29)) != 0;
+    const BOOL key_down = (flags & (1u << 31)) == 0;
+    const BOOL key_triggered = (flags & (1u << 30)) == 0;
+
+    if (code < 0 || !key || !key_down || !key_triggered)
+        return 0;
+
+    if (key == VK_F4)
+        return alt_down ? 0 : 1;
+
+    if (key == (WPARAM)g_config.hotkeys.toggle_fullscreen && alt_down)
+        return 1;
+
+    return key == (WPARAM)g_config.hotkeys.toggle_fullscreen2 ? 1 : 0;
+}
+
 void DDTakeScreenshot(void)
 {
     TRACE("%s [%p]\n", __FUNCTION__, _ReturnAddress());
