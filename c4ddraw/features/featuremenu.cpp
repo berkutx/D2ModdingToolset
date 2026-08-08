@@ -4728,9 +4728,10 @@ LRESULT CALLBACK keyboardHookObserver(int code, WPARAM wParam, LPARAM lParam)
     const int before = DDGetDisplayMode();
     LRESULT result = 0;
 
-    // Real exclusive mode can keep ordinary F4 WM_KEYDOWN away from the WndProc. Intercept at the
-    // same WH_KEYBOARD point that cnc-ddraw uses for Alt+Enter and route both through our normalized
-    // transition. Consuming the initial press also prevents cnc-ddraw from toggling a second time.
+    // In exclusive mode F4 can reach the game WndProc yet still toggle too late: chrome briefly
+    // follows the attempted transition while the fullscreen-sized renderer wins the nested relayout.
+    // Handle it at cnc-ddraw's WH_KEYBOARD point, just like Alt+Enter, and consume the initial press
+    // so exactly one normalized transition owns both mode and normal-window geometry.
     if (DDIsWindowModeToggleHotkey(code, wParam, lParam)) {
         DDToggleWindowedMode();
         result = 1;

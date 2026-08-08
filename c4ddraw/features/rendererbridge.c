@@ -7,6 +7,7 @@
 
 #include <windows.h>
 #include <intrin.h>
+#include <stdlib.h>
 
 #pragma intrinsic(_ReturnAddress)
 
@@ -19,6 +20,10 @@
 
 extern const void* DDGetDecoratedSurface(
     const void* source, int width, int height, int pitch, int bpp, int rgb555);
+
+int DDGetDisplayMode(void);
+static BOOL dd_prepare_normal_window_output(RECT* saved_rect);
+static void dd_restore_output_request(const RECT* saved_rect);
 
 /*
  * Keep cnc-ddraw's live fake desktop geometry aligned with a validated Hor+
@@ -277,15 +282,23 @@ void DDReloadConfigForMenu(int output_size_changed, int display_mode_changed)
  */
 void DDRelayoutCurrentMode(void)
 {
+    RECT saved_output_rect;
+    BOOL prepared_normal_output = FALSE;
+
     TRACE("%s [%p]\n", __FUNCTION__, _ReturnAddress());
 
     if (!g_ddraw.ref || !g_ddraw.hwnd || !g_ddraw.width)
         return;
 
+    if (DDGetDisplayMode() == 0)
+        prepared_normal_output = dd_prepare_normal_window_output(&saved_output_rect);
+
     BOOL saved_remove_menu = g_config.remove_menu;
     g_config.remove_menu = FALSE;
     dd_SetDisplayMode(0, 0, 0, 0);
     g_config.remove_menu = saved_remove_menu;
+    if (prepared_normal_output)
+        dd_restore_output_request(&saved_output_rect);
 
     if (g_mouse_locked)
     {
@@ -439,6 +452,146 @@ int DDWriteConfigString(const char* key, const char* value)
 }
 
 /*
+ * Fullscreen modes replace cnc-ddraw's live render geometry with the monitor dimensions.  On the
+ * return trip a width=0/height=0 configuration can therefore inherit that fullscreen geometry
+ * instead of becoming a visibly smaller normal window.  Keep the last real normal-window client
+ * size when there is one; for a process that started fullscreen, derive it from the persisted
+ * output request (or the game canvas for the 0x0 automatic request).  The selected live size is
+ * clamped to the current monitor work area, including the caption/frame and C4dll-R menu.
+ *
+ * The g_config override is deliberately temporary.  In particular, a fitted automatic window must
+ * not turn persisted width=0/height=0 into a fixed output when cnc-ddraw later calls cfg_save().
+ */
+static LONG g_last_normal_output_width;
+static LONG g_last_normal_output_height;
+
+static LONG dd_read_config_long(const char* key, LONG fallback)
+{
+    char fallback_text[32] = {0};
+    char value[32] = {0};
+    char* end = NULL;
+    long parsed;
+
+    wsprintfA(fallback_text, "%ld", fallback);
+    if (!DDReadConfigString(key, fallback_text, value, sizeof(value)))
+        return fallback;
+
+    parsed = strtol(value, &end, 0);
+    return end != value ? (LONG)parsed : fallback;
+}
+
+static void dd_get_current_work_area(RECT* work)
+{
+    MONITORINFO info;
+    HMONITOR monitor;
+
+    if (!work)
+        return;
+
+    SetRect(work, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    monitor = MonitorFromWindow(g_ddraw.hwnd, MONITOR_DEFAULTTONEAREST);
+    ZeroMemory(&info, sizeof(info));
+    info.cbSize = sizeof(info);
+    if (monitor && GetMonitorInfoA(monitor, &info))
+        *work = info.rcWork;
+    else
+        SystemParametersInfoA(SPI_GETWORKAREA, 0, work, 0);
+}
+
+static void dd_fit_normal_output_to_work_area(LONG* width, LONG* height, const RECT* work)
+{
+    RECT chrome = {0, 0, 100, 100};
+    LONG capacity_width;
+    LONG capacity_height;
+    LONG extra_width = 0;
+    LONG extra_height = 0;
+
+    if (!width || !height || !work || *width <= 0 || *height <= 0)
+        return;
+
+    if (AdjustWindowRectEx(&chrome, WS_OVERLAPPEDWINDOW, TRUE, 0))
+    {
+        extra_width = (chrome.right - chrome.left) - 100;
+        extra_height = (chrome.bottom - chrome.top) - 100;
+    }
+    capacity_width = (work->right - work->left) - extra_width;
+    capacity_height = (work->bottom - work->top) - extra_height;
+    if (capacity_width <= 0 || capacity_height <= 0)
+        return;
+
+    if (*width > capacity_width || *height > capacity_height)
+    {
+        const LONGLONG requested_width = *width;
+        const LONGLONG requested_height = *height;
+        if (requested_width * capacity_height > requested_height * capacity_width)
+        {
+            *width = capacity_width;
+            *height = (LONG)(requested_height * capacity_width / requested_width);
+        }
+        else
+        {
+            *height = capacity_height;
+            *width = (LONG)(requested_width * capacity_height / requested_height);
+        }
+    }
+}
+
+static BOOL dd_prepare_normal_window_output(RECT* saved_rect)
+{
+    RECT work;
+    RECT frame;
+    LONG width;
+    LONG height;
+    LONG outer_width;
+    LONG outer_height;
+
+    if (!saved_rect || !g_ddraw.hwnd || !g_ddraw.width || !g_ddraw.height)
+        return FALSE;
+
+    *saved_rect = g_config.window_rect;
+    width = g_last_normal_output_width;
+    height = g_last_normal_output_height;
+    if (width <= 0 || height <= 0)
+    {
+        width = dd_read_config_long("width", 0);
+        height = dd_read_config_long("height", 0);
+        if (width <= 0 || height <= 0)
+        {
+            width = (LONG)g_ddraw.width;
+            height = (LONG)g_ddraw.height;
+        }
+    }
+
+    dd_get_current_work_area(&work);
+    dd_fit_normal_output_to_work_area(&width, &height, &work);
+    if (width <= 0 || height <= 0)
+        return FALSE;
+
+    g_last_normal_output_width = width;
+    g_last_normal_output_height = height;
+    g_config.window_rect.right = width;
+    g_config.window_rect.bottom = height;
+
+    /* g_config stores the desired client origin.  Center the corresponding outer rectangle in the
+     * work area so a side/top taskbar cannot leave the new normal window looking fullscreen. */
+    SetRect(&frame, 0, 0, width, height);
+    AdjustWindowRectEx(&frame, WS_OVERLAPPEDWINDOW, TRUE, 0);
+    outer_width = frame.right - frame.left;
+    outer_height = frame.bottom - frame.top;
+    g_config.window_rect.left =
+        work.left + ((work.right - work.left) - outer_width) / 2 - frame.left;
+    g_config.window_rect.top =
+        work.top + ((work.bottom - work.top) - outer_height) / 2 - frame.top;
+    return TRUE;
+}
+
+static void dd_restore_output_request(const RECT* saved_rect)
+{
+    if (saved_rect)
+        g_config.window_rect = *saved_rect;
+}
+
+/*
  * F4 is owned by C4dll-R so it also works with an existing ddraw.ini that predates the hotkey.
  * Remember which kind of fullscreen was left, but always make the return trip a real normal
  * window. Temporarily selecting cnc-ddraw's borderless toggle gives util_toggle_fullscreen()
@@ -450,6 +603,8 @@ void DDToggleWindowedMode(void)
     static LONG last_fullscreen_mode = 1; /* safest first transition: normal -> borderless */
     const int mode = DDGetDisplayMode();
     BOOL saved_toggle_borderless;
+    RECT saved_output_rect;
+    BOOL prepared_normal_output = FALSE;
 
     if (mode < 0)
         return;
@@ -458,6 +613,11 @@ void DDToggleWindowedMode(void)
 
     if (mode == 0)
     {
+        if (g_ddraw.render.width > 0 && g_ddraw.render.height > 0)
+        {
+            g_last_normal_output_width = (LONG)g_ddraw.render.width;
+            g_last_normal_output_height = (LONG)g_ddraw.render.height;
+        }
         if (InterlockedExchangeAdd(&last_fullscreen_mode, 0) == 2)
         {
             g_config.fullscreen = FALSE;
@@ -470,6 +630,7 @@ void DDToggleWindowedMode(void)
     }
     else
     {
+        prepared_normal_output = dd_prepare_normal_window_output(&saved_output_rect);
         InterlockedExchange(&last_fullscreen_mode, mode);
         if (mode == 1)
         {
@@ -485,6 +646,8 @@ void DDToggleWindowedMode(void)
     }
 
     util_toggle_fullscreen();
+    if (prepared_normal_output)
+        dd_restore_output_request(&saved_output_rect);
     /*
      * Keep the live transition policy coherent with the mode we just entered. In particular, after
      * F4 creates borderless from a config whose persisted toggle_borderless was false, Alt+Enter
@@ -503,10 +666,10 @@ void DDToggleWindowedMode(void)
 }
 
 /*
- * The renderer's WH_KEYBOARD hook is the only reliable input point in real exclusive mode: some
- * DirectInput/game paths never deliver F4 to the window procedure. Let the feature layer route all
- * configured fullscreen hotkeys through DDToggleWindowedMode instead of mixing its normalized F4
- * transition with cnc-ddraw's raw Alt+Enter transition. Plain F4 is wrapper-owned; Alt+F4 is not.
+ * Handle fullscreen hotkeys before the game WndProc: changing the renderer from inside that WndProc
+ * can briefly update chrome but leave the fullscreen-sized nested relayout in control. Route both
+ * fixed C4dll-R shortcuts and configured alternatives through DDToggleWindowedMode. Plain F4 is
+ * wrapper-owned; Alt+F4 is not.
  */
 int DDIsWindowModeToggleHotkey(int code, WPARAM key, LPARAM hook_flags)
 {
@@ -521,10 +684,11 @@ int DDIsWindowModeToggleHotkey(int code, WPARAM key, LPARAM hook_flags)
     if (key == VK_F4)
         return alt_down ? 0 : 1;
 
-    if (key == (WPARAM)g_config.hotkeys.toggle_fullscreen && alt_down)
+    if ((key == VK_RETURN || key == (WPARAM)g_config.hotkeys.toggle_fullscreen) && alt_down)
         return 1;
 
-    return key == (WPARAM)g_config.hotkeys.toggle_fullscreen2 ? 1 : 0;
+    return g_config.hotkeys.toggle_fullscreen2 &&
+        key == (WPARAM)g_config.hotkeys.toggle_fullscreen2 ? 1 : 0;
 }
 
 void DDTakeScreenshot(void)
