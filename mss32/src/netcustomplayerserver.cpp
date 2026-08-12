@@ -233,15 +233,25 @@ void CNetCustomPlayerServer::PeerCallback::onPacketReceived(DefaultMessageIDType
     switch (type) {
     case ID_GAME_MESSAGE: {
         SLNet::RakNetGUID sender;
-        auto message = getMessageAndSender(packet, &sender);
-        m_player->postMessageToReceive(message, getClientId(sender));
+        std::size_t availableBytes{};
+        auto message = getMessageAndSender(packet, &sender, &availableBytes);
+        if (!message) {
+            m_player->getLogger()->warn(__FUNCTION__ ": refusing malformed relayed game message");
+            break;
+        }
+        m_player->postMessageToReceive(message, availableBytes, getClientId(sender));
         break;
     }
 
     case ID_GAME_MESSAGE_TO_HOST_SERVER: {
-        auto message = reinterpret_cast<game::NetMessageHeader*>(packet->data);
+        const auto availableBytes{packet ? static_cast<std::size_t>(packet->length) : 0};
+        auto message = packet ? reinterpret_cast<game::NetMessageHeader*>(packet->data) : nullptr;
+        if (!isValidMessage(message, availableBytes, ID_GAME_MESSAGE_TO_HOST_SERVER)) {
+            m_player->getLogger()->warn(__FUNCTION__ ": refusing malformed direct game message");
+            break;
+        }
         message->messageType = game::netMessageNormalType; // TODO: any better way to do this?
-        m_player->postMessageToReceive(message, getClientId(packet->guid));
+        m_player->postMessageToReceive(message, availableBytes, getClientId(packet->guid));
         break;
     }
 

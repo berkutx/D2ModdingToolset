@@ -52,6 +52,10 @@ protected:
     static bool __fastcall isHost(CNetCustomPlayerClient* thisptr, int /*%edx*/);
 
 private:
+    /** Forwards the host's own lord pick to the lobby server (ID_LOBBY_PLAYER_SETUP)
+     * since it never leaves the local loopback otherwise. */
+    void forwardPlayerSetupToLobby(const game::NetMessageHeader* message) const;
+
     class PeerCallback : public NetPeerCallback
     {
     public:

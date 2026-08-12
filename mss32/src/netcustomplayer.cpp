@@ -26,6 +26,7 @@
 #include "netcustomservice.h"
 #include "netcustomsession.h"
 #include "netmsg.h"
+#include <cstring>
 #include <mutex>
 #include <slikenet/types.h>
 #include <spdlog/spdlog.h>
@@ -68,9 +69,36 @@ uint32_t CNetCustomPlayer::getClientId(const SLNet::RakNetGUID& guid)
     return guid.ToUint32(guid);
 }
 
-const game::NetMessageHeader* CNetCustomPlayer::getMessageAndSender(const SLNet::Packet* packet,
-                                                                    SLNet::RakNetGUID* sender)
+bool CNetCustomPlayer::isValidMessage(const game::NetMessageHeader* message,
+                                      std::size_t availableBytes,
+                                      std::uint32_t expectedMessageType)
 {
+    if (!message || availableBytes < sizeof(game::NetMessageHeader)
+        || availableBytes >= game::netMessageMaxLength) {
+        return false;
+    }
+
+    if (message->length < sizeof(game::NetMessageHeader) || message->length > availableBytes
+        || message->length >= game::netMessageMaxLength
+        || message->messageType != expectedMessageType) {
+        return false;
+    }
+
+    return std::memchr(message->messageClassName, '\0', sizeof(message->messageClassName)) != nullptr;
+}
+
+const game::NetMessageHeader* CNetCustomPlayer::getMessageAndSender(const SLNet::Packet* packet,
+                                                                    SLNet::RakNetGUID* sender,
+                                                                    std::size_t* availableBytes)
+{
+    if (availableBytes) {
+        *availableBytes = 0;
+    }
+    if (!packet || !packet->data || !sender || !availableBytes
+        || packet->length < sizeof(SLNet::MessageID)) {
+        return nullptr;
+    }
+
     SLNet::BitStream input{packet->data, packet->length, false};
     input.IgnoreBytes(sizeof(SLNet::MessageID));
     if (!input.Read(*sender)) {
@@ -78,8 +106,24 @@ const game::NetMessageHeader* CNetCustomPlayer::getMessageAndSender(const SLNet:
         return nullptr;
     }
 
-    auto messageData = input.GetData() + input.GetReadOffset() / 8;
-    return reinterpret_cast<const game::NetMessageHeader*>(messageData);
+    const auto readBits{input.GetReadOffset()};
+    if ((readBits & 7u) != 0) {
+        return nullptr;
+    }
+
+    const auto readBytes{static_cast<std::size_t>(readBits / 8)};
+    if (readBytes > packet->length) {
+        return nullptr;
+    }
+
+    *availableBytes = static_cast<std::size_t>(packet->length) - readBytes;
+    const auto messageData{input.GetData() + readBytes};
+    const auto message{reinterpret_cast<const game::NetMessageHeader*>(messageData)};
+    if (!isValidMessage(message, *availableBytes, game::netMessageNormalType)) {
+        *availableBytes = 0;
+        return nullptr;
+    }
+    return message;
 }
 
 CNetCustomService* CNetCustomPlayer::getService() const
@@ -118,8 +162,14 @@ uint32_t CNetCustomPlayer::getId() const
 }
 
 void CNetCustomPlayer::postMessageToReceive(const game::NetMessageHeader* message,
+                                            std::size_t availableBytes,
                                             std::uint32_t idFrom)
 {
+    if (!isValidMessage(message, availableBytes, game::netMessageNormalType)) {
+        getLogger()->warn(__FUNCTION__ ": refusing invalid game message from 0x{:x}", idFrom);
+        return;
+    }
+
     getLogger()->debug(__FUNCTION__ ": '{:s}' from 0x{:x}", message->messageClassName, idFrom);
 
     auto msg = std::make_unique<unsigned char[]>(message->length);
@@ -246,15 +296,17 @@ game::ReceiveMessageResult __fastcall CNetCustomPlayer::receiveMessage(
 
     if (message->messageType != game::netMessageNormalType) {
         thisptr->getLogger()
-            ->debug(__FUNCTION__ ": message from 0x{:x} with unexpected type 0x{:x}", *idFrom,
-                    message->messageType);
+            ->debug(__FUNCTION__ ": message from 0x{:x} with unexpected type 0x{:x}", pair.first,
+                     message->messageType);
+        thisptr->m_messages.pop();
         return game::ReceiveMessageResult::Failure;
     }
 
     if (message->length >= game::netMessageMaxLength) {
         thisptr->getLogger()->debug(
             __FUNCTION__ ": message from 0x{:x} with length {:d} that exeeds maximum of {:d}",
-            *idFrom, message->length, game::netMessageMaxLength);
+            pair.first, message->length, game::netMessageMaxLength);
+        thisptr->m_messages.pop();
         return game::ReceiveMessageResult::Failure;
     }
 

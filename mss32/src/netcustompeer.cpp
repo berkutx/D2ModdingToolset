@@ -56,6 +56,25 @@ void CNetCustomPeer::ResetPacketNotification()
     m_packetNotificationSent = false;
 }
 
+void CNetCustomPeer::CompletePacketProcessing()
+{
+    ResetPacketNotification();
+
+    // A packet can enter the return queue after Receive() reported it empty but before the
+    // notification flag is reset. Rearm here so that race cannot leave the new packet stranded.
+    if (HasPacketsToReceive()) {
+        SendPacketNotification();
+    }
+}
+
+bool CNetCustomPeer::HasPacketsToReceive()
+{
+    packetReturnMutex.Lock();
+    const bool hasPackets{!packetReturnQueue.IsEmpty()};
+    packetReturnMutex.Unlock();
+    return hasPackets;
+}
+
 void CNetCustomPeer::UpdateThreadCallback(RakPeerInterface* peer, void* /*data*/)
 {
     // TODO: remove this when disconnect issue is resolved.
@@ -68,11 +87,7 @@ void CNetCustomPeer::UpdateThreadCallback(RakPeerInterface* peer, void* /*data*/
     }
 
     CNetCustomPeer* customPeer = (CNetCustomPeer*)peer;
-    customPeer->packetReturnMutex.Lock();
-    bool empty = customPeer->packetReturnQueue.IsEmpty();
-    customPeer->packetReturnMutex.Unlock();
-
-    if (!empty && !customPeer->IsPacketNotificationSent()) {
+    if (customPeer->HasPacketsToReceive() && !customPeer->IsPacketNotificationSent()) {
         spdlog::debug(
             __FUNCTION__ ": there are packets in the return queue, posting notification message");
         customPeer->SendPacketNotification();
@@ -83,13 +98,17 @@ void CNetCustomPeer::SendPacketNotification()
 {
     using namespace game;
 
+    bool expected{};
+    if (!m_packetNotificationSent.compare_exchange_strong(expected, true)) {
+        return;
+    }
+
     const auto& uiManagerApi = CUIManagerApi::get();
 
     UIManagerPtr uiManager{};
     uiManagerApi.get(&uiManager);
-    m_packetNotificationSent = uiManagerApi.postMessage(uiManager.data,
-                                                        m_packetNotificationMessageId, 0, 0);
-    if (!m_packetNotificationSent) {
+    if (!uiManagerApi.postMessage(uiManager.data, m_packetNotificationMessageId, 0, 0)) {
+        m_packetNotificationSent = false;
         spdlog::debug(__FUNCTION__ ": failed to post notification message, error = {:d}",
                       GetLastError());
     }

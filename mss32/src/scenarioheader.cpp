@@ -23,26 +23,44 @@
 
 namespace game::ScenarioFileHeaderApi {
 
+namespace {
+
+/** Native game ABI.  The Russobit entry point was verified to take exactly six stack arguments
+ * and return with `ret 0x18`. This wrapper deliberately does not request the optional data,
+ * format-version, or expansion outputs. Keep the raw ABI private so feature code cannot call it
+ * with a wrong signature. */
+using NativeReadAndValidateFileHeader = bool(__stdcall*)(const char* filePath,
+                                                         CMidgardID* scenarioFileId,
+                                                         ScenarioFileHeader* header,
+                                                         void* optionalDataOut,
+                                                         int* formatVersion,
+                                                         bool* expansionContent);
+
 // clang-format off
-static std::array<Api, 3> functions = {{
-    // Akella
-    Api{
-        (Api::ReadAndCheckHeader)0x5e3db7
-    },
+static std::array<NativeReadAndValidateFileHeader, 4> functions = {{
+    // Akella -- ranked capture is intentionally unsupported.
+    nullptr,
     // Russobit
-    Api{
-        (Api::ReadAndCheckHeader)0x5e3db7
-    },
-    // Gog
-    Api{
-        (Api::ReadAndCheckHeader)0x5e2ae4
-    }
+    (NativeReadAndValidateFileHeader)0x5e3db7,
+    // GOG -- intentionally disabled until its complete ranked-capture path is verified.
+    nullptr,
+    // Scenario Editor
+    nullptr,
 }};
 // clang-format on
 
-Api& get()
+} // namespace
+
+bool readAndValidateFileHeader(const char* filePath,
+                               CMidgardID* scenarioFileId,
+                               ScenarioFileHeader* header)
 {
-    return functions[static_cast<int>(hooks::gameVersion())];
+    const auto version{static_cast<int>(hooks::gameVersion())};
+    if (!filePath || !scenarioFileId || !header || version < 0
+        || version >= static_cast<int>(functions.size()) || !functions[version]) {
+        return false;
+    }
+    return functions[version](filePath, scenarioFileId, header, nullptr, nullptr, nullptr);
 }
 
 } // namespace game::ScenarioFileHeaderApi

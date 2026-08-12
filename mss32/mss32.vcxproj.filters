@@ -752,6 +752,9 @@
     <ClCompile Include="src\menucustomlobby.cpp">
       <Filter>features\lobby</Filter>
     </ClCompile>
+    <ClCompile Include="src\lobbysaveexchange.cpp">
+      <Filter>features\lobby</Filter>
+    </ClCompile>
     <ClCompile Include="src\netcustomservice.cpp">
       <Filter>features\lobby</Filter>
     </ClCompile>
@@ -1059,6 +1062,9 @@
       <Filter>game</Filter>
     </ClCompile>
     <ClCompile Include="src\midgardscenariomap.cpp">
+      <Filter>game</Filter>
+    </ClCompile>
+    <ClCompile Include="src\midstreamenvfile.cpp">
       <Filter>game</Filter>
     </ClCompile>
     <ClCompile Include="src\bindings\rodview.cpp">
@@ -2790,6 +2796,9 @@
       <Filter>game</Filter>
     </ClInclude>
     <ClInclude Include="include\menucustomlobby.h">
+      <Filter>features\lobby</Filter>
+    </ClInclude>
+    <ClInclude Include="include\lobbysaveexchange.h">
       <Filter>features\lobby</Filter>
     </ClInclude>
     <ClInclude Include="include\netcustomservice.h">

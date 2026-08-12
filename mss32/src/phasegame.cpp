@@ -25,25 +25,29 @@ namespace game::CPhaseGameApi {
 
 // clang-format off
 static std::array<Api, 4> functions = {{
-    // Akella
+    // Akella -- ranked host capture is intentionally unsupported for this build.
     Api{
         (Api::CheckObjectLock)0x4078b7,
         (Api::SendStackMoveMsg)0x40650f,
+        (Api::SendSaveGameMsg)nullptr,
     },
     // Russobit
     Api{
         (Api::CheckObjectLock)0x4078b7,
         (Api::SendStackMoveMsg)0x40650f,
+        (Api::SendSaveGameMsg)0x40639b,
     },
-    // Gog
+    // GOG -- ranked host capture is intentionally unsupported for this build.
     Api{
         (Api::CheckObjectLock)0x40753e,
         (Api::SendStackMoveMsg)0x40619b,
+        (Api::SendSaveGameMsg)nullptr,
     },
     // Scenario Editor
     Api{
         (Api::CheckObjectLock)nullptr,
         (Api::SendStackMoveMsg)nullptr,
+        (Api::SendSaveGameMsg)nullptr,
     },
 }};
 // clang-format on

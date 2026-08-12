@@ -349,8 +349,10 @@ static void readSettings(const sol::table& table, Settings& settings)
                 std::clamp<int>(chances.value()[i + 1], 0, 100));
     }
 
+#ifdef _DEBUG
     // People keep forgetting to turn this off in release packages
-    //settings.debugMode = readSetting(table, "debugHooks", defaultSettings().debugMode);
+    settings.debugMode = readSetting(table, "debugHooks", defaultGameSettings().debugMode);
+#endif
     // clang-format on
 
     readAiAttackPowerSettings(table, settings.aiAttackPowerBonus);

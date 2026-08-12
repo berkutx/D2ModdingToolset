@@ -31,6 +31,8 @@ namespace game {
 struct IStdFileImpl;
 struct CMidStreamCountFile;
 struct CMidStreamFile;
+struct ScenarioFileHeader;
+struct CStreamBits;
 
 struct StreamEnvFileInfo
 {
@@ -54,6 +56,25 @@ struct CMidStreamEnvFile : public IMidgardStreamEnv
 };
 
 assert_size(CMidStreamEnvFile, 84);
+
+namespace CMidStreamEnvFileApi {
+
+struct Api
+{
+    /** Constructs a file-backed write environment and writes the scenario header.
+     * The optional stream contains host-only AI state and may be null. */
+    using WriteConstructor = CMidStreamEnvFile*(__thiscall*)(CMidStreamEnvFile* thisptr,
+                                                             const char* filePath,
+                                                             const CMidgardID* scenarioId,
+                                                             bool isExpansionContent,
+                                                             ScenarioFileHeader* header,
+                                                             CStreamBits* optionalData);
+    WriteConstructor writeConstructor;
+};
+
+Api& get();
+
+} // namespace CMidStreamEnvFileApi
 
 } // namespace game
 

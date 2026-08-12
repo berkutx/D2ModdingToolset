@@ -62,6 +62,7 @@ CNetCustomSession ::~CNetCustomSession()
 {
     spdlog::debug(__FUNCTION__);
     m_service->leaveRoom();
+    m_service->notifySessionDestroyed(this);
 }
 
 CNetCustomService* CNetCustomSession::getService() const

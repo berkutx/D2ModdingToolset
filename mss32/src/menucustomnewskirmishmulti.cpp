@@ -18,7 +18,9 @@
  */
 
 #include "menucustomnewskirmishmulti.h"
+#include "autodialoghooks.h"
 #include "button.h"
+#include "d2string.h"
 #include "dialoginterf.h"
 #include "editboxinterf.h"
 #include "game.h"
@@ -28,8 +30,12 @@
 #include "menuphase.h"
 #include "scenariodata.h"
 #include "scenariodataarray.h"
+#include "spinbuttoninterf.h"
+#include "stringarray.h"
 #include "textids.h"
+#include "togglebutton.h"
 #include "utils.h"
+#include "version.h"
 #include <spdlog/spdlog.h>
 
 namespace hooks {
@@ -40,6 +46,7 @@ CMenuCustomNewSkirmishMulti::CMenuCustomNewSkirmishMulti(game::CMenuPhase* menuP
 {
     using namespace game;
 
+    CustomHostDialogGuard dialogGuard;
     CMenuNewSkirmishMultiApi::get().constructor(this, menuPhase);
 
     static RttiInfo<CMenuNewSkirmishMultiVftable> rttiInfo = {};
@@ -52,14 +59,18 @@ CMenuCustomNewSkirmishMulti::CMenuCustomNewSkirmishMulti(game::CMenuPhase* menuP
     auto dialog = CMenuBaseApi::get().getDialogInterface(this);
     setButtonCallback(dialog, "BTN_LOAD", loadBtnHandler, this);
     setUserNameToEditName();
+    initializeRoomOptionsControls();
 
-    CNetCustomService::get()->addRoomsCallback(&m_roomsCallback);
+    if (auto service = CNetCustomService::get()) {
+        service->addRoomsCallback(&m_roomsCallback);
+    }
 }
 
 CMenuCustomNewSkirmishMulti::~CMenuCustomNewSkirmishMulti()
 {
     using namespace game;
 
+    readRoomOptionsControls();
     auto service = CNetCustomService::get();
     if (service) {
         service->removeRoomsCallback(&m_roomsCallback);
@@ -131,8 +142,101 @@ void __fastcall CMenuCustomNewSkirmishMulti::loadBtnHandler(CMenuCustomNewSkirmi
     menuPhaseApi.setScenarioDescription(menuPhase, scenario->description.string);
 
     auto dialog = CMenuBaseApi::get().getDialogInterface(thisptr);
+    thisptr->readRoomOptionsControls();
     thisptr->createRoom(getEditBoxText(dialog, "EDIT_GAME"), scenario->name.string,
                         scenario->description.string, getEditBoxText(dialog, "EDIT_PASSWORD"));
+}
+
+static void setupSimTurnsDaysSpinOptions(game::CSpinButtonInterf* spinButton, int maxDays)
+{
+    using namespace game;
+
+    const auto& string{StringApi::get()};
+    const auto& stringArray{StringArrayApi::get()};
+
+    StringArray options{};
+    stringArray.reserve(&options, static_cast<const unsigned int>(maxDays + 1));
+
+    for (int i = 0; i <= maxDays; ++i) {
+        char buffer[8] = {0};
+        std::snprintf(buffer, sizeof(buffer) - 1, "%d", i);
+
+        String str;
+        string.initFromString(&str, buffer);
+        stringArray.pushBack(&options, &str);
+        string.free(&str);
+    }
+
+    CSpinButtonInterfApi::get().setOptions(spinButton, &options);
+    stringArray.destructor(&options);
+}
+
+void CMenuCustomNewSkirmishMulti::initializeRoomOptionsControls()
+{
+    using namespace game;
+
+    auto service = CNetCustomService::get();
+    if (!service) {
+        return;
+    }
+
+    const auto& dialogApi = CDialogInterfApi::get();
+    auto dialog = CMenuBaseApi::get().getDialogInterface(this);
+    auto& options = service->getRoomOptions();
+
+    if (auto toggle = dialogApi.findToggleButton(dialog, "TOG_RANKED")) {
+        const bool supported{gameVersion() == GameVersion::Russobit};
+        CToggleButtonApi::get().setChecked(toggle, supported && options.ranked);
+        toggle->vftable->setEnabled(toggle, supported);
+    }
+
+    if (auto toggle = dialogApi.findToggleButton(dialog, "TOG_UNLOCK_GUI")) {
+        CToggleButtonApi::get().setChecked(toggle, options.unlockGui);
+    }
+
+    if (auto toggle = dialogApi.findToggleButton(dialog, "TOG_SIM_DAYS_LABEL")) {
+        CToggleButtonApi::get().setChecked(toggle, options.simultaneousTurnsEnabled);
+    }
+
+    if (auto spin = dialogApi.findSpinButton(dialog, "SPIN_SIM_DAYS")) {
+        setupSimTurnsDaysSpinOptions(spin, 30);
+        CSpinButtonInterfApi::get().setSelectedOption(spin, options.simultaneousTurnsDays);
+    }
+}
+
+void CMenuCustomNewSkirmishMulti::readRoomOptionsControls()
+{
+    using namespace game;
+
+    auto service = CNetCustomService::get();
+    if (!service) {
+        return;
+    }
+
+    const auto& dialogApi = CDialogInterfApi::get();
+    auto dialog = CMenuBaseApi::get().getDialogInterface(this);
+    auto& options = service->getRoomOptions();
+
+    if (auto toggle = dialogApi.findToggleButton(dialog, "TOG_RANKED")) {
+        options.ranked = gameVersion() == GameVersion::Russobit && toggle->data->checked;
+    }
+
+    if (auto toggle = dialogApi.findToggleButton(dialog, "TOG_UNLOCK_GUI")) {
+        options.unlockGui = toggle->data->checked;
+    }
+
+    auto simTurnsToggle = dialogApi.findToggleButton(dialog, "TOG_SIM_DAYS_LABEL");
+    if (simTurnsToggle) {
+        options.simultaneousTurnsEnabled = simTurnsToggle->data->checked;
+    }
+
+    if (auto spin = dialogApi.findSpinButton(dialog, "SPIN_SIM_DAYS")) {
+        options.simultaneousTurnsDays = spin->data->selectedOption;
+        if (!simTurnsToggle) {
+            // Preserve spinner-only semantics for older/custom dialog resources.
+            options.simultaneousTurnsEnabled = options.simultaneousTurnsDays > 0;
+        }
+    }
 }
 
 const game::ScenarioData* CMenuCustomNewSkirmishMulti::getSelectedScenario()

@@ -35,8 +35,6 @@ class CMenuCustomNewSkirmishMulti
     , public CMenuCustomBase
 {
 public:
-    static constexpr char dialogName[] = "DLG_HOST";
-
     CMenuCustomNewSkirmishMulti(game::CMenuPhase* menuPhase);
     ~CMenuCustomNewSkirmishMulti();
 
@@ -47,6 +45,12 @@ protected:
                                       char flags);
 
     static void __fastcall loadBtnHandler(CMenuCustomNewSkirmishMulti* thisptr, int /*%edx*/);
+
+    /** Sets room options controls (TOG_RANKED/TOG_SIM_DAYS_LABEL/SPIN_SIM_DAYS/
+     * TOG_UNLOCK_GUI) from CNetCustomService. */
+    void initializeRoomOptionsControls();
+    /** Reads room options controls state back into CNetCustomService. */
+    void readRoomOptionsControls();
 
     const game::ScenarioData* getSelectedScenario();
     bool isGameAndPlayerNamesValid();

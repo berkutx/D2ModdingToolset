@@ -6,6 +6,28 @@
 - Can be used on vanilla version or with other mods installed;
 - Allows players to search and create PvP matches without external software using custom lobby server. Currently only for [Motlin's mod](https://dis2modding.fandom.com/ru/wiki/Мод_Мотлина);
 - <details>
+    <summary>Adds ranked-match lifecycle support to the custom lobby;</summary>
+
+    - Ranked hosting is currently enabled only for the verified Russobit executable. Other game builds continue to create casual rooms;
+    - The lobby server requests independent host and joiner saves, then acknowledges durable storage. The client deletes only the exact generated local save after that acknowledgement;
+    - Save-transfer COMMIT carries no client digest. The server computes the stored artifact SHA-256 while receiving the chunks;
+    - Loaded games are always casual. This prevents a ranked setting from a previous room being reused for an unrelated save;
+    - Custom protocol ids are append-only: the existing lobby/game ids `+1` through `+7` and relay id `255` are unchanged. Rooms created by older clients have no `Ranked` column and remain casual;
+    - Ranked lifecycle adds only the previously unused `+8` through `+13` range:
+
+      | Id | Direction | Purpose |
+      | --- | --- | --- |
+      | `+8 SAVE_REQUEST` | core → participant | Requests one bounded native save capture for the assigned host/joiner role. |
+      | `+9 SAVE_UPLOAD` | participant → core | Carries the ordered V2 `BEGIN`, `CHUNK`, header-only `COMMIT`, or `FAIL` operations. |
+      | `+10 MATCH_ENDED` | core → participant | Returns a finalized ranked participant from the game UI to the custom lobby. |
+      | `+11 PLAYER_SETUP` | host → core | Reports authenticated setup data that the stock local-host path does not relay; V1 carries the lord choice. |
+      | `+12 SYSTEM_NOTICE` | core → participant | Carries current-client modal notices only; ordinary system chat stays on legacy chat/game packets. |
+      | `+13 SAVE_STORED_ACK` | core → participant | Confirms durable server storage so the exact generated local save may be deleted; it is not a RakNet ACK. |
+
+    - System chat uses the existing lobby chat or native in-game chat packet. The optional modal packet is understood only by current clients and is safely ignored by older clients;
+    - Client and lobby server must be updated together because SaveTransfer V2 uses a header-only COMMIT.
+  </details>
+- <details>
     <summary>Adds random scenario map generator;</summary>
     
     - Add `generatorSettings.lua` into `Scripts` forlder;

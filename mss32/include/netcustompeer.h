@@ -39,10 +39,16 @@ public:
 
     bool IsPacketNotificationSent() const;
     void ResetPacketNotification();
+    /**
+     * Acknowledges the notification consumed by the UI thread and immediately rearms it when a
+     * packet arrived during the final drain/reset window.
+     */
+    void CompletePacketProcessing();
 
 protected:
     static void UpdateThreadCallback(RakPeerInterface* peer, void* data);
 
+    bool HasPacketsToReceive();
     void SendPacketNotification();
 
 private:

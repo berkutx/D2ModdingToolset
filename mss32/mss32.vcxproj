@@ -398,6 +398,7 @@ call ..\buildDetours.bat ..\Detours
     <ClCompile Include="src\midgardhooks.cpp" />
     <ClCompile Include="src\midgardmapfog.cpp" />
     <ClCompile Include="src\midgardscenariomap.cpp" />
+    <ClCompile Include="src\midstreamenvfile.cpp" />
     <ClCompile Include="src\midobjectlock.cpp" />
     <ClCompile Include="src\midobjectlockhooks.cpp" />
     <ClCompile Include="src\midserver.cpp" />
@@ -476,6 +477,7 @@ call ..\buildDetours.bat ..\Detours
     <ClCompile Include="src\itemutils.cpp" />
     <ClCompile Include="src\leaderabilitycat.cpp" />
     <ClCompile Include="src\listbox.cpp" />
+    <ClCompile Include="src\lobbysaveexchange.cpp" />
     <ClCompile Include="src\idlistutils.cpp" />
     <ClCompile Include="src\lordcat.cpp" />
     <ClCompile Include="src\main.cpp" />
@@ -1182,6 +1184,7 @@ call ..\buildDetours.bat ..\Detours
     <ClInclude Include="include\leadercategory.h" />
     <ClInclude Include="include\d2list.h" />
     <ClInclude Include="include\listbox.h" />
+    <ClInclude Include="include\lobbysaveexchange.h" />
     <ClInclude Include="include\idlistutils.h" />
     <ClInclude Include="include\lordcat.h" />
     <ClInclude Include="include\lordtype.h" />

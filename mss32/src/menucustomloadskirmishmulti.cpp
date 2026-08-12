@@ -71,6 +71,7 @@ void CMenuCustomLoadSkirmishMulti::createRoomAndServer()
 
     auto vftable = (CMenuLoadVftable*)((CMenuBase*)this)->vftable;
     auto phaseData = this->menuBaseData->menuPhase->data;
+    CNetCustomService::get()->getRoomOptions().ranked = false;
     createRoom(vftable->getGameName(this), phaseData->scenarioName, phaseData->scenarioDescription,
                vftable->getPassword(this));
 }

@@ -19,6 +19,7 @@
 
 #include "netcustomplayerclient.h"
 #include "mempool.h"
+#include "lobbysaveexchange.h"
 #include "mqnetreception.h"
 #include "mqnetsystem.h"
 #include "netcustomplayer.h"
@@ -28,6 +29,8 @@
 #include "netmsg.h"
 #include "settings.h"
 #include "utils.h"
+#include <BitStream.h>
+#include <cstring>
 #include <spdlog/spdlog.h>
 
 namespace hooks {
@@ -101,10 +104,36 @@ bool __fastcall CNetCustomPlayerClient::sendMessage(CNetCustomPlayerClient* this
     }
 
     if (thisptr->getSession()->isHost()) {
+        thisptr->forwardPlayerSetupToLobby(message);
         return thisptr->sendHostMessage(message);
     } else {
         return thisptr->sendRemoteMessage(message, thisptr->m_serverGuid);
     }
+}
+
+void CNetCustomPlayerClient::forwardPlayerSetupToLobby(const game::NetMessageHeader* message) const
+{
+    // The relay already observes the host race through normal setup state. Only the host lord
+    // request is local-loopback-only and needs an out-of-band attribution message.
+    if (std::strcmp(message->messageClassName, ".?AVCMenusReqLordMsg@@")) {
+        return;
+    }
+    constexpr std::uint8_t kind{1};
+
+    if (message->length < sizeof(game::NetMessageHeader) + sizeof(std::uint32_t)) {
+        return;
+    }
+    std::uint32_t value{};
+    std::memcpy(&value,
+                reinterpret_cast<const char*>(message) + sizeof(game::NetMessageHeader),
+                sizeof(value));
+
+    auto service = getService();
+    SLNet::BitStream stream;
+    stream.Write(static_cast<SLNet::MessageID>(ID_LOBBY_PLAYER_SETUP));
+    stream.Write(kind);
+    stream.Write(value);
+    service->send(stream, service->getLobbyGuid(), LOW_PRIORITY);
 }
 
 bool __fastcall CNetCustomPlayerClient::setName(CNetCustomPlayerClient* thisptr,
@@ -130,7 +159,12 @@ void CNetCustomPlayerClient::PeerCallback::onPacketReceived(DefaultMessageIDType
     switch (type) {
     case ID_GAME_MESSAGE: {
         SLNet::RakNetGUID sender;
-        auto message = getMessageAndSender(packet, &sender);
+        std::size_t availableBytes{};
+        auto message = getMessageAndSender(packet, &sender, &availableBytes);
+        if (!message) {
+            m_player->getLogger()->warn(__FUNCTION__ ": refusing malformed relayed game message");
+            break;
+        }
         if (sender != m_player->m_serverGuid) {
             // Should only be a message to the server if we are hosting
             // (since both server and client players share the same peer)
@@ -139,14 +173,21 @@ void CNetCustomPlayerClient::PeerCallback::onPacketReceived(DefaultMessageIDType
                         message->messageClassName, getClientId(sender));
             break;
         }
-        m_player->postMessageToReceive(message, game::serverNetPlayerId);
+        observeLobbySaveGameMessage(message, availableBytes);
+        m_player->postMessageToReceive(message, availableBytes, game::serverNetPlayerId);
         break;
     }
 
     case ID_GAME_MESSAGE_TO_HOST_CLIENT: {
-        auto message = reinterpret_cast<game::NetMessageHeader*>(packet->data);
+        const auto availableBytes{packet ? static_cast<std::size_t>(packet->length) : 0};
+        auto message = packet ? reinterpret_cast<game::NetMessageHeader*>(packet->data) : nullptr;
+        if (!isValidMessage(message, availableBytes, ID_GAME_MESSAGE_TO_HOST_CLIENT)) {
+            m_player->getLogger()->warn(__FUNCTION__ ": refusing malformed direct game message");
+            break;
+        }
         message->messageType = game::netMessageNormalType; // TODO: any better way to do this?
-        m_player->postMessageToReceive(message, game::serverNetPlayerId);
+        observeLobbySaveGameMessage(message, availableBytes);
+        m_player->postMessageToReceive(message, availableBytes, game::serverNetPlayerId);
         break;
     }
 

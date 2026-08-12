@@ -22,9 +22,25 @@
 
 namespace game {
 struct CAutoDialog;
+struct DialogDescriptor;
 } // namespace game
 
 namespace hooks {
+
+/** Temporarily exposes the custom lobby host dialog to the native DLG_HOST constructor. */
+class CustomHostDialogGuard
+{
+public:
+    CustomHostDialogGuard();
+    ~CustomHostDialogGuard();
+
+    CustomHostDialogGuard(const CustomHostDialogGuard&) = delete;
+    CustomHostDialogGuard& operator=(const CustomHostDialogGuard&) = delete;
+
+private:
+    game::DialogDescriptor** m_slot{};
+    game::DialogDescriptor* m_original{};
+};
 
 bool __fastcall autoDialogLoadAndParseScriptFileHooked(game::CAutoDialog* thisptr,
                                                        int /*%edx*/,

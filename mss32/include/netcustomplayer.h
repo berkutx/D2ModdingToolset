@@ -21,6 +21,7 @@
 #define NETCUSTOMPLAYER_H
 
 #include "mqnetplayer.h"
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -63,8 +64,12 @@ protected:
     using RemoteClients = std::map<SLNet::RakNetGUID, SLNet::RakString>;
 
     static uint32_t getClientId(const SLNet::RakNetGUID& guid);
+    static bool isValidMessage(const game::NetMessageHeader* message,
+                               std::size_t availableBytes,
+                               std::uint32_t expectedMessageType);
     static const game::NetMessageHeader* getMessageAndSender(const SLNet::Packet* packet,
-                                                             SLNet::RakNetGUID* sender);
+                                                             SLNet::RakNetGUID* sender,
+                                                             std::size_t* availableBytes);
 
     CNetCustomService* getService() const;
     CNetCustomSession* getSession() const;
@@ -73,7 +78,9 @@ protected:
     const std::string& getName() const;
     void setName(const char* value);
     uint32_t getId() const;
-    void postMessageToReceive(const game::NetMessageHeader* message, std::uint32_t idFrom);
+    void postMessageToReceive(const game::NetMessageHeader* message,
+                              std::size_t availableBytes,
+                              std::uint32_t idFrom);
     bool sendRemoteMessage(const game::NetMessageHeader* message,
                            const SLNet::RakNetGUID& to) const;
     bool sendRemoteMessage(const game::NetMessageHeader* message, const RemoteClients& to) const;

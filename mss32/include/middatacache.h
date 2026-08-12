@@ -45,7 +45,7 @@ struct CMidDataCache2 : public IMidgardObjectMap
 
     assert_vftable_size(INotifyVftable, 1);
 
-    CMidgardScenarioMap** scenarioMap;
+    CMidgardScenarioMap* scenarioMap;
     IdList list;
     char unknown;
     char padding[3];
@@ -54,6 +54,7 @@ struct CMidDataCache2 : public IMidgardObjectMap
 };
 
 assert_size(CMidDataCache2, 36);
+assert_offset(CMidDataCache2, scenarioMap, 4);
 
 namespace CMidDataCache2Api {
 
