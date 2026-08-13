@@ -23,6 +23,9 @@
 #include "customattacks.h"
 #include "custommodifiers.h"
 #include "hooks.h"
+#ifdef D2_TESTDRV
+#include "testdrv/testdrv.h" // publishable test/logging system; compile-gated
+#endif
 #include "restrictions.h"
 #include "settings.h"
 #include "unitsforhire.h"
@@ -193,6 +196,19 @@ static void setupDefaultLogger()
     // Original mss32.dll has no log file so we are free to use short name "mss32.log"
     // (instead of the old "mss32Proxy.log")
     auto fileName = hooks::gameFolder() / "mss32.log";
+#ifdef D2_TESTDRV
+    // Two-instance MP tests run host+join from the same folder; give those roles a
+    // per-PID log so the two processes don't fight over the one rotating mss32.log.
+    {
+        char role[16]{};
+        GetEnvironmentVariableA("D2TESTDRV_ROLE", role, sizeof(role));
+        if (lstrcmpiA(role, "host") == 0 || lstrcmpiA(role, "join") == 0
+            || lstrcmpiA(role, "joiner") == 0) {
+            fileName = hooks::gameFolder()
+                       / ("mss32_" + std::to_string(GetCurrentProcessId()) + ".log");
+        }
+    }
+#endif
     auto fileSink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(fileName.string(),
                                                                            5u << 20, 3);
     // TODO: setting for all available trace levels (not only debug vs non-debug)
@@ -211,6 +227,9 @@ static void setupDefaultLogger()
     // Using UTC helps to match logs from different users (with different timezones).
     // It also helps to match client logs with lobby server logs.
     logger->set_pattern("%D %H:%M:%S.%e %5t [%=8!n] [%L] %v", spdlog::pattern_time_type::utc);
+#ifdef D2_TESTDRV
+    logger->flush_on(spdlog::level::info); // tests/diagnostics read the log live (no lost tail to buffering)
+#endif
 }
 
 BOOL APIENTRY DllMain(HMODULE hDll, DWORD reason, LPVOID reserved)
@@ -257,6 +276,12 @@ BOOL APIENTRY DllMain(HMODULE hDll, DWORD reason, LPVOID reserved)
         return FALSE;
     }
 
+#ifdef D2_TESTDRV
+    // [test/logging system] Early boot patches (skip-intro / black-screen fg-flag),
+    // applied before the game plays the intro or reaches its message pump.
+    hooks::testdrv::installEarly();
+#endif
+
     if (hooks::executableIsGame() && !hooks::loadUnitsForHire()) {
         hooks::showErrorMessageBox("Failed to load new units. Check error log for details.");
         return FALSE;
@@ -267,6 +292,13 @@ BOOL APIENTRY DllMain(HMODULE hDll, DWORD reason, LPVOID reserved)
     if (!setupHooks()) {
         return FALSE;
     }
+
+#ifdef D2_TESTDRV
+    // UI/world reporters, UI-thread command executor, DirectPlay localhost discovery,
+    // and the relay bridge. Each is runtime-gated by its D2TESTDRV_* env var.
+    if (!hooks::testdrv::install(library))
+        return FALSE;
+#endif
 
     // Lazy initialization is not optimal as the data can be accessed in parallel threads.
     // Thread sync is excessive because the data is read-only or thread-exclusive once initialized.

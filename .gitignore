@@ -3,6 +3,9 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/master/VisualStudio.gitignore
 
+# Per-machine test config (paths differ per dev machine); the tracked sample is the template.
+tools/test/test.config.psd1
+
 # User-specific files
 *.suo
 *.user
@@ -14,6 +17,7 @@
 
 # Build results
 [Dd]ebug/
+[Dd]ebugTest/
 [Dd]ebugPublic/
 [Rr]elease/
 [Rr]eleases/
@@ -378,3 +382,7 @@ ASALocalRun/
 *blx.bib
 .bak 
 .mtc
+
+# Local DebugTest verification output (never commit generated DLL/OBJ/PDB files).
+.build-out/
+.build-temp/
