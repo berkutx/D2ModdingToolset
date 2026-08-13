@@ -1,0 +1,148 @@
+# Slot management and unit dismissal (test-harness agent guide)
+
+How a harness agent inspects a hero's group slots and dismisses a unit to free a slot,
+reusing existing mss32 facilities. Everything below maps to code that already exists in
+the toolset; the only new pieces are one relay opcode end-to-end and a few extra JSON
+fields on the world snapshot. Both mirror facilities that are already in the harness.
+
+## TL;DR contract
+
+| Operation | Agent call | Result |
+| --- | --- | --- |
+| Read slot occupancy | `GET /api/world` -> `stacks[].slots[]` + `leaderId` | per-slot `{position, unitId, isBig}` |
+| Move/swap a unit (formation) | `POST /api/ui/move-unit?role=&stack=<ID>&src=<0..5>&dst=<0..5>` (`Move-GroupUnit`) | `{found:bool}` |
+| Dismiss a unit (free a slot) | `POST /api/ui/dismiss?role=&stack=<ID>&unit=<ID>` (`Dismiss-Unit`) | `{found:bool}` |
+
+The move/swap is DONE and live-verified (replicates): `worldactions::moveGroupUnit` sends the engine's
+`CStackSwapUnitMsg` via `CPhaseGame::sendStackSwapUnitMsg` (Russobit `0x406cc7`), the host applies it
+(`CVisitorSwapUnitPosition`) and broadcasts `CCmdUpdateObjMsg`. `src` (the moved unit) must hold a unit;
+`dst` may be EMPTY (plain move, e.g. slide a just-hired unit down into a free slot) or OCCUPIED (swap,
+e.g. put a ranged/caster on the back line and a melee up front). The moved unit's position goes in the
+message's FIRST field (the one the engine requires occupied); the destination second (may be empty).
+(RE chain + the method to find such client messages: `HIRE-MERC.md`.)
+
+Backed entirely by mss32: read via `GroupView::getSlots()` / `UnitSlotView`; write via
+`VisitorApi::extractUnitFromGroup(..., apply=1)` (the same call mss32 already uses in
+`leadersforhirehooks.cpp:309`).
+
+## The slot model
+
+- A hero army is a `CMidStack` owning a `CMidUnitGroup` with `CMidgardID positions[6]`
+  (6 slots, index 0..5). A city/fort garrison is the same: `CFortification` owns a
+  `CMidUnitGroup` with the same 6-slot layout.
+- Grid: `line = position % 2` (0 = front, 1 = back); `column = position / 2` (0..2).
+  `UnitSlotView` gives `getLine()` / `getColumn()` / `isFrontline()` directly.
+- A big (2-slot) unit occupies the two positions of one column, e.g. `{0,1}` or `{2,3}`
+  or `{4,5}`. Detect with `UnitView.getImpl().isSmall() == false`.
+- Empty slot: `unitId == emptyId`, unit pointer is null.
+- The leader is one of the slot units. Never dismiss it (see Guardrails).
+
+## READ: inspect slot occupancy
+
+`GET /api/world` emits both stack totals and the per-slot detail needed by the action layer.
+The reporter uses `getSlots()` and publishes the leader plus each occupied slot:
+
+```cpp
+{ "leaderId":"UNIT_...", "slots":[
+  { "position":0, "unitId":"UNIT_A", "isBig":false }
+] }
+```
+
+Resulting per-stack JSON the agent reads:
+
+```json
+{ "id":"STACK_...", "owner":"PLAYER_...", "units":4, "leaderId":"UNIT_...",
+  "slots":[ {"position":0,"unitId":"UNIT_A","isBig":false},
+            {"position":2,"unitId":"UNIT_B","isBig":true} ] }
+```
+
+Free-slot count = `6 - sum(isBig ? 2 : 1 for occupied slots)`. A big hire fits only if a
+whole column (`{0,1}`, `{2,3}` or `{4,5}`) is empty.
+
+Each occupied `slots[]` entry also carries the profile emitted by `emitUnitProfile`:
+level, XP, HP, armor, damage, reach and attack class. That is enough to rank occupants
+without a second in-process query; `unitId`, `position` and `isBig` remain the formation fields.
+
+## WRITE: dismiss a unit (DONE)
+
+Agent call (programmatic, no UI emulation):
+
+```
+POST http://127.0.0.1:8077/api/ui/dismiss?role=&stack=<STACK_ID>&unit=<UNIT_ID>
+-> { "role":..., "dismiss":{"stack":...,"unit":...}, "found":true }   (Dismiss-Unit)
+```
+
+`found:true` means the dismiss message was sent. Verify by re-reading `GET /api/world` on
+EITHER role: the slot is empty and `units` is decremented (it replicates).
+
+What backs it: NOT a raw `extractUnitFromGroup` (that is the server's apply step, the same
+trap the hire hit with `addUnitToGroup`). The acting player is a CLIENT; it SENDS the
+engine's own `CStackDismissUnitMsg` via `CPhaseGame::sendStackDismissUnitMsg` (Russobit
+`0x406f47`, args `(&unitId, &stackId)`), the exact call the manage-stack dismiss makes. The
+host applies it and broadcasts, so the removal replicates. `worldactions::dismissUnit`
+gates own-turn/own-stack, rejects the LEADER outright (the engine disbands the stack via a
+different message, `CStackDismissLeaderMsg`), and requires the unit to be a group member.
+(RE chain + the method to find such client messages: `HIRE-MERC.md`.)
+
+The chain is wired like the other commands: opcode `DismissUnit = 0x0309` (stackId | unitId)
+in `packetlogicbridge.cpp`, parsed in `autonav.cpp` `onRemoteCommand` -> `safeDismissUnit`,
+exposed as `POST /api/ui/dismiss` (`relay.js`) and `Dismiss-Unit` (`_relay.ps1`).
+
+## MP correctness
+
+- Issue the change as the CLIENT message the UI sends (`CStackDismissUnitMsg`), never a raw
+  `objectMap` edit or a client-side `extractUnitFromGroup` (that is the server's apply step;
+  on a client it does not replicate, the same trap the hire hit with `addUnitToGroup`).
+- REPLICATION IS VERIFIED: the message route was the right call (this doc predicted it). After
+  a dismiss, read EITHER role's `/api/world`; the slot is empty and `units` decremented on both.
+  The acting player may be host OR joiner (whoever owns the stack, on their turn).
+- Ownership: only the owner may dismiss. Validate `stack->ownerId == localPlayerId()`
+  before issuing. The harness runs the host, so dismiss the host's own units only.
+- Timing: a turn-phase action. Do it during the host's turn (after BeginTurn, before
+  EndTurn), like the other slot/hire operations.
+
+## Recipes
+
+Free a slot for a 2-slot (big) hire:
+
+1. `GET /api/world`, find the target stack `slots[]`.
+2. A big unit needs a fully empty column (`{0,1}`, `{2,3}` or `{4,5}`).
+3. If none is free, pick the weakest non-leader occupant, `POST /api/ui/dismiss` it,
+   re-read, repeat until a column opens.
+4. Proceed with the hire (hire-list hooks / camp interface).
+
+Replace a weak unit with a better hire:
+
+1. `/api/world` slots -> choose the weakest non-leader `unitId`.
+2. `/api/ui/dismiss` it.
+3. Hire/add the better unit into the freed slot.
+
+## Guardrails
+
+- Never dismiss the LEADER. Compare each candidate against `leaderId`; dismissing a leader
+  is a different command (`StackDismissLeader`) and disbands the whole stack.
+- Re-read `/api/world` after every dismiss to confirm the slot is free before the next
+  action. Fail loud if `found:false` or the slot did not clear; do not silently continue.
+- Prefer the programmatic `/api/ui/dismiss` over driving the real `TOG_DISMISS` UI button:
+  the UI path needs the unit panel open and pops a confirmation dialog (the project rule is
+  programmatic state, not input emulation).
+- Host dismisses only its own units; never act across players.
+
+## Reuse map (mss32 symbol behind each operation)
+
+| Operation | Agent surface | mss32 reuse | Location |
+| --- | --- | --- | --- |
+| read per-slot occupancy | `stacks[].slots[]` | `GroupView::getSlots()` -> `UnitSlotView` | `include/bindings/groupview.h:53`, `unitslotview.h:46-55` |
+| big-unit flag | `slots[].isBig` | `UnitView.getImpl().isSmall()` (inverse) | `include/bindings/unitimplview.h` |
+| leader id | `leaderId` | `StackView::getLeader()` | `include/bindings/stackview.h` |
+| reporter emit | `stacks[].leaderId/slots[]` | `forEachStack`, `getSlots()`, `emitUnitProfile()` | `src/testdrv/worldreporter.cpp` |
+| dismiss (execute) | `POST /api/ui/dismiss` (`Dismiss-Unit`) | `CPhaseGame::sendStackDismissUnitMsg` (CStackDismissUnitMsg) @0x406f47 | `src/testdrv/worldactions.cpp` `dismissUnit` |
+| relay endpoint | `POST /api/ui/dismiss?stack=&unit=` | mirror `/api/ui/move-unit` | `tools/relay/relay.js` |
+| opcode | `Op.DismissUnit = 0x0309` | mirror `MoveGroupUnit` | `src/testdrv/packetlogicbridge.cpp` |
+| command drain | `cmd.type==8 -> safeDismissUnit` | mirror `safeMoveGroupUnit` | `src/testdrv/autonav.cpp` |
+| ownership + leader guard | `dismissUnit()` | mirror `worldactions::moveGroupUnit` | `src/testdrv/worldactions.cpp` |
+
+Related (already present, used alongside slot management): item transfer between stacks
+`CMidServerLogicApi::stackExchangeItem`; native move `CPhaseGameApi::sendStackMoveMsg`
+(via `/api/ui/move`); hire-list customization hooks (`unitsforhirehooks.cpp`,
+`leadersforhirehooks.cpp`).
