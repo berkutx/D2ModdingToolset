@@ -1,6 +1,6 @@
 #requires -Version 7.0
-# Shared battle flow for the test harness: drive ONE role's hero out of its capital, approach and attack
-# the nearest free neutral monster, run auto-battle, and dismiss the post-battle dialogs - then report the
+# Shared battle flow for the test harness: drive ONE role's starting hero (garrisoned or already free),
+# approach and attack the nearest free neutral monster, run auto-battle, and dismiss the post-battle dialogs - then report the
 # BEFORE and post-battle (AFTER) stacks so the caller can verify and/or measure later regeneration. Used
 # by attack-monster.ps1 (single-instance) and mp-attack-monsters.ps1 (multiplayer). Dot-source AFTER
 # _relay.ps1 (this uses Get-World/Get-Stacks/Move-Stack/Invoke-Toggle/Get-Dialog/Invoke-Button).
@@ -19,17 +19,20 @@ $script:BattleStartButton = @{
 # (never blind-confirm an unexpected prompt).
 $script:BattleClose = @('BTN_CLOSE', 'BTN_OK', 'BTN_TAKEALL', 'BTN_TAKE', 'BTN_CONTINUE', 'BTN_RIGHTSIDE')
 
-# The role's first mobile self stack (its starting hero/leader) on the map.
-function Get-SelfHero([string]$Role) {
-    @(Get-Stacks $Role) | Where-Object { $_.relation -eq 'self' -and $_.units -ge 1 } | Select-Object -First 1
+# The role's first mobile self stack (its starting hero/leader). Some fixtures put it in the capital;
+# multiplayer battle fixtures can explicitly require an already-free stack and avoid testing capital exits.
+function Get-SelfHero([string]$Role, [switch]$FreeOnly) {
+    @(Get-Stacks $Role) | Where-Object {
+        $_.relation -eq 'self' -and $_.units -ge 1 -and (-not $FreeOnly -or -not [bool]$_.inside)
+    } | Select-Object -First 1
 }
 # One stack by id (or $null) from the role's live census.
 function Get-StackId([string]$Role, [string]$Id) {
     @(Get-Stacks $Role) | Where-Object { $_.id -eq $Id } | Select-Object -First 1
 }
 
-# Drive <Role>'s starting hero: exit the capital, approach + attack the nearest free neutral monster,
-# auto-battle, dismiss post-battle dialogs. Returns a result object with the BEFORE and post-battle
+# Drive <Role>'s starting hero: optionally exit the capital, approach + attack the nearest free neutral
+# monster, auto-battle, dismiss post-battle dialogs. Returns a result object with the BEFORE and post-battle
 # (AFTER) snapshots so the caller can verify the fight and/or measure regeneration after a turn cycle.
 # $Client is the game process (to detect a crash). Never throws; returns @{ ok=$false; reason=... } on
 # any failure so the caller decides how to report it.
@@ -37,25 +40,28 @@ function Invoke-HeroAttack {
     param(
         [Parameter(Mandatory)][string]$Role,
         [System.Diagnostics.Process]$Client,
-        [int]$ActivateTimeoutSec = 60
+        [int]$ActivateTimeoutSec = 60,
+        [switch]$RequireFreeSelfStack
     )
 
-    # Find the hero (garrisoned in the capital at this point).
+    # Find the fixture's hero. The legacy single-player fixture starts it in the capital; the multiplayer
+    # fixture deliberately supplies a free RodPlacer so this battle oracle does not also assume a generated
+    # capital's orientation/exit tile.
     $hero = $null; $t0 = Get-Date
-    while ((((Get-Date) - $t0).TotalSeconds) -lt 30) { $hero = Get-SelfHero $Role; if ($hero) { break }; Start-Sleep 1 }
-    if (-not $hero) { return [pscustomobject]@{ ok = $false; reason = "no own mobile stack (hero) on the map" } }
+    while ((((Get-Date) - $t0).TotalSeconds) -lt 30) { $hero = Get-SelfHero $Role -FreeOnly:$RequireFreeSelfStack; if ($hero) { break }; Start-Sleep 1 }
+    if (-not $hero) { return [pscustomobject]@{ ok = $false; reason = $(if ($RequireFreeSelfStack) { "no free own mobile stack (hero) on the map" } else { "no own mobile stack (hero) on the map" }) } }
     [int]$ax = $hero.x; [int]$ay = $hero.y
-    Write-Host ("[battle:$Role] hero {0} garrisoned at ({1},{2}) mv={3}" -f $hero.id, $ax, $ay, $hero.movement) -ForegroundColor Cyan
+    Write-Host ("[battle:$Role] hero {0} {1} at ({2},{3}) mv={4}" -f $hero.id, $(if ($RequireFreeSelfStack) { 'free' } else { 'garrisoned' }), $ax, $ay, $hero.movement) -ForegroundColor Cyan
 
     # reachedStrategic latches on the FIRST map frame, which can precede the late DLG_BEGIN_TURN. Do not
     # use that transient map as evidence that the turn is active and do not probe/refire Move-Stack.
     # Instead, wait until the relay has actually observed DLG_BEGIN_TURN, acknowledge each known startup
     # dialog at most once (BTN_OK starts activation), and wait for strategicActionReady: the native world
     # reporter's observation of the exact clientTakesTurn admission gate used by Move-Stack. Wall-clock
-    # stability is not readiness. Only then issue the sole garrison-exit intent.
+    # stability is not readiness. Only then issue the first movement intent.
     $consumed = @{}; $activationReady = $false; $t0 = Get-Date
     while ((((Get-Date) - $t0).TotalSeconds) -lt $ActivateTimeoutSec) {
-        if ($Client -and $Client.HasExited) { return [pscustomobject]@{ ok = $false; reason = "the game crashed before the exit" } }
+        if ($Client -and $Client.HasExited) { return [pscustomobject]@{ ok = $false; reason = "the game crashed before the first movement" } }
         $state = Get-RoleState $Role
         $d = if ($state) { $state.dialog } else { $null }
         $onMap = $d -eq 'DLG_STRATEGIC' -or $d -eq 'DLG_ISO_PAL'
@@ -88,24 +94,27 @@ function Invoke-HeroAttack {
         return [pscustomobject]@{ ok = $false; reason = "native clientTakesTurn never became true after DLG_BEGIN_TURN (on $d)" }
     }
 
-    # Refresh the exact stack precondition immediately before the only exit command. If something else
-    # already moved it, fail closed rather than manufacturing a second semantic exit/move action.
+    # Refresh the exact stack precondition immediately before the first movement command. If something else
+    # already moved it, fail closed rather than manufacturing a second semantic action.
     $hero = Get-StackId $Role $hero.id
-    if (-not $hero -or -not [bool]$hero.inside -or [int]$hero.x -ne $ax -or [int]$hero.y -ne $ay) {
-        return [pscustomobject]@{ ok = $false; reason = "garrison changed before the sole exit intent" }
+    if (-not $hero -or [int]$hero.x -ne $ax -or [int]$hero.y -ne $ay -or
+        ($RequireFreeSelfStack -and [bool]$hero.inside) -or (-not $RequireFreeSelfStack -and -not [bool]$hero.inside)) {
+        return [pscustomobject]@{ ok = $false; reason = "starting hero changed before the first movement intent" }
     }
-    if (-not (Move-Stack $Role $hero.id ($ax + 5) ($ay + 5))) {
-        return [pscustomobject]@{ ok = $false; reason = "sole garrison-exit intent was not accepted" }
+    if (-not $RequireFreeSelfStack) {
+        if (-not (Move-Stack $Role $hero.id ($ax + 5) ($ay + 5))) {
+            return [pscustomobject]@{ ok = $false; reason = "sole garrison-exit intent was not accepted" }
+        }
+        $t0 = Get-Date; $exited = $false
+        while ((((Get-Date) - $t0).TotalSeconds) -lt 15) {
+            $h = Get-StackId $Role $hero.id
+            if ($h -and ($h.x -ne $ax -or $h.y -ne $ay)) { $hero = $h; $exited = $true; break }
+            Start-Sleep 1
+        }
+        if (-not $exited) { return [pscustomobject]@{ ok = $false; reason = "hero did not exit the garrison (still at ($ax,$ay))" } }
     }
-    $t0 = Get-Date; $exited = $false
-    while ((((Get-Date) - $t0).TotalSeconds) -lt 15) {
-        $h = Get-StackId $Role $hero.id
-        if ($h -and ($h.x -ne $ax -or $h.y -ne $ay)) { $hero = $h; $exited = $true; break }
-        Start-Sleep 1
-    }
-    if (-not $exited) { return [pscustomobject]@{ ok = $false; reason = "hero did not exit the garrison (still at ($ax,$ay))" } }
     [int]$ex = $hero.x; [int]$ey = $hero.y
-    Write-Host ("[battle:$Role] exited to ({0},{1})." -f $ex, $ey) -ForegroundColor Green
+    Write-Host ("[battle:$Role] attack origin is ({0},{1})." -f $ex, $ey) -ForegroundColor Green
 
     # Nearest FREE neutral monster (relation neutral, not in a fort/city). Filtering on neutral avoids the
     # other player's stacks; skipping inside avoids a siege.
@@ -127,7 +136,7 @@ function Invoke-HeroAttack {
     # movement) and the battle opens while it is still alive, so the spend is captured at DLG_BATTLE_A
     # below. No separate recon move is issued - one right next to the just-exited fort proved fragile (it
     # re-entered the garrison, landed adjacent to the monster making the attack a degenerate move, or
-    # desynced the two MP clients into a battle crash). $mvBefore/$mvAfter hold garrison -> at-battle.
+    # desynced the two MP clients into a battle crash). $mvBefore/$mvAfter hold attack-origin -> at-battle.
     $mvBefore = -1; $mvAfter = -1
 
     # Attack: Move-Stack onto the monster's tile -> routed adjacent, end=monster -> the server starts the battle.
@@ -141,9 +150,9 @@ function Invoke-HeroAttack {
     if (-not $inBattle) { return [pscustomobject]@{ ok = $false; reason = "no battle started (DLG_BATTLE_A; on $(Get-Dialog $Role))" } }
     Write-Host "[battle:$Role] battle started (DLG_BATTLE_A)." -ForegroundColor Green
 
-    # Movement spent reaching the monster: the hero walked from its exit tile to the monster and is now
+    # Movement spent reaching the monster: the hero walked from its attack-origin tile and is now
     # alive in the battle, so read its movement (poll briefly for the throttled snapshot to reflect the
-    # deduction). If the monster was adjacent the walk is 0 and the value stays at the garrison full.
+    # deduction). If the monster was adjacent the walk is 0 and the value stays unchanged.
     $t0 = Get-Date
     while ((((Get-Date) - $t0).TotalSeconds) -lt 5) {
         $hb = Get-StackId $Role $hero.id
@@ -198,7 +207,7 @@ function Invoke-HeroAttack {
         ex       = $ex; ey = $ey
         monId    = $mon.id; monX = [int]$mon.x; monY = [int]$mon.y
         adjacent = $adjacent
-        mvBefore = $mvBefore   # hero movement: garrison-full -> at battle start (the walk to the monster). -1 if unread.
+        mvBefore = $mvBefore   # hero movement: attack origin -> battle start (the walk to the monster). -1 if unread.
         mvAfter  = $mvAfter
         before   = [pscustomobject]@{ monHp = $monHp0; monUnits = $monUnits0; heroHp = $heroHp0; heroUnits = $heroUnits0; heroMv = $heroMv0 }
         after    = [pscustomobject]@{

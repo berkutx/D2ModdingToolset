@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
   Multiplayer battle + turn-pass + regeneration test. Two clients (HOST + JOINER) reach a started
-  TCP/IP game; each in turn sends its hero out to attack the nearest free neutral monster, then ends its
+  TCP/IP game; each in turn uses its free starting hero to attack the nearest neutral monster, then ends its
   turn; after the day rolls over, the damaged monsters' HP recovery (regeneration) is measured.
 
 .DESCRIPTION
@@ -11,7 +11,7 @@
 
     1. Pair HOST + JOINER: the host GENERATES a random map (template -Template, placing neutrals near
        each start), the joiner joins, and both reach the strategic map.
-    2. HOST turn (the host is the active player first): exit the capital, attack the nearest free
+    2. HOST turn (the host is the active player first): take the fixture's free hero, attack the nearest
        neutral monster, auto-battle, dismiss the post-battle dialogs. Then END the host's turn.
     3. JOINER turn (now active): the same attack flow. Then END the joiner's turn.
     4. The day rolls over (the world snapshot's `day` increments). Any stack that survived a battle
@@ -249,13 +249,13 @@ try {
     }
 
     # HOST turn: attack the nearest free neutral monster (the host is the active player first).
-    $rh = Invoke-HeroAttack -Role host -Client $h
+    $rh = Invoke-HeroAttack -Role host -Client $h -RequireFreeSelfStack
     if (-not $rh.ok) { throw "host attack: $($rh.reason)" }
     $vh = Test-AttackResult $rh
     Write-Host ("[mp] HOST battle: {0}; monster {1} hp {2} -> {3}; hero hp {4}->{5}{6}" -f `
             $vh.note, $rh.monId, $rh.before.monHp, $rh.after.monHp,
             $rh.before.heroHp, $rh.after.heroHp, $(if ($rh.after.heroGone) { ' GONE' } else { '' })) -ForegroundColor Cyan
-    $rhMv = if ($rh.mvBefore -ge 0) { "$($rh.mvBefore) -> $($rh.mvAfter) (spent $($rh.mvBefore - $rh.mvAfter) walking to the monster)" } else { "garrison $($rh.before.heroMv), walk not captured" }
+    $rhMv = if ($rh.mvBefore -ge 0) { "$($rh.mvBefore) -> $($rh.mvAfter) (spent $($rh.mvBefore - $rh.mvAfter) walking to the monster)" } else { "origin $($rh.before.heroMv), walk not captured" }
     Write-Host ("[mp] HOST hero MOVEMENT: $rhMv") -ForegroundColor DarkCyan
     if (-not $vh.ok) { throw "host battle did not resolve: $($vh.note)" }
 
@@ -267,13 +267,13 @@ try {
     Write-Host "[mp] JOINER day-1 gold = $goldJ1" -ForegroundColor DarkCyan
 
     # JOINER turn: the same attack flow (its activate loop dismisses the new-day popup first).
-    $rj = Invoke-HeroAttack -Role join -Client $j
+    $rj = Invoke-HeroAttack -Role join -Client $j -RequireFreeSelfStack
     if (-not $rj.ok) { throw "join attack: $($rj.reason)" }
     $vj = Test-AttackResult $rj
     Write-Host ("[mp] JOINER battle: {0}; hero hp {1}->{2}{3}; monster {4} hp {5}->{6}{7}" -f `
             $vj.note, $rj.before.heroHp, $rj.after.heroHp, $(if ($rj.after.heroGone) { ' GONE' } else { '' }),
             $rj.monId, $rj.before.monHp, $rj.after.monHp, $(if ($rj.after.monGone) { ' GONE' } else { '' })) -ForegroundColor Cyan
-    $rjMv = if ($rj.mvBefore -ge 0) { "$($rj.mvBefore) -> $($rj.mvAfter) (spent $($rj.mvBefore - $rj.mvAfter) walking to the monster)" } else { "garrison $($rj.before.heroMv), walk not captured" }
+    $rjMv = if ($rj.mvBefore -ge 0) { "$($rj.mvBefore) -> $($rj.mvAfter) (spent $($rj.mvBefore - $rj.mvAfter) walking to the monster)" } else { "origin $($rj.before.heroMv), walk not captured" }
     Write-Host ("[mp] JOINER hero MOVEMENT: $rjMv") -ForegroundColor DarkCyan
     if (-not $vj.ok) { throw "join battle did not resolve: $($vj.note)" }
 
