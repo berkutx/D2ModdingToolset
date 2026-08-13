@@ -541,7 +541,11 @@ try {
                 if (@($res.hiredList).Count -lt 1) { throw "CI $($res.role) hired no mercenary" }
                 if ([int]$res.gotChests -lt 1) { throw "CI $($res.role) collected no arena chest" }
                 $slots = @($res.finalSlots)
-                if ([int]$res.units -lt 2 -or $slots.Count -ne [int]$res.units) {
+                # The reporter emits occupied formation CELLS. A big unit therefore appears twice
+                # (once for each cell in its column), while stack.units counts logical units. Compare
+                # the unique unit ids with units; keep validating every occupied cell below.
+                $logicalUnitIds = @($slots | ForEach-Object { [string]$_.unitId } | Select-Object -Unique)
+                if ([int]$res.units -lt 2 -or $logicalUnitIds.Count -ne [int]$res.units) {
                     throw "CI $($res.role) final slot census does not match squad size"
                 }
                 $positions = @($slots | ForEach-Object { [int]$_.position })

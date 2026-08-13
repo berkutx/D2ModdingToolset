@@ -10,7 +10,9 @@ on:
     inputs:
       dll_run_id:
         description: "test-harness run id containing mss32-test-harness-debug"
-        type: number
+        # github.run_id is a string expression. Validate its numeric shape in setup instead of making
+        # reusable-workflow dispatch fail before the setup job can report a useful error.
+        type: string
         required: true
       wait_sec:
         description: "per-template generation timeout"

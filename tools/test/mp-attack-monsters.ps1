@@ -99,6 +99,45 @@ function DriveToStrategic([string]$role, [int]$sec) {
     }
     return $false
 }
+
+# The first ISO/map frame is transient: stock may publish a late startup popup on either peer before
+# the active host's TurnInfo finishes. Drain only the exact known startup dialogs, once per role/dialog,
+# until the native clientTakesTurn admission gate says the host can accept its single strategic action.
+# This is local to generated-MP bootstrap; the shared battle helper and single-player path stay simpler.
+function Wait-HostStrategicActionReady([int]$sec) {
+    $claimed = @{}
+    $t0 = Get-Date
+    while ((((Get-Date) - $t0).TotalSeconds) -lt $sec) {
+        $hostState = Get-RoleState host
+        $hostDialog = if ($hostState) { $hostState.dialog } else { $null }
+        $hostOnMap = $hostDialog -eq 'DLG_STRATEGIC' -or $hostDialog -eq 'DLG_ISO_PAL'
+        if ([bool]$hostState.connected -and $hostOnMap -and [bool]$hostState.sawBeginTurn -and
+            [bool]$hostState.strategicActionReady) { return $true }
+
+        foreach ($role in @('host', 'join')) {
+            $state = if ($role -eq 'host') { $hostState } else { Get-RoleState $role }
+            $dialog = if ($state) { $state.dialog } else { $null }
+            $claim = "${role}::${dialog}"
+            if (-not $dialog -or -not $Dismiss.ContainsKey($dialog) -or $claimed.ContainsKey($claim)) {
+                continue
+            }
+            $button = $Dismiss[$dialog]
+            $readyButton = @($state.widgets) | Where-Object {
+                $_.name -eq $button -and $_.type -eq 'button' -and $_.state.enabled -eq $true
+            } | Select-Object -First 1
+            if (-not $readyButton) { continue }
+
+            # Claim before dispatch. An uncertain result is a hard failure, never permission to refire.
+            $claimed[$claim] = $button
+            if (-not (Invoke-Button $role $dialog $button)) {
+                throw "one-shot MP startup action ${claim}::$button was not accepted"
+            }
+            Write-Host "[mp] acknowledged startup ${claim}::$button" -ForegroundColor DarkCyan
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
 # Press BTN_END_TURN for <role>, confirming any popup (an "unmoved units" / message box) so the turn
 # passes, until <passed> (a scriptblock) returns true or the timeout elapses.
 function EndTurn([string]$role, [scriptblock]$passed, [int]$sec) {
@@ -204,6 +243,10 @@ try {
     Write-Host "[mp] both reached the strategic map ($players players)." -ForegroundColor Green
     $goldH1 = [int](Get-Resources host).gold   # host day-1 gold (income is credited on turn activation)
     Write-Host "[mp] HOST day-1 gold = $goldH1" -ForegroundColor DarkCyan
+
+    if (-not (Wait-HostStrategicActionReady 90)) {
+        throw "pair never completed stock turn startup (host '$(Get-Dialog host)', join '$(Get-Dialog join)')"
+    }
 
     # HOST turn: attack the nearest free neutral monster (the host is the active player first).
     $rh = Invoke-HeroAttack -Role host -Client $h
