@@ -13,7 +13,7 @@ The harness has three layers.
 
 | Layer | Responsibility | Location |
 |---|---|---|
-| Game client | The `mss32.dll` DebugTest build, loaded by `Discipl2.exe`. Its reporter (`uistatereporter`) tracks the current dialog and, every frame, enumerates all of its controls into a JSON snapshot. Its executor (`autonav`) runs each incoming command on the game's UI thread. It contains no test logic. | `mss32/src/testdrv/` |
+| Game client | The test-harness-enabled `mss32.dll` (currently the Debug profile built by the `DebugTest` MSBuild configuration), loaded by `Discipl2.exe`. Its reporter (`uistatereporter`) tracks the current dialog and, every frame, enumerates all of its controls into a JSON snapshot. Its executor (`autonav`) runs each incoming command on the game's UI thread. It contains no test logic. | `mss32/src/testdrv/` |
 | Relay | A dependency-free Node.js server. It keeps the latest snapshot of each client, keyed by role, and forwards the dispatcher's commands to the client. It contains no test logic. | `tools/relay/relay.js` |
 | Dispatcher | The PowerShell test script. It launches the clients, reads their interface state, sends commands, checks the result, and coordinates the two clients when a test needs both. | `tools/test/*.ps1` |
 
@@ -30,10 +30,13 @@ dispatcher  ->  relay  ->  game client      commands  (POST /api/ui/invoke, /sel
 dispatcher  <-  relay  <-  game client      state     (GET  /api/ui)
 ```
 
-Windows clients use the named pipe by default. Headless Wine/WSL runners use the same framed
+Windows clients use the named pipe by default. Headless Wine/Docker runners and parallel Windows
+headless hosts use the same framed
 protocol over TCP: set `D2TESTDRV_BRIDGE_TCP_HOST`/`D2TESTDRV_BRIDGE_TCP_PORT` for the game process
 and `D2_RELAY_TCP_HOST`/`D2_RELAY_TCP_PORT` for the relay. TCP is a supported transport for the
-headless launcher, not a packet-inspection or gameplay hook.
+headless launcher, not a packet-inspection or gameplay hook. `D2_RELAY_HTTP_HOST`/`D2_RELAY_HTTP_PORT`
+select each relay's HTTP control endpoint. The native TCP client resolves DNS/container service names,
+reconnects after a relay restart, performs a fresh `Hello`, and republishes current snapshots.
 
 The dispatcher reads `GET /api/ui` to get the snapshot the client last sent (over the `UiSnapshot`
 bridge opcode), and posts to `/api/ui/*` to forward a command to the client (over the matching
@@ -62,6 +65,11 @@ next frame.
 
 A message box is an ordinary dialog (`DLG_MESSAGE_BOX`); its body is the `text` of a text widget, so
 it appears in the snapshot like any other dialog.
+
+Custom-lobby chat is a separate opt-in snapshot. Start a client with `-LobbyChat` (or set
+`D2TESTDRV_LOBBY_CHAT=1`) and call `Get-LobbyChat <role>` (`GET /api/lobby/chat`). The reporter observes
+the game's natural `CMenuCustomLobby::addChatMessage` call, converts CP1251 text to UTF-8, and retains at
+most 80 messages. Chat stays out of frequently polled `/api/state`; no packet interception is involved.
 
 ## The world snapshot
 
@@ -98,10 +106,14 @@ load it is empty, so a test POLLS `Get-Stacks` after reaching the map until the 
 
 ## Enabling the harness
 
-The harness is compiled into `mss32.dll` only in the **DebugTest** configuration (the `D2_TESTDRV`
-define). The Debug and Release builds are byte-identical to the unmodified DLL.
+The harness capability is the **`D2_TESTDRV`** compile gate; Debug/Release is the build profile. Today
+that gate is enabled only by the internal **DebugTest** MSBuild configuration, which is a real Debug
+build (`/Od`, `_DEBUG`, debug CRT/dependencies). CI therefore publishes
+`mss32-test-harness-debug`. A future optimized profile would be named
+`mss32-test-harness-release`, not “ReleaseTest”. Ordinary Debug and Release configurations do not
+compile the harness surface.
 
-Within a DebugTest build, each feature is switched on at runtime by a `D2TESTDRV_*` environment
+Within a test-harness build, each feature is switched on at runtime by a `D2TESTDRV_*` environment
 variable. `Start-GameClient` sets these on the launched game process: `D2TESTDRV_UI_REPORTER` (the
 snapshot), `D2TESTDRV_RELAY_BRIDGE` (the command bridge), `D2TESTDRV_SKIP_INTRO` and
 `D2TESTDRV_BLACKSCREEN_FIX` (boot fixes), and `D2TESTDRV_ROLE` (the relay key). To run a feature
@@ -112,7 +124,8 @@ by hand, set the same variables before launching `Discipl2.exe`.
 1. Configuration. Copy `test.config.sample.psd1` to `test.config.psd1` (which is gitignored) and set
    `GameDir` to the Disciples 2 installation. The scripts read it whenever `-GameDir` is not given on
    the command line, and report the path to correct if it is wrong.
-2. DLL. Build the DebugTest `mss32.dll` and place it in `GameDir`, alongside `Discipl2.exe` and the
+2. DLL. Build the Debug-profile test-harness `mss32.dll` (`DebugTest` configuration) and place it in
+   `GameDir`, alongside `Discipl2.exe` and the
    renamed `Mss23.dll`.
 3. Node.js on `PATH`. The dispatcher starts `relay.js`.
 
@@ -343,13 +356,15 @@ read the resulting state, act. A minimal single-instance test may instead use th
 ## Adding a CI job
 
 CI lives in [`../../.github/workflows`](../../.github/workflows). `test-harness.yml` is the single
-entrypoint for native harness or test-script changes: it builds the compile-gated DebugTest DLL from
-the exact checkout and exact dependency gitlinks, then calls the reusable `tests.yml` suite. Barton's
-production `mss32.yml` remains independent. The slower template matrix is manual-only.
+entrypoint for native harness or test-script changes: it validates every PowerShell/JavaScript tool
+and both relay transports, builds the compile-gated Debug-profile harness DLL from the exact checkout
+and exact dependency gitlinks, then calls the reusable `tests.yml` suite. Barton's production
+`mss32.yml` remains independent. After the ordinary suite, the generated matrix runs every recognized
+random-scenario template and requires each generated map to reach the strategic screen.
 
 To add a test to CI, copy one of the test jobs in `tests.yml` (for example
 `multiplayer-strategic`) and change its final step to run your script with
-`-GameDir "$env:GAME_DIR" -Kill`. Each test job downloads the `mss32-debugtest` artifact, restores the
+`-GameDir "$env:GAME_DIR" -Kill`. Each test job downloads the `mss32-test-harness-debug` artifact, restores the
 cached game, deploys `mss32.dll`, and runs the script. CI has no config file, so `-GameDir` is passed
 explicitly and `-Kill` makes the run clean up after itself.
 
@@ -358,10 +373,12 @@ explicitly and `-Kill` makes the run clean up after itself.
 | File | Role |
 |---|---|
 | `_relay.ps1` | the toolkit: config, relay, clients, and the commands above |
+| `relay-transport-smoke.ps1` | protocol-level Hello/status smoke for both the named-pipe and TCP relay transports |
 | `_battle.ps1` | the shared battle flow (`Invoke-HeroAttack`): exit, approach + attack the nearest free neutral, auto-battle, dismiss dialogs, report before/after; used by both battle tests |
+| `_obs.ps1` | owned portable-OBS setup/record/stop helper used by multiplayer and static-arena CI jobs |
 | `test.config.sample.psd1` | per-machine config template; copy to `test.config.psd1` |
 | `scenario-generation.ps1` | single-instance generator example: drive the form, and with `-ToMap` play the generated map into the strategic screen |
-| `list-templates.js` | enumerate generator templates in the same compact numeric order as the game; consumed by the manual generation matrix |
+| `list-templates.js` | enumerate valid generator templates in the same compact numeric order as the game; drives the automatic all-template matrix |
 | `world-snapshot.ps1` | single-instance world-snapshot example: reach the map and read the live world state (player resources + map stacks) |
 | `move-hero.ps1` | single-instance move example: exit the garrison and move the hero with the game's own pathfinding cost, verified through the world snapshot |
 | `attack-monster.ps1` | single-instance battle template: exit, approach a free monster, attack, auto-battle, dismiss post-battle dialogs, and verify by HP / units / position |
@@ -370,7 +387,7 @@ explicitly and `-Kill` makes the run clean up after itself.
 | `reliability_test.ps1` | boot N times to the main menu (the CI boot test) |
 | `walk-menu.ps1` | one self-nav client, left running for manual inspection |
 | `lobby-create.ps1` | manual live-lobby integration test; not run in CI and requires explicit credentials |
-| `luckytest-arena.ps1` | manual LuckyTest squad/arena scenario exercising hire, formation and dismiss operations |
+| `luckytest-arena.ps1` | static authored-arena test exercising chests, camps, hire and squad layout for both roles; CI downloads one pinned `.sg`, never the LuckyTest loader/reroller |
 | `HIRE-MERC.md`, `SLOT-MANAGEMENT.md` | contracts and RE notes for the optional LuckyTest action surface |
 | `_show-window.ps1`, `_capture.ps1` | bring a window forward and capture a diagnostic PNG |
 | `../relay/relay.js` | the relay |
@@ -391,7 +408,7 @@ explicitly and `-Kill` makes the run clean up after itself.
 
 | Слой | Назначение | Расположение |
 |---|---|---|
-| Клиент игры | Сборка `mss32.dll` в конфигурации DebugTest, загружаемая `Discipl2.exe`. Репортёр (`uistatereporter`) отслеживает текущий диалог и каждый кадр перечисляет все его контролы в JSON-снапшот. Исполнитель (`autonav`) выполняет каждую входящую команду на UI-потоке игры. Тестовой логики не содержит. | `mss32/src/testdrv/` |
+| Клиент игры | `mss32.dll` с включённой test-harness capability (сейчас Debug-профиль внутренней MSBuild-конфигурации `DebugTest`), загружаемая `Discipl2.exe`. Репортёр (`uistatereporter`) отслеживает текущий диалог и каждый кадр перечисляет все его контролы в JSON-снапшот. Исполнитель (`autonav`) выполняет каждую входящую команду на UI-потоке игры. Тестовой логики не содержит. | `mss32/src/testdrv/` |
 | Рилей | Node.js-сервер без зависимостей. Хранит последний снапшот каждого клиента по ключу-роли и пересылает команды диспетчера клиенту. Тестовой логики не содержит. | `tools/relay/relay.js` |
 | Диспетчер | Тестовый скрипт на PowerShell. Запускает клиентов, читает состояние их интерфейса, подаёт команды, проверяет результат и координирует двух клиентов, когда тесту нужны оба. | `tools/test/*.ps1` |
 
@@ -408,11 +425,14 @@ explicitly and `-Kill` makes the run clean up after itself.
 диспетчер  <-  рилей  <-  клиент игры      состояние  (GET  /api/ui)
 ```
 
-В Windows клиенты по умолчанию используют именованный канал. Headless-запуски под Wine/WSL
+В Windows клиенты по умолчанию используют именованный канал. Headless-запуски под Wine/Docker и
+параллельные Windows headless-хосты
 используют тот же framed-протокол через TCP: процессу игры задаются
 `D2TESTDRV_BRIDGE_TCP_HOST`/`D2TESTDRV_BRIDGE_TCP_PORT`, а рилею —
 `D2_RELAY_TCP_HOST`/`D2_RELAY_TCP_PORT`. TCP — поддерживаемый транспорт headless-launcher-а,
-а не перехват пакетов или gameplay-hook.
+а не перехват пакетов или gameplay-hook. `D2_RELAY_HTTP_HOST`/`D2_RELAY_HTTP_PORT` выбирают HTTP
+control endpoint каждого рилея. Native TCP-клиент разрешает DNS/имена Docker services, после рестарта
+рилея переподключается, повторяет `Hello` и заново публикует текущие снапшоты.
 
 Диспетчер читает `GET /api/ui`, получая снапшот, который клиент прислал последним (опкодом
 `UiSnapshot`), и шлёт `POST /api/ui/*`, чтобы передать команду клиенту (соответствующим командным
@@ -440,6 +460,11 @@ explicitly and `-Kill` makes the run clean up after itself.
 
 Месседж-бокс является обычным диалогом (`DLG_MESSAGE_BOX`); его текст хранится в поле `text` текстового виджета,
 поэтому в снапшоте он виден так же, как любой другой диалог.
+
+Чат custom lobby — отдельный opt-in снапшот. Запустите клиента с `-LobbyChat` (либо задайте
+`D2TESTDRV_LOBBY_CHAT=1`) и вызовите `Get-LobbyChat <role>` (`GET /api/lobby/chat`). Репортёр наблюдает
+естественный вызов игры `CMenuCustomLobby::addChatMessage`, преобразует CP1251 в UTF-8 и хранит не
+больше 80 сообщений. Чат не попадает в часто опрашиваемый `/api/state`; перехвата пакетов здесь нет.
 
 ## Снапшот мира
 
@@ -476,10 +501,14 @@ explicitly and `-Kill` makes the run clean up after itself.
 
 ## Включение тестовой системы
 
-Тестовая система попадает в `mss32.dll` только в конфигурации **DebugTest** (дефайн `D2_TESTDRV`). Сборки Debug и
-Release побайтно совпадают с неизменённой DLL.
+Test-harness capability задаётся compile gate **`D2_TESTDRV`**, а Debug/Release — профиль сборки.
+Сейчас gate включён только внутренней MSBuild-конфигурацией **DebugTest**, которая действительно
+является Debug-сборкой (`/Od`, `_DEBUG`, debug CRT/dependencies). Поэтому CI публикует артефакт
+`mss32-test-harness-debug`. Будущий оптимизированный профиль логично назвать
+`mss32-test-harness-release`, а не «ReleaseTest». Обычные конфигурации Debug и Release harness-код
+не компилируют.
 
-Внутри сборки DebugTest каждая возможность включается во время выполнения переменной среды `D2TESTDRV_*`.
+Внутри test-harness сборки каждая возможность включается во время выполнения переменной среды `D2TESTDRV_*`.
 `Start-GameClient` задаёт их запускаемому процессу игры: `D2TESTDRV_UI_REPORTER` (снапшот),
 `D2TESTDRV_RELAY_BRIDGE` (командный мост), `D2TESTDRV_SKIP_INTRO` и `D2TESTDRV_BLACKSCREEN_FIX`
 (boot-фиксы), `D2TESTDRV_ROLE` (ключ-роль у рилея). Чтобы запустить возможность вручную, задайте
@@ -490,7 +519,8 @@ Release побайтно совпадают с неизменённой DLL.
 1. Конфигурация. Скопируйте `test.config.sample.psd1` в `test.config.psd1` (он в gitignore) и задайте
    `GameDir` как путь к установке Disciples 2. Скрипты читают его, когда `-GameDir` не передан в командной
    строке, и при неверном пути сообщают, что исправить.
-2. DLL. Соберите `mss32.dll` в конфигурации DebugTest и положите её в `GameDir`, рядом с `Discipl2.exe`
+2. DLL. Соберите Debug-профиль test-harness `mss32.dll` (конфигурация `DebugTest`) и положите её в
+   `GameDir`, рядом с `Discipl2.exe`
    и переименованной `Mss23.dll`.
 3. Node.js в `PATH`. Диспетчер запускает `relay.js`.
 
@@ -719,13 +749,15 @@ while (-not (Get-RoleState $role).reachedStrategic) {
 ## Добавление джоба в CI
 
 CI находится в [`../../.github/workflows`](../../.github/workflows). `test-harness.yml` — единственный
-вход для изменений native harness или тестовых скриптов: он собирает compile-gated DebugTest DLL из
-точного checkout и точных dependency gitlinks, затем вызывает переиспользуемый набор `tests.yml`.
-Production workflow Бартона `mss32.yml` не меняется. Медленная матрица шаблонов запускается вручную.
+вход для изменений native harness или тестовых скриптов: он проверяет синтаксис всех PowerShell/JS
+tools и оба транспорта рилея, собирает compile-gated Debug-профиль harness DLL из точного checkout и
+точных dependency gitlinks, затем вызывает переиспользуемый набор `tests.yml`. Production workflow
+Бартона `mss32.yml` не меняется. После обычного набора автоматическая матрица прогоняет каждый
+распознанный шаблон случайной карты и требует выхода сгенерированной карты на strategic screen.
 
 Чтобы добавить тест в CI, скопируйте один из тест-джобов в `tests.yml` (например,
 `multiplayer-strategic`) и замените его последний шаг на запуск вашего скрипта с
-`-GameDir "$env:GAME_DIR" -Kill`. Каждый тест-джоб скачивает артефакт `mss32-debugtest`, восстанавливает
+`-GameDir "$env:GAME_DIR" -Kill`. Каждый тест-джоб скачивает артефакт `mss32-test-harness-debug`, восстанавливает
 игру из кэша, разворачивает `mss32.dll` и запускает скрипт. Конфига в CI нет, поэтому `-GameDir`
 передаётся явно, а `-Kill` обеспечивает уборку после прогона.
 
@@ -734,10 +766,12 @@ Production workflow Бартона `mss32.yml` не меняется. Медле
 | Файл | Роль |
 |---|---|
 | `_relay.ps1` | тулкит: конфиг, рилей, клиенты и команды выше |
+| `relay-transport-smoke.ps1` | protocol-level Hello/status smoke обоих транспортов рилея: named pipe и TCP |
 | `_battle.ps1` | общий сценарий боя (`Invoke-HeroAttack`): выход, подход + атака ближайшего свободного нейтрала, автобой, закрытие диалогов, отчёт до/после; используется обоими боевыми тестами |
+| `_obs.ps1` | helper установки/записи/остановки собственного portable OBS для multiplayer и static-arena CI jobs |
 | `test.config.sample.psd1` | шаблон конфига машины; копируется в `test.config.psd1` |
 | `scenario-generation.ps1` | одиночный пример генератора: прогон по форме, а с `-ToMap` доиграть сгенерированную карту до стратегического экрана |
-| `list-templates.js` | перечисляет шаблоны генератора в том же компактном числовом порядке, что игра; используется ручной матрицей генерации |
+| `list-templates.js` | перечисляет валидные шаблоны генератора в том же компактном числовом порядке, что игра; питает автоматическую матрицу всех шаблонов |
 | `world-snapshot.ps1` | одиночный пример снапшота мира: выйти на карту и прочитать живое состояние мира (ресурсы игрока + стеки карты) |
 | `move-hero.ps1` | одиночный пример перемещения: выйти из гарнизона и переместить героя с родной стоимостью пути игры, проверка через снапшот мира |
 | `attack-monster.ps1` | одиночный шаблон боя: выход, подход к свободному монстру, атака, автобой, закрытие послебоевых диалогов и проверка по ХП / юнитам / позиции |
@@ -746,7 +780,7 @@ Production workflow Бартона `mss32.yml` не меняется. Медле
 | `reliability_test.ps1` | загрузка N раз до главного меню (бут-тест CI) |
 | `walk-menu.ps1` | один self-nav клиент, оставленный запущенным для ручного осмотра |
 | `lobby-create.ps1` | ручной интеграционный тест живого lobby; не запускается в CI и требует явных credentials |
-| `luckytest-arena.ps1` | ручной LuckyTest-сценарий отряда/арены для найма, перестановки и удаления юнитов |
+| `luckytest-arena.ps1` | тест статической авторской арены: сундуки, лагеря, найм и раскладка отряда у обеих ролей; CI скачивает один pinned `.sg`, но не LuckyTest loader/reroller |
 | `HIRE-MERC.md`, `SLOT-MANAGEMENT.md` | контракты и RE-заметки опционального LuckyTest action surface |
 | `_show-window.ps1`, `_capture.ps1` | поднять окно и снять диагностический PNG |
 | `../relay/relay.js` | рилей |

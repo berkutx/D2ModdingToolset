@@ -1,13 +1,13 @@
 name: tests
 
-# Reusable test suite for the DebugTest build produced by test-harness.yml.
+# Reusable test suite for the debug test-harness build produced by test-harness.yml.
 # Jobs run in parallel against the minimal standalone game (restored from cache).
 
 on:
   workflow_call:
 permissions:
   contents: read
-  actions: read # download the same run's mss32-debugtest artifact
+  actions: read # download the same run's mss32-test-harness-debug artifact
 
 jobs:
   # Warm the ~1.95 GB minimal game into the Actions cache once per run/branch.
@@ -56,10 +56,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with: { submodules: false, fetch-depth: 1 }
-      - name: Get DebugTest DLL
+      - name: Get test-harness DLL (Debug)
         uses: actions/download-artifact@v8
         with:
-          name: mss32-debugtest
+          name: mss32-test-harness-debug
           path: dll
       - name: Restore game from cache
         uses: actions/cache/restore@v5
@@ -68,7 +68,7 @@ jobs:
           key: slasher-min-v1
           enableCrossOsArchive: true
           fail-on-cache-miss: true
-      - name: Unpack game + deploy DebugTest mss32.dll
+      - name: Unpack game + deploy test-harness mss32.dll
         run: |
           New-Item -ItemType Directory -Force -Path game | Out-Null
           tar -xzf game.tar.gz -C game
@@ -90,10 +90,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with: { submodules: false, fetch-depth: 1 }
-      - name: Get DebugTest DLL
+      - name: Get test-harness DLL (Debug)
         uses: actions/download-artifact@v8
         with:
-          name: mss32-debugtest
+          name: mss32-test-harness-debug
           path: dll
       - name: Restore game from cache
         uses: actions/cache/restore@v5
@@ -102,7 +102,7 @@ jobs:
           key: slasher-min-v1
           enableCrossOsArchive: true
           fail-on-cache-miss: true
-      - name: Unpack game + deploy DebugTest mss32.dll
+      - name: Unpack game + deploy test-harness mss32.dll
         run: |
           New-Item -ItemType Directory -Force -Path game | Out-Null
           tar -xzf game.tar.gz -C game
@@ -129,10 +129,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with: { submodules: false, fetch-depth: 1 }
-      - name: Get DebugTest DLL
+      - name: Get test-harness DLL (Debug)
         uses: actions/download-artifact@v8
         with:
-          name: mss32-debugtest
+          name: mss32-test-harness-debug
           path: dll
       - name: Enable DirectPlay (native TCP/IP service provider for D2 multiplayer)
         run: |
@@ -168,7 +168,7 @@ jobs:
           key: slasher-min-v1
           enableCrossOsArchive: true
           fail-on-cache-miss: true
-      - name: Unpack game + deploy DebugTest mss32.dll + force OpenGL/ColdCPU
+      - name: Unpack game + deploy test-harness mss32.dll + force OpenGL/ColdCPU
         run: |
           New-Item -ItemType Directory -Force -Path game | Out-Null
           tar -xzf game.tar.gz -C game
@@ -220,11 +220,55 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dumps | Out-Null
           "PROCDUMP=$pd"   | Out-File -FilePath $env:GITHUB_ENV -Append
           "DUMPDIR=$dumps" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Host + joiner (relay) -> skirmish, both reach the map, host ends turn -> joiner's new day
+      - name: Install OBS Studio (portable) for the run video
+        continue-on-error: true   # recording is best-effort; never fail the test on an OBS hiccup
+        run: |
+          . ./tools/test/_obs.ps1
+          Install-Obs
+      - name: Host + joiner (relay) -> skirmish, both reach the map, host ends turn -> joiner's new day [recorded]
         run: |
           node --version  # the dispatcher starts tools/relay/relay.js; GitHub runners ship Node
-          ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -EndHostTurn -Kill -ProcDump "$env:PROCDUMP" -DumpDir "$env:DUMPDIR"
-          exit $LASTEXITCODE
+          $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
+          "REC_DIR=$rec" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # Dot-source inside the try so a parse error in _obs.ps1 cannot fail the functional test.
+          try { . ./tools/test/_obs.ps1; Start-ObsRecording -OutDir $rec | Out-Null } catch { Write-Host "::warning::OBS start failed: $($_.Exception.Message)" }
+          $code = 1
+          try {
+            ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -EndHostTurn -Kill -ProcDump "$env:PROCDUMP" -DumpDir "$env:DUMPDIR"
+            $code = $LASTEXITCODE
+          } catch {
+            Write-Host "::warning::two-instance test threw: $($_.Exception.Message)"; $code = 1
+          } finally {
+            try {
+              $mkv = Stop-ObsRecording
+              if ($mkv) {
+                $named = Join-Path (Split-Path $mkv -Parent) 'multiplayer-strategic.mkv'
+                Move-Item -LiteralPath $mkv -Destination $named -Force
+                "VIDEO_FILE=$named" | Out-File -FilePath $env:GITHUB_ENV -Append
+              }
+            } catch { Write-Host "::warning::OBS stop failed: $($_.Exception.Message)" }
+          }
+          exit $code
+      - name: Upload the run video (raw single file, no zip)
+        if: always() && env.VIDEO_FILE != ''
+        id: video
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.VIDEO_FILE }}
+          archive: false
+          if-no-files-found: warn
+      - name: Upload the OBS log (diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: multiplayer-obs-log
+          path: ${{ env.REC_DIR }}/obs.log
+          if-no-files-found: warn
+      - name: Link the run video in the summary on failure
+        if: failure() && steps.video.outputs.artifact-url != ''
+        run: |
+          "### Multiplayer run video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "[Download the recording](${{ steps.video.outputs.artifact-url }})" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Dump per-instance logs + relay state on failure
         if: failure()
@@ -233,8 +277,9 @@ jobs:
             Write-Host "===================== $($_.Name) ====================="
             (Get-Content $_.FullName) -match '\[testdrv\]|midObjectLock' | Select-Object -Last 150
           }
-          $relay = Join-Path "$env:DUMPDIR" 'relay.out.log'
-          if (Test-Path $relay) { Write-Host "===================== relay ====================="; Get-Content $relay -Tail 120 }
+          $relay = Get-ChildItem "$env:DUMPDIR" -Filter 'relay-*.out.log' -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($relay) { Write-Host "===================== relay ====================="; Get-Content $relay.FullName -Tail 120 }
         shell: pwsh
       - name: Upload full per-instance logs + relay log on failure
         if: failure()
@@ -243,7 +288,7 @@ jobs:
           name: multiplayer-logs
           path: |
             ${{ env.GAME_DIR }}/mss32_*.log
-            ${{ env.DUMPDIR }}/relay.out.log
+            ${{ env.DUMPDIR }}/relay-*.out.log
           if-no-files-found: warn
       - name: Analyze hung-instance snapshots (cdb stacks)
         if: failure()
@@ -292,10 +337,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with: { submodules: false, fetch-depth: 1 }
-      - name: Get DebugTest DLL
+      - name: Get test-harness DLL (Debug)
         uses: actions/download-artifact@v8
         with:
-          name: mss32-debugtest
+          name: mss32-test-harness-debug
           path: dll
       - name: Enable DirectPlay (native TCP/IP service provider for D2 multiplayer)
         run: |
@@ -313,7 +358,7 @@ jobs:
           key: slasher-min-v1
           enableCrossOsArchive: true
           fail-on-cache-miss: true
-      - name: Unpack game + deploy DebugTest mss32.dll + force OpenGL/ColdCPU
+      - name: Unpack game + deploy test-harness mss32.dll + force OpenGL/ColdCPU
         run: |
           New-Item -ItemType Directory -Force -Path game | Out-Null
           tar -xzf game.tar.gz -C game
@@ -344,11 +389,54 @@ jobs:
           if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
           & $sevenzip x $z "-o$ex" -y "x86" | Out-Null
           Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
-      - name: Host generates the map, both reach it, host ends turn -> joiner's new day
+      - name: Install OBS Studio (portable) for the run video
+        continue-on-error: true
+        run: |
+          . ./tools/test/_obs.ps1
+          Install-Obs
+      - name: Host generates the map, both reach it, host ends turn -> joiner's new day [recorded]
         run: |
           node --version
-          ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -RandomMap -EndHostTurn -Scenario 7 -GenWaitSec 60 -Kill
-          exit $LASTEXITCODE
+          $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
+          "REC_DIR=$rec" | Out-File -FilePath $env:GITHUB_ENV -Append
+          try { . ./tools/test/_obs.ps1; Start-ObsRecording -OutDir $rec | Out-Null } catch { Write-Host "::warning::OBS start failed: $($_.Exception.Message)" }
+          $code = 1
+          try {
+            ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -RandomMap -EndHostTurn -Scenario 7 -GenWaitSec 60 -Kill
+            $code = $LASTEXITCODE
+          } catch {
+            Write-Host "::warning::generated-map test threw: $($_.Exception.Message)"; $code = 1
+          } finally {
+            try {
+              $mkv = Stop-ObsRecording
+              if ($mkv) {
+                $named = Join-Path (Split-Path $mkv -Parent) 'generated-map-turn-pass.mkv'
+                Move-Item -LiteralPath $mkv -Destination $named -Force
+                "VIDEO_FILE=$named" | Out-File -FilePath $env:GITHUB_ENV -Append
+              }
+            } catch { Write-Host "::warning::OBS stop failed: $($_.Exception.Message)" }
+          }
+          exit $code
+      - name: Upload the run video (raw single file, no zip)
+        if: always() && env.VIDEO_FILE != ''
+        id: video
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.VIDEO_FILE }}
+          archive: false
+          if-no-files-found: warn
+      - name: Upload the OBS log (diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: generated-map-obs-log
+          path: ${{ env.REC_DIR }}/obs.log
+          if-no-files-found: warn
+      - name: Link the run video in the summary on failure
+        if: failure() && steps.video.outputs.artifact-url != ''
+        run: |
+          "### Generated-map run video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "[Download the recording](${{ steps.video.outputs.artifact-url }})" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
       - name: Dump per-instance logs on failure
         if: failure()
         run: |
@@ -381,10 +469,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with: { submodules: false, fetch-depth: 1 }
-      - name: Get DebugTest DLL
+      - name: Get test-harness DLL (Debug)
         uses: actions/download-artifact@v8
         with:
-          name: mss32-debugtest
+          name: mss32-test-harness-debug
           path: dll
       - name: Enable DirectPlay (native TCP/IP service provider for D2 multiplayer)
         run: |
@@ -402,7 +490,7 @@ jobs:
           key: slasher-min-v1
           enableCrossOsArchive: true
           fail-on-cache-miss: true
-      - name: Unpack game + deploy DebugTest mss32.dll + force OpenGL/ColdCPU
+      - name: Unpack game + deploy test-harness mss32.dll + force OpenGL/ColdCPU
         run: |
           New-Item -ItemType Directory -Force -Path game | Out-Null
           tar -xzf game.tar.gz -C game
@@ -433,11 +521,54 @@ jobs:
           if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
           & $sevenzip x $z "-o$ex" -y "x86" | Out-Null
           Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
-      - name: Host generates a map; both attack nearest monsters + pass turns; assert regeneration
+      - name: Install OBS Studio (portable) for the run video
+        continue-on-error: true
+        run: |
+          . ./tools/test/_obs.ps1
+          Install-Obs
+      - name: Host generates a map; both attack nearest monsters + pass turns; assert regeneration [recorded]
         run: |
           node --version
-          ./tools/test/mp-attack-monsters.ps1 -GameDir "$env:GAME_DIR" -GenWaitSec 90 -Kill
-          exit $LASTEXITCODE
+          $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
+          "REC_DIR=$rec" | Out-File -FilePath $env:GITHUB_ENV -Append
+          try { . ./tools/test/_obs.ps1; Start-ObsRecording -OutDir $rec | Out-Null } catch { Write-Host "::warning::OBS start failed: $($_.Exception.Message)" }
+          $code = 1
+          try {
+            ./tools/test/mp-attack-monsters.ps1 -GameDir "$env:GAME_DIR" -GenWaitSec 90 -Kill
+            $code = $LASTEXITCODE
+          } catch {
+            Write-Host "::warning::mp-attack test threw: $($_.Exception.Message)"; $code = 1
+          } finally {
+            try {
+              $mkv = Stop-ObsRecording
+              if ($mkv) {
+                $named = Join-Path (Split-Path $mkv -Parent) 'mp-attack-monsters.mkv'
+                Move-Item -LiteralPath $mkv -Destination $named -Force
+                "VIDEO_FILE=$named" | Out-File -FilePath $env:GITHUB_ENV -Append
+              }
+            } catch { Write-Host "::warning::OBS stop failed: $($_.Exception.Message)" }
+          }
+          exit $code
+      - name: Upload the run video (raw single file, no zip)
+        if: always() && env.VIDEO_FILE != ''
+        id: video
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.VIDEO_FILE }}
+          archive: false
+          if-no-files-found: warn
+      - name: Upload the OBS log (diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mp-attack-obs-log
+          path: ${{ env.REC_DIR }}/obs.log
+          if-no-files-found: warn
+      - name: Link the run video in the summary on failure
+        if: failure() && steps.video.outputs.artifact-url != ''
+        run: |
+          "### Multiplayer attack/regen run video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "[Download the recording](${{ steps.video.outputs.artifact-url }})" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
       - name: Dump per-instance logs on failure
         if: failure()
         run: |
@@ -452,6 +583,141 @@ jobs:
           name: mp-attack-logs
           path: ${{ env.GAME_DIR }}/mss32_*.log
           if-no-files-found: warn
+
+  # The arena map is an ordinary authored .sg. This job deliberately does not build, download or
+  # inject the LuckyTest roulette loader: it validates the reusable game/harness mechanics directly.
+  static-arena-squad-actions:
+    name: Static arena, chests + camps + hire + squad layout (2p)
+    needs: prep-game
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 30
+    env:
+      GALLIUM_DRIVER: llvmpipe
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with: { submodules: false, fetch-depth: 1 }
+      - name: Get test-harness DLL (Debug)
+        uses: actions/download-artifact@v8
+        with:
+          name: mss32-test-harness-debug
+          path: dll
+      - name: Enable DirectPlay (native TCP/IP service provider for D2 multiplayer)
+        run: |
+          $sp = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\DirectPlay\Service Providers'
+          try {
+            if ((Get-WindowsOptionalFeature -Online -FeatureName DirectPlay).State -ne 'Enabled') {
+              Enable-WindowsOptionalFeature -Online -FeatureName DirectPlay -All -NoRestart -ErrorAction Stop | Out-Null
+            }
+          } catch { Write-Host "::warning::Enable DirectPlay failed: $($_.Exception.Message)" }
+          if (-not (Test-Path $sp)) { throw 'DirectPlay service-provider key absent; TCP/IP is unavailable' }
+      - name: Restore game from cache
+        uses: actions/cache/restore@v5
+        with:
+          path: game.tar.gz
+          key: slasher-min-v1
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Unpack game + deploy test-harness mss32.dll + force OpenGL/ColdCPU
+        run: |
+          New-Item -ItemType Directory -Force -Path game | Out-Null
+          tar -xzf game.tar.gz -C game
+          $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
+          Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
+          $ini = Join-Path $dir 'Disciple.ini'
+          if (Test-Path $ini) {
+            $c = Get-Content $ini -Raw
+            if ($c -match '(?m)^Renderer=')       { $c = $c -replace '(?m)^Renderer=\d+','Renderer=3' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nRenderer=3" }
+            else                                   { $c += "`r`n[Wrapper]`r`nRenderer=3`r`n" }
+            if ($c -match '(?m)^ColdCPU=')        { $c = $c -replace '(?m)^ColdCPU=\d+','ColdCPU=0' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nColdCPU=0" }
+            Set-Content -Path $ini -Value $c -Encoding ASCII -NoNewline
+          }
+          "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Deploy Mesa3D software OpenGL (llvmpipe)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $asset = (gh api repos/pal1000/mesa-dist-win/releases/latest | ConvertFrom-Json).assets |
+            Where-Object { $_.name -match 'release-msvc\.7z$' } | Select-Object -First 1
+          $z = Join-Path $env:TEMP 'mesa.7z'
+          Invoke-WebRequest $asset.browser_download_url -OutFile $z -UseBasicParsing
+          $ex = Join-Path $env:TEMP 'mesa'
+          $sevenzip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
+          & $sevenzip x $z "-o$ex" -y 'x86' | Out-Null
+          Copy-Item "$ex\x86\*.dll" $env:GAME_DIR -Force -ErrorAction Stop
+      - name: Install the authored arena map (one static .sg; no loader/reroller)
+        run: |
+          $exports = Join-Path $env:GAME_DIR 'Exports'
+          New-Item -ItemType Directory -Force -Path $exports | Out-Null
+          # The extracted runner game is disposable. Make the arena the sole saved scenario so its
+          # DLG_CHOOSE_SKIRMISH index is deterministically zero.
+          Get-ChildItem -LiteralPath $exports -Filter '*.sg' -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force
+          $arena = Join-Path $exports 'luckytest-arena.sg'
+          $url = 'https://raw.githubusercontent.com/berkutx/disciples2-roulette-arena-template-loader/main/reroller/assets/arena.sg'
+          Invoke-WebRequest $url -OutFile $arena -UseBasicParsing
+          $expected = 'C5F256EAAC3269895860BB04B885D629E0CD23F7FF1B95A313E54FCEEBE6FECF'
+          $actual = (Get-FileHash -LiteralPath $arena -Algorithm SHA256).Hash
+          if ($actual -ne $expected) { throw "arena.sg SHA256 mismatch: $actual" }
+          if (@(Get-ChildItem -LiteralPath $exports -Filter '*.sg' -File).Count -ne 1) {
+            throw 'arena is not the sole exported scenario'
+          }
+          Write-Host "arena.sg verified: $actual"
+      - name: Install OBS Studio (portable) for the run video
+        continue-on-error: true
+        run: |
+          . ./tools/test/_obs.ps1
+          Install-Obs
+      - name: Load static arena; both roles collect, hire and arrange squads [recorded]
+        run: |
+          node --version
+          $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
+          "REC_DIR=$rec" | Out-File -FilePath $env:GITHUB_ENV -Append
+          try { . ./tools/test/_obs.ps1; Start-ObsRecording -OutDir $rec | Out-Null } catch { Write-Host "::warning::OBS start failed: $($_.Exception.Message)" }
+          $code = 1
+          try {
+            & ./tools/test/luckytest-arena.ps1 -GameDir "$env:GAME_DIR" -Scenario 0 -Ci -Kill
+            $code = if ($?) { 0 } elseif ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }
+          } catch {
+            Write-Host "::warning::static-arena test threw: $($_.Exception.Message)"; $code = 1
+          } finally {
+            try {
+              $mkv = Stop-ObsRecording
+              if ($mkv) {
+                $named = Join-Path (Split-Path $mkv -Parent) 'static-arena-squad-actions.mkv'
+                Move-Item -LiteralPath $mkv -Destination $named -Force
+                "VIDEO_FILE=$named" | Out-File -FilePath $env:GITHUB_ENV -Append
+              }
+            } catch { Write-Host "::warning::OBS stop failed: $($_.Exception.Message)" }
+          }
+          exit $code
+      - name: Upload the run video (raw single file, no zip)
+        if: always() && env.VIDEO_FILE != ''
+        id: arena-video
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.VIDEO_FILE }}
+          archive: false
+          if-no-files-found: warn
+      - name: Upload OBS and game logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: static-arena-diagnostics
+          path: |
+            ${{ env.REC_DIR }}/obs.log
+            ${{ env.GAME_DIR }}/mss32_*.log
+          if-no-files-found: warn
+      - name: Link the run video in the summary on failure
+        if: failure() && steps.arena-video.outputs.artifact-url != ''
+        run: |
+          '### Static-arena run video' | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          '[Download the recording](${{ steps.arena-video.outputs.artifact-url }})' | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
   # Future tests go here as more jobs, each: download the DLL artifact, restore the
   # game cache, deploy, run a script.

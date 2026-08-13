@@ -118,6 +118,9 @@ try {
         # Generation finished (the wait above reached DLG_GENERATION_RESULT or threw). Accept the
         # map into the host lobby, then start solo: empty slots become AI, the game loads, and the
         # first-turn popups give way to the strategic map. This proves the scenario actually plays.
+        # Keep generation-only success distinct from a playable-map success: any later throw must
+        # remain red in the all-template matrix.
+        $outcome = 'generated, map not reached'
         if (-not (Invoke-Button host DLG_GENERATION_RESULT BTN_ACCEPT)) { throw "BTN_ACCEPT not found" }
         if (-not (Wait-Dialog host DLG_LOBBY 20)) { throw "BTN_ACCEPT did not open DLG_LOBBY" }
         Write-Host "[gen] map accepted; starting solo host (AI fills the rest)..." -ForegroundColor Cyan
@@ -136,7 +139,10 @@ try {
             elseif ($d -eq 'DLG_LOBBY') { $null = Invoke-Button host DLG_LOBBY BTN_OK }   # re-press start if it lingered
             Start-Sleep -Milliseconds 700
         }
-        if (-not $onMap) { throw "did not reach the strategic map (stuck on $(Get-Dialog host))" }
+        if (-not $onMap) {
+            $outcome = "generated, map not reached (stuck on $(Get-Dialog host))"
+            throw $outcome
+        }
         $outcome = 'reached map'
         Write-Host "[gen] reached the generated map ($(Get-Dialog host))" -ForegroundColor Green
     }

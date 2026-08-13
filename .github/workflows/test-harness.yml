@@ -1,7 +1,7 @@
 name: test-harness
 
 # The production mss32 workflow stays untouched. This workflow alone builds the
-# compile-gated DebugTest configuration and runs the external game harness from
+# compile-gated debug harness configuration and runs the external game harness from
 # the exact checkout under test (including the exact dependency gitlinks).
 
 on:
@@ -22,6 +22,7 @@ on:
       - "tools/test/**"
       - ".github/workflows/test-harness.yml"
       - ".github/workflows/tests.yml"
+      - ".github/workflows/generation-matrix.yml"
   workflow_dispatch:
 
 permissions:
@@ -33,8 +34,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  validate:
+    name: Validate scripts + relay transports
+    runs-on: windows-2025-vs2026
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with: { submodules: false, fetch-depth: 1 }
+      - name: Parse every PowerShell and JavaScript tool
+        run: |
+          $failed = $false
+          Get-ChildItem tools -Recurse -Filter *.ps1 -File | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors) {
+              $failed = $true
+              $errors | ForEach-Object { Write-Host "::error file=$($_.Extent.File),line=$($_.Extent.StartLineNumber)::$($_.Message)" }
+            }
+          }
+          Get-ChildItem tools -Recurse -Filter *.js -File | ForEach-Object {
+            node --check $_.FullName
+            if ($LASTEXITCODE) { $failed = $true }
+          }
+          if ($failed) { exit 1 }
+      - name: Named-pipe framed-protocol smoke
+        run: ./tools/test/relay-transport-smoke.ps1 -Transport pipe
+      - name: TCP framed-protocol smoke (Wine/Docker transport)
+        run: ./tools/test/relay-transport-smoke.ps1 -Transport tcp
+
   build:
-    name: Build DebugTest
+    name: Build test-harness DLL (Debug)
     runs-on: windows-2025-vs2026
     defaults:
       run:
@@ -45,7 +76,7 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Build exact DebugTest dependencies
+      - name: Build exact Debug dependencies
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
@@ -57,7 +88,7 @@ jobs:
             /p:MultiProcessorCompilation=true /p:MinimalRebuild=false /m /nologo /verbosity:minimal
           exit $LASTEXITCODE
 
-      - name: Build DebugTest (D2_TESTDRV)
+      - name: Build test-harness DLL (Debug + D2_TESTDRV)
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
@@ -80,15 +111,25 @@ jobs:
             if (-not $txt.Contains($marker)) { Write-Error "missing harness marker: $marker"; exit 1 }
           }
 
-      - name: Upload DebugTest DLL
+      - name: Upload test-harness DLL (Debug)
         uses: actions/upload-artifact@v7
         with:
-          name: mss32-debugtest
+          name: mss32-test-harness-debug
           path: out/mss32.dll
           if-no-files-found: error
 
   tests:
     name: Tests
-    needs: build
+    needs: [build, validate]
     uses: ./.github/workflows/tests.yml
-    secrets: inherit
+
+  templates:
+    name: Every random-scenario template
+    needs: [build, validate, tests]
+    # The ordinary suite warms the shared game cache. Run the template matrix even when an
+    # unrelated gameplay job failed, but never without the exact harness DLL from this run.
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.validate.result == 'success' }}
+    uses: ./.github/workflows/generation-matrix.yml
+    with:
+      dll_run_id: ${{ github.run_id }}
+      wait_sec: 60

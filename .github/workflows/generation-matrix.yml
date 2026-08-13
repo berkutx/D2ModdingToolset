@@ -1,32 +1,42 @@
 name: generation-matrix
 
-# On-demand: generate every random-scenario template, one job per template, and report which
-# generate vs error (the harness distinguishes a sol3 panic, a mid-generation error box, and a
-# timeout). Dispatch only (it is slow and the generator is heavy) and available once this workflow
-# is on the default branch. The matrix axis is parsed from the game's Templates/*.lua by
-# tools/test/list-templates.js; each job runs scenario-generation.ps1 with -WaitGenerationSec.
+# Generate and load every random-scenario template, one job per template, and report which reaches
+# the strategic map vs errors (the harness distinguishes a sol3 panic, a mid-generation error box,
+# a timeout, and a generated scenario that cannot be started). The matrix axis is parsed from the
+# game's Templates/*.lua by tools/test/list-templates.js.
 
 on:
+  workflow_call:
+    inputs:
+      dll_run_id:
+        description: "test-harness run id containing mss32-test-harness-debug"
+        type: number
+        required: true
+      wait_sec:
+        description: "per-template generation timeout"
+        type: number
+        required: false
+        default: 60
   workflow_dispatch:
     inputs:
       dll_run_id:
-        description: "test-harness run id for the DebugTest DLL (empty = latest successful build)"
+        description: "test-harness run id for the debug harness DLL (empty = latest successful build)"
         type: string
         required: false
         default: ""
       wait_sec:
         description: "seconds to wait for each template's generation (a real one finishes well under a minute)"
-        type: string
+        type: number
         required: false
-        default: "60"
+        default: 60
 
 permissions:
   contents: read
-  actions: read # list harness runs + download the mss32-debugtest artifact
+  actions: read # list harness runs + download the mss32-test-harness-debug artifact
 
 jobs:
   setup:
-    name: Parse templates + resolve DLL
+    name: Parse templates + resolve harness DLL
     runs-on: ubuntu-latest
     outputs:
       run_id: ${{ steps.dll.outputs.run_id }}
@@ -39,7 +49,7 @@ jobs:
           fetch-depth: 1
           sparse-checkout: tools/test
           sparse-checkout-cone-mode: true
-      - name: Resolve the DebugTest DLL run
+      - name: Resolve the test-harness DLL run
         id: dll
         env:
           GH_TOKEN: ${{ github.token }}
@@ -51,14 +61,21 @@ jobs:
           set -euo pipefail
           rid="$GIVEN"
           if [ -z "$rid" ]; then
-            for id in $(gh run list --workflow test-harness.yml --branch "$BRANCH" --status success \
+            for id in $(gh run list --workflow test-harness.yml --branch "$BRANCH" --status completed \
                           -L 20 --json databaseId --jq '.[].databaseId' -R "$REPO"); do
-              if gh api "repos/$REPO/actions/runs/$id/artifacts" --jq '.artifacts[].name' 2>/dev/null | grep -qx 'mss32-debugtest'; then
+              if gh api "repos/$REPO/actions/runs/$id/artifacts" --jq '.artifacts[].name' 2>/dev/null | grep -qx 'mss32-test-harness-debug'; then
                 rid="$id"; break
               fi
             done
           fi
-          [ -n "$rid" ] || { echo "::error::no test-harness build with a live mss32-debugtest artifact on '$BRANCH'"; exit 1; }
+          [ -n "$rid" ] || { echo "::error::no test-harness build with a live mss32-test-harness-debug artifact on '$BRANCH'"; exit 1; }
+          [[ "$rid" =~ ^[0-9]+$ ]] || { echo "::error::dll_run_id must be a numeric Actions run id"; exit 1; }
+          artifact_id=$(gh api "repos/$REPO/actions/runs/$rid/artifacts" \
+            --jq '.artifacts[] | select(.name == "mss32-test-harness-debug" and (.expired | not)) | .id' | head -1)
+          [ -n "$artifact_id" ] || {
+            echo "::error::run $rid has no live mss32-test-harness-debug artifact"
+            exit 1
+          }
           echo "run_id=$rid" >> "$GITHUB_OUTPUT"
       - name: Restore game cache (extract only Templates)
         uses: actions/cache/restore@v5
@@ -100,10 +117,10 @@ jobs:
           fetch-depth: 1
           sparse-checkout: tools
           sparse-checkout-cone-mode: true
-      - name: Get the DebugTest DLL
+      - name: Get the test-harness DLL (Debug)
         uses: actions/download-artifact@v8
         with:
-          name: mss32-debugtest
+          name: mss32-test-harness-debug
           path: dll
           run-id: ${{ needs.setup.outputs.run_id }}
           github-token: ${{ github.token }}
@@ -152,12 +169,15 @@ jobs:
           if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
           & $sevenzip x $z "-o$ex" -y "x86" | Out-Null
           Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
-      - name: Generate template ${{ matrix.template.index }} (${{ matrix.template.name }})
+      - name: Generate + load template ${{ matrix.template.index }} (${{ matrix.template.name }})
         env:
           T_INDEX: ${{ matrix.template.index }}
           T_NAME: ${{ matrix.template.name }}
+          WAIT_SEC: ${{ inputs.wait_sec }}
         run: |
           node --version
+          $waitSec = [int]$env:WAIT_SEC
+          if ($waitSec -lt 1 -or $waitSec -gt 600) { throw "wait_sec must be 1..600" }
           # Run the scenario in a child pwsh: its explicit `exit 1` must not terminate this wrapper
           # before the outcome row is persisted for the aggregate summary.
           $ErrorActionPreference = 'Continue'
@@ -165,7 +185,7 @@ jobs:
           # game's stderr and stays in the raw job log.)
           $out = & "$PSHOME\pwsh.exe" -NoLogo -NoProfile -NonInteractive `
             -File ./tools/test/scenario-generation.ps1 -GameDir "$env:GAME_DIR" `
-            -Template $env:T_INDEX -WaitGenerationSec ${{ inputs.wait_sec || '60' }} 2>&1
+            -Template $env:T_INDEX -WaitGenerationSec $waitSec -ToMap 2>&1
           $code = $LASTEXITCODE
           $out | ForEach-Object { Write-Host $_ }
           $oc = $out | Select-String '^GEN_OUTCOME=' | Select-Object -Last 1
@@ -189,11 +209,12 @@ jobs:
   # Aggregate every template's outcome into one table in the run summary.
   summarize:
     name: Results summary
-    needs: generate
+    needs: [setup, generate]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Collect per-template outcomes
+        continue-on-error: true
         uses: actions/download-artifact@v8
         with:
           pattern: gen-outcome-*
@@ -201,17 +222,28 @@ jobs:
           merge-multiple: true
       - name: Build the results table
         shell: bash
+        env:
+          EXPECTED_MATRIX: ${{ needs.setup.outputs.matrix }}
         run: |
+          missing=0
           {
-            echo "## Random-scenario generation, per template"
+            echo "## Random-scenario generation + map load, per template"
             echo ""
             echo "| | # | Template | Time | Outcome |"
             echo "|:--:|--:|---|--:|---|"
-            cat outcomes/*.tsv 2>/dev/null | sort -n | while IFS=$'\t' read -r idx name status secs; do
+            while IFS=$'\t' read -r idx name; do
+              row="outcomes/$idx.tsv"
+              if [ ! -f "$row" ]; then
+                echo "| ❌ | $idx | $name | - | infrastructure failure: no outcome artifact |"
+                missing=1
+                continue
+              fi
+              IFS=$'\t' read -r actual_idx actual_name status secs < "$row"
+              idx="$actual_idx"; name="$actual_name"
               [ -z "$name" ] && continue
               mode="${status%% | *}"                          # the part before the first " | "
               case "$mode" in
-                generated)    icon='✅' ;;                    # built a map
+                "reached map") icon='✅' ;;                  # generated, accepted, started and loaded
                 "no result"*) icon='⏳' ;;                    # never finished in the budget
                 *)            icon='❌' ;;                    # crashed / sol3 / error box
               esac
@@ -219,6 +251,7 @@ jobs:
               if [ -z "$secs" ]; then t='-'; elif [ "$secs" -gt 99 ] 2>/dev/null; then t='99+s'; else t="${secs}s"; fi
               detail=$(printf '%s' "$status" | tr '|' '/')    # a literal | would split the table cell
               echo "| $icon | $idx | $name | $t | ${detail:0:150} |"
-            done
+            done < <(printf '%s' "$EXPECTED_MATRIX" | jq -r '.[] | [.index,.name] | @tsv')
           } >> "$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"
+          [ "$missing" -eq 0 ] || exit 1
