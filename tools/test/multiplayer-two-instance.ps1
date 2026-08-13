@@ -49,7 +49,7 @@ Get-ChildItem $GameDir -Filter "mss32_*.log" -ErrorAction SilentlyContinue | Rem
 
 if ($DumpDir) { New-Item -ItemType Directory -Force -Path $DumpDir | Out-Null }
 $relay = Start-TestRelay -LogDir $(if ($DumpDir) { $DumpDir } else { $env:TEMP })
-$relayLog = Join-Path $(if ($DumpDir) { $DumpDir } else { $env:TEMP }) "relay.out.log"
+$relayLog = $relay.RelayLogPath
 Write-Host "[disp] relay up" -ForegroundColor Green
 
 # ---- test-specific orchestration (built on the toolkit primitives) ------------------------------

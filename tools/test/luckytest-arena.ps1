@@ -1,17 +1,17 @@
 #requires -Version 7.0
 <#
-  luckytest-arena MP test (DEV). Host launches via berkut_loader (the roulette hook rolls the luckytest
-  arena); joiner joins over DirectPlay. The host passes its turn so the JOINER plays: pick the 100-move
-  hero, collect all reachable chests (clicking each pickup message), then enter the first camp and hire
-  the single hero there. Finally hand control to the user (leave everything running).
+  LuckyTest arena MP harness. Both clients are ordinary DebugTest game processes: the host loads a
+  preinstalled arena .sg from Exports and the joiner joins over DirectPlay. No roulette loader,
+  injector, hook DLL or reroller is part of this test. The host passes its turn so the JOINER plays:
+  pick the 100-move hero, collect reachable chests, enter camps and exercise squad actions.
 #>
 param(
     [switch]$AttachHost,  # WSL/lobby: drive a host already launched and AT THE ARENA via the existing
                           # relay (:8077); skip this script's own deploy/relay-start/launch/DirectPlay pair.
-    [string]$GameDir = 'C:\GOG Games\slasher_mns_2_4 - Copy',
-    [string]$Mss32   = 'C:\GOG Games\DEV\_mss32_out\release-stage\mss32.dll',
-    [string]$Loader  = 'C:\GOG Games\disciples2-roulette-arena-template-loader\dist\berkutx_loader.exe',
-    [int]$GenWaitSec = 120,
+    [string]$GameDir,
+    [int]$Scenario = 0, # index of the preinstalled arena in DLG_CHOOSE_SKIRMISH; CI makes it the only .sg
+    [switch]$Kill,      # stop only the processes launched by this invocation (CI/default automation)
+    [switch]$Ci,        # bounded squad-build verdict; implies -BuildSquad and exits instead of a PvP clash
     [switch]$SkipChests,  # go straight to the camp (beat the ~60s MP turn timer while cracking the hire)
     [switch]$BisectCamp,  # enter ONLY the first camp, fire the hire, then STOP with DLG_MERCENARIES left
                           # OPEN (no BTN_BACK) for manual inspection. Implies -SkipChests.
@@ -28,11 +28,13 @@ param(
                           # NOTE: in the battle the JOINER is fought BY THE HUMAN - the harness never toggles
                           # auto-battle on the joiner nor touches its battle/post-battle dialogs.
 )
+# CI validates the reusable arena/gameplay harness, not the product roulette/injector lifecycle.
+if ($Ci) { $BuildSquad = $true }
 # -BuildSquad does its own interleaved chest+camp route (the bulk collect-all-first exhausts movement).
 if ($DumpCamps -or $BuildSquad -or $CampProbe) { $SkipChests = $true }
 if ($BisectCamp) { $SkipChests = $true }
 . (Join-Path $PSScriptRoot '_relay.ps1')
-$hookLog = Join-Path $GameDir 'berkutx_roulette.log'
+if (-not $AttachHost) { $GameDir = Resolve-GameDir $GameDir }
 
 $Dismiss = @{
     'DLG_SCENARIO_BRIEFING' = 'BTN_CONTINUE'; 'DLG_BEGIN_TURN' = 'BTN_OK'; 'DLG_GETINFO_BOX' = 'BTN_CLOSE'
@@ -384,39 +386,44 @@ function Show-SquadTable($res) {
 
 # ---- run ----------------------------------------------------------------------------------------
 $relay = $null
+$hostProcess = $null
+$joinProcess = $null
 $ok = $false
+$failed = $false
 if (-not $AttachHost) {
-# Cleanup OUR tagged Copy-game windows only (spare the user's mp-test + any other folder).
-Get-Process Discipl2 -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -match '\[(HOST|CLIENT)\]' -and $_.MainWindowTitle -notmatch 'mp-test' } | Stop-Process -Force -ErrorAction SilentlyContinue
-Stop-Process -Name dplaysvr -Force -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 800
+# Never kill an unrelated developer game. A pre-existing client from this exact disposable
+# GameDir (or the process-global DirectPlay server) means the machine is not exclusive enough
+# for a deterministic two-client run; fail before launching anything.
+$expectedExe = [IO.Path]::GetFullPath((Join-Path $GameDir 'Discipl2.exe'))
+$sameGame = @(Get-Process Discipl2 -ErrorAction SilentlyContinue | Where-Object {
+    try { [string]::Equals([IO.Path]::GetFullPath($_.MainModule.FileName), $expectedExe,
+                           [StringComparison]::OrdinalIgnoreCase) } catch { $false }
+})
+if ($sameGame) { throw "pre-existing Discipl2.exe from '$GameDir' (pid=$($sameGame.Id -join ','))" }
+$dplay = @(Get-Process dplaysvr -ErrorAction SilentlyContinue)
+if ($dplay) { throw "pre-existing process-global dplaysvr (pid=$($dplay.Id -join ','))" }
 
-# Deploy + clear caches.
-Copy-Item $Mss32 (Join-Path $GameDir 'mss32.dll') -Force
-Copy-Item $Loader (Join-Path $GameDir 'berkutx_loader.exe') -Force
-$cache = Join-Path $env:LOCALAPPDATA 'berkutx_roulette'; if (Test-Path $cache) { Remove-Item $cache -Recurse -Force -ErrorAction SilentlyContinue }
-if (Test-Path $hookLog) { Remove-Item $hookLog -Force -ErrorAction SilentlyContinue }
-$idx = Resolve-TemplateIndex $GameDir 'luckytest'
-Write-Host "[lt] luckytest index=$idx; deploying + launching..." -ForegroundColor Cyan
+# The caller installs DebugTest mss32.dll and the static arena .sg. Keeping deployment out of this
+# test makes the same script work in CI, locally, and in a headless server image without a loader.
+$exports = Join-Path $GameDir 'Exports'
+if (-not (Test-Path $exports)) { throw "Exports directory missing: $exports" }
+if (-not (Get-ChildItem -LiteralPath $exports -Filter *.sg -File -ErrorAction SilentlyContinue)) {
+    throw "no arena .sg installed under $exports"
+}
+Write-Host "[lt] loading installed arena scenario index=$Scenario..." -ForegroundColor Cyan
 
 $relay = Start-TestRelay
 } else { Write-Host "[lt] -AttachHost: driving the already-launched lobby host (at the arena) via the existing relay :8077" -ForegroundColor Cyan }
 try {
   if (-not $AttachHost) {
-    # HOST via the loader (roulette hook). JOINER via plain Start-GameClient (gets the arena over the net).
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName=(Join-Path $GameDir 'berkutx_loader.exe'); $psi.WorkingDirectory=$GameDir; $psi.UseShellExecute=$false
-    foreach ($f in @('SKIP_INTRO','BLACKSCREEN_FIX','UI_REPORTER','WORLD','RELAY_BRIDGE')) { $psi.EnvironmentVariables["D2TESTDRV_$f"]="1" }
-    $psi.EnvironmentVariables["D2TESTDRV_ROLE"]="host"
-    $hp=[System.Diagnostics.Process]::Start($psi)
+    # Both roles are the same plain DebugTest client. The only difference is their relay role.
+    $flags = @('SKIP_INTRO','BLACKSCREEN_FIX','UI_REPORTER','WORLD','RELAY_BRIDGE')
+    $hostProcess = Start-GameClient -GameDir $GameDir -Role host -Flags $flags
     if (-not (Wait-Dialog host DLG_MAIN_MENU 90)) { throw "host never reached DLG_MAIN_MENU" }
-    if (-not ((Get-Content $hookLog -ErrorAction SilentlyContinue | Select-String 'build433B0B=1').Count -gt 0)) { throw "roulette hook did NOT install (gate failed)" }
-    Write-Host "[lt] hook installed (gate ok)." -ForegroundColor Green
     Start-Sleep -Seconds 6
-    $joinFlags = @('SKIP_INTRO','BLACKSCREEN_FIX','UI_REPORTER','WORLD','RELAY_BRIDGE')
-    $jp = Start-GameClient -GameDir $GameDir -Role join -Flags $joinFlags
+    $joinProcess = Start-GameClient -GameDir $GameDir -Role join -Flags $flags
 
-    # Pair: both to protocol, host generates luckytest, joiner joins.
+    # Pair: both to TCP/IP; the host loads the already-installed static arena, then the joiner joins.
     if (-not (Wait-Dialog join DLG_MAIN_MENU 90)) { throw "joiner never reached DLG_MAIN_MENU" }
     if (-not (Step-ToDialog host DLG_MAIN_MENU BTN_MULTI DLG_PROTOCOL)) { throw "host no DLG_PROTOCOL" }
     $null=Set-ListSelection host DLG_PROTOCOL TLBOX_PROTOCOL 2; Start-Sleep 1
@@ -425,26 +432,24 @@ try {
     $null=Set-ListSelection join DLG_PROTOCOL TLBOX_PROTOCOL 2; Start-Sleep 1
     if (-not (Step-ToDialog join DLG_PROTOCOL BTN_CONTINUE DLG_LOAD_NEW_MULTI)) { throw "join no DLG_LOAD_NEW_MULTI" }
 
-    if (-not (Step-ToDialog host DLG_LOAD_NEW_MULTI BTN_HOST DLG_HOST)) { throw "host no DLG_HOST" }
-    if (-not (Step-ToDialog host DLG_HOST BTN_RANDOM_MAP DLG_RANDOM_SCENARIO_MULTI)) { throw "host no generator" }
-    $D='DLG_RANDOM_SCENARIO_MULTI'
-    if (-not (Set-ListSelection host $D TLBOX_TEMPLATES $idx)) { throw "TLBOX_TEMPLATES" }; Start-Sleep 2
-    if (-not (Set-EditText host $D EDIT_NAME "LuckyArena")) { throw "EDIT_NAME" }; Start-Sleep 2
-    $null=Set-SpinOption host $D SPIN_GOAL 0; Start-Sleep 1
-    if (-not (Invoke-Button host $D BTN_GENERATE)) { throw "BTN_GENERATE" }
-    Write-Host "[lt] host generating luckytest..." -ForegroundColor Cyan
-    $t0=Get-Date; $gen=$false
-    while ((((Get-Date)-$t0).TotalSeconds) -lt $GenWaitSec) {
+    # DLG_CHOOSE_SKIRMISH is co-present inside DLG_HOST. Select the static arena and load it.
+    $t0=Get-Date; $hostLobby=$false; $lastFire=(Get-Date).AddSeconds(-10)
+    while ((((Get-Date)-$t0).TotalSeconds) -lt 45) {
         $d=Get-Dialog host
-        if ($d -eq 'DLG_GENERATION_RESULT') { $gen=$true; break }
-        if ($d -eq 'DLG_MESSAGE_BOX') { throw "host generation errored (DLG_MESSAGE_BOX)" }
-        Start-Sleep -Milliseconds 1200
+        if ($d -eq 'DLG_LOBBY') { $hostLobby=$true; break }
+        if (((Get-Date)-$lastFire).TotalSeconds -ge 4) {
+            if ($d -eq 'DLG_LOAD_NEW_MULTI') { $null=Invoke-Button host DLG_LOAD_NEW_MULTI BTN_HOST }
+            else {
+                $null=Set-ListSelection host DLG_CHOOSE_SKIRMISH TLBOX_GAME_SLOT $Scenario
+                Start-Sleep -Milliseconds 400
+                $null=Invoke-Button host DLG_CHOOSE_SKIRMISH BTN_LOAD
+            }
+            $lastFire=Get-Date
+        }
+        Start-Sleep -Milliseconds 500
     }
-    if (-not $gen) { throw "host generation timed out (on $(Get-Dialog host))" }
-    if (-not (Invoke-Button host DLG_GENERATION_RESULT BTN_ACCEPT)) { throw "host BTN_ACCEPT" }
-    if (-not (Wait-Dialog host DLG_LOBBY 25)) { throw "host no DLG_LOBBY after accept" }
-    $rolled = (Get-Content $hookLog | Select-String 'ourTemplate=1').Count -gt 0
-    Write-Host "[lt] host in lobby; arena rolled=$rolled. joiner joining..." -ForegroundColor Green
+    if (-not $hostLobby) { throw "host did not load arena scenario index $Scenario (on $(Get-Dialog host))" }
+    Write-Host "[lt] host loaded arena and entered lobby; joiner joining..." -ForegroundColor Green
 
     if (-not (Step-ToDialog join DLG_LOAD_NEW_MULTI BTN_JOIN DLG_SESSION)) { throw "join no DLG_SESSION" }
     Start-Sleep -Seconds 3
@@ -527,6 +532,36 @@ try {
             $joinRes = Build-RoleSquad join
             Show-SquadTable $hostRes
             Show-SquadTable $joinRes
+        }
+
+        if ($Ci) {
+            foreach ($res in @($hostRes, $joinRes)) {
+                if (-not $res -or -not $res.heroId) { throw "CI squad build returned no result" }
+                if (@($res.candidates).Count -lt 1) { throw "CI $($res.role) arena has no mercenary camps" }
+                if (@($res.hiredList).Count -lt 1) { throw "CI $($res.role) hired no mercenary" }
+                if ([int]$res.gotChests -lt 1) { throw "CI $($res.role) collected no arena chest" }
+                $slots = @($res.finalSlots)
+                if ([int]$res.units -lt 2 -or $slots.Count -ne [int]$res.units) {
+                    throw "CI $($res.role) final slot census does not match squad size"
+                }
+                $positions = @($slots | ForEach-Object { [int]$_.position })
+                if (@($positions | Sort-Object -Unique).Count -ne $positions.Count -or
+                    @($positions | Where-Object { $_ -lt 0 -or $_ -gt 5 }).Count) {
+                    throw "CI $($res.role) final formation has invalid/duplicate slot positions"
+                }
+                $finalIds = @($slots | ForEach-Object { [string]$_.unitId })
+                if ($finalIds -notcontains [string]$res.leaderId) {
+                    throw "CI $($res.role) final formation lost its leader"
+                }
+                foreach ($hired in @($res.hiredList)) {
+                    if ($finalIds -notcontains [string]$hired.unitId) {
+                        throw "CI $($res.role) final formation lost hired unit $($hired.unitId)"
+                    }
+                }
+            }
+            $ok = $true
+            Write-Host "[lt][CI] PASS: static arena loaded normally; both roles hired and arranged squads" -ForegroundColor Green
+            return
         }
 
         # ============ POST-BUILD: cycle the day -> head-on clash -> host attacks joiner -> both auto-battle ===
@@ -920,6 +955,19 @@ try {
     $ok = ($entered -ge 1)
     Write-Host "`n==== luckytest-arena: chests=$collected, camps entered=$entered, hired=$hired ====" -ForegroundColor $(if ($ok) { 'Green' } else { 'Yellow' })
 } catch {
+    $failed = $true
     Write-Host "[lt] FAIL: $($_.Exception.Message)" -ForegroundColor Red
+} finally {
+    if ($Kill -and -not $AttachHost) {
+        foreach ($p in @($hostProcess, $joinProcess, $relay)) {
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+        }
+        Stop-Process -Name dplaysvr -Force -ErrorAction SilentlyContinue
+        Write-Host "[lt] stopped the clients and relay launched by this test" -ForegroundColor DarkGray
+    }
 }
-Write-Host "[lt] LEFT RUNNING (relay pid=$(if($relay){$relay.Id}else{'ext'})) for inspection / hand-off." -ForegroundColor Yellow
+if ($failed -or -not $ok) { exit 1 }
+if (-not $Kill) {
+    Write-Host "[lt] LEFT RUNNING (relay pid=$(if($relay){$relay.Id}else{'ext'})) for inspection / hand-off." -ForegroundColor Yellow
+}
+exit 0
