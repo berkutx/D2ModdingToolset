@@ -1,0 +1,457 @@
+name: tests
+
+# Reusable test suite for the DebugTest build produced by test-harness.yml.
+# Jobs run in parallel against the minimal standalone game (restored from cache).
+
+on:
+  workflow_call:
+permissions:
+  contents: read
+  actions: read # download the same run's mss32-debugtest artifact
+
+jobs:
+  # Warm the ~1.95 GB minimal game into the Actions cache once per run/branch.
+  # ubuntu does the download; the windows test jobs restore it (cross-OS archive).
+  # A same-branch cache is readable on that branch, so this self-warms on a feature
+  # branch, no default-branch dispatch needed.
+  prep-game:
+    name: Prepare game (cache)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore (skip download on a hit)
+        id: c
+        uses: actions/cache/restore@v5
+        with:
+          path: game.tar.gz
+          key: slasher-min-v1
+          enableCrossOsArchive: true
+      - name: Set up Python
+        if: steps.c.outputs.cache-hit != 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Download from the public HF bucket
+        if: steps.c.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          pip install -U "huggingface_hub[cli]" >/dev/null
+          hf buckets cp "hf://buckets/berkut/d2_slasher_mini/slasher_mns_2_4_min.tar.gz" game.tar.gz
+          ls -l game.tar.gz
+          sha256sum game.tar.gz
+      - name: Save cache
+        if: steps.c.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: game.tar.gz
+          key: slasher-min-v1
+          enableCrossOsArchive: true
+
+  boot-smoke:
+    name: Boot to the main menu (1x smoke)
+    needs: prep-game
+    runs-on: windows-2025-vs2026
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with: { submodules: false, fetch-depth: 1 }
+      - name: Get DebugTest DLL
+        uses: actions/download-artifact@v8
+        with:
+          name: mss32-debugtest
+          path: dll
+      - name: Restore game from cache
+        uses: actions/cache/restore@v5
+        with:
+          path: game.tar.gz
+          key: slasher-min-v1
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Unpack game + deploy DebugTest mss32.dll
+        run: |
+          New-Item -ItemType Directory -Force -Path game | Out-Null
+          tar -xzf game.tar.gz -C game
+          $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
+          if (-not (Test-Path "$dir\Discipl2.exe")) { Write-Error "Discipl2.exe missing"; exit 1 }
+          if (-not (Test-Path "$dir\Mss23.dll"))   { Write-Error "Mss23.dll (renamed Miles) missing"; exit 1 }
+          Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
+          "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Boot once -> DLG_MAIN_MENU
+        run: ./tools/test/reliability_test.ps1 -N 1 -Boot 1 -TimeoutSec 60 -GameDir "$env:GAME_DIR"
+
+  boot-reliability:
+    name: Boot to the main menu (5x reliability)
+    needs: prep-game
+    runs-on: windows-2025-vs2026
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with: { submodules: false, fetch-depth: 1 }
+      - name: Get DebugTest DLL
+        uses: actions/download-artifact@v8
+        with:
+          name: mss32-debugtest
+          path: dll
+      - name: Restore game from cache
+        uses: actions/cache/restore@v5
+        with:
+          path: game.tar.gz
+          key: slasher-min-v1
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Unpack game + deploy DebugTest mss32.dll
+        run: |
+          New-Item -ItemType Directory -Force -Path game | Out-Null
+          tar -xzf game.tar.gz -C game
+          $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
+          Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
+          "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Boot 5x -> DLG_MAIN_MENU
+        run: ./tools/test/reliability_test.ps1 -N 5 -Boot 1 -TimeoutSec 60 -GameDir "$env:GAME_DIR"
+
+  # Two-instance multiplayer: a PowerShell dispatcher launches a host + a joiner and
+  # drives both through the menus into a started skirmish over native DirectPlay TCP/IP on
+  # localhost, entirely over the node relay (read each agent's live UI, send invoke/select
+  # commands, no files). Both reach the map, then the host closes its first-turn dialogs and
+  # legitimately ends its turn, and the joiner sees + clicks through its OWN new day.
+  multiplayer-strategic:
+    name: Multiplayer skirmish, host + joiner, honest turn-pass (2p)
+    needs: prep-game
+    runs-on: windows-2025-vs2026
+    env:
+      GALLIUM_DRIVER: llvmpipe # Mesa software GL (deployed below) selects llvmpipe
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with: { submodules: false, fetch-depth: 1 }
+      - name: Get DebugTest DLL
+        uses: actions/download-artifact@v8
+        with:
+          name: mss32-debugtest
+          path: dll
+      - name: Enable DirectPlay (native TCP/IP service provider for D2 multiplayer)
+        run: |
+          # The minimal game uses native DirectPlay TCP/IP for MP. A clean Windows
+          # Server runner ships the DirectPlay legacy feature DISABLED, so D2's
+          # protocol list collapses to Hotseat only (TLBOX_PROTOCOL total=1) and
+          # TCP/IP (index 2) is absent, the host falls through to DLG_HOTSEAT and MP
+          # never starts. Enabling it registers dplayx/dpwsockx + the DirectPlay
+          # Service Providers (incl. "Internet TCP/IP Connection For DirectPlay"),
+          # machine-wide, so both the host and joiner instances see TCP/IP.
+          $sp = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\DirectPlay\Service Providers'
+          try {
+            $st = (Get-WindowsOptionalFeature -Online -FeatureName DirectPlay).State
+            Write-Host "DirectPlay feature before: $st"
+            if ($st -ne 'Enabled') {
+              Enable-WindowsOptionalFeature -Online -FeatureName DirectPlay -All -NoRestart -ErrorAction Stop | Out-Null
+              Write-Host "DirectPlay feature after: $((Get-WindowsOptionalFeature -Online -FeatureName DirectPlay).State)"
+            }
+          } catch {
+            Write-Host "::warning::Enable-WindowsOptionalFeature DirectPlay failed: $($_.Exception.Message)"
+          }
+          if (Test-Path $sp) {
+            Write-Host "DirectPlay service providers registered:"
+            (Get-ChildItem $sp).PSChildName | ForEach-Object { Write-Host "  - $_" }
+          } else {
+            Write-Host "::error::DirectPlay SP registry key absent after enable, TCP/IP will be missing"
+          }
+          Write-Host "dpwsockx (SysWOW64): $(Test-Path "$env:SystemRoot\SysWOW64\dpwsockx.dll")"
+      - name: Restore game from cache
+        uses: actions/cache/restore@v5
+        with:
+          path: game.tar.gz
+          key: slasher-min-v1
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Unpack game + deploy DebugTest mss32.dll + force OpenGL/ColdCPU
+        run: |
+          New-Item -ItemType Directory -Force -Path game | Out-Null
+          tar -xzf game.tar.gz -C game
+          $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
+          Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
+          # DisciplesGL renders via OpenGL (Renderer=3) on Mesa llvmpipe (deployed next).
+          # ColdCPU=0 (frame limiter OFF): the strategic-map render hung with the limiter
+          # on, a snapshot caught the UI thread parked in DisciplesGL's per-frame
+          # Sleep(v36) at C4dll_R+0xcb7a inside the map's display-list render loop
+          # (sub_5642E1), never returning to the message pump. Try without the limiter.
+          $ini = Join-Path $dir 'Disciple.ini'
+          if (Test-Path $ini) {
+            $c = Get-Content $ini -Raw
+            if ($c -match '(?m)^Renderer=')      { $c = $c -replace '(?m)^Renderer=\d+','Renderer=3' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nRenderer=3" }
+            else                                  { $c += "`r`n[Wrapper]`r`nRenderer=3`r`n" }
+            if ($c -match '(?m)^ColdCPU=')       { $c = $c -replace '(?m)^ColdCPU=\d+','ColdCPU=0' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nColdCPU=0" }
+            if ($c -match '(?m)^ImageVSync=')     { $c = $c -replace '(?m)^ImageVSync=\d+','ImageVSync=0' }
+            if ($c -match '(?m)^HD=')            { $c = $c -replace '(?m)^HD=\d+','HD=0' }
+            Set-Content -Path $ini -Value $c -Encoding ASCII -NoNewline
+            Write-Host "DisciplesGL: $((Get-Content $ini | Select-String '^Renderer=|^ColdCPU=|^ImageVSync=|^HD=') -join ' | ')"
+          } else {
+            Write-Host "::warning::Disciple.ini not found"
+          }
+          "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Deploy Mesa3D software OpenGL (llvmpipe) next to the game
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $dir = $env:GAME_DIR
+          $rel = gh api repos/pal1000/mesa-dist-win/releases/latest | ConvertFrom-Json
+          $asset = $rel.assets | Where-Object { $_.name -match 'release-msvc\.7z$' } | Select-Object -First 1
+          Write-Host "mesa asset: $($asset.name)"
+          $z = Join-Path $env:TEMP 'mesa.7z'
+          Invoke-WebRequest $asset.browser_download_url -OutFile $z -UseBasicParsing
+          $ex = Join-Path $env:TEMP 'mesa'
+          $sevenzip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
+          & $sevenzip x $z "-o$ex" -y "x86" | Out-Null
+          Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
+          Write-Host "Mesa opengl32.dll = $((Get-Item (Join-Path $dir 'opengl32.dll')).Length) bytes"
+      - name: Fetch procdump (diagnostic crash capture)
+        run: |
+          $pd = Join-Path $env:GITHUB_WORKSPACE 'procdump.exe'
+          # 32-bit procdump -> captures the x86 thread context of the WOW64 game
+          Invoke-WebRequest 'https://live.sysinternals.com/procdump.exe' -OutFile $pd -UseBasicParsing
+          $dumps = Join-Path $env:GITHUB_WORKSPACE 'dumps'
+          New-Item -ItemType Directory -Force -Path $dumps | Out-Null
+          "PROCDUMP=$pd"   | Out-File -FilePath $env:GITHUB_ENV -Append
+          "DUMPDIR=$dumps" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Host + joiner (relay) -> skirmish, both reach the map, host ends turn -> joiner's new day
+        run: |
+          node --version  # the dispatcher starts tools/relay/relay.js; GitHub runners ship Node
+          ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -EndHostTurn -Kill -ProcDump "$env:PROCDUMP" -DumpDir "$env:DUMPDIR"
+          exit $LASTEXITCODE
+
+      - name: Dump per-instance logs + relay state on failure
+        if: failure()
+        run: |
+          Get-ChildItem "$env:GAME_DIR" -Filter "mss32_*.log" | Sort-Object Name | ForEach-Object {
+            Write-Host "===================== $($_.Name) ====================="
+            (Get-Content $_.FullName) -match '\[testdrv\]|midObjectLock' | Select-Object -Last 150
+          }
+          $relay = Join-Path "$env:DUMPDIR" 'relay.out.log'
+          if (Test-Path $relay) { Write-Host "===================== relay ====================="; Get-Content $relay -Tail 120 }
+        shell: pwsh
+      - name: Upload full per-instance logs + relay log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: multiplayer-logs
+          path: |
+            ${{ env.GAME_DIR }}/mss32_*.log
+            ${{ env.DUMPDIR }}/relay.out.log
+          if-no-files-found: warn
+      - name: Analyze hung-instance snapshots (cdb stacks)
+        if: failure()
+        run: |
+          $dumps = Get-ChildItem "$env:DUMPDIR" -Filter *.dmp -ErrorAction SilentlyContinue
+          if (-not $dumps) { Write-Host "no snapshots captured (green, or an instance exited before snapshot)"; exit 0 }
+          $cdb = @(
+            "C:\Program Files (x86)\Windows Kits\10\Debuggers\x86\cdb.exe",
+            "C:\Program Files\Windows Kits\10\Debuggers\x86\cdb.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          Write-Host "cdb: $cdb"
+          $sym = "srv*$env:TEMP\sym*https://msdl.microsoft.com/download/symbols"
+          foreach ($d in $dumps) {
+            Write-Host "===================== $($d.Name) (all-thread stacks) ====================="
+            if ($cdb) {
+              $txt = Join-Path $env:DUMPDIR "$($d.BaseName).stacks.txt"
+              # hang snapshot (no exception) -> dump every thread's stack + modules; the
+              # stuck UI/dialog thread (in the Mesa software render) is among them.
+              & $cdb -z $d.FullName -y $sym -c ".reload /f; ~*kb 40; lmf; q" 2>&1 | Out-File $txt
+              Get-Content $txt -Tail 60 | ForEach-Object { Write-Host $_ }
+            } else { Write-Host "x86 cdb not found" }
+          }
+      - name: Upload crash stacks + screenshots
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: multiplayer-stacks
+          path: |
+            ${{ env.DUMPDIR }}/*.stacks.txt
+            ${{ env.DUMPDIR }}/*.png
+          if-no-files-found: ignore
+
+  # The full honest flow on a GENERATED map: the host drives the random generator to a map (not a
+  # skirmish), the joiner joins, both reach the strategic map, then the host legitimately ends its
+  # turn and the joiner sees + clicks through its OWN new-day dialogs. The 60s budget is on the
+  # generation step only (after the template is chosen), not the whole test.
+  generated-map-turn-pass:
+    name: Generated map, host + joiner, honest turn-pass (2p)
+    needs: prep-game
+    runs-on: windows-2025-vs2026
+    env:
+      GALLIUM_DRIVER: llvmpipe
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with: { submodules: false, fetch-depth: 1 }
+      - name: Get DebugTest DLL
+        uses: actions/download-artifact@v8
+        with:
+          name: mss32-debugtest
+          path: dll
+      - name: Enable DirectPlay (native TCP/IP service provider for D2 multiplayer)
+        run: |
+          $sp = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\DirectPlay\Service Providers'
+          try {
+            if ((Get-WindowsOptionalFeature -Online -FeatureName DirectPlay).State -ne 'Enabled') {
+              Enable-WindowsOptionalFeature -Online -FeatureName DirectPlay -All -NoRestart -ErrorAction Stop | Out-Null
+            }
+          } catch { Write-Host "::warning::Enable DirectPlay failed: $($_.Exception.Message)" }
+          if (-not (Test-Path $sp)) { Write-Host "::error::DirectPlay service-provider key absent; TCP/IP will be missing" }
+      - name: Restore game from cache
+        uses: actions/cache/restore@v5
+        with:
+          path: game.tar.gz
+          key: slasher-min-v1
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Unpack game + deploy DebugTest mss32.dll + force OpenGL/ColdCPU
+        run: |
+          New-Item -ItemType Directory -Force -Path game | Out-Null
+          tar -xzf game.tar.gz -C game
+          $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
+          Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
+          $ini = Join-Path $dir 'Disciple.ini'
+          if (Test-Path $ini) {
+            $c = Get-Content $ini -Raw
+            if ($c -match '(?m)^Renderer=')      { $c = $c -replace '(?m)^Renderer=\d+','Renderer=3' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nRenderer=3" }
+            else                                  { $c += "`r`n[Wrapper]`r`nRenderer=3`r`n" }
+            if ($c -match '(?m)^ColdCPU=')       { $c = $c -replace '(?m)^ColdCPU=\d+','ColdCPU=0' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nColdCPU=0" }
+            Set-Content -Path $ini -Value $c -Encoding ASCII -NoNewline
+          }
+          "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Deploy Mesa3D software OpenGL (llvmpipe)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $dir = $env:GAME_DIR
+          $asset = (gh api repos/pal1000/mesa-dist-win/releases/latest | ConvertFrom-Json).assets |
+            Where-Object { $_.name -match 'release-msvc\.7z$' } | Select-Object -First 1
+          $z = Join-Path $env:TEMP 'mesa.7z'
+          Invoke-WebRequest $asset.browser_download_url -OutFile $z -UseBasicParsing
+          $ex = Join-Path $env:TEMP 'mesa'
+          $sevenzip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
+          & $sevenzip x $z "-o$ex" -y "x86" | Out-Null
+          Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
+      - name: Host generates the map, both reach it, host ends turn -> joiner's new day
+        run: |
+          node --version
+          ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -RandomMap -EndHostTurn -Scenario 7 -GenWaitSec 60 -Kill
+          exit $LASTEXITCODE
+      - name: Dump per-instance logs on failure
+        if: failure()
+        run: |
+          Get-ChildItem "$env:GAME_DIR" -Filter "mss32_*.log" | Sort-Object Name | ForEach-Object {
+            Write-Host "===================== $($_.Name) ====================="
+            (Get-Content $_.FullName) -match '\[testdrv\]' | Select-Object -Last 150
+          }
+      - name: Upload per-instance logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: generated-map-logs
+          path: ${{ env.GAME_DIR }}/mss32_*.log
+          if-no-files-found: warn
+
+  # Multiplayer attack + turn-pass + regeneration: the host GENERATES a map (so each player has a
+  # nearby neutral; a fixed skirmish can be too sparse), the joiner joins, both reach the strategic map.
+  # Then each player in turn sends its hero out to attack the nearest free neutral monster, auto-battles,
+  # and ends its turn; after the day rolls over the test asserts a damaged survivor (a winning hero or a
+  # surviving monster) regenerated by >= the threshold. Same Mesa/ColdCPU + DirectPlay setup as above.
+  multiplayer-attack-regen:
+    name: Multiplayer attack + turn-pass + regeneration (2p, generated map)
+    needs: prep-game
+    runs-on: windows-2025-vs2026
+    env:
+      GALLIUM_DRIVER: llvmpipe
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with: { submodules: false, fetch-depth: 1 }
+      - name: Get DebugTest DLL
+        uses: actions/download-artifact@v8
+        with:
+          name: mss32-debugtest
+          path: dll
+      - name: Enable DirectPlay (native TCP/IP service provider for D2 multiplayer)
+        run: |
+          $sp = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\DirectPlay\Service Providers'
+          try {
+            if ((Get-WindowsOptionalFeature -Online -FeatureName DirectPlay).State -ne 'Enabled') {
+              Enable-WindowsOptionalFeature -Online -FeatureName DirectPlay -All -NoRestart -ErrorAction Stop | Out-Null
+            }
+          } catch { Write-Host "::warning::Enable DirectPlay failed: $($_.Exception.Message)" }
+          if (-not (Test-Path $sp)) { Write-Host "::error::DirectPlay service-provider key absent; TCP/IP will be missing" }
+      - name: Restore game from cache
+        uses: actions/cache/restore@v5
+        with:
+          path: game.tar.gz
+          key: slasher-min-v1
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Unpack game + deploy DebugTest mss32.dll + force OpenGL/ColdCPU
+        run: |
+          New-Item -ItemType Directory -Force -Path game | Out-Null
+          tar -xzf game.tar.gz -C game
+          $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
+          Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
+          $ini = Join-Path $dir 'Disciple.ini'
+          if (Test-Path $ini) {
+            $c = Get-Content $ini -Raw
+            if ($c -match '(?m)^Renderer=')      { $c = $c -replace '(?m)^Renderer=\d+','Renderer=3' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nRenderer=3" }
+            else                                  { $c += "`r`n[Wrapper]`r`nRenderer=3`r`n" }
+            if ($c -match '(?m)^ColdCPU=')       { $c = $c -replace '(?m)^ColdCPU=\d+','ColdCPU=0' }
+            elseif ($c -match '(?m)^\[Wrapper\]') { $c = $c -replace '(?m)^\[Wrapper\]',"[Wrapper]`r`nColdCPU=0" }
+            Set-Content -Path $ini -Value $c -Encoding ASCII -NoNewline
+          }
+          "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Deploy Mesa3D software OpenGL (llvmpipe)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $dir = $env:GAME_DIR
+          $asset = (gh api repos/pal1000/mesa-dist-win/releases/latest | ConvertFrom-Json).assets |
+            Where-Object { $_.name -match 'release-msvc\.7z$' } | Select-Object -First 1
+          $z = Join-Path $env:TEMP 'mesa.7z'
+          Invoke-WebRequest $asset.browser_download_url -OutFile $z -UseBasicParsing
+          $ex = Join-Path $env:TEMP 'mesa'
+          $sevenzip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
+          & $sevenzip x $z "-o$ex" -y "x86" | Out-Null
+          Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
+      - name: Host generates a map; both attack nearest monsters + pass turns; assert regeneration
+        run: |
+          node --version
+          ./tools/test/mp-attack-monsters.ps1 -GameDir "$env:GAME_DIR" -GenWaitSec 90 -Kill
+          exit $LASTEXITCODE
+      - name: Dump per-instance logs on failure
+        if: failure()
+        run: |
+          Get-ChildItem "$env:GAME_DIR" -Filter "mss32_*.log" | Sort-Object Name | ForEach-Object {
+            Write-Host "===================== $($_.Name) ====================="
+            (Get-Content $_.FullName) -match '\[testdrv\]|\[battle' | Select-Object -Last 150
+          }
+      - name: Upload per-instance logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mp-attack-logs
+          path: ${{ env.GAME_DIR }}/mss32_*.log
+          if-no-files-found: warn
+
+  # Future tests go here as more jobs, each: download the DLL artifact, restore the
+  # game cache, deploy, run a script.
