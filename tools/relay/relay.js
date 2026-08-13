@@ -50,7 +50,7 @@ const Op = {
     MoveGroupUnit: 0x0308,  // -> client: move/swap a unit between formation slots (u16 stackId | i32 src | i32 dst)
     DismissUnit: 0x0309,    // -> client: dismiss a non-leader unit from a stack (u16 stackId | u16 unitId)
     UiSnapshot: 0x0410,     // <- client: current dialog + all its widgets with state (JSON)
-    WorldSnapshot: 0x0411,  // <- client: players' resources + all map stacks (JSON)
+    WorldSnapshot: 0x0411,  // <- client: clientTakesTurn observation + resources/map objects (JSON)
     LobbyChat: 0x0412,      // <- client: recent custom-lobby chat (JSON)
 };
 
@@ -147,7 +147,7 @@ function handleMessage(socket, op, flags, payload) {
         const prev = state.socketByRole[role];
         if (prev && prev !== socket) { state.clients.delete(prev); try { prev.destroy(); } catch (e) { /* gone */ } }
         state.clients.set(socket, { role, pid: h.pid });
-        state.byRole[role] = { connected: true, pid: h.pid, dialog: null, widgets: [], players: [], stacks: [], camps: [], bags: [], reachedStrategic: false, sawBeginTurn: false };
+        state.byRole[role] = { connected: true, pid: h.pid, dialog: null, widgets: [], strategicActionReady: false, players: [], stacks: [], camps: [], bags: [], reachedStrategic: false, sawBeginTurn: false };
         state.chatByRole[role] = [];
         state.socketByRole[role] = socket;
         console.log(`[hello] role=${role} pid=${h.pid} v${h.version}`);
@@ -181,8 +181,10 @@ function handleMessage(socket, op, flags, payload) {
         break;
     }
     case Op.WorldSnapshot: {
-        // JSON: { day, players: [...], stacks: [...], camps: [...], bags: [...] }. Same DLL escaping
-        // guarantees as UiSnapshot, so a parse failure means a torn frame: log and skip, never crash.
+        // JSON: { day, strategicActionReady, players: [...], stacks: [...], camps: [...], bags: [...] }.
+        // strategicActionReady is exactly the reporter's raw clientTakesTurn observation. Same DLL
+        // escaping guarantees as UiSnapshot, so a parse failure means a torn frame: log and skip,
+        // never crash. Missing/old readiness fields fail closed.
         let snap;
         try { snap = JSON.parse(payload.toString('utf8')); }
         catch (e) { console.error(`[world] ${roleOf(socket)} bad snapshot JSON: ${e.message}`); break; }
@@ -190,12 +192,16 @@ function handleMessage(socket, op, flags, payload) {
         const stacks = Array.isArray(snap.stacks) ? snap.stacks : [];
         const camps = Array.isArray(snap.camps) ? snap.camps : [];
         const bags = Array.isArray(snap.bags) ? snap.bags : [];
+        const strategicActionReady = snap.strategicActionReady === true;
         const c = state.clients.get(socket);
         if (c) {
             const r = state.byRole[c.role];
-            if (r) { r.day = snap.day; r.players = players; r.stacks = stacks; r.camps = camps; r.bags = bags; }
+            if (r) {
+                r.day = snap.day; r.strategicActionReady = strategicActionReady;
+                r.players = players; r.stacks = stacks; r.camps = camps; r.bags = bags;
+            }
         }
-        console.log(`[world] ${roleOf(socket)} -> day ${snap.day}, ${players.length} players, ${stacks.length} stacks, ${camps.length} camps, ${bags.length} bags`);
+        console.log(`[world] ${roleOf(socket)} -> day ${snap.day}, clientTakesTurn=${strategicActionReady}, ${players.length} players, ${stacks.length} stacks, ${camps.length} camps, ${bags.length} bags`);
         break;
     }
     case Op.LobbyChat: {
@@ -326,16 +332,17 @@ const httpServer = http.createServer(async (req, res) => {
         for (const [name, r] of Object.entries(state.byRole)) roles[name] = { dialog: r.dialog, widgets: r.widgets };
         return sendJson(res, 200, { roles });
     }
-    // The live world snapshot. With ?role=, one role's { role, day, players, stacks, camps, bags };
-    // without, every role.
+    // The live world snapshot. strategicActionReady is the raw clientTakesTurn observation. With
+    // ?role=, return one role's { role, day, strategicActionReady, players, stacks, camps, bags };
+    // without, return every role.
     if (req.method === 'GET' && path === '/api/world') {
         const role = q.get('role');
         if (role) {
             const r = state.byRole[role];
-            return sendJson(res, 200, { role, day: r ? r.day : null, players: r ? (r.players || []) : [], stacks: r ? (r.stacks || []) : [], camps: r ? (r.camps || []) : [], bags: r ? (r.bags || []) : [] });
+            return sendJson(res, 200, { role, day: r ? r.day : null, strategicActionReady: !!(r && r.strategicActionReady), players: r ? (r.players || []) : [], stacks: r ? (r.stacks || []) : [], camps: r ? (r.camps || []) : [], bags: r ? (r.bags || []) : [] });
         }
         const roles = {};
-        for (const [name, r] of Object.entries(state.byRole)) roles[name] = { day: r.day, players: r.players || [], stacks: r.stacks || [], camps: r.camps || [], bags: r.bags || [] };
+        for (const [name, r] of Object.entries(state.byRole)) roles[name] = { day: r.day, strategicActionReady: !!r.strategicActionReady, players: r.players || [], stacks: r.stacks || [], camps: r.camps || [], bags: r.bags || [] };
         return sendJson(res, 200, { roles });
     }
     // Custom-lobby chat captured at CMenuCustomLobby::addChatMessage. Enable it on the game process

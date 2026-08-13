@@ -136,7 +136,8 @@ function Resolve-TemplateIndex([string]$GameDir, [string]$Name) {
 function Get-RelayState {
     try { return (Invoke-RestMethod "$script:RelayBase/api/state" -TimeoutSec 3).roles } catch { return $null }
 }
-# One role's state object (or $null): .dialog, .widgets, .connected, .reachedStrategic, .sawBeginTurn.
+# One role's state object (or $null): .dialog, .widgets, .connected, .reachedStrategic, .sawBeginTurn,
+# .strategicActionReady (native clientTakesTurn observation from the world reporter).
 function Get-RoleState([string]$Role) {
     $s = Get-RelayState; if ($s) { return $s.$Role } else { return $null }
 }
@@ -149,7 +150,8 @@ function Get-Dialog([string]$Role) {
 function Get-GameUi([string]$Role) {
     try { return Invoke-RestMethod "$script:RelayBase/api/ui?role=$([uri]::EscapeDataString($Role))" -TimeoutSec 3 } catch { return $null }
 }
-# The world snapshot for a role: { role, day, players:[{id,relation,human,race,gold,...mana}],
+# The world snapshot for a role: { role, day, strategicActionReady,
+# players:[{id,relation,human,race,gold,...mana}],
 # stacks:[{id,x,y,owner,relation,movement,units,hp,subrace,inside}] }. `hp` is the group's total current
 # HP, `inside` is true for a garrisoned stack. Populated only once a scenario is loaded.
 function Get-World([string]$Role) {

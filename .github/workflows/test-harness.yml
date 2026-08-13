@@ -128,7 +128,7 @@ jobs:
     needs: [build, validate, tests]
     # The ordinary suite warms the shared game cache. Run the template matrix even when an
     # unrelated gameplay job failed, but never without the exact harness DLL from this run.
-    if: ${{ !cancelled() && needs.build.result == 'success' && needs.validate.result == 'success' }}
+    if: ${{ always() && !cancelled() && needs.build.result == 'success' && needs.validate.result == 'success' }}
     uses: ./.github/workflows/generation-matrix.yml
     with:
       dll_run_id: ${{ github.run_id }}

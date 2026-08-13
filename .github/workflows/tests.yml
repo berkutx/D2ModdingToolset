@@ -650,7 +650,7 @@ jobs:
           if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
           & $sevenzip x $z "-o$ex" -y 'x86' | Out-Null
           Copy-Item "$ex\x86\*.dll" $env:GAME_DIR -Force -ErrorAction Stop
-      - name: Install the authored arena map (one static .sg; no loader/reroller)
+      - name: Install the authored arena map (one repository-pinned .sg; no loader/reroller)
         run: |
           $exports = Join-Path $env:GAME_DIR 'Exports'
           New-Item -ItemType Directory -Force -Path $exports | Out-Null
@@ -659,15 +659,14 @@ jobs:
           Get-ChildItem -LiteralPath $exports -Filter '*.sg' -File -ErrorAction SilentlyContinue |
             Remove-Item -Force
           $arena = Join-Path $exports 'luckytest-arena.sg'
-          $url = 'https://raw.githubusercontent.com/berkutx/disciples2-roulette-arena-template-loader/main/reroller/assets/arena.sg'
-          Invoke-WebRequest $url -OutFile $arena -UseBasicParsing
-          $expected = 'C5F256EAAC3269895860BB04B885D629E0CD23F7FF1B95A313E54FCEEBE6FECF'
+          Copy-Item -LiteralPath 'tools/test/assets/luckytest-arena.sg' -Destination $arena -Force
+          $expected = '2F8CBAD1E1FE3D649CFD8D8205AB056D80CD3ECD963C440EF5442987FD8100AB'
           $actual = (Get-FileHash -LiteralPath $arena -Algorithm SHA256).Hash
           if ($actual -ne $expected) { throw "arena.sg SHA256 mismatch: $actual" }
           if (@(Get-ChildItem -LiteralPath $exports -Filter '*.sg' -File).Count -ne 1) {
             throw 'arena is not the sole exported scenario'
           }
-          Write-Host "arena.sg verified: $actual"
+          Write-Host "repository-pinned arena.sg verified: $actual"
       - name: Install OBS Studio (portable) for the run video
         continue-on-error: true
         run: |

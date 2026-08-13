@@ -92,6 +92,16 @@ try {
     $opcode = [BitConverter]::ToUInt16($body, 0)
     if ($opcode -ne 2) { throw ('expected HelloAck 0x0002, got 0x{0:X4}' -f $opcode) }
 
+    # Exercise the native clientTakesTurn observation through both public views. One frame is enough:
+    # the relay must retain its exact true value in role state and in the dedicated world projection.
+    $worldJson = '{"day":1,"strategicActionReady":true,"players":[],"stacks":[],"camps":[],"bags":[]}'
+    $worldPayload = [Text.Encoding]::UTF8.GetBytes($worldJson)
+    $frameWriter.Write([uint32](4 + $worldPayload.Length))
+    $frameWriter.Write([uint16]0x0411) # WorldSnapshot
+    $frameWriter.Write([uint16]0)
+    $frameWriter.Write($worldPayload)
+    $frameWriter.Flush()
+
     # Exercise the newest restored th-publish surface too: a UTF-8 lobby snapshot must stay
     # isolated from /api/state and be readable through the dedicated endpoint.
     $chatText = 'Привет'
@@ -115,6 +125,22 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if (-not $seen) { throw "relay did not publish connected role '$roleText'" }
+
+    $readinessSeen = $false
+    for ($i = 0; $i -lt 20; $i++) {
+        $state = Invoke-RestMethod "$script:RelayBase/api/state" -TimeoutSec 2
+        $stateRole = $state.roles.PSObject.Properties[$roleText]
+        $world = Invoke-RestMethod "$script:RelayBase/api/world?role=$([uri]::EscapeDataString($roleText))" -TimeoutSec 2
+        if ($stateRole -and $stateRole.Value.strategicActionReady -eq $true -and
+            $world.strategicActionReady -eq $true) {
+            $readinessSeen = $true
+            break
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $readinessSeen) {
+        throw 'relay did not publish strategicActionReady=true through both /api/state and /api/world'
+    }
 
     $chatSeen = $false
     for ($i = 0; $i -lt 20; $i++) {

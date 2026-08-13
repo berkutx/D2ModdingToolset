@@ -157,6 +157,16 @@ const char* relationOf(const game::CMidgardID& owner, const game::CMidgardID& lo
     return "enemy";
 }
 
+// UI-thread observation of the exact sequential strategic action gate used first by
+// worldactions::moveStack. No simultaneous-turn admission, interception, or other production feature
+// participates in this test-only signal.
+bool strategicActionReady()
+{
+    auto* phaseGame = testdrv::livePhaseGame();
+    auto* data = phaseGame ? phaseGame->data : nullptr;
+    return data && data->clientTakesTurn;
+}
+
 // UI-thread only: reads live game objects through ScenarioView and the *View wrappers.
 void buildJson(std::string& json, const game::IMidgardObjectMap* objectMap)
 {
@@ -184,6 +194,8 @@ void buildJson(std::string& json, const game::IMidgardObjectMap* objectMap)
 
     json += '{';
     kvInt(json, "day", scenario.getCurrentDay());
+    json += ',';
+    kvBool(json, "strategicActionReady", strategicActionReady());
 
     json += ",\"players\":[";
     bool firstPlayer = true;

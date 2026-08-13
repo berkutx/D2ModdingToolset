@@ -80,12 +80,19 @@ snapshot the dispatcher reads with `Get-World <role>` (`GET /api/world`):
 
 ```json
 { "day": 1,
+  "strategicActionReady": true,
   "players": [
     { "id": "...", "relation": "self", "human": true, "race": 1, "gold": 200, "lifeMana": 0 } ],
   "stacks": [
     { "id": "S143KC0001", "x": 38, "y": 38, "owner": "...", "relation": "self",
       "movement": 33, "units": 1, "hp": 95, "subrace": 1, "inside": true } ] }
 ```
+
+`strategicActionReady` is the world reporter's UI-thread observation of the exact live
+`CPhaseGameData::clientTakesTurn` gate checked first by `Move-Stack`. It has no queue, object-lock, or
+simultaneous-turn meaning. The relay exposes the same raw boolean in `/api/state` and `/api/world`.
+Before a one-shot strategic action, require a connected role, the current strategic-map dialog,
+`sawBeginTurn`, and this bit; never probe or retry the action to discover readiness.
 
 `relation` tags each player and stack `self`, `neutral`, or `enemy`. In a single-instance game `self`
 is the player whose turn it is (the reporter has no network client to name the local human), so read
@@ -197,7 +204,7 @@ the client's `D2TESTDRV_ROLE`.
 | `Set-EditText <role> <dlg> <edit> <text>` | set an edit-box's text | `POST /api/ui/edit` |
 | `Invoke-Toggle <role> <dlg> <toggle>` | flip a toggle button (e.g. auto-battle) | `POST /api/ui/toggle` |
 | `Step-ToDialog <role> <dlg> <btn> <toDlg> [sec]` | click `<btn>` until the client reaches `<toDlg>` | none |
-| `Get-World <role>` | the world snapshot `{ day, players, stacks }` | `GET /api/world` |
+| `Get-World <role>` | the world snapshot `{ day, strategicActionReady, players, stacks }` | `GET /api/world` |
 | `Get-Resources <role>` | the local player's resource row | `GET /api/world` |
 | `Get-Stacks <role>` | every stack on the map | `GET /api/world` |
 | `Move-Stack <role> <id> <x> <y>` | move a stack to a tile, or onto a monster to attack | `POST /api/ui/move` |
@@ -289,11 +296,12 @@ template. Its steps, in order:
 2. Exit the garrison. The starting hero sits INSIDE its capital, so the snapshot reports the fort
    anchor, not the hero's tile, and the first action is always a free exit step. Issue it with
    `Move-Stack <role> <heroId> (cx+5) (cy+5)`, where `(cx,cy)` is the reported anchor position: the
-   client detects the garrisoned stack and replicates the game's exact 0-cost exit move. Retry the move
-   until it is accepted: the first-day begin-turn popup (`DLG_BEGIN_TURN`) can appear a beat after the
-   iso view and the engine refuses moves until it is confirmed (that activates the turn), so dismiss any
-   lingering popup between attempts. Then wait for the reported position to change to a real tile and
-   treat that as the hero's starting tile.
+   client detects the garrisoned stack and replicates the game's exact 0-cost exit move. Do not probe or
+   retry it: the first-day `DLG_BEGIN_TURN` can appear after the iso view while the engine's
+   `clientTakesTurn` admission gate is still false. Acknowledge each known startup dialog at most once,
+   then wait for a connected current map with `sawBeginTurn` and `strategicActionReady` both true,
+   refresh the hero precondition, and issue this sole exit intent. Finally wait for the reported position
+   to change to a real tile and treat that as the hero's starting tile.
 3. Pick the target. From `Get-Stacks`, take the nearest stack whose `relation` is `neutral` and whose
    `inside` is false: a free neutral monster. Filter on `neutral` specifically, not just non-self, so
    an enemy AI player's roaming stack is never chosen as the "monster"; skip `inside` stacks, which are
@@ -387,7 +395,7 @@ explicitly and `-Kill` makes the run clean up after itself.
 | `reliability_test.ps1` | boot N times to the main menu (the CI boot test) |
 | `walk-menu.ps1` | one self-nav client, left running for manual inspection |
 | `lobby-create.ps1` | manual live-lobby integration test; not run in CI and requires explicit credentials |
-| `luckytest-arena.ps1` | static authored-arena test exercising chests, camps, hire and squad layout for both roles; CI downloads one pinned `.sg`, never the LuckyTest loader/reroller |
+| `luckytest-arena.ps1` | static authored-arena test exercising chests, camps, hire and squad layout for both roles; CI copies the repository-pinned `assets/luckytest-arena.sg`, never the LuckyTest loader/reroller |
 | `HIRE-MERC.md`, `SLOT-MANAGEMENT.md` | contracts and RE notes for the optional LuckyTest action surface |
 | `_show-window.ps1`, `_capture.ps1` | bring a window forward and capture a diagnostic PNG |
 | `../relay/relay.js` | the relay |
@@ -475,12 +483,20 @@ control endpoint каждого рилея. Native TCP-клиент разреш
 
 ```json
 { "day": 1,
+  "strategicActionReady": true,
   "players": [
     { "id": "...", "relation": "self", "human": true, "race": 1, "gold": 200, "lifeMana": 0 } ],
   "stacks": [
     { "id": "S143KC0001", "x": 38, "y": 38, "owner": "...", "relation": "self",
       "movement": 33, "units": 1, "hp": 95, "subrace": 1, "inside": true } ] }
 ```
+
+`strategicActionReady` — наблюдение UI-потока за точным живым флагом
+`CPhaseGameData::clientTakesTurn`, который `Move-Stack` проверяет первым. Он ничего не сообщает об
+очереди, блокировке объекта или одновременных ходах. Рилей отдаёт тот же исходный bool и в
+`/api/state`, и в `/api/world`. Перед однократным стратегическим действием требуйте подключённую роль,
+текущий диалог стратегической карты, `sawBeginTurn` и этот флаг; не пробуйте действие и не повторяйте
+его для определения готовности.
 
 `relation` помечает каждого игрока и каждый стек как `self`, `neutral` или `enemy`. В одиночной игре
 `self` это игрок, чей сейчас ход (у репортёра нет сетевого клиента, чтобы назвать локального человека),
@@ -591,7 +607,7 @@ DebugTest пишет в лог и роняет на нём прогон вмес
 | `Set-EditText <role> <dlg> <edit> <text>` | задать текст поля ввода | `POST /api/ui/edit` |
 | `Invoke-Toggle <role> <dlg> <toggle>` | переключить toggle-кнопку (например, автобой) | `POST /api/ui/toggle` |
 | `Step-ToDialog <role> <dlg> <btn> <toDlg> [sec]` | нажимать `<btn>`, пока клиент не дойдёт до `<toDlg>` | нет |
-| `Get-World <role>` | снапшот мира `{ day, players, stacks }` | `GET /api/world` |
+| `Get-World <role>` | снапшот мира `{ day, strategicActionReady, players, stacks }` | `GET /api/world` |
 | `Get-Resources <role>` | строка ресурсов локального игрока | `GET /api/world` |
 | `Get-Stacks <role>` | все стеки на карте | `GET /api/world` |
 | `Move-Stack <role> <id> <x> <y>` | переместить стек на клетку или на монстра для атаки | `POST /api/ui/move` |
@@ -681,11 +697,12 @@ while (-not (Get-RoleState $role).reachedStrategic) {
 2. Выйти из гарнизона. Стартовый герой сидит ВНУТРИ столицы, поэтому снапшот сообщает якорь форта, а
    не клетку героя, и первое действие - всегда бесплатный шаг выхода. Подайте его через
    `Move-Stack <role> <heroId> (cx+5) (cy+5)`, где `(cx,cy)` - сообщённая позиция якоря: клиент
-   распознаёт стек в гарнизоне и воспроизводит точный 0-стоимостный выход игры. Повторяйте команду, пока
-   она не будет принята: popup начала первого дня (`DLG_BEGIN_TURN`) может появиться чуть позже изо-вида,
-   и движок отклоняет ходы, пока его не подтвердят (это активирует ход), поэтому между попытками
-   закрывайте любой задержавшийся popup. Затем дождитесь смены сообщённой позиции на реальную клетку и
-   считайте её стартовой клеткой героя.
+   распознаёт стек в гарнизоне и воспроизводит точный 0-стоимостный выход игры. Не пробуйте и не
+   повторяйте его: `DLG_BEGIN_TURN` первого дня может появиться после изо-вида, пока admission-флаг
+   движка `clientTakesTurn` ещё ложен. Подтвердите каждый известный стартовый диалог не более одного
+   раза, затем дождитесь подключённой роли на текущей карте с истинными `sawBeginTurn` и
+   `strategicActionReady`, заново проверьте героя и подайте единственную команду выхода. После этого
+   дождитесь смены сообщённой позиции на реальную клетку и считайте её стартовой клеткой героя.
 3. Выбрать цель. Из `Get-Stacks` возьмите ближайший стек, у которого `relation` равно `neutral`, а
    `inside` ложно: свободного нейтрального монстра. Фильтруйте именно по `neutral`, а не просто по
    не-`self`, чтобы бродячий стек вражеского ИИ-игрока никогда не был выбран как «монстр»; стеки с
@@ -780,7 +797,7 @@ tools и оба транспорта рилея, собирает compile-gated 
 | `reliability_test.ps1` | загрузка N раз до главного меню (бут-тест CI) |
 | `walk-menu.ps1` | один self-nav клиент, оставленный запущенным для ручного осмотра |
 | `lobby-create.ps1` | ручной интеграционный тест живого lobby; не запускается в CI и требует явных credentials |
-| `luckytest-arena.ps1` | тест статической авторской арены: сундуки, лагеря, найм и раскладка отряда у обеих ролей; CI скачивает один pinned `.sg`, но не LuckyTest loader/reroller |
+| `luckytest-arena.ps1` | тест статической авторской арены: сундуки, лагеря, найм и раскладка отряда у обеих ролей; CI копирует закреплённый в репозитории `assets/luckytest-arena.sg`, без LuckyTest loader/reroller |
 | `HIRE-MERC.md`, `SLOT-MANAGEMENT.md` | контракты и RE-заметки опционального LuckyTest action surface |
 | `_show-window.ps1`, `_capture.ps1` | поднять окно и снять диагностический PNG |
 | `../relay/relay.js` | рилей |

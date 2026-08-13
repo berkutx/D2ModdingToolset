@@ -28,8 +28,10 @@ void install();
  * SEH wrapper in autonav, never from the bridge thread (getObjectMap is thread-keyed). */
 void rebuildSnapshot();
 
-/** Copy the latest world snapshot (JSON: {"day":..,"players":[..],"stacks":[..]}) and its change
- * epoch. Thread-safe; the bridge thread calls this. Returns false before the first snapshot exists. */
+/** Copy the latest world snapshot
+ * (JSON: {"day":..,"strategicActionReady":bool,"players":[..],"stacks":[..]}) and its change epoch.
+ * strategicActionReady is a UI-thread observation of the live clientTakesTurn admission gate.
+ * Thread-safe; the bridge thread calls this. Returns false before the first snapshot exists. */
 bool copyWorldSnapshot(std::string& outJson, std::uint32_t& outEpoch);
 
 } // namespace worldreporter

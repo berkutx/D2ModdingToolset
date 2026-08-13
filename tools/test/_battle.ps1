@@ -50,23 +50,21 @@ function Invoke-HeroAttack {
     # reachedStrategic latches on the FIRST map frame, which can precede the late DLG_BEGIN_TURN. Do not
     # use that transient map as evidence that the turn is active and do not probe/refire Move-Stack.
     # Instead, wait until the relay has actually observed DLG_BEGIN_TURN, acknowledge each known startup
-    # dialog at most once (BTN_OK is the action that activates this turn), and require the resulting bare
-    # map to hold long enough for a fresh reporter snapshot. Only then issue the sole garrison-exit intent.
-    $consumed = @{}; $bareSince = $null; $activationReady = $false; $t0 = Get-Date
+    # dialog at most once (BTN_OK starts activation), and wait for strategicActionReady: the native world
+    # reporter's observation of the exact clientTakesTurn admission gate used by Move-Stack. Wall-clock
+    # stability is not readiness. Only then issue the sole garrison-exit intent.
+    $consumed = @{}; $activationReady = $false; $t0 = Get-Date
     while ((((Get-Date) - $t0).TotalSeconds) -lt $ActivateTimeoutSec) {
         if ($Client -and $Client.HasExited) { return [pscustomobject]@{ ok = $false; reason = "the game crashed before the exit" } }
         $state = Get-RoleState $Role
         $d = if ($state) { $state.dialog } else { $null }
         $onMap = $d -eq 'DLG_STRATEGIC' -or $d -eq 'DLG_ISO_PAL'
 
-        if ($onMap -and [bool]$state.sawBeginTurn) {
-            if ($null -eq $bareSince) { $bareSince = Get-Date }
-            elseif ((((Get-Date) - $bareSince).TotalMilliseconds) -ge 2000) {
-                $activationReady = $true
-                break
-            }
+        if ([bool]$state.connected -and $onMap -and [bool]$state.sawBeginTurn -and
+            [bool]$state.strategicActionReady) {
+            $activationReady = $true
+            break
         } else {
-            $bareSince = $null
             if ($d -and $script:BattleStartButton.ContainsKey($d) -and -not $consumed.ContainsKey($d)) {
                 $button = $script:BattleStartButton[$d]
                 $readyButton = @($state.widgets) | Where-Object {
@@ -79,7 +77,7 @@ function Invoke-HeroAttack {
                         return [pscustomobject]@{ ok = $false; reason = "one-shot startup action $d::$button was not accepted" }
                     }
                     if ($d -eq 'DLG_BEGIN_TURN') {
-                        Write-Host "[battle:$Role] begin-turn acknowledged; waiting for the stable active map..." -ForegroundColor DarkCyan
+                        Write-Host "[battle:$Role] begin-turn acknowledged; waiting for native clientTakesTurn=true..." -ForegroundColor DarkCyan
                     }
                 }
             }
@@ -87,7 +85,7 @@ function Invoke-HeroAttack {
         Start-Sleep -Milliseconds 250
     }
     if (-not $activationReady) {
-        return [pscustomobject]@{ ok = $false; reason = "turn never reached a stable map after DLG_BEGIN_TURN (on $d)" }
+        return [pscustomobject]@{ ok = $false; reason = "native clientTakesTurn never became true after DLG_BEGIN_TURN (on $d)" }
     }
 
     # Refresh the exact stack precondition immediately before the only exit command. If something else
