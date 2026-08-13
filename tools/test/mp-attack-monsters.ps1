@@ -27,10 +27,10 @@
 
 .EXAMPLE
   .\mp-attack-monsters.ps1 -Kill
-  .\mp-attack-monsters.ps1 -Kill -MinRegenPct 5 -Template Diligence -MapSize 1
+  .\mp-attack-monsters.ps1 -Kill -MinRegenPct 5 -Template Freedom -MapSize 1
 #>
 param(
-    [string]$Template = 'Diligence',  # generator template (resolved by NAME); places neutrals near each start
+    [string]$Template = 'Freedom',    # creates an owned RodPlacer stack and neutral stacks in each start zone
     [int]$MapSize = 1,                # SPIN_SIZE index (0 = smallest); a larger map gives each player its own neutral zone
     [int]$GenWaitSec = 90,            # seconds to wait for the host's map generation
     [int]$MinRegenPct = 0,            # HARD-fail gate on the best survivor's regen (default 0 = observe-only; regen is unit/timing-dependent, ~0-16% per day). Pass e.g. 5 for a strict gate.
