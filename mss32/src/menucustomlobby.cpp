@@ -18,6 +18,9 @@
  */
 
 #include "menucustomlobby.h"
+#ifdef D2_TESTDRV
+#include "testdrv/lobbychatreporter.h"
+#endif
 #include "autodialog.h"
 #include "button.h"
 #include "dialoginterf.h"
@@ -1499,6 +1502,11 @@ void CMenuCustomLobby::addChatMessage(CNetCustomService::ChatMessage message)
     if (m_chatMessages.size() >= chatMessageMaxCount) {
         m_chatMessages.pop_front();
     }
+#ifdef D2_TESTDRV
+    // Read before the move below: the lobby server echoes both remote and locally sent lines here.
+    hooks::testdrv::lobbychatreporter::onChatReceived(message.sender.C_String(),
+                                                      message.text.C_String());
+#endif
     m_chatMessages.push_back(std::move(message));
 
     updateListBoxChat();

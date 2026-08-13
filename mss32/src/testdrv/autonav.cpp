@@ -193,6 +193,12 @@ bool setListSelection(const char* dlgName, const char* lbName, int index, std::u
     bool ok = false;
     __try {
         game::CListBoxInterfApi::get().setSelectedIndex(lb, index);
+        // A raw setSelectedIndex does not run the listbox callback that a real click runs. Menus
+        // such as DLG_RANDOM_SCENARIO_MULTI rebuild their parameter spins from that callback; without
+        // it the template matrix selects a new row while generation still reads stale/default options.
+        auto* callback = lb->listBoxData ? lb->listBoxData->onSelectionConfirmed.data : nullptr;
+        if (callback && callback->vftable && callback->vftable->runCallback)
+            callback->vftable->runCallback(callback, index);
         spdlog::info("[testdrv] nav select {}::{} = {:d} (total={:d})", dlgName, lbName, index,
                      lb->listBoxData ? lb->listBoxData->elementsTotal : -1);
         ok = true;

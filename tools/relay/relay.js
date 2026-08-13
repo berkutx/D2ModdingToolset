@@ -10,6 +10,8 @@
  * coordinate with no files.
  *
  * Run: node relay.js (pipe \\.\pipe\d2lobby.packetlogic, optional D2_RELAY_TCP_PORT, HTTP :8077).
+ * D2_RELAY_HTTP_HOST/_PORT override the dispatcher endpoint for parallel headless hosts;
+ * D2TESTDRV_PIPE_NAME can isolate a local named-pipe smoke or test run.
  * Built-ins net + http only.
  */
 
@@ -18,9 +20,19 @@
 const net = require('net');
 const http = require('http');
 
-const PIPE_NAME = '\\\\.\\pipe\\d2lobby.packetlogic';
-const HTTP_HOST = '127.0.0.1';
-const HTTP_PORT = 8077;
+function envPort(name, fallback) {
+    const raw = process.env[name];
+    if (raw === undefined || raw === '') return fallback;
+    const port = Number(raw);
+    if (!Number.isInteger(port) || port < 1 || port > 65535)
+        throw new Error(`${name} must be an integer from 1 to 65535 (got ${JSON.stringify(raw)})`);
+    return port;
+}
+
+const PIPE_NAME = process.env.D2TESTDRV_PIPE_NAME || '\\\\.\\pipe\\d2lobby.packetlogic';
+const HTTP_HOST = process.env.D2_RELAY_HTTP_HOST || '127.0.0.1';
+const HTTP_PORT = envPort('D2_RELAY_HTTP_PORT', 8077);
+const INSTANCE_ID = process.env.D2_RELAY_INSTANCE_ID || `${process.pid}-${Date.now()}`;
 const PROTOCOL_VERSION = 1;
 
 // Opcodes (mirror testdrv/packetlogicbridge.cpp, public protocol only).
@@ -39,11 +51,13 @@ const Op = {
     DismissUnit: 0x0309,    // -> client: dismiss a non-leader unit from a stack (u16 stackId | u16 unitId)
     UiSnapshot: 0x0410,     // <- client: current dialog + all its widgets with state (JSON)
     WorldSnapshot: 0x0411,  // <- client: players' resources + all map stacks (JSON)
+    LobbyChat: 0x0412,      // <- client: recent custom-lobby chat (JSON)
 };
 
 const state = {
     clients: new Map(),  // socket -> { role, pid }
     byRole: {},          // role -> current serialized UI/world state
+    chatByRole: {},      // role -> recent lobby-chat messages; kept out of frequently polled /api/state
     socketByRole: {},    // role -> current socket (NOT serialized); the authoritative owner, so a
                          // relaunch supersedes it and a stale socket's late 'close' can't flip it offline.
 };
@@ -134,6 +148,7 @@ function handleMessage(socket, op, flags, payload) {
         if (prev && prev !== socket) { state.clients.delete(prev); try { prev.destroy(); } catch (e) { /* gone */ } }
         state.clients.set(socket, { role, pid: h.pid });
         state.byRole[role] = { connected: true, pid: h.pid, dialog: null, widgets: [], players: [], stacks: [], camps: [], bags: [], reachedStrategic: false, sawBeginTurn: false };
+        state.chatByRole[role] = [];
         state.socketByRole[role] = socket;
         console.log(`[hello] role=${role} pid=${h.pid} v${h.version}`);
         const ack = Buffer.alloc(8);
@@ -181,6 +196,16 @@ function handleMessage(socket, op, flags, payload) {
             if (r) { r.day = snap.day; r.players = players; r.stacks = stacks; r.camps = camps; r.bags = bags; }
         }
         console.log(`[world] ${roleOf(socket)} -> day ${snap.day}, ${players.length} players, ${stacks.length} stacks, ${camps.length} camps, ${bags.length} bags`);
+        break;
+    }
+    case Op.LobbyChat: {
+        let snapshot;
+        try { snapshot = JSON.parse(payload.toString('utf8')); }
+        catch (e) { console.error(`[lobbychat] ${roleOf(socket)} bad snapshot JSON: ${e.message}`); break; }
+        const messages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
+        const client = state.clients.get(socket);
+        if (client) state.chatByRole[client.role] = messages;
+        console.log(`[lobbychat] ${roleOf(socket)} -> ${messages.length} messages`);
         break;
     }
     case Op.CommandResult: {
@@ -242,9 +267,18 @@ function onAgentConn(socket) {
     socket.on('error', (e) => console.error('[conn] socket error', e.message));
 }
 
-if (process.platform === 'win32') {
+function fatalListenError(kind, error) {
+    console.error(`[${kind}] server error`, error.message);
+    // A relay with only its HTTP half alive would pass readiness but strand every game agent.
+    process.exitCode = 2;
+    setImmediate(() => process.exit(2));
+}
+
+// TCP mode deliberately skips the process-global fixed pipe, allowing several independent headless
+// relays on one Windows host (each uses its own D2_RELAY_TCP_PORT and D2_RELAY_HTTP_PORT).
+if (process.platform === 'win32' && !process.env.D2_RELAY_TCP_PORT) {
     const pipeServer = net.createServer(onAgentConn);
-    pipeServer.on('error', (e) => console.error('[pipe] server error', e.message));
+    pipeServer.on('error', (e) => fatalListenError('pipe', e));
     pipeServer.listen(PIPE_NAME, () => console.log(`[pipe] listening on ${PIPE_NAME}`));
 } else if (!process.env.D2_RELAY_TCP_PORT) {
     console.error('[tcp] D2_RELAY_TCP_PORT is required when the Windows named pipe is unavailable');
@@ -252,10 +286,10 @@ if (process.platform === 'win32') {
 }
 
 if (process.env.D2_RELAY_TCP_PORT) {
-    const tcpPort = parseInt(process.env.D2_RELAY_TCP_PORT, 10);
+    const tcpPort = envPort('D2_RELAY_TCP_PORT', 47626);
     const tcpHost = process.env.D2_RELAY_TCP_HOST || '127.0.0.1';
     const tcpServer = net.createServer(onAgentConn);
-    tcpServer.on('error', (e) => console.error('[tcp] server error', e.message));
+    tcpServer.on('error', (e) => fatalListenError('tcp', e));
     tcpServer.listen(tcpPort, tcpHost,
         () => console.log(`[tcp] agent server on ${tcpHost}:${tcpPort}`));
 }
@@ -277,7 +311,8 @@ const httpServer = http.createServer(async (req, res) => {
     const path = url.pathname;
     const q = url.searchParams;
 
-    if (req.method === 'GET' && path === '/api/status') return sendJson(res, 200, { roles: state.byRole });
+    if (req.method === 'GET' && path === '/api/status')
+        return sendJson(res, 200, { instanceId: INSTANCE_ID, roles: state.byRole });
     // Per-role status + latches for the dispatcher: { roles: { host:{connected,dialog,widgets,...}, ... } }.
     if (req.method === 'GET' && path === '/api/state') return sendJson(res, 200, { roles: state.byRole });
     // The live UI snapshot. With ?role=, one role's { role, dialog, widgets }; without, every role.
@@ -301,6 +336,18 @@ const httpServer = http.createServer(async (req, res) => {
         }
         const roles = {};
         for (const [name, r] of Object.entries(state.byRole)) roles[name] = { day: r.day, players: r.players || [], stacks: r.stacks || [], camps: r.camps || [], bags: r.bags || [] };
+        return sendJson(res, 200, { roles });
+    }
+    // Custom-lobby chat captured at CMenuCustomLobby::addChatMessage. Enable it on the game process
+    // with D2TESTDRV_LOBBY_CHAT=1; absent/disabled reporters naturally return an empty list.
+    if (req.method === 'GET' && path === '/api/lobby/chat') {
+        const role = q.get('role');
+        if (role) {
+            return sendJson(res, 200, { role, messages: state.chatByRole[role] || [] });
+        }
+        const roles = {};
+        for (const name of Object.keys(state.byRole))
+            roles[name] = { messages: state.chatByRole[name] || [] };
         return sendJson(res, 200, { roles });
     }
     // UI actions, grouped under /api/ui/*. Each resolves the role's agent socket then forwards one
@@ -388,6 +435,7 @@ const httpServer = http.createServer(async (req, res) => {
     sendJson(res, 404, { error: 'not found' });
 });
 
+httpServer.on('error', (e) => fatalListenError('http', e));
 httpServer.listen(HTTP_PORT, HTTP_HOST, () => console.log(`[http] api on http://${HTTP_HOST}:${HTTP_PORT}`));
 
 process.on('SIGINT', () => { console.log('\nshutting down'); process.exit(0); });

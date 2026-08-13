@@ -12,11 +12,14 @@
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #endif
 #include <winsock2.h>
+#include <ws2tcpip.h>
 
+#include "testdrv/lobbychatreporter.h"
 #include "testdrv/packetlogicbridge.h"
 #include "testdrv/uistatereporter.h"
 #include "testdrv/worldreporter.h"
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -32,7 +35,7 @@ namespace bridge {
 namespace {
 
 // Pipe name + protocol version (mirror the node relay).
-constexpr const wchar_t* kPipeName = L"\\\\.\\pipe\\d2lobby.packetlogic";
+constexpr const wchar_t* kDefaultPipeName = L"\\\\.\\pipe\\d2lobby.packetlogic";
 constexpr uint32_t kProtocolVersion = 1;
 
 // Public protocol opcodes only. Control opcodes the bridge does not own are
@@ -55,6 +58,7 @@ enum class Op : uint16_t
 
     UiSnapshot = 0x0410,     // -> relay: current dialog + all its widgets with state (JSON)
     WorldSnapshot = 0x0411,  // -> relay: players' resources + all map stacks (JSON, world reporter)
+    LobbyChat = 0x0412,      // -> relay: recent custom-lobby chat (JSON, lobby chat reporter)
 };
 
 std::atomic<HANDLE> g_pipe{INVALID_HANDLE_VALUE};
@@ -72,6 +76,36 @@ struct SendItem
 std::mutex g_send_mutex;
 std::deque<SendItem> g_send_queue;
 constexpr size_t kSendQueueMax = 256;
+
+bool has_connection()
+{
+    return g_pipe.load() != INVALID_HANDLE_VALUE || g_sock.load() != INVALID_SOCKET;
+}
+
+void clear_send_queue()
+{
+    std::lock_guard<std::mutex> lock(g_send_mutex);
+    g_send_queue.clear();
+}
+
+void close_connection()
+{
+    HANDLE pipe = g_pipe.exchange(INVALID_HANDLE_VALUE);
+    if (pipe != INVALID_HANDLE_VALUE) {
+        CancelIoEx(pipe, nullptr);
+        CloseHandle(pipe);
+    }
+
+    SOCKET socket = g_sock.exchange(INVALID_SOCKET);
+    if (socket != INVALID_SOCKET) {
+        shutdown(socket, SD_BOTH);
+        closesocket(socket);
+    }
+
+    // Command results produced for a relay which disappeared are no longer
+    // correlated after the next Hello. Current snapshots are resent instead.
+    clear_send_queue();
+}
 
 bool write_message(Op op, const void* payload, uint32_t payload_size)
 {
@@ -228,153 +262,270 @@ void handle_incoming(Op op, const std::vector<uint8_t>& payload)
 
 void bridge_thread_main()
 {
+    bool wsaStarted = false;
+    struct ThreadExit
+    {
+        bool& wsaStarted;
+        ~ThreadExit()
+        {
+            close_connection();
+            if (wsaStarted)
+                WSACleanup();
+            g_running.store(false);
+            spdlog::info("[testdrv] bridge thread exiting");
+        }
+    } threadExit{wsaStarted};
+
     Sleep(500); // let the loader settle before chatting on a pipe
 
     char tcpHost[256]{};
-    const bool useTcp = GetEnvironmentVariableA("D2TESTDRV_BRIDGE_TCP_HOST", tcpHost,
-                                                 sizeof(tcpHost)) > 0;
+    const DWORD hostLength =
+        GetEnvironmentVariableA("D2TESTDRV_BRIDGE_TCP_HOST", tcpHost, sizeof(tcpHost));
+    if (hostLength >= sizeof(tcpHost)) {
+        spdlog::warn("[testdrv] D2TESTDRV_BRIDGE_TCP_HOST is too long, bridge disabled");
+        return;
+    }
+    const bool useTcp = hostLength > 0;
+    sockaddr_in tcpAddress{};
+    wchar_t pipeName[256]{};
+
     if (useTcp) {
         char portText[16]{};
-        GetEnvironmentVariableA("D2TESTDRV_BRIDGE_TCP_PORT", portText, sizeof(portText));
-        const int port = portText[0] ? atoi(portText) : 47626;
+        const DWORD portLength =
+            GetEnvironmentVariableA("D2TESTDRV_BRIDGE_TCP_PORT", portText, sizeof(portText));
+        if (portLength >= sizeof(portText)) {
+            spdlog::warn("[testdrv] D2TESTDRV_BRIDGE_TCP_PORT is too long, bridge disabled");
+            return;
+        }
+
+        char* portEnd = nullptr;
+        const long port = portText[0] ? strtol(portText, &portEnd, 10) : 47626;
+        if (port < 1 || port > 65535 || (portText[0] && (!portEnd || *portEnd != '\0'))) {
+            spdlog::warn("[testdrv] D2TESTDRV_BRIDGE_TCP_PORT is invalid, bridge disabled");
+            return;
+        }
+
         WSADATA wsa{};
-        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
-            return;
-        SOCKET socket = INVALID_SOCKET;
-        for (int attempt = 0; attempt < 20 && g_running.load(); ++attempt) {
-            socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-            if (socket == INVALID_SOCKET)
-                break;
-            sockaddr_in address{};
-            address.sin_family = AF_INET;
-            address.sin_port = htons(static_cast<u_short>(port));
-            address.sin_addr.s_addr = inet_addr(tcpHost);
-            if (address.sin_addr.s_addr == INADDR_NONE)
-                address.sin_addr.s_addr = inet_addr("127.0.0.1");
-            if (::connect(socket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != SOCKET_ERROR)
-                break;
-            closesocket(socket);
-            socket = INVALID_SOCKET;
-            Sleep(500);
-        }
-        if (socket == INVALID_SOCKET) {
-            spdlog::warn("[testdrv] bridge could not connect via TCP");
-            WSACleanup();
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+            spdlog::warn("[testdrv] bridge WSAStartup failed");
             return;
         }
-        u_long nonblocking = 1;
-        ioctlsocket(socket, FIONBIO, &nonblocking);
-        g_sock = socket;
-        spdlog::info("[testdrv] bridge connected via TCP");
+        wsaStarted = true;
+
+        addrinfo hints{};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+        addrinfo* resolved = nullptr;
+        const std::string service = std::to_string(port);
+        const int resolveResult = getaddrinfo(tcpHost, service.c_str(), &hints, &resolved);
+        if (resolveResult != 0 || !resolved || !resolved->ai_addr) {
+            spdlog::warn("[testdrv] bridge cannot resolve TCP host '{}' (error={:d})", tcpHost,
+                         resolveResult);
+            if (resolved)
+                freeaddrinfo(resolved);
+            return;
+        }
+        tcpAddress = *reinterpret_cast<const sockaddr_in*>(resolved->ai_addr);
+        freeaddrinfo(resolved);
     } else {
-        HANDLE pipe = INVALID_HANDLE_VALUE;
-        for (int attempt = 0; attempt < 20 && g_running.load(); ++attempt) {
-            pipe = CreateFileW(kPipeName, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                               0, nullptr);
-            if (pipe != INVALID_HANDLE_VALUE)
-                break;
-            const DWORD error = GetLastError();
-            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PIPE_BUSY) {
-                spdlog::warn("[testdrv] bridge CreateFileW failed lastError={:d}", error);
-                return;
-            }
-            Sleep(500);
-        }
-        if (pipe == INVALID_HANDLE_VALUE) {
-            spdlog::info("[testdrv] bridge: no relay running, observability off");
+        const DWORD pipeLength = GetEnvironmentVariableW(
+            L"D2TESTDRV_PIPE_NAME", pipeName, static_cast<DWORD>(_countof(pipeName)));
+        if (pipeLength >= _countof(pipeName)) {
+            spdlog::warn("[testdrv] D2TESTDRV_PIPE_NAME is too long, bridge disabled");
             return;
         }
-        g_pipe = pipe;
+        if (!pipeLength)
+            lstrcpynW(pipeName, kDefaultPipeName, static_cast<int>(_countof(pipeName)));
+    }
+
+    auto connectOnce = [&]() -> bool {
+        if (useTcp) {
+            SOCKET socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (socket == INVALID_SOCKET)
+                return false;
+            DWORD timeoutMs = 2000;
+            setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO,
+                       reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+            if (::connect(socket, reinterpret_cast<sockaddr*>(&tcpAddress), sizeof(tcpAddress))
+                == SOCKET_ERROR) {
+                closesocket(socket);
+                return false;
+            }
+            if (!g_running.load()) {
+                closesocket(socket);
+                return false;
+            }
+            u_long nonblocking = 1;
+            if (ioctlsocket(socket, FIONBIO, &nonblocking) == SOCKET_ERROR) {
+                closesocket(socket);
+                return false;
+            }
+            g_sock.store(socket);
+            spdlog::info("[testdrv] bridge connected via TCP (socket={:d})", (int)socket);
+            return true;
+        }
+
+        HANDLE pipe = CreateFileW(pipeName, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                  OPEN_EXISTING, 0, nullptr);
+        if (pipe == INVALID_HANDLE_VALUE)
+            return false;
+        if (!g_running.load()) {
+            CloseHandle(pipe);
+            return false;
+        }
+        g_pipe.store(pipe);
         spdlog::info("[testdrv] bridge connected to relay pipe");
-    }
+        return true;
+    };
 
-    auto hello = build_hello_payload();
-    if (!write_message(Op::Hello, hello.data(), (uint32_t)hello.size())) {
-        spdlog::warn("[testdrv] bridge Hello write failed");
-        return;
-    }
-    Op op;
-    std::vector<uint8_t> payload;
-    if (!read_message(op, payload) || op != Op::HelloAck) {
-        spdlog::warn("[testdrv] bridge HelloAck not received");
-        return;
-    }
-    spdlog::info("[testdrv] bridge HelloAck ok ({:d} bytes)", (unsigned)payload.size());
-    uint32_t last_ui_epoch = 0;
-    uint32_t last_world_epoch = 0;
+    unsigned connectAttempts = 0;
+    unsigned handshakeFailures = 0;
     while (g_running.load()) {
-        // 0. Forward the live UI snapshot (current dialog + every widget with its state) to the
-        //    relay whenever it changes, so the dispatcher can scan/verify the UI without scraping
-        //    logs. The reporter builds it on the UI thread under a lock and bumps the epoch on each
-        //    change; we ship only on a new epoch.
-        {
-            std::string snap;
-            uint32_t epoch = 0;
-            if (uistatereporter::copyUiSnapshot(snap, epoch) && epoch != last_ui_epoch) {
-                last_ui_epoch = epoch;
-                write_message(Op::UiSnapshot, snap.data(), (uint32_t)snap.size());
+        if (!connectOnce()) {
+            ++connectAttempts;
+            if (connectAttempts == 20
+                || (connectAttempts > 20 && connectAttempts % 120 == 0)) {
+                spdlog::info("[testdrv] bridge waiting for relay (attempt {:d})", connectAttempts);
             }
-        }
-
-        // 0b. Forward the live WORLD snapshot (players' resources + every map stack) the same way:
-        //     the reporter rebuilds it on the UI thread (throttled) and bumps its epoch on change.
-        {
-            std::string snap;
-            uint32_t epoch = 0;
-            if (worldreporter::copyWorldSnapshot(snap, epoch) && epoch != last_world_epoch) {
-                last_world_epoch = epoch;
-                write_message(Op::WorldSnapshot, snap.data(), (uint32_t)snap.size());
-            }
-        }
-
-        // 1. Drain pending writes from the game-thread enqueue.
-        for (;;) {
-            SendItem item;
-            bool has = false;
-            {
-                std::lock_guard<std::mutex> lk(g_send_mutex);
-                if (!g_send_queue.empty()) {
-                    item = std::move(g_send_queue.front());
-                    g_send_queue.pop_front();
-                    has = true;
-                }
-            }
-            if (!has)
-                break;
-            write_message(item.op, item.payload.data(), (uint32_t)item.payload.size());
-        }
-
-        // 2. Poll for an incoming message.
-        bool has_data = false;
-        if (g_sock.load() != INVALID_SOCKET) {
-            u_long available = 0;
-            if (ioctlsocket(g_sock.load(), FIONREAD, &available) == SOCKET_ERROR)
-                break;
-            has_data = available >= 4;
-        } else {
-            DWORD available = 0;
-            if (!PeekNamedPipe(g_pipe.load(), nullptr, 0, nullptr, &available, nullptr))
-                break;
-            has_data = available >= 4;
-        }
-        if (has_data) {
-            if (!read_message(op, payload))
-                break;
-            handle_incoming(op, payload);
+            Sleep(500);
             continue;
         }
-        Sleep(5);
-    }
+        connectAttempts = 0;
 
-    HANDLE old = g_pipe.exchange(INVALID_HANDLE_VALUE);
-    if (old != INVALID_HANDLE_VALUE)
-        CloseHandle(old);
-    SOCKET oldSocket = g_sock.exchange(INVALID_SOCKET);
-    if (oldSocket != INVALID_SOCKET) {
-        closesocket(oldSocket);
-        WSACleanup();
+        auto hello = build_hello_payload();
+        Op op{};
+        std::vector<uint8_t> payload;
+        const bool helloOk = write_message(Op::Hello, hello.data(), (uint32_t)hello.size())
+                             && read_message(op, payload) && op == Op::HelloAck;
+        if (!helloOk) {
+            ++handshakeFailures;
+            if (handshakeFailures == 1 || handshakeFailures % 20 == 0) {
+                spdlog::warn("[testdrv] bridge handshake failed; reconnecting (failure {:d})",
+                             handshakeFailures);
+            }
+            close_connection();
+            Sleep(500);
+            continue;
+        }
+        handshakeFailures = 0;
+        spdlog::info("[testdrv] bridge HelloAck ok ({:d} bytes)", (unsigned)payload.size());
+
+        uint32_t lastUiEpoch = 0;
+        uint32_t lastWorldEpoch = 0;
+        uint32_t lastChatEpoch = 0;
+        bool connectionOk = true;
+        while (g_running.load() && has_connection() && connectionOk) {
+            // Epochs restart at zero after each Hello so a replacement relay receives
+            // the complete current UI/world/chat state without replaying commands.
+            {
+                std::string snap;
+                uint32_t epoch = 0;
+                if (uistatereporter::copyUiSnapshot(snap, epoch) && epoch != lastUiEpoch) {
+                    lastUiEpoch = epoch;
+                    connectionOk =
+                        write_message(Op::UiSnapshot, snap.data(), (uint32_t)snap.size());
+                }
+            }
+            {
+                std::string snap;
+                uint32_t epoch = 0;
+                if (connectionOk && worldreporter::copyWorldSnapshot(snap, epoch)
+                    && epoch != lastWorldEpoch) {
+                    lastWorldEpoch = epoch;
+                    connectionOk =
+                        write_message(Op::WorldSnapshot, snap.data(), (uint32_t)snap.size());
+                }
+            }
+            {
+                std::string snap;
+                uint32_t epoch = 0;
+                if (connectionOk && lobbychatreporter::copyChatLog(snap, epoch)
+                    && epoch != lastChatEpoch) {
+                    lastChatEpoch = epoch;
+                    connectionOk =
+                        write_message(Op::LobbyChat, snap.data(), (uint32_t)snap.size());
+                }
+            }
+            if (!connectionOk)
+                break;
+
+            for (;;) {
+                SendItem item;
+                bool has = false;
+                {
+                    std::lock_guard<std::mutex> lock(g_send_mutex);
+                    if (!g_send_queue.empty()) {
+                        item = std::move(g_send_queue.front());
+                        g_send_queue.pop_front();
+                        has = true;
+                    }
+                }
+                if (!has)
+                    break;
+                if (!write_message(item.op, item.payload.data(), (uint32_t)item.payload.size())) {
+                    connectionOk = false;
+                    break;
+                }
+            }
+            if (!connectionOk)
+                break;
+
+            bool hasData = false;
+            SOCKET socket = g_sock.load();
+            if (socket != INVALID_SOCKET) {
+                fd_set readable;
+                FD_ZERO(&readable);
+                FD_SET(socket, &readable);
+                timeval noWait{};
+                const int ready = select(0, &readable, nullptr, nullptr, &noWait);
+                if (ready == SOCKET_ERROR) {
+                    connectionOk = false;
+                    break;
+                }
+                if (ready > 0) {
+                    char probe = 0;
+                    const int peeked = recv(socket, &probe, 1, MSG_PEEK);
+                    if (peeked == 0
+                        || (peeked == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK)) {
+                        connectionOk = false;
+                        break;
+                    }
+                    u_long available = 0;
+                    if (ioctlsocket(socket, FIONREAD, &available) == SOCKET_ERROR) {
+                        connectionOk = false;
+                        break;
+                    }
+                    hasData = available >= 4;
+                }
+            } else {
+                DWORD available = 0;
+                HANDLE pipe = g_pipe.load();
+                if (pipe == INVALID_HANDLE_VALUE
+                    || !PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
+                    connectionOk = false;
+                    break;
+                }
+                hasData = available >= 4;
+            }
+
+            if (hasData) {
+                if (!read_message(op, payload)) {
+                    connectionOk = false;
+                    break;
+                }
+                handle_incoming(op, payload);
+                continue;
+            }
+            Sleep(5);
+        }
+
+        if (g_running.load())
+            spdlog::warn("[testdrv] relay connection lost; retrying");
+        close_connection();
+        if (g_running.load())
+            Sleep(500);
     }
-    spdlog::info("[testdrv] bridge thread exiting");
 }
 
 } // namespace

@@ -35,7 +35,9 @@
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>MultiByte</CharacterSet>
   </PropertyGroup>
-  <!-- DebugTest = Debug + the D2_TESTDRV publishable test/logging system. -->
+  <!-- DebugTest is the internal MSBuild configuration: Debug profile + D2_TESTDRV.
+       Published artifacts use mss32-test-harness-{debug|release}, so the capability and
+       optimization profile remain distinct if a Release+D2_TESTDRV variant is added later. -->
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='DebugTest|Win32'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
@@ -530,6 +532,7 @@ call ..\buildDetours.bat ..\Detours
     <ClCompile Include="src\testdrv\autonav.cpp" Condition="'$(Configuration)'=='DebugTest'" />
     <ClCompile Include="src\testdrv\bootfixes.cpp" Condition="'$(Configuration)'=='DebugTest'" />
     <ClCompile Include="src\testdrv\directplaysessionhooks.cpp" Condition="'$(Configuration)'=='DebugTest'" />
+    <ClCompile Include="src\testdrv\lobbychatreporter.cpp" Condition="'$(Configuration)'=='DebugTest'" />
     <ClCompile Include="src\testdrv\packetlogicbridge.cpp" Condition="'$(Configuration)'=='DebugTest'" />
     <ClCompile Include="src\testdrv\testdrv.cpp" Condition="'$(Configuration)'=='DebugTest'" />
     <ClCompile Include="src\testdrv\uistatereporter.cpp" Condition="'$(Configuration)'=='DebugTest'" />
@@ -1535,6 +1538,7 @@ call ..\buildDetours.bat ..\Detours
     <ClInclude Include="include\testdrv\autonav.h" />
     <ClInclude Include="include\testdrv\bootfixes.h" />
     <ClInclude Include="include\testdrv\directplaysessionhooks.h" />
+    <ClInclude Include="include\testdrv\lobbychatreporter.h" />
     <ClInclude Include="include\testdrv\packetlogicbridge.h" />
     <ClInclude Include="include\testdrv\testdrv.h" />
     <ClInclude Include="include\testdrv\testenv.h" />

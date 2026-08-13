@@ -5,8 +5,19 @@
 #   $client  = Start-GameClient -GameDir $GameDir -Role host
 # and drive each client over the relay with the verb-noun commands below. See README.md.
 
-$script:RelayBase = "http://127.0.0.1:8077"           # same for everyone, NOT machine-specific
+$script:RelayHttpHost = if ($env:D2_RELAY_HTTP_HOST -and $env:D2_RELAY_HTTP_HOST -notin @('0.0.0.0', '::')) {
+    $env:D2_RELAY_HTTP_HOST
+} else {
+    '127.0.0.1'
+}
+$script:RelayHttpPort = if ($env:D2_RELAY_HTTP_PORT) { [int]$env:D2_RELAY_HTTP_PORT } else { 8077 }
+if ($script:RelayHttpPort -lt 1 -or $script:RelayHttpPort -gt 65535) {
+    throw "D2_RELAY_HTTP_PORT must be between 1 and 65535"
+}
+$script:RelayBase = "http://$($script:RelayHttpHost):$($script:RelayHttpPort)"
 $script:RelayJs   = "$PSScriptRoot\..\relay\relay.js" # same for everyone, NOT machine-specific
+$script:RussobitExeSize = 4187648
+$script:RussobitExeSha256 = '1375CDEF09EC470EE64FE5693FB734D7C69FB215212311D997F792B258A642EB'
 
 # ---- machine-specific config (the only thing that differs per dev machine) --------------------
 # GameDir/ProcDump live in tools/test/test.config.psd1 (gitignored; copy test.config.sample.psd1).
@@ -26,6 +37,15 @@ function Resolve-GameDir([string]$GameDir) {
         throw "Game not found at '$GameDir' (no Discipl2.exe). Copy tools/test/test.config.sample.psd1 " +
               "to test.config.psd1 and set GameDir to your Disciples 2 install, or pass -GameDir."
     }
+    $exe = Join-Path $GameDir 'Discipl2.exe'
+    $actualSize = (Get-Item -LiteralPath $exe).Length
+    $actualSha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+    if ($actualSize -ne $script:RussobitExeSize -or
+        $actualSha256 -cne $script:RussobitExeSha256) {
+        throw "Unsupported Discipl2.exe at '$exe': size=$actualSize sha256=$actualSha256. " +
+              "The harness uses exact Russobit addresses and requires size=$($script:RussobitExeSize) " +
+              "sha256=$($script:RussobitExeSha256)."
+    }
     return $GameDir
 }
 
@@ -33,27 +53,63 @@ function Resolve-GameDir([string]$GameDir) {
 # Start the node relay; return its process (throws if it never answers /api/status).
 function Start-TestRelay {
     param([string]$LogDir = $env:TEMP)
-    $log = Join-Path $LogDir "relay.out.log"
-    $relay = Start-Process node -ArgumentList "`"$script:RelayJs`"" -PassThru -WindowStyle Hidden `
-        -RedirectStandardOutput $log -RedirectStandardError "$log.err"
-    for ($i = 0; $i -lt 25; $i++) {
-        try { Invoke-RestMethod "$script:RelayBase/api/status" -TimeoutSec 2 | Out-Null; return $relay }
-        catch { Start-Sleep -Milliseconds 300 }
+
+    # A successful response here is never ours: this function has not launched its child yet.
+    # Refuse to mistake a stale relay for the new one.
+    try {
+        $existing = Invoke-RestMethod "$script:RelayBase/api/status" -TimeoutSec 1
+        throw "relay endpoint $script:RelayBase is already occupied (instanceId=$($existing.instanceId))"
+    } catch {
+        if ($_.Exception.Message -like 'relay endpoint * is already occupied*') { throw }
     }
-    throw "relay did not come up on $script:RelayBase"
+
+    New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+    $instanceId = [guid]::NewGuid().ToString('N')
+    $log = Join-Path $LogDir "relay-$instanceId.out.log"
+    $errLog = "$log.err"
+    $oldInstanceId = [Environment]::GetEnvironmentVariable('D2_RELAY_INSTANCE_ID', 'Process')
+    try {
+        [Environment]::SetEnvironmentVariable('D2_RELAY_INSTANCE_ID', $instanceId, 'Process')
+        $relay = Start-Process node -ArgumentList "`"$script:RelayJs`"" -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput $log -RedirectStandardError $errLog
+    } finally {
+        [Environment]::SetEnvironmentVariable('D2_RELAY_INSTANCE_ID', $oldInstanceId, 'Process')
+    }
+
+    for ($i = 0; $i -lt 25; $i++) {
+        if ($relay.HasExited) {
+            $stderr = if (Test-Path -LiteralPath $errLog) {
+                (Get-Content -LiteralPath $errLog -Tail 20) -join [Environment]::NewLine
+            } else { '' }
+            throw "relay process exited before readiness (code=$($relay.ExitCode)). $stderr"
+        }
+        try {
+            $status = Invoke-RestMethod "$script:RelayBase/api/status" -TimeoutSec 2
+            if ($status.instanceId -ceq $instanceId) {
+                $relay | Add-Member -NotePropertyName RelayInstanceId -NotePropertyValue $instanceId
+                $relay | Add-Member -NotePropertyName RelayLogPath -NotePropertyValue $log
+                return $relay
+            }
+        } catch {}
+        Start-Sleep -Milliseconds 300
+    }
+    Stop-Process -Id $relay.Id -Force -ErrorAction SilentlyContinue
+    throw "owned relay instance $instanceId did not come up on $script:RelayBase (logs: $log, $errLog)"
 }
 
-# Launch a game instance as the DebugTest client for <Role> (host/join/...). Default flags are the
+# Launch a game instance with the debug test-harness DLL for <Role> (host/join/...). Default flags are the
 # boot fixes + UI reporter + relay bridge (dispatcher-driven; no built-in self-nav).
 function Start-GameClient {
     param(
         [Parameter(Mandatory)][string]$GameDir,
         [Parameter(Mandatory)][string]$Role,
-        [string[]]$Flags = @('SKIP_INTRO', 'BLACKSCREEN_FIX', 'UI_REPORTER', 'WORLD', 'RELAY_BRIDGE')
+        [string[]]$Flags = @('SKIP_INTRO', 'BLACKSCREEN_FIX', 'UI_REPORTER', 'WORLD', 'RELAY_BRIDGE'),
+        [switch]$LobbyChat
     )
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "$GameDir\Discipl2.exe"; $psi.WorkingDirectory = $GameDir; $psi.UseShellExecute = $false
     foreach ($f in $Flags) { $psi.EnvironmentVariables["D2TESTDRV_$f"] = "1" }
+    if ($LobbyChat) { $psi.EnvironmentVariables["D2TESTDRV_LOBBY_CHAT"] = "1" }
     $psi.EnvironmentVariables["D2TESTDRV_ROLE"] = $Role
     return [System.Diagnostics.Process]::Start($psi)
 }
@@ -98,6 +154,11 @@ function Get-GameUi([string]$Role) {
 # HP, `inside` is true for a garrisoned stack. Populated only once a scenario is loaded.
 function Get-World([string]$Role) {
     try { return Invoke-RestMethod "$script:RelayBase/api/world?role=$([uri]::EscapeDataString($Role))" -TimeoutSec 3 } catch { return $null }
+}
+# Recent custom-lobby chat for a role: [{t,sender,text},...]. Start the client with -LobbyChat
+# (sets D2TESTDRV_LOBBY_CHAT=1) or set that environment variable explicitly.
+function Get-LobbyChat([string]$Role) {
+    try { return (Invoke-RestMethod "$script:RelayBase/api/lobby/chat?role=$([uri]::EscapeDataString($Role))" -TimeoutSec 3).messages } catch { return $null }
 }
 # Convenience views over the world snapshot: the local player's resources, the map's stacks, the
 # neutral mercenary camps (each with a hireable roster), and the treasure chests / bags lying around.
