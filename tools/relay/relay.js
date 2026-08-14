@@ -50,7 +50,7 @@ const Op = {
     MoveGroupUnit: 0x0308,  // -> client: move/swap a unit between formation slots (u16 stackId | i32 src | i32 dst)
     DismissUnit: 0x0309,    // -> client: dismiss a non-leader unit from a stack (u16 stackId | u16 unitId)
     UiSnapshot: 0x0410,     // <- client: current dialog + all its widgets with state (JSON)
-    WorldSnapshot: 0x0411,  // <- client: clientTakesTurn observation + resources/map objects (JSON)
+    WorldSnapshot: 0x0411,  // <- client: stock strategic admission + resources/map objects (JSON)
     LobbyChat: 0x0412,      // <- client: recent custom-lobby chat (JSON)
 };
 
@@ -116,7 +116,11 @@ function awaitResult(seq, ms) {
 function sendCommand(sock, op, body) {
     const seq = (g_seq = (g_seq + 1) >>> 0);
     send(sock, op, Buffer.concat([u32(seq), body]));
-    return awaitResult(seq, 5000);
+    // A prior stock menu callback can publish its next dialog and then keep the UI thread blocked while
+    // it synchronously creates or loads a scenario. A command addressed to that new dialog is queued,
+    // so allow it to reach the UI thread and return its sequence-correlated acceptance result. This is
+    // not proof that the callback's effect completed; callers observe the resulting state separately.
+    return awaitResult(seq, 30000);
 }
 
 // ---- named-pipe server (agent connections) ---------------------------------
@@ -182,7 +186,7 @@ function handleMessage(socket, op, flags, payload) {
     }
     case Op.WorldSnapshot: {
         // JSON: { day, strategicActionReady, players: [...], stacks: [...], camps: [...], bags: [...] }.
-        // strategicActionReady is exactly the reporter's raw clientTakesTurn observation. Same DLL
+        // strategicActionReady is the reporter's stock turn + object-lock admission observation. Same
         // escaping guarantees as UiSnapshot, so a parse failure means a torn frame: log and skip,
         // never crash. Missing/old readiness fields fail closed.
         let snap;
@@ -201,7 +205,7 @@ function handleMessage(socket, op, flags, payload) {
                 r.players = players; r.stacks = stacks; r.camps = camps; r.bags = bags;
             }
         }
-        console.log(`[world] ${roleOf(socket)} -> day ${snap.day}, clientTakesTurn=${strategicActionReady}, ${players.length} players, ${stacks.length} stacks, ${camps.length} camps, ${bags.length} bags`);
+        console.log(`[world] ${roleOf(socket)} -> day ${snap.day}, strategicActionReady=${strategicActionReady}, ${players.length} players, ${stacks.length} stacks, ${camps.length} camps, ${bags.length} bags`);
         break;
     }
     case Op.LobbyChat: {
@@ -332,7 +336,7 @@ const httpServer = http.createServer(async (req, res) => {
         for (const [name, r] of Object.entries(state.byRole)) roles[name] = { dialog: r.dialog, widgets: r.widgets };
         return sendJson(res, 200, { roles });
     }
-    // The live world snapshot. strategicActionReady is the raw clientTakesTurn observation. With
+    // The live world snapshot. strategicActionReady is the stock turn + object-lock observation. With
     // ?role=, return one role's { role, day, strategicActionReady, players, stacks, camps, bags };
     // without, return every role.
     if (req.method === 'GET' && path === '/api/world') {

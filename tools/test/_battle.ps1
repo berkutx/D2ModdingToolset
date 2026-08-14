@@ -41,11 +41,12 @@ function Invoke-HeroAttack {
         [Parameter(Mandatory)][string]$Role,
         [System.Diagnostics.Process]$Client,
         [int]$ActivateTimeoutSec = 60,
+        [int]$BattleTimeoutSec = 300,
         [switch]$RequireFreeSelfStack
     )
 
     # Find the fixture's hero. The legacy single-player fixture starts it in the capital; the multiplayer
-    # fixture deliberately supplies a free RodPlacer so this battle oracle does not also assume a generated
+    # fixture deliberately supplies a free fighter so this battle oracle does not also assume a generated
     # capital's orientation/exit tile.
     $hero = $null; $t0 = Get-Date
     while ((((Get-Date) - $t0).TotalSeconds) -lt 30) { $hero = Get-SelfHero $Role -FreeOnly:$RequireFreeSelfStack; if ($hero) { break }; Start-Sleep 1 }
@@ -57,8 +58,8 @@ function Invoke-HeroAttack {
     # use that transient map as evidence that the turn is active and do not probe/refire Move-Stack.
     # Instead, wait until the relay has actually observed DLG_BEGIN_TURN, acknowledge each known startup
     # dialog at most once (BTN_OK starts activation), and wait for strategicActionReady: the native world
-    # reporter's observation of the exact clientTakesTurn admission gate used by Move-Stack. Wall-clock
-    # stability is not readiness. Only then issue the first movement intent.
+    # reporter's observation of the exact stock turn + object-lock admission used by Move-Stack.
+    # Wall-clock stability is not readiness. Only then issue the first movement intent.
     $consumed = @{}; $activationReady = $false; $t0 = Get-Date
     while ((((Get-Date) - $t0).TotalSeconds) -lt $ActivateTimeoutSec) {
         if ($Client -and $Client.HasExited) { return [pscustomobject]@{ ok = $false; reason = "the game crashed before the first movement" } }
@@ -83,7 +84,7 @@ function Invoke-HeroAttack {
                         return [pscustomobject]@{ ok = $false; reason = "one-shot startup action $d::$button was not accepted" }
                     }
                     if ($d -eq 'DLG_BEGIN_TURN') {
-                        Write-Host "[battle:$Role] begin-turn acknowledged; waiting for native clientTakesTurn=true..." -ForegroundColor DarkCyan
+                        Write-Host "[battle:$Role] begin-turn acknowledged; waiting for stock strategic action admission..." -ForegroundColor DarkCyan
                     }
                 }
             }
@@ -91,7 +92,7 @@ function Invoke-HeroAttack {
         Start-Sleep -Milliseconds 250
     }
     if (-not $activationReady) {
-        return [pscustomobject]@{ ok = $false; reason = "native clientTakesTurn never became true after DLG_BEGIN_TURN (on $d)" }
+        return [pscustomobject]@{ ok = $false; reason = "stock strategic action admission never opened after DLG_BEGIN_TURN (on $d)" }
     }
 
     # Refresh the exact stack precondition immediately before the first movement command. If something else
@@ -107,11 +108,16 @@ function Invoke-HeroAttack {
         }
         $t0 = Get-Date; $exited = $false
         while ((((Get-Date) - $t0).TotalSeconds) -lt 15) {
-            $h = Get-StackId $Role $hero.id
-            if ($h -and ($h.x -ne $ax -or $h.y -ne $ay)) { $hero = $h; $exited = $true; break }
+            # Effect + admission must coexist in one newly rebuilt world snapshot. This cannot consume
+            # the pre-send cached `true`, because that same snapshot must already contain the new position.
+            $world = Get-World $Role
+            $h = @($world.stacks) | Where-Object { $_.id -eq $hero.id } | Select-Object -First 1
+            if ($h -and ($h.x -ne $ax -or $h.y -ne $ay) -and [bool]$world.strategicActionReady) {
+                $hero = $h; $exited = $true; break
+            }
             Start-Sleep 1
         }
-        if (-not $exited) { return [pscustomobject]@{ ok = $false; reason = "hero did not exit the garrison (still at ($ax,$ay))" } }
+        if (-not $exited) { return [pscustomobject]@{ ok = $false; reason = "hero exit effect and unlocked strategic admission did not converge (started at ($ax,$ay))" } }
     }
     [int]$ex = $hero.x; [int]$ey = $hero.y
     Write-Host ("[battle:$Role] attack origin is ({0},{1})." -f $ex, $ey) -ForegroundColor Green
@@ -133,22 +139,23 @@ function Invoke-HeroAttack {
             $mon.id, $mon.x, $mon.y, $monUnits0, $monHp0, $adjacent) -ForegroundColor Cyan
 
     # The movement-point spend is read from the ATTACK itself: the hero walks to the monster (spending
-    # movement) and the battle opens while it is still alive, so the spend is captured at DLG_BATTLE_A
-    # below. No separate recon move is issued - one right next to the just-exited fort proved fragile (it
+    # movement) and the battle opens while it is still alive, so the spend is captured at the exact
+    # DLG_BATTLE_A/B viewer below. No separate recon move is issued - one right next to the just-exited fort proved fragile (it
     # re-entered the garrison, landed adjacent to the monster making the attack a degenerate move, or
     # desynced the two MP clients into a battle crash). $mvBefore/$mvAfter hold attack-origin -> at-battle.
     $mvBefore = -1; $mvAfter = -1
 
     # Attack: Move-Stack onto the monster's tile -> routed adjacent, end=monster -> the server starts the battle.
     if (-not (Move-Stack $Role $hero.id $mon.x $mon.y)) { return [pscustomobject]@{ ok = $false; reason = "attack move was not issued" } }
-    $t0 = Get-Date; $inBattle = $false
+    $t0 = Get-Date; $battleDialog = $null
     while ((((Get-Date) - $t0).TotalSeconds) -lt 40) {
         if ($Client -and $Client.HasExited) { return [pscustomobject]@{ ok = $false; reason = "the game crashed on the attack" } }
-        if ((Get-Dialog $Role) -eq 'DLG_BATTLE_A') { $inBattle = $true; break }
+        $d = Get-Dialog $Role
+        if ($d -in @('DLG_BATTLE_A', 'DLG_BATTLE_B')) { $battleDialog = $d; break }
         Start-Sleep 1
     }
-    if (-not $inBattle) { return [pscustomobject]@{ ok = $false; reason = "no battle started (DLG_BATTLE_A; on $(Get-Dialog $Role))" } }
-    Write-Host "[battle:$Role] battle started (DLG_BATTLE_A)." -ForegroundColor Green
+    if (-not $battleDialog) { return [pscustomobject]@{ ok = $false; reason = "no battle started (DLG_BATTLE_A/B; on $(Get-Dialog $Role))" } }
+    Write-Host "[battle:$Role] battle started ($battleDialog)." -ForegroundColor Green
 
     # Movement spent reaching the monster: the hero walked from its attack-origin tile and is now
     # alive in the battle, so read its movement (poll briefly for the throttled snapshot to reflect the
@@ -165,16 +172,16 @@ function Invoke-HeroAttack {
     }
 
     # Auto-battle (the AI plays every round; not an instant resolve).
-    if (-not (Invoke-Toggle $Role DLG_BATTLE_A TOG_AUTOBATTLE)) { return [pscustomobject]@{ ok = $false; reason = "TOG_AUTOBATTLE not toggled" } }
+    if (-not (Invoke-Toggle $Role $battleDialog TOG_AUTOBATTLE)) { return [pscustomobject]@{ ok = $false; reason = "TOG_AUTOBATTLE not toggled in $battleDialog" } }
     Write-Host "[battle:$Role] auto-battle on; fighting..." -ForegroundColor Cyan
 
     # Dismiss every post-battle dialog (result + rewards) until the map is back AND HOLDS. A won battle
     # drops a loot dialog (DLG_ITEM, BTN_OK) a beat AFTER the battle viewer closes and the map flashes, so
     # do not return on the first map sighting: require the map to hold ~3s with no dialog, dismissing any
-    # late reward. The in-progress battle viewer (DLG_BATTLE_A) is exempt from the no-progress guard - a
+    # late reward. The in-progress battle viewer (DLG_BATTLE_A/B) is exempt from the no-progress guard - a
     # long auto-battle keeps it up.
     $t0 = Get-Date; $backOnMap = $false; $last = ''; $lastChange = Get-Date; $mapSince = $null
-    while ((((Get-Date) - $t0).TotalSeconds) -lt 150) {
+    while ((((Get-Date) - $t0).TotalSeconds) -lt $BattleTimeoutSec) {
         if ($Client -and $Client.HasExited) { return [pscustomobject]@{ ok = $false; reason = "the game crashed during/after the battle" } }
         $d = Get-Dialog $Role
         if ($d -eq 'DLG_STRATEGIC' -or $d -eq 'DLG_ISO_PAL') {
@@ -182,7 +189,7 @@ function Invoke-HeroAttack {
             elseif ((((Get-Date) - $mapSince).TotalSeconds) -ge 3) { $backOnMap = $true; break }   # map held -> no late reward coming
         } else {
             $mapSince = $null   # a dialog is up (result / loot / late reward) -> dismiss it and restart the settle
-            if ($d -eq 'DLG_BATTLE_A' -or $d -ne $last) { $last = $d; $lastChange = Get-Date }
+            if ($d -in @('DLG_BATTLE_A', 'DLG_BATTLE_B') -or $d -ne $last) { $last = $d; $lastChange = Get-Date }
             elseif ((((Get-Date) - $lastChange).TotalSeconds) -gt 30) { return [pscustomobject]@{ ok = $false; reason = "stuck on $d after the battle" } }
             if ($d) { foreach ($b in $script:BattleClose) { if (Invoke-Button $Role $d $b) { break } } }
         }

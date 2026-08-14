@@ -28,6 +28,26 @@ function Read-Exact([IO.Stream]$Stream, [int]$Count) {
     return $buffer
 }
 
+function Assert-NoPendingFrame([IO.Stream]$Stream, [int]$WaitMs = 400) {
+    $probe = [byte[]]::new(1)
+    $cancel = [Threading.CancellationTokenSource]::new($WaitMs)
+    try {
+        try {
+            $read = $Stream.ReadAsync($probe, 0, 1, $cancel.Token).GetAwaiter().GetResult()
+        } catch {
+            $e = $_.Exception
+            if ($e -is [OperationCanceledException] -or $e.InnerException -is [OperationCanceledException]) {
+                return
+            }
+            throw
+        }
+        if ($read -eq 0) { throw 'agent transport closed while checking for a duplicate command frame' }
+        throw 'relay emitted more than one command frame for a single HTTP POST'
+    } finally {
+        $cancel.Dispose()
+    }
+}
+
 $httpPort = Get-FreeTcpPort
 $pipeLeaf = "d2.testdrv.smoke.$PID.$([guid]::NewGuid().ToString('N'))"
 $env:D2_RELAY_HTTP_HOST = '127.0.0.1'
@@ -46,6 +66,8 @@ if ($Transport -eq 'tcp') {
 $relay = $null
 $transportClient = $null
 $stream = $null
+$httpClient = $null
+$httpResponse = $null
 try {
     $relay = Start-TestRelay -LogDir (Join-Path $env:TEMP "d2-relay-smoke-$Transport-$PID")
 
@@ -55,7 +77,7 @@ try {
         $stream = $transportClient.GetStream()
     } else {
         $transportClient = [IO.Pipes.NamedPipeClientStream]::new(
-            '.', $pipeLeaf, [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::None)
+            '.', $pipeLeaf, [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
         $transportClient.Connect(5000)
         $stream = $transportClient
     }
@@ -92,7 +114,7 @@ try {
     $opcode = [BitConverter]::ToUInt16($body, 0)
     if ($opcode -ne 2) { throw ('expected HelloAck 0x0002, got 0x{0:X4}' -f $opcode) }
 
-    # Exercise the native clientTakesTurn observation through both public views. One frame is enough:
+    # Exercise the native stock strategic-admission observation through both public views. One frame is enough:
     # the relay must retain its exact true value in role state and in the dedicated world projection.
     $worldJson = '{"day":1,"strategicActionReady":true,"players":[],"stacks":[],"camps":[],"bags":[]}'
     $worldPayload = [Text.Encoding]::UTF8.GetBytes($worldJson)
@@ -157,8 +179,57 @@ try {
     if ($stateJson -match '"messages"' -or $stateJson.Contains($chatText)) {
         throw 'lobby chat leaked into the frequently-polled /api/state payload'
     }
+
+    # Regression for the dispatcher timeout: one HTTP action must produce exactly one framed command,
+    # and a client result arriving after the old five-second bound must still complete that same POST.
+    $httpClient = [Net.Http.HttpClient]::new()
+    $httpClient.Timeout = [TimeSpan]::FromSeconds(35)
+    $commandUri = "$script:RelayBase/api/ui/select?role=$([uri]::EscapeDataString($roleText))&dlg=DLG_PROTOCOL&lb=TLBOX_PROTOCOL&index=2"
+    $postTask = $httpClient.PostAsync($commandUri, [Net.Http.StringContent]::new(''))
+
+    $commandLength = [BitConverter]::ToUInt32((Read-Exact $stream 4), 0)
+    if ($commandLength -lt 16 -or $commandLength -gt 1048576) {
+        throw "invalid dispatcher command frame length $commandLength"
+    }
+    $command = Read-Exact $stream ([int]$commandLength)
+    $commandOp = [BitConverter]::ToUInt16($command, 0)
+    $commandFlags = [BitConverter]::ToUInt16($command, 2)
+    if ($commandOp -ne 0x0301 -or $commandFlags -ne 0) {
+        throw ('expected one SetSelection frame (0x0301/flags 0), got 0x{0:X4}/flags {1}' -f $commandOp, $commandFlags)
+    }
+    $commandSeq = [BitConverter]::ToUInt32($command, 4)
+    $offset = 8
+    $dialogLength = [BitConverter]::ToUInt16($command, $offset); $offset += 2
+    $dialog = [Text.Encoding]::UTF8.GetString($command, $offset, $dialogLength); $offset += $dialogLength
+    $listLength = [BitConverter]::ToUInt16($command, $offset); $offset += 2
+    $listBox = [Text.Encoding]::UTF8.GetString($command, $offset, $listLength); $offset += $listLength
+    if ($offset + 4 -ne $command.Length) { throw 'SetSelection frame has an unexpected payload shape' }
+    $selectedIndex = [BitConverter]::ToInt32($command, $offset)
+    if ($dialog -cne 'DLG_PROTOCOL' -or $listBox -cne 'TLBOX_PROTOCOL' -or $selectedIndex -ne 2) {
+        throw "unexpected SetSelection target $dialog::$listBox = $selectedIndex"
+    }
+
+    Start-Sleep -Milliseconds 6500
+    $frameWriter.Write([uint32]9)      # frame body: 4-byte header + 5-byte payload
+    $frameWriter.Write([uint16]0x0304) # CommandResult
+    $frameWriter.Write([uint16]0)
+    $frameWriter.Write([uint32]$commandSeq)
+    $frameWriter.Write([byte]1)        # found=true
+    $frameWriter.Flush()
+
+    $httpResponse = $postTask.GetAwaiter().GetResult()
+    $responseBody = $httpResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    if (-not $httpResponse.IsSuccessStatusCode) {
+        throw "delayed command POST failed with HTTP $([int]$httpResponse.StatusCode): $responseBody"
+    }
+    $commandResult = $responseBody | ConvertFrom-Json
+    if ($commandResult.found -ne $true) { throw "delayed command result was not found=true: $responseBody" }
+    Assert-NoPendingFrame $stream
+
     Write-Host "relay $Transport transport smoke PASS (instance=$($relay.RelayInstanceId), role=$roleText)"
 } finally {
+    if ($httpResponse) { $httpResponse.Dispose() }
+    if ($httpClient) { $httpClient.Dispose() }
     if ($stream) { $stream.Dispose() }
     if ($transportClient -and $transportClient -ne $stream) { $transportClient.Dispose() }
     if ($relay -and -not $relay.HasExited) {

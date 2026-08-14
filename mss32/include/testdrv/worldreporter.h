@@ -30,7 +30,7 @@ void rebuildSnapshot();
 
 /** Copy the latest world snapshot
  * (JSON: {"day":..,"strategicActionReady":bool,"players":[..],"stacks":[..]}) and its change epoch.
- * strategicActionReady is a UI-thread observation of the live clientTakesTurn admission gate.
+ * strategicActionReady is a UI-thread observation of the stock turn + object-lock admission gate.
  * Thread-safe; the bridge thread calls this. Returns false before the first snapshot exists. */
 bool copyWorldSnapshot(std::string& outJson, std::uint32_t& outEpoch);
 

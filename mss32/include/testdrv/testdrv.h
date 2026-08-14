@@ -35,6 +35,10 @@ void startRuntimeFromUi();
 /** Resolve and validate the current game phase without retaining a scenario pointer. */
 game::CPhaseGame* livePhaseGame();
 
+/** True when the stock sequential client would admit a strategic action: it owns the turn and the
+ * phase's existing object-lock predicate is clear. UI-thread only. */
+bool strategicActionReady();
+
 } // namespace testdrv
 } // namespace hooks
 

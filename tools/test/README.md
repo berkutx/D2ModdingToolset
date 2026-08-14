@@ -88,11 +88,12 @@ snapshot the dispatcher reads with `Get-World <role>` (`GET /api/world`):
       "movement": 33, "units": 1, "hp": 95, "subrace": 1, "inside": true } ] }
 ```
 
-`strategicActionReady` is the world reporter's UI-thread observation of the exact live
-`CPhaseGameData::clientTakesTurn` gate checked first by `Move-Stack`. It has no queue, object-lock, or
-simultaneous-turn meaning. The relay exposes the same raw boolean in `/api/state` and `/api/world`.
-Before a one-shot strategic action, require a connected role, the current strategic-map dialog,
-`sawBeginTurn`, and this bit; never probe or retry the action to discover readiness.
+`strategicActionReady` is the world reporter's UI-thread observation of the same stock admission used
+by `Move-Stack`: `CPhaseGameData::clientTakesTurn` is true and the existing phase object-lock predicate
+is clear. It does not add queue policy or simultaneous-turn semantics. The relay exposes the same
+boolean in `/api/state` and `/api/world`, while the native action checks it again authoritatively before
+sending. Before a one-shot strategic action, require a connected role, the current strategic-map
+dialog, `sawBeginTurn`, and this bit; never probe or retry the action to discover readiness.
 
 `relation` tags each player and stack `self`, `neutral`, or `enemy`. In a single-instance game `self`
 is the player whose turn it is (the reporter has no network client to name the local human), so read
@@ -234,11 +235,13 @@ may belong to a dialog that is not on top. The client resolves the name across a
 
 Each command reports whether it resolved its target. `Invoke-Button`, `Set-ListSelection`,
 `Set-SpinOption`, and `Set-EditText` return `$true` when the dialog and widget were found and the
-action ran, and `$false` otherwise (a wrong name, or the dialog is not open). The relay holds the
-request open until the client answers, so a command to an absent target is reported, not silently
-dropped. A test therefore waits for a dialog and then acts on it: `Step-ToDialog` retries the click
-while the source dialog is not yet present and stops once the target dialog appears or the timeout
-elapses.
+action was accepted for execution, and `$false` otherwise (a wrong name, or the dialog is not open).
+This result is not proof that a synchronous callback completed successfully; the test must observe
+the expected state transition. The relay holds the request open until the client answers, so a command
+to an absent target is reported, not silently dropped. A test therefore waits for a dialog and then
+acts on it: `Step-ToDialog` uses a bounded retry policy only for coalescible navigation and stops once
+the target dialog appears or the timeout elapses. Semantic actions such as accepting a generated map
+are dispatched once and verified by their effect.
 
 ## Driving through a sequence of dialogs
 
@@ -297,8 +300,8 @@ template. Its steps, in order:
    anchor, not the hero's tile, and the first action is always a free exit step. Issue it with
    `Move-Stack <role> <heroId> (cx+5) (cy+5)`, where `(cx,cy)` is the reported anchor position: the
    client detects the garrisoned stack and replicates the game's exact 0-cost exit move. Do not probe or
-   retry it: the first-day `DLG_BEGIN_TURN` can appear after the iso view while the engine's
-   `clientTakesTurn` admission gate is still false. Acknowledge each known startup dialog at most once,
+   retry it: the first-day `DLG_BEGIN_TURN` can appear after the iso view while the stock turn/object-lock
+   admission is still closed. Acknowledge each known startup dialog at most once,
    then wait for a connected current map with `sawBeginTurn` and `strategicActionReady` both true,
    refresh the hero precondition, and issue this sole exit intent. Finally wait for the reported position
    to change to a real tile and treat that as the hero's starting tile.
@@ -310,8 +313,9 @@ template. Its steps, in order:
    monster is already adjacent to the hero (Chebyshev distance of 1 or less).
 5. Attack. `Move-Stack <role> <heroId> <monX> <monY>` onto the monster's tile. The client routes the
    hero adjacent and sets the move message's `end` to the monster tile, so the server starts the
-   battle exactly as clicking the enemy stack would: `DLG_BATTLE_A` opens, and the UI reporter sees it.
-6. Auto-battle. `Invoke-Toggle <role> DLG_BATTLE_A TOG_AUTOBATTLE` hands the fight to the game's AI,
+   battle exactly as clicking the enemy stack would: the exact `DLG_BATTLE_A` or `DLG_BATTLE_B` viewer
+   opens, and the UI reporter sees it.
+6. Auto-battle. `Invoke-Toggle` on that exact A/B viewer's `TOG_AUTOBATTLE` hands the fight to the game's AI,
    which plays every round (this is the in-game auto-battle, not the instant resolve), and the battle
    ends on its own. Auto-battle is a toggle, not a button, so it needs `Invoke-Toggle`, not
    `Invoke-Button`.
@@ -319,7 +323,7 @@ template. Its steps, in order:
    reward or dropped-item dialogs. Click the forward button (any of `BTN_CLOSE`, `BTN_OK`,
    `BTN_TAKEALL`, `BTN_TAKE`, `BTN_CONTINUE`, `BTN_RIGHTSIDE`) on each, the same way the first-turn
    sequence is driven, until `DLG_STRATEGIC`/`DLG_ISO_PAL` returns. Do not blind-click a generic
-   `BTN_YES` here, and do not treat the battle viewer (`DLG_BATTLE_A`) as stuck while it is still up
+   `BTN_YES` here, and do not treat the battle viewer (`DLG_BATTLE_A/B`) as stuck while it is still up
    (a long auto-battle keeps it open); bound the rest with a no-progress guard so an unrecognized
    reward dialog fails fast instead of spinning the whole timeout.
 8. Verify by reading one clean post-battle snapshot, then comparing. Poll `Get-World` until the GET
@@ -340,15 +344,16 @@ Pace the post-battle dialog loop like any other dialog sequence: about one click
 seconds, tracking the last dialog so the same one is not clicked twice before it advances.
 
 This battle flow is factored into [`_battle.ps1`](_battle.ps1) (`Invoke-HeroAttack`) and reused by the
-multiplayer test [`mp-attack-monsters.ps1`](mp-attack-monsters.ps1): the host generates a map (so both
-starts have a nearby neutral; a fixed skirmish can be too sparse), then each player in turn takes one
-plain step (to surface a movement-point spend), attacks its nearest monster, and ends its turn. After
-the day rolls over the test logs each player's daily income (gold change) and the regeneration of every
-damaged survivor (a winning hero that took hits, or a surviving monster). Regeneration is unit and
-timing-dependent (a unit without the Regeneration ability heals 0%; a monster damaged late has not had a
-full day to heal), so it is printed for observation rather than hard-gated; pass `-MinRegenPct 5` for a
-strict floor. The two clients exchange the real game messages over DirectPlay (begin-turn, stack-move,
-battle), so the run exercises turn-pass, movement points, income, and combat HP end to end.
+multiplayer test [`mp-attack-monsters.ps1`](mp-attack-monsters.ps1). CI copies the repository-pinned
+`assets/mp-battle-regen.sg` into the disposable game's `Exports` as its sole slot; no map generator or
+external loader participates. The small deterministic scenario gives each player one free fighter, a
+distinct nearby short-fight neutral, and reserve targets. Each player attacks once and ends its turn. After the day rolls
+over the test logs daily income and the regeneration of every damaged survivor (a winning hero that
+took hits, or a surviving monster). Regeneration is unit and timing-dependent, so it is printed for
+observation rather than hard-gated; pass `-MinRegenPct 5` for a strict floor. The two clients exchange
+the real game messages over DirectPlay (begin-turn, stack-move, battle), so the run exercises turn-pass,
+movement points, income, and combat HP end to end. Random generation remains independently covered by
+the generated-map turn-pass job and the full template matrix.
 
 ## Adding a test
 
@@ -384,7 +389,7 @@ explicitly and `-Kill` makes the run clean up after itself.
 | File | Role |
 |---|---|
 | `_relay.ps1` | the toolkit: config, relay, clients, and the commands above |
-| `relay-transport-smoke.ps1` | protocol-level Hello/status smoke for both the named-pipe and TCP relay transports |
+| `relay-transport-smoke.ps1` | framed-protocol smoke for named pipe and TCP: Hello/state/chat plus delayed command correlation without duplicate dispatch |
 | `_battle.ps1` | the shared battle flow (`Invoke-HeroAttack`): use a required free hero or exit a garrisoned one, attack the nearest free neutral, auto-battle, dismiss dialogs, report before/after |
 | `_obs.ps1` | owned portable-OBS setup/record/stop helper used by multiplayer and static-arena CI jobs |
 | `test.config.sample.psd1` | per-machine config template; copy to `test.config.psd1` |
@@ -393,12 +398,13 @@ explicitly and `-Kill` makes the run clean up after itself.
 | `world-snapshot.ps1` | single-instance world-snapshot example: reach the map and read the live world state (player resources + map stacks) |
 | `move-hero.ps1` | single-instance move example: exit the garrison and move the hero with the game's own pathfinding cost, verified through the world snapshot |
 | `attack-monster.ps1` | single-instance battle template: exit, approach a free monster, attack, auto-battle, dismiss post-battle dialogs, and verify by HP / units / position |
-| `mp-attack-monsters.ps1` | multiplayer battle test: host generates a map, both players attack their nearest monster and pass turns, then a damaged survivor's regeneration is verified after the day rolls over |
+| `mp-attack-monsters.ps1` | multiplayer battle test on the repository-pinned `assets/mp-battle-regen.sg`: both players attack their own nearby neutral and pass turns, then a damaged survivor's regeneration is verified after the day rolls over |
 | `multiplayer-two-instance.ps1` | two clients into a started game (a skirmish, or with `-RandomMap` a generated map); `-EndHostTurn` adds the honest turn-pass |
 | `reliability_test.ps1` | boot N times to the main menu (the CI boot test) |
 | `walk-menu.ps1` | one self-nav client, left running for manual inspection |
 | `lobby-create.ps1` | manual live-lobby integration test; not run in CI and requires explicit credentials |
 | `luckytest-arena.ps1` | static authored-arena test exercising chests, camps, hire and squad layout for both roles; CI copies the repository-pinned `assets/luckytest-arena.sg`, never the LuckyTest loader/reroller |
+| `assets/*.sg` | ordinary frozen scenario fixtures copied once into each disposable CI game; no runtime map loader, reroller or generator dependency |
 | `HIRE-MERC.md`, `SLOT-MANAGEMENT.md` | contracts and RE notes for the optional LuckyTest action surface |
 | `_show-window.ps1`, `_capture.ps1` | bring a window forward and capture a diagnostic PNG |
 | `../relay/relay.js` | the relay |
@@ -494,12 +500,13 @@ control endpoint каждого рилея. Native TCP-клиент разреш
       "movement": 33, "units": 1, "hp": 95, "subrace": 1, "inside": true } ] }
 ```
 
-`strategicActionReady` — наблюдение UI-потока за точным живым флагом
-`CPhaseGameData::clientTakesTurn`, который `Move-Stack` проверяет первым. Он ничего не сообщает об
-очереди, блокировке объекта или одновременных ходах. Рилей отдаёт тот же исходный bool и в
-`/api/state`, и в `/api/world`. Перед однократным стратегическим действием требуйте подключённую роль,
-текущий диалог стратегической карты, `sawBeginTurn` и этот флаг; не пробуйте действие и не повторяйте
-его для определения готовности.
+`strategicActionReady` — наблюдение UI-потока за тем же штатным admission, который использует
+`Move-Stack`: `CPhaseGameData::clientTakesTurn` истинно и существующий object-lock фазы свободен. Этот
+флаг не добавляет собственной политики очередей или семантики одновременных ходов. Рилей отдаёт тот
+же bool и в `/api/state`, и в `/api/world`, а native action авторитетно проверяет его ещё раз перед
+отправкой. Перед однократным стратегическим действием требуйте подключённую роль, текущий диалог
+стратегической карты, `sawBeginTurn` и этот флаг; не пробуйте действие и не повторяйте его для
+определения готовности.
 
 `relation` помечает каждого игрока и каждый стек как `self`, `neutral` или `enemy`. В одиночной игре
 `self` это игрок, чей сейчас ход (у репортёра нет сетевого клиента, чтобы назвать локального человека),
@@ -640,10 +647,12 @@ Get-Dialog host    # прочитать следующий диалог, зат�
 
 Каждая команда сообщает, разрешила ли она свою цель. `Invoke-Button`, `Set-ListSelection`,
 `Set-SpinOption` и `Set-EditText` возвращают `$true`, когда диалог и виджет найдены и действие
-выполнено, и `$false` иначе (неверное имя или диалог не открыт). Рилей держит запрос открытым, пока
-клиент не ответит, поэтому команда на отсутствующую цель сообщается, а не теряется молча. Поэтому тест
-ждёт диалог и затем действует на нём: `Step-ToDialog` повторяет нажатие, пока исходный диалог ещё не
-появился, и останавливается, когда появляется целевой диалог или истекает тайм-аут.
+принято к выполнению, и `$false` иначе (неверное имя или диалог не открыт). Этот результат не доказывает,
+что синхронный callback успешно завершился: тест должен наблюдать ожидаемый переход состояния. Рилей
+держит запрос открытым, пока клиент не ответит, поэтому команда на отсутствующую цель сообщается, а не
+теряется молча. `Step-ToDialog` применяет ограниченные повторы только к коалесцируемой навигации и
+останавливается при появлении целевого диалога или по тайм-ауту. Семантические действия вроде принятия
+сгенерированной карты отправляются один раз и проверяются по эффекту.
 
 ## Прохождение последовательности диалогов
 
@@ -701,8 +710,8 @@ while (-not (Get-RoleState $role).reachedStrategic) {
    не клетку героя, и первое действие - всегда бесплатный шаг выхода. Подайте его через
    `Move-Stack <role> <heroId> (cx+5) (cy+5)`, где `(cx,cy)` - сообщённая позиция якоря: клиент
    распознаёт стек в гарнизоне и воспроизводит точный 0-стоимостный выход игры. Не пробуйте и не
-   повторяйте его: `DLG_BEGIN_TURN` первого дня может появиться после изо-вида, пока admission-флаг
-   движка `clientTakesTurn` ещё ложен. Подтвердите каждый известный стартовый диалог не более одного
+   повторяйте его: `DLG_BEGIN_TURN` первого дня может появиться после изо-вида, пока штатный admission
+   хода/object-lock ещё закрыт. Подтвердите каждый известный стартовый диалог не более одного
    раза, затем дождитесь подключённой роли на текущей карте с истинными `sawBeginTurn` и
    `strategicActionReady`, заново проверьте героя и подайте единственную команду выхода. После этого
    дождитесь смены сообщённой позиции на реальную клетку и считайте её стартовой клеткой героя.
@@ -715,16 +724,16 @@ while (-not (Get-RoleState $role).reachedStrategic) {
    с героем (расстояние Чебышёва 1 или меньше).
 5. Атаковать. `Move-Stack <role> <heroId> <monX> <monY>` на клетку монстра. Клиент проводит героя
    вплотную и ставит `end` сообщения о перемещении в клетку монстра, поэтому сервер начинает бой
-   ровно так же, как клик по вражескому стеку: открывается `DLG_BATTLE_A`, и репортёр интерфейса его
-   видит.
-6. Автобой. `Invoke-Toggle <role> DLG_BATTLE_A TOG_AUTOBATTLE` передаёт бой ИИ игры, который отыгрывает
+   ровно так же, как клик по вражескому стеку: открывается точный viewer `DLG_BATTLE_A` или
+   `DLG_BATTLE_B`, и репортёр интерфейса его видит.
+6. Автобой. `Invoke-Toggle` на `TOG_AUTOBATTLE` этого точного A/B viewer передаёт бой ИИ игры, который отыгрывает
    каждый раунд (это внутриигровой автобой, а не мгновенное разрешение), и бой завершается сам. Автобой
    - переключатель, а не кнопка, поэтому нужен `Invoke-Toggle`, а не `Invoke-Button`.
 7. Закрыть послебоевые диалоги. За боем следует экран результата и нередко один или несколько диалогов
    награды или выпавших предметов. Нажимайте кнопку-вперёд (любую из `BTN_CLOSE`, `BTN_OK`,
    `BTN_TAKEALL`, `BTN_TAKE`, `BTN_CONTINUE`, `BTN_RIGHTSIDE`) на каждом так же, как ведут
    последовательность первого хода, пока не вернётся `DLG_STRATEGIC`/`DLG_ISO_PAL`. Не прожимайте вслепую
-   общий `BTN_YES` здесь и не считайте окно боя (`DLG_BATTLE_A`) зависшим, пока оно ещё открыто (долгий
+   общий `BTN_YES` здесь и не считайте окно боя (`DLG_BATTLE_A/B`) зависшим, пока оно ещё открыто (долгий
    автобой держит его открытым); остальное ограничьте сторожем «нет прогресса», чтобы нераспознанный
    диалог награды быстро падал, а не крутил весь тайм-аут.
 8. Проверить, прочитав один чистый послебоевой снапшот, затем сравнив. Опрашивайте `Get-World`, пока
@@ -744,16 +753,15 @@ while (-not (Get-RoleState $role).reachedStrategic) {
 секунды, запоминая последний диалог, чтобы не нажать один и тот же дважды до того, как он продвинется.
 
 Этот сценарий боя вынесен в [`_battle.ps1`](_battle.ps1) (`Invoke-HeroAttack`) и переиспользуется
-мультиплеерным тестом [`mp-attack-monsters.ps1`](mp-attack-monsters.ps1): хост генерирует карту (чтобы
-у обоих стартов был ближний нейтрал; фиксированный скирмиш бывает слишком разрежённым), затем каждый
-игрок по очереди делает один обычный шаг (чтобы проявить трату очков движения), атакует ближайшего
-монстра и завершает ход. После смены дня тест логирует дневной инком каждого игрока (изменение золота)
-и регенерацию каждого повреждённого выжившего (победивший герой, получивший урон, или выживший монстр).
-Реген зависит от юнита и тайминга (юнит без способности «Регенерация» лечит 0%; монстр, повреждённый
-поздно, не успел залечиться за полный день), поэтому он печатается для наблюдения, а не жёстко гейтится;
-для строгого порога передайте `-MinRegenPct 5`. Два клиента обмениваются реальными игровыми сообщениями
-по DirectPlay (начало хода, перемещение стека, бой), так что прогон сквозь проверяет пас хода, очки
-движения, инком и боевое ХП.
+мультиплеерным тестом [`mp-attack-monsters.ps1`](mp-attack-monsters.ps1). CI копирует закреплённый в
+репозитории `assets/mp-battle-regen.sg` в `Exports` одноразовой игры как единственный слот; генератор
+карт и внешний loader не участвуют. Маленький детерминированный сценарий даёт каждому игроку свободного
+бойца, отдельного ближнего нейтрала для короткого боя и запасные цели. Каждый игрок один раз атакует и завершает ход. После
+смены дня тест логирует дневной инком и регенерацию каждого повреждённого выжившего. Реген зависит от
+юнита и тайминга, поэтому печатается для наблюдения, а не жёстко гейтится; для строгого порога передайте
+`-MinRegenPct 5`. Два клиента обмениваются реальными игровыми сообщениями по DirectPlay (начало хода,
+перемещение стека, бой), так что прогон сквозь проверяет пас хода, очки движения, инком и боевое ХП.
+Случайная генерация отдельно покрыта generated-map turn-pass job и полной матрицей шаблонов.
 
 ## Добавление теста
 
@@ -789,7 +797,7 @@ outcome, незагрузившаяся карта и отсутствующая
 | Файл | Роль |
 |---|---|
 | `_relay.ps1` | тулкит: конфиг, рилей, клиенты и команды выше |
-| `relay-transport-smoke.ps1` | protocol-level Hello/status smoke обоих транспортов рилея: named pipe и TCP |
+| `relay-transport-smoke.ps1` | smoke framed-протокола для named pipe и TCP: Hello/state/chat и задержанный command-result без повторной отправки |
 | `_battle.ps1` | общий сценарий боя (`Invoke-HeroAttack`): взять требуемого свободного героя или вывести гарнизонного, атаковать ближайшего свободного нейтрала, автобой, закрытие диалогов, отчёт до/после |
 | `_obs.ps1` | helper установки/записи/остановки собственного portable OBS для multiplayer и static-arena CI jobs |
 | `test.config.sample.psd1` | шаблон конфига машины; копируется в `test.config.psd1` |
@@ -798,12 +806,13 @@ outcome, незагрузившаяся карта и отсутствующая
 | `world-snapshot.ps1` | одиночный пример снапшота мира: выйти на карту и прочитать живое состояние мира (ресурсы игрока + стеки карты) |
 | `move-hero.ps1` | одиночный пример перемещения: выйти из гарнизона и переместить героя с родной стоимостью пути игры, проверка через снапшот мира |
 | `attack-monster.ps1` | одиночный шаблон боя: выход, подход к свободному монстру, атака, автобой, закрытие послебоевых диалогов и проверка по ХП / юнитам / позиции |
-| `mp-attack-monsters.ps1` | мультиплеерный боевой тест: хост генерирует карту, оба игрока атакуют ближайшего монстра и пропускают ход, затем после смены дня проверяется регенерация повреждённого выжившего |
+| `mp-attack-monsters.ps1` | мультиплеерный боевой тест на закреплённом `assets/mp-battle-regen.sg`: оба игрока атакуют своего ближнего нейтрала и пропускают ход, затем после смены дня проверяется регенерация повреждённого выжившего |
 | `multiplayer-two-instance.ps1` | два клиента в начатую игру (скирмиш или с `-RandomMap` сгенерированная карта); `-EndHostTurn` добавляет честный пропуск хода |
 | `reliability_test.ps1` | загрузка N раз до главного меню (бут-тест CI) |
 | `walk-menu.ps1` | один self-nav клиент, оставленный запущенным для ручного осмотра |
 | `lobby-create.ps1` | ручной интеграционный тест живого lobby; не запускается в CI и требует явных credentials |
 | `luckytest-arena.ps1` | тест статической авторской арены: сундуки, лагеря, найм и раскладка отряда у обеих ролей; CI копирует закреплённый в репозитории `assets/luckytest-arena.sg`, без LuckyTest loader/reroller |
+| `assets/*.sg` | обычные замороженные сценарии, один раз копируемые в одноразовую CI-игру; без runtime loader, reroller или генератора |
 | `HIRE-MERC.md`, `SLOT-MANAGEMENT.md` | контракты и RE-заметки опционального LuckyTest action surface |
 | `_show-window.ps1`, `_capture.ps1` | поднять окно и снять диагностический PNG |
 | `../relay/relay.js` | рилей |

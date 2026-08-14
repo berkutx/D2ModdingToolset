@@ -2,15 +2,15 @@
 <#
 .SYNOPSIS
   Multiplayer battle + turn-pass + regeneration test. Two clients (HOST + JOINER) reach a started
-  TCP/IP game; each in turn uses its free starting hero to attack the nearest neutral monster, then ends its
-  turn; after the day rolls over, the damaged monsters' HP recovery (regeneration) is measured.
+  TCP/IP game loaded from a pinned ordinary .sg; each in turn uses its free starting hero to attack
+  its nearby neutral monster, then ends its turn; after the day rolls over, HP recovery is measured.
 
 .DESCRIPTION
   Built on the single-instance battle template (the shared _battle.ps1 Invoke-HeroAttack flow) plus the
   two-instance pairing. Every action goes through the relay, no input emulation. The sequence:
 
-    1. Pair HOST + JOINER: the host GENERATES a random map (template -Template, placing neutrals near
-       each start), the joiner joins, and both reach the strategic map.
+    1. Pair HOST + JOINER: the host loads the installed deterministic battle fixture at -Scenario,
+       the joiner joins, and both reach the strategic map.
     2. HOST turn (the host is the active player first): take the fixture's free hero, attack the nearest
        neutral monster, auto-battle, dismiss the post-battle dialogs. Then END the host's turn.
     3. JOINER turn (now active): the same attack flow. Then END the joiner's turn.
@@ -22,17 +22,16 @@
   and a damaged survivor's regeneration was measured. Regeneration is unit/timing-dependent (a unit
   without the Regeneration ability heals 0%; a monster damaged late has not had a full day to heal), so
   the actual percent is printed for observation and the hard gate `-MinRegenPct` defaults to 0; pass a
-  positive value (e.g. 5) for a strict floor. A generated map is used (not a fixed skirmish), because a
-  skirmish map can be too sparse: one player kills the only nearby neutral and the other has none in reach.
+  positive value (e.g. 5) for a strict floor. The pinned fixture gives each player one free fighter and
+  a distinct nearby short-fight neutral (with reserve targets); generator behavior is covered independently by the generation
+  smoke and the full template matrix.
 
 .EXAMPLE
   .\mp-attack-monsters.ps1 -Kill
-  .\mp-attack-monsters.ps1 -Kill -MinRegenPct 5 -Template Freedom -MapSize 1
+  .\mp-attack-monsters.ps1 -Kill -MinRegenPct 5 -Scenario 0
 #>
 param(
-    [string]$Template = 'Freedom',    # creates an owned RodPlacer stack and neutral stacks in each start zone
-    [int]$MapSize = 1,                # SPIN_SIZE index (0 = smallest); a larger map gives each player its own neutral zone
-    [int]$GenWaitSec = 90,            # seconds to wait for the host's map generation
+    [int]$Scenario = 0,               # index of the preinstalled battle fixture; CI makes it the only .sg
     [int]$StartupWaitSec = 180,       # bounded stock two-peer replication + first-turn readiness budget
     [int]$MinRegenPct = 0,            # HARD-fail gate on the best survivor's regen (default 0 = observe-only; regen is unit/timing-dependent, ~0-16% per day). Pass e.g. 5 for a strict gate.
     [switch]$Kill,
@@ -42,7 +41,12 @@ param(
 . "$PSScriptRoot\_relay.ps1"
 . "$PSScriptRoot\_battle.ps1"   # Invoke-HeroAttack + Test-AttackResult (the shared battle flow)
 $GameDir = Resolve-GameDir $GameDir
-$templateIndex = Resolve-TemplateIndex $GameDir $Template
+
+$exports = Join-Path $GameDir 'Exports'
+if (-not (Test-Path -LiteralPath $exports)) { throw "Exports directory missing: $exports" }
+if (-not (Get-ChildItem -LiteralPath $exports -Filter *.sg -File -ErrorAction SilentlyContinue)) {
+    throw "no battle fixture .sg installed under $exports"
+}
 
 # Clean slate without a blanket kill: only our tagged [HOST]/[CLIENT] windows, plus a stale dplaysvr.
 Get-Process Discipl2 -ErrorAction SilentlyContinue |
@@ -76,47 +80,37 @@ function RegenCandidates([pscustomobject]$r, [string]$role, [bool]$includeHero) 
     $out   # callers wrap in @() to normalize 0/1/2 results
 }
 
-# Click <btn> on <dlg> until the client LEAVES <dlg> (the lobby OK).
+# Dispatch <btn> on <dlg> at most once, then observe the client leaving it (the lobby OK).
 function ClickAndLeave([string]$role, [string]$dlg, [string]$btn, [int]$sec) {
-    $t0 = Get-Date; $null = Invoke-Button $role $dlg $btn; $lf = Get-Date
+    if ((Get-Dialog $role) -ne $dlg) { return $true }
+    if (-not (Invoke-Button $role $dlg $btn)) { return $false }
+    $t0 = Get-Date
     while ((((Get-Date) - $t0).TotalSeconds) -lt $sec) {
         if ((Get-Dialog $role) -ne $dlg) { return $true }
-        if (((Get-Date) - $lf).TotalSeconds -ge 12) { $null = Invoke-Button $role $dlg $btn; $lf = Get-Date }
         Start-Sleep -Milliseconds 500
-    }
-    return $false
-}
-# Dismiss first-turn popups until <role> reaches the map (relay-latched reachedStrategic), paced ~2.5s.
-function DriveToStrategic([string]$role, [int]$sec) {
-    $t0 = Get-Date; $ld = ''; $lf = (Get-Date).AddSeconds(-10)
-    while ((((Get-Date) - $t0).TotalSeconds) -lt $sec) {
-        $r = Get-RoleState $role
-        if ($r -and $r.reachedStrategic) { return $true }
-        $d = if ($r) { $r.dialog } else { $null }
-        if ($d -and $Dismiss.ContainsKey($d) -and ($d -ne $ld -or ((Get-Date) - $lf).TotalSeconds -ge 2.5)) {
-            $null = Invoke-Button $role $d $Dismiss[$d]; $ld = $d; $lf = Get-Date
-        }
-        Start-Sleep -Milliseconds 700
     }
     return $false
 }
 
 # The first ISO/map frame is transient: stock may publish a late startup popup on either peer before
 # the active host's TurnInfo finishes. Drain only the exact known startup dialogs, once per role/dialog,
-# until the native clientTakesTurn admission gate says the host can accept its single strategic action.
-# This is local to generated-MP bootstrap; the shared battle helper and single-player path stay simpler.
+# until the stock turn + object-lock admission says the host can accept its single strategic action.
+# This is local to MP bootstrap; the shared battle helper and single-player path stay simpler.
 function Wait-HostStrategicActionReady([int]$sec) {
     $claimed = @{}
     $t0 = Get-Date
     while ((((Get-Date) - $t0).TotalSeconds) -lt $sec) {
         $hostState = Get-RoleState host
+        $joinState = Get-RoleState join
         $hostDialog = if ($hostState) { $hostState.dialog } else { $null }
+        $joinDialog = if ($joinState) { $joinState.dialog } else { $null }
         $hostOnMap = $hostDialog -eq 'DLG_STRATEGIC' -or $hostDialog -eq 'DLG_ISO_PAL'
+        $joinOnMap = $joinDialog -eq 'DLG_STRATEGIC' -or $joinDialog -eq 'DLG_ISO_PAL'
         if ([bool]$hostState.connected -and $hostOnMap -and [bool]$hostState.sawBeginTurn -and
-            [bool]$hostState.strategicActionReady) { return $true }
+            [bool]$hostState.strategicActionReady -and [bool]$joinState.connected -and $joinOnMap) { return $true }
 
         foreach ($role in @('host', 'join')) {
-            $state = if ($role -eq 'host') { $hostState } else { Get-RoleState $role }
+            $state = if ($role -eq 'host') { $hostState } else { $joinState }
             $dialog = if ($state) { $state.dialog } else { $null }
             $claim = "${role}::${dialog}"
             if (-not $dialog -or -not $Dismiss.ContainsKey($dialog) -or $claimed.ContainsKey($claim)) {
@@ -179,7 +173,7 @@ function PassTurnToJoiner([int]$sec) {
     return [bool](Get-RoleState join).sawBeginTurn
 }
 
-# Pair HOST + JOINER (the host generates a random map) and drive both to the strategic map.
+# Pair HOST + JOINER (the host loads the installed static scenario) and drive both to the strategic map.
 function Pair-AndReachMap {
     if (-not (Wait-Dialog host DLG_MAIN_MENU 90)) { return $false }
     if (-not (Wait-Dialog join DLG_MAIN_MENU 90)) { return $false }
@@ -189,45 +183,22 @@ function Pair-AndReachMap {
     if (-not (Step-ToDialog join DLG_MAIN_MENU BTN_MULTI DLG_PROTOCOL)) { return $false }
     $null = Set-ListSelection join DLG_PROTOCOL TLBOX_PROTOCOL 2; Start-Sleep -Milliseconds 1000
     if (-not (Step-ToDialog join DLG_PROTOCOL BTN_CONTINUE DLG_LOAD_NEW_MULTI)) { return $false }
-    Write-Host "[mp] joiner staged; host generating a random '$Template' map (index $templateIndex)..." -ForegroundColor DarkGray
+    Write-Host "[mp] joiner staged; host loading installed battle scenario index $Scenario..." -ForegroundColor DarkGray
 
-    # Host creates the session by GENERATING a random map (a skirmish map can be too sparse - one player
-    # kills the only near neutral and the other has none in reach; a generated template places neutrals by
-    # each start). DLG_HOST -> BTN_RANDOM_MAP -> DLG_RANDOM_SCENARIO_MULTI form, then accept into the lobby.
+    # DLG_CHOOSE_SKIRMISH is co-present inside DLG_HOST. Selection and load are each one-shot; wait on
+    # the resulting lobby instead of refiring while the synchronous loader owns the UI thread.
     if (-not (Step-ToDialog host DLG_LOAD_NEW_MULTI BTN_HOST DLG_HOST)) { return $false }
-    if (-not (Step-ToDialog host DLG_HOST BTN_RANDOM_MAP DLG_RANDOM_SCENARIO_MULTI)) { return $false }
-    $D = 'DLG_RANDOM_SCENARIO_MULTI'
-    if (-not (Set-ListSelection host $D TLBOX_TEMPLATES $templateIndex)) { return $false }
-    Start-Sleep 2
-    if (-not (Set-EditText host $D EDIT_NAME "AutoHost")) { return $false }   # BTN_GENERATE needs a name
-    Start-Sleep 2
-    if (-not (Set-SpinOption host $D SPIN_SIZE $MapSize)) { return $false }
-    Start-Sleep 2
-    if (-not (Set-SpinOption host $D SPIN_GOAL 0)) { return $false }
-    Start-Sleep 2
-    if (-not (Invoke-Button host $D BTN_GENERATE)) { return $false }
-    Write-Host "[mp] host generating (template '$Template', up to ${GenWaitSec}s)..." -ForegroundColor Cyan
-    $t0 = Get-Date; $hostLobby = $false
-    while ((((Get-Date) - $t0).TotalSeconds) -lt $GenWaitSec) {
-        $d = Get-Dialog host
-        if ($d -eq 'DLG_GENERATION_RESULT') {
-            if (-not (Invoke-Button host DLG_GENERATION_RESULT BTN_ACCEPT)) { return $false }
-            $hostLobby = (Wait-Dialog host DLG_LOBBY 20); break
-        }
-        if ($d -eq 'DLG_MESSAGE_BOX') { Write-Host "[mp] host generation errored (template $Template; DLG_MESSAGE_BOX)" -ForegroundColor Red; return $false }
-        Start-Sleep -Milliseconds 1500
-    }
-    if (-not $hostLobby) { return $false }
+    if (-not (Set-ListSelection host DLG_CHOOSE_SKIRMISH TLBOX_GAME_SLOT $Scenario)) { return $false }
+    if (-not (Invoke-Button host DLG_CHOOSE_SKIRMISH BTN_LOAD)) { return $false }
+    if (-not (Wait-Dialog host DLG_LOBBY 120)) { return $false }
     Write-Host "[mp] host in lobby; joiner joining..." -ForegroundColor DarkGray
     if (-not (Step-ToDialog join DLG_LOAD_NEW_MULTI BTN_JOIN DLG_SESSION)) { return $false }
     Start-Sleep -Seconds 3   # session enumeration settle
     if (-not (Step-ToDialog join DLG_SESSION BTN_JOIN_GAME DLG_LOBBY)) { return $false }
     Start-Sleep -Milliseconds 1500
     if (-not (ClickAndLeave host DLG_LOBBY BTN_OK 45)) { return $false }
-    if (-not (DriveToStrategic host 180)) { return $false }
     if (-not (ClickAndLeave join DLG_LOBBY BTN_OK 45)) { return $false }
-    if (-not (DriveToStrategic join 180)) { return $false }
-    return $true
+    return (Wait-HostStrategicActionReady $StartupWaitSec)
 }
 
 # ---- run ----------------------------------------------------------------------------------------
@@ -239,15 +210,11 @@ try {
     Start-Sleep -Seconds 10   # joiner boots 10s later (parallel); the join is gated inside Pair-AndReachMap
     $j = Start-GameClient -GameDir $GameDir -Role join
 
-    if (-not (Pair-AndReachMap)) { throw "pairing failed (host '$(Get-Dialog host)', join '$(Get-Dialog join)')" }
+    if (-not (Pair-AndReachMap)) { throw "pairing/stock turn startup failed (host '$(Get-Dialog host)', join '$(Get-Dialog join)')" }
     $players = @((Get-World host).players).Count
-    Write-Host "[mp] both reached the strategic map ($players players)." -ForegroundColor Green
+    Write-Host "[mp] both reached the strategic map; host action admission is open ($players players)." -ForegroundColor Green
     $goldH1 = [int](Get-Resources host).gold   # host day-1 gold (income is credited on turn activation)
     Write-Host "[mp] HOST day-1 gold = $goldH1" -ForegroundColor DarkCyan
-
-    if (-not (Wait-HostStrategicActionReady $StartupWaitSec)) {
-        throw "pair never completed stock turn startup (host '$(Get-Dialog host)', join '$(Get-Dialog join)')"
-    }
 
     # HOST turn: attack the nearest free neutral monster (the host is the active player first).
     $rh = Invoke-HeroAttack -Role host -Client $h -RequireFreeSelfStack

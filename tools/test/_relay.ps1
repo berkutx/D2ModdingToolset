@@ -137,7 +137,7 @@ function Get-RelayState {
     try { return (Invoke-RestMethod "$script:RelayBase/api/state" -TimeoutSec 3).roles } catch { return $null }
 }
 # One role's state object (or $null): .dialog, .widgets, .connected, .reachedStrategic, .sawBeginTurn,
-# .strategicActionReady (native clientTakesTurn observation from the world reporter).
+# .strategicActionReady (native stock turn + object-lock observation from the world reporter).
 function Get-RoleState([string]$Role) {
     $s = Get-RelayState; if ($s) { return $s.$Role } else { return $null }
 }
@@ -180,11 +180,15 @@ function Wait-Dialog([string]$Role, [string]$Dialog, [int]$TimeoutSec = 60) {
 
 # ---- the dispatcher's hands (drive UI) ---------------------------------------------------------
 # Each command returns the client's `found` flag: $true if the addressed dialog and widget were
-# resolved (the action ran), $false if not (a wrong name, or the dialog is not open). The relay
+# resolved and the action was accepted for execution, $false if not (a wrong name, or the dialog is
+# not open). This is not proof of the callback's effect; callers observe the resulting state. The relay
 # holds the request until the client answers, so a command to an absent target is reported, not
 # silently dropped. The timeout exceeds the relay's own wait so a slow answer is not cut off.
 function script:Post([string]$Path) {
-    try { return (Invoke-RestMethod "$script:RelayBase/api/ui/$Path" -Method POST -TimeoutSec 8).found } catch { return $false }
+    # A command queued behind a stock synchronous UI callback gets up to 30s to reach the UI thread.
+    # Keep HTTP just outside that bound. One-shot semantic callers treat a timeout as a hard false;
+    # generic coalescible navigation may retry only under its own explicit bounded policy.
+    try { return (Invoke-RestMethod "$script:RelayBase/api/ui/$Path" -Method POST -TimeoutSec 35).found } catch { return $false }
 }
 function Invoke-Button([string]$Role, [string]$Dialog, [string]$Button) {
     [bool](script:Post "invoke?role=$([uri]::EscapeDataString($Role))&dlg=$([uri]::EscapeDataString($Dialog))&btn=$([uri]::EscapeDataString($Button))")
@@ -231,7 +235,7 @@ function Move-GroupUnit([string]$Role, [string]$Stack, [int]$Src, [int]$Dst) {
 function Dismiss-Unit([string]$Role, [string]$Stack, [string]$Unit) {
     [bool](script:Post "dismiss?role=$([uri]::EscapeDataString($Role))&stack=$([uri]::EscapeDataString($Stack))&unit=$([uri]::EscapeDataString($Unit))")
 }
-# Flip a toggle button (e.g. DLG_BATTLE_A::TOG_AUTOBATTLE). invokeButton matches only buttons, so toggles
+# Flip a toggle button (e.g. DLG_BATTLE_A/B::TOG_AUTOBATTLE). invokeButton matches only buttons, so toggles
 # (auto-battle, etc.) need their own verb. Returns the client's `found` flag.
 function Invoke-Toggle([string]$Role, [string]$Dialog, [string]$Toggle) {
     [bool](script:Post "toggle?role=$([uri]::EscapeDataString($Role))&dlg=$([uri]::EscapeDataString($Dialog))&tog=$([uri]::EscapeDataString($Toggle))")

@@ -75,36 +75,46 @@ try {
     }
     if ((Get-Dialog host) -ne 'DLG_GENERATION_RESULT') { throw "generation did not finish in time (on $(Get-Dialog host))" }
 
-    # Accept + start solo (AI fills the rest); dismiss first-turn popups; reach the strategic map.
+    # Accept + start solo (AI fills the rest). Both semantic actions are one-shot; their effects are
+    # observed below rather than redispatched while their synchronous callbacks are still unwinding.
     if (-not (Invoke-Button host DLG_GENERATION_RESULT BTN_ACCEPT)) { throw "BTN_ACCEPT not found" }
     if (-not (Wait-Dialog host DLG_LOBBY 20)) { throw "BTN_ACCEPT did not open DLG_LOBBY" }
     $popups = @{
         'DLG_SCENARIO_BRIEFING' = 'BTN_CONTINUE'; 'DLG_BEGIN_TURN' = 'BTN_OK'
         'DLG_GETINFO_BOX' = 'BTN_CLOSE'; 'DLG_MESSAGE_BOX' = 'BTN_OK'; 'DLG_EVENT_POPUP' = 'BTN_RIGHTSIDE'
     }
-    $null = Invoke-Button host DLG_LOBBY BTN_OK
-    $t0 = Get-Date; $onMap = $false
-    while ((((Get-Date) - $t0).TotalSeconds) -lt 120) {
-        $d = Get-Dialog host
-        if ($d -eq 'DLG_STRATEGIC' -or $d -eq 'DLG_ISO_PAL') { $onMap = $true; break }
-        if ($popups.ContainsKey($d)) { $null = Invoke-Button host $d $popups[$d] }
-        elseif ($d -eq 'DLG_LOBBY') { $null = Invoke-Button host DLG_LOBBY BTN_OK }
-        Start-Sleep -Milliseconds 700
-    }
-    if (-not $onMap) { throw "did not reach the strategic map (stuck on $(Get-Dialog host))" }
-    Write-Host "[move] reached the map; locating the hero..." -ForegroundColor Green
+    if (-not (Invoke-Button host DLG_LOBBY BTN_OK)) { throw "BTN_OK did not start the generated scenario" }
 
-    # Poll for a populated world snapshot, then pick the hero: the local player's first mobile stack.
-    $hero = $null; $neutral = $null
+    # The first map frame can precede a late begin-turn popup and object-lock drain. Service only the
+    # known startup dialogs, at most once per observed dialog, until one fresh world snapshot has both
+    # the hero and the exact stock strategic admission. Do not probe or retry Move-Stack.
+    $hero = $null; $neutral = $null; $world = $null; $claimed = @{}
     $t0 = Get-Date
-    while ((((Get-Date) - $t0).TotalSeconds) -lt 30) {
-        $stacks = @(Get-Stacks host)
+    while ((((Get-Date) - $t0).TotalSeconds) -lt 180) {
+        $state = Get-RoleState host
+        $d = if ($state) { $state.dialog } else { $null }
+        if ($d -and $popups.ContainsKey($d) -and -not $claimed.ContainsKey($d)) {
+            $button = $popups[$d]
+            $readyButton = @($state.widgets) | Where-Object {
+                $_.name -eq $button -and $_.type -eq 'button' -and $_.state.enabled -eq $true
+            } | Select-Object -First 1
+            if ($readyButton) {
+                $claimed[$d] = $button
+                if (-not (Invoke-Button host $d $button)) { throw "one-shot startup action $d::$button was not accepted" }
+            }
+        }
+        $world = Get-World host
+        $stacks = @($world.stacks)
         $hero = $stacks | Where-Object { $_.relation -eq 'self' -and $_.movement -gt 0 } | Select-Object -First 1
         $neutral = $stacks | Where-Object { $_.relation -ne 'self' } | Select-Object -First 1
-        if ($hero) { break }
-        Start-Sleep -Milliseconds 1000
+        $onMap = $d -eq 'DLG_STRATEGIC' -or $d -eq 'DLG_ISO_PAL'
+        if ($hero -and [bool]$state.connected -and $onMap -and [bool]$state.sawBeginTurn -and
+            [bool]$world.strategicActionReady) { break }
+        $hero = $null
+        Start-Sleep -Milliseconds 500
     }
-    if (-not $hero) { throw "no own mobile stack (movement>0) on the map to move" }
+    if (-not $hero) { throw "no ready own mobile stack (movement>0) after stock turn startup" }
+    Write-Host "[move] reached the ready strategic map; hero located." -ForegroundColor Green
     Write-Host ("[move] hero id={0} at ({1},{2}) movement={3}" -f $hero.id, $hero.x, $hero.y, $hero.movement) -ForegroundColor Cyan
 
     # A garrisoned hero reports the fort anchor, not a walkable tile. Exit through the one observed
@@ -118,11 +128,13 @@ try {
         $t0 = Get-Date
         do {
             Start-Sleep -Milliseconds 500
-            $hero = @(Get-Stacks host) | Where-Object { $_.id -eq $heroId -and -not $_.inside } | Select-Object -First 1
-        } while (-not $hero -and (((Get-Date) - $t0).TotalSeconds -lt 20))
+            $world = Get-World host
+            $hero = @($world.stacks) | Where-Object { $_.id -eq $heroId -and -not $_.inside } | Select-Object -First 1
+        } while ((-not $hero -or -not [bool]$world.strategicActionReady) -and (((Get-Date) - $t0).TotalSeconds -lt 20))
         if (-not $hero -or $hero.x -ne $exitX -or $hero.y -ne $exitY) {
             throw "hero did not leave the capital at the exact gate"
         }
+        if (-not [bool]$world.strategicActionReady) { throw "capital exit applied but the stock strategic lock did not clear" }
     }
 
     # Target a tile a couple steps toward the nearest neutral (open ground, short of contact). The DLL

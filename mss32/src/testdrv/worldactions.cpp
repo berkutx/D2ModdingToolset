@@ -120,9 +120,11 @@ bool moveStack(const char* stackIdStr, int targetX, int targetY)
 {
     using namespace game;
 
-    // The move issues a client net-message; only do it on the local player's own turn.
+    // Match the stock UI admission before doing any path work or sending a net-message. The raw turn
+    // bit is insufficient while the existing phase object-lock predicate is still busy applying a
+    // command; bypassing that lock can make a direct test action disappear or overlap a prior move.
     CPhaseGame* phaseGame = testdrv::livePhaseGame();
-    if (!phaseGame || !phaseGame->data || !phaseGame->data->clientTakesTurn)
+    if (!phaseGame || !testdrv::strategicActionReady())
         return false;
 
     const IMidgardObjectMap* objectMap = hooks::getObjectMap();

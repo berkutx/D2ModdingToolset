@@ -132,7 +132,27 @@ try {
         $outcome = 'harness failure: BTN_ACCEPT was not dispatched'
         if (-not (Invoke-Button host DLG_GENERATION_RESULT BTN_ACCEPT)) { throw "BTN_ACCEPT not found" }
         $outcome = 'harness failure: BTN_ACCEPT did not open DLG_LOBBY'
-        if (-not (Wait-Dialog host DLG_LOBBY 20)) { throw $outcome }
+        # BTN_ACCEPT serializes the generated scenario synchronously before the UI can publish the
+        # lobby. Large 72x72 templates have exceeded 20s here while still making honest progress.
+        # Dispatch once, then wait passively with explicit relay/client health checks; never refire.
+        $t0 = Get-Date; $accepted = $false; $disconnectTicks = 0
+        while ((((Get-Date) - $t0).TotalSeconds) -lt 120) {
+            if ($relay.HasExited) { $outcome = 'harness failure: relay exited while accepting generated map'; throw $outcome }
+            if ($client.HasExited) { $outcome = 'harness failure: client exited while accepting generated map'; throw $outcome }
+            $state = Get-RoleState host
+            if (-not $state -or -not [bool]$state.connected) {
+                $disconnectTicks++
+                if ($disconnectTicks -ge 5) { $outcome = 'harness failure: client disconnected while accepting generated map'; throw $outcome }
+            } else {
+                $disconnectTicks = 0
+                if ($state.dialog -eq 'DLG_LOBBY') { $accepted = $true; break }
+            }
+            Start-Sleep -Milliseconds 500
+        }
+        if (-not $accepted) {
+            $outcome = "harness failure: BTN_ACCEPT did not open DLG_LOBBY (on $(Get-Dialog host))"
+            throw $outcome
+        }
         Write-Host "[gen] map accepted; starting solo host (AI fills the rest)..." -ForegroundColor Cyan
 
         # First-turn popups, each mapped to the button that dismisses it (same set the MP test uses).
@@ -169,6 +189,7 @@ try {
     }
     $ok = $true
 } catch {
+    if ($outcome -eq 'not-run') { $outcome = "harness failure: $($_.Exception.Message)" }
     Write-Host "[gen] FAIL: $($_.Exception.Message)" -ForegroundColor Red
 } finally {
     # Enrich a failure with the exact reason now captured in the DLL log (the CRT assert or the sol3

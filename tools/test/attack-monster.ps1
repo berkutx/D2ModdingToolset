@@ -19,9 +19,9 @@
        (reported at the fort anchor, fought as a siege), so the monster test skips them.
     4. Snapshot the hero and the monster BEFORE: position, unit count, total HP.
     5. Attack: Move-Stack the hero onto the monster's tile. moveStack routes adjacent and sets the
-       message `end` to the monster tile, so the server starts the battle (DLG_BATTLE_A), exactly
+       message `end` to the monster tile, so the server starts the battle (DLG_BATTLE_A/B), exactly
        like clicking an enemy stack.
-    6. Auto-battle: Invoke-Toggle DLG_BATTLE_A TOG_AUTOBATTLE -> the game's AI plays every round
+    6. Auto-battle: Invoke-Toggle on the exact DLG_BATTLE_A/B viewer -> the game's AI plays every round
        (not an instant resolve). The battle ends on its own.
     7. Dismiss every post-battle dialog (result screen, then any reward / dropped-item dialogs) by
        clicking the forward button until the strategic map is back.

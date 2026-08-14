@@ -115,6 +115,14 @@ game::CPhaseGame* livePhaseGame()
     return phaseGame->data && phaseGame->data->midClient == client ? phaseGame : nullptr;
 }
 
+bool strategicActionReady()
+{
+    auto* phaseGame = livePhaseGame();
+    auto* data = phaseGame ? phaseGame->data : nullptr;
+    return data && data->clientTakesTurn && data->midObjectLock
+           && !game::CPhaseGameApi::get().checkObjectLock(phaseGame);
+}
+
 void installEarly()
 {
     bootfixes::installEarly();
