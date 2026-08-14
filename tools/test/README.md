@@ -368,7 +368,10 @@ entrypoint for native harness or test-script changes: it validates every PowerSh
 and both relay transports, builds the compile-gated Debug-profile harness DLL from the exact checkout
 and exact dependency gitlinks, then calls the reusable `tests.yml` suite. Barton's production
 `mss32.yml` remains independent. After the ordinary suite, the generated matrix runs every recognized
-random-scenario template and requires each generated map to reach the strategic screen.
+random-scenario template for up to 300 seconds and records whether its map reaches the strategic screen.
+Because these templates come from the external game cache and have no all-green baseline, known generator
+outcomes (assert, error box, healthy timeout) are informational. Parser/setup/DLL/transport failures,
+unrecognized outcomes, maps that fail to complete loading, and missing outcome rows still fail CI.
 
 To add a test to CI, copy one of the test jobs in `tests.yml` (for example
 `multiplayer-strategic`) and change its final step to run your script with
@@ -382,7 +385,7 @@ explicitly and `-Kill` makes the run clean up after itself.
 |---|---|
 | `_relay.ps1` | the toolkit: config, relay, clients, and the commands above |
 | `relay-transport-smoke.ps1` | protocol-level Hello/status smoke for both the named-pipe and TCP relay transports |
-| `_battle.ps1` | the shared battle flow (`Invoke-HeroAttack`): exit, approach + attack the nearest free neutral, auto-battle, dismiss dialogs, report before/after; used by both battle tests |
+| `_battle.ps1` | the shared battle flow (`Invoke-HeroAttack`): use a required free hero or exit a garrisoned one, attack the nearest free neutral, auto-battle, dismiss dialogs, report before/after |
 | `_obs.ps1` | owned portable-OBS setup/record/stop helper used by multiplayer and static-arena CI jobs |
 | `test.config.sample.psd1` | per-machine config template; copy to `test.config.psd1` |
 | `scenario-generation.ps1` | single-instance generator example: drive the form, and with `-ToMap` play the generated map into the strategic screen |
@@ -769,8 +772,11 @@ CI находится в [`../../.github/workflows`](../../.github/workflows). `
 вход для изменений native harness или тестовых скриптов: он проверяет синтаксис всех PowerShell/JS
 tools и оба транспорта рилея, собирает compile-gated Debug-профиль harness DLL из точного checkout и
 точных dependency gitlinks, затем вызывает переиспользуемый набор `tests.yml`. Production workflow
-Бартона `mss32.yml` не меняется. После обычного набора автоматическая матрица прогоняет каждый
-распознанный шаблон случайной карты и требует выхода сгенерированной карты на strategic screen.
+Бартона `mss32.yml` не меняется. После обычного набора автоматическая матрица до 300 секунд прогоняет
+каждый распознанный шаблон случайной карты и записывает, дошла ли карта до strategic screen. Шаблоны
+берутся из внешнего кэша игры и пока не имеют полностью зелёного baseline, поэтому известные результаты
+генератора (assert, error box, здоровый timeout) информационные. Parser/setup/DLL/transport, неизвестный
+outcome, незагрузившаяся карта и отсутствующая outcome-строка по-прежнему краснят CI.
 
 Чтобы добавить тест в CI, скопируйте один из тест-джобов в `tests.yml` (например,
 `multiplayer-strategic`) и замените его последний шаг на запуск вашего скрипта с
@@ -784,7 +790,7 @@ tools и оба транспорта рилея, собирает compile-gated 
 |---|---|
 | `_relay.ps1` | тулкит: конфиг, рилей, клиенты и команды выше |
 | `relay-transport-smoke.ps1` | protocol-level Hello/status smoke обоих транспортов рилея: named pipe и TCP |
-| `_battle.ps1` | общий сценарий боя (`Invoke-HeroAttack`): выход, подход + атака ближайшего свободного нейтрала, автобой, закрытие диалогов, отчёт до/после; используется обоими боевыми тестами |
+| `_battle.ps1` | общий сценарий боя (`Invoke-HeroAttack`): взять требуемого свободного героя или вывести гарнизонного, атаковать ближайшего свободного нейтрала, автобой, закрытие диалогов, отчёт до/после |
 | `_obs.ps1` | helper установки/записи/остановки собственного portable OBS для multiplayer и static-arena CI jobs |
 | `test.config.sample.psd1` | шаблон конфига машины; копируется в `test.config.psd1` |
 | `scenario-generation.ps1` | одиночный пример генератора: прогон по форме, а с `-ToMap` доиграть сгенерированную карту до стратегического экрана |

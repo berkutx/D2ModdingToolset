@@ -132,4 +132,4 @@ jobs:
     uses: ./.github/workflows/generation-matrix.yml
     with:
       dll_run_id: ${{ github.run_id }}
-      wait_sec: 60
+      wait_sec: 300

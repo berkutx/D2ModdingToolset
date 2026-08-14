@@ -18,7 +18,7 @@ on:
         description: "per-template generation timeout"
         type: number
         required: false
-        default: 60
+        default: 300
   workflow_dispatch:
     inputs:
       dll_run_id:
@@ -27,10 +27,10 @@ on:
         required: false
         default: ""
       wait_sec:
-        description: "seconds to wait for each template's generation (a real one finishes well under a minute)"
+        description: "seconds to wait for each template's generation"
         type: number
         required: false
-        default: 60
+        default: 300
 
 permissions:
   contents: read
@@ -198,7 +198,19 @@ jobs:
           # index<TAB>name<TAB>outcome<TAB>generation-seconds; the summarize job assembles the table
           ("{0}`t{1}`t{2}`t{3}`n" -f $env:T_INDEX, $env:T_NAME, $status, $secs) | Set-Content "outcome/$($env:T_INDEX).tsv" -Encoding utf8 -NoNewline
           Write-Host "::notice title=$($env:T_NAME)::$status"
-          exit $code
+          # Templates come from the external game cache and have no all-green baseline. Preserve known
+          # generator outcomes in the table without making every Barton harness PR permanently red. A
+          # relay/client/action failure, an unrecognized result, a map-load failure, or a missing row stays hard.
+          $green = $status -eq 'reached map'
+          $knownFailure = $status -match '^error box:' -or
+            $status -match '^no result in \d+s' -or
+            $status -match '^crashed \(generator assert\) \| \[crt-assert\]' -or
+            $status -match '^sol3 panic \(errored on the generator form\) \| \[stderr\]'
+          if (-not $oc -or (-not $green -and -not $knownFailure) -or ($green -and $code -ne 0) -or ($knownFailure -and $code -eq 0)) {
+            throw "template harness produced an inconsistent/unrecognized outcome '$status' (child exit $code)"
+          }
+          if ($knownFailure) { Write-Warning "template outcome is non-green (recorded above; child exit $code)" }
+          exit 0 # clear the child pwsh's LASTEXITCODE; the Actions pwsh footer would otherwise re-propagate it
       - name: Upload this template's outcome
         if: always()
         uses: actions/upload-artifact@v7
@@ -230,6 +242,8 @@ jobs:
           missing=0
           {
             echo "## Random-scenario generation + map load, per template"
+            echo ""
+            echo "> Known generator outcomes over the external game cache are informational; harness/map-load failures and missing artifacts still fail CI."
             echo ""
             echo "| | # | Template | Time | Outcome |"
             echo "|:--:|--:|---|--:|---|"

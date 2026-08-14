@@ -88,13 +88,22 @@ try {
         # Assert generation runs to a result. A bad template fails three ways: it errors at once and
         # stays on the form (sol3 panic, printed to the game's stderr), it runs a while then pops
         # DLG_MESSAGE_BOX (the generator gave up after N attempts), or it never leaves
-        # DLG_WAIT_GENERATION. A working one reaches DLG_GENERATION_RESULT in well under a minute, so a
-        # long wait means failure, not slowness; $outcome records which, for the matrix summary.
+        # DLG_WAIT_GENERATION. Some large shipped templates take more than a minute, so the matrix uses
+        # the same bounded 300s budget as -ToMap; $outcome records which case occurred for its summary.
         Write-Host "[gen] waiting up to ${WaitGenerationSec}s for generation to finish..." -ForegroundColor Cyan
-        $t0 = Get-Date; $started = $false; $done = $false; $errbox = $false; $crashed = $false
+        $t0 = Get-Date; $started = $false; $done = $false; $errbox = $false; $crashed = $false; $disconnectTicks = 0
         while ((((Get-Date) - $t0).TotalSeconds) -lt $WaitGenerationSec) {
+            if ($relay.HasExited) { $outcome = 'harness failure: relay exited during generation'; throw $outcome }
             if ($client.HasExited) { $crashed = $true; break }   # a debug assert / fault killed the game
-            $d = Get-Dialog host
+            $state = Get-RoleState host
+            if (-not $state -or -not [bool]$state.connected) {
+                $disconnectTicks++
+                if ($disconnectTicks -ge 5) { $outcome = 'harness failure: client disconnected during generation'; throw $outcome }
+                Start-Sleep -Milliseconds 1000
+                continue
+            }
+            $disconnectTicks = 0
+            $d = $state.dialog
             if ($d -eq 'DLG_WAIT_GENERATION') { $started = $true }
             if ($d -eq 'DLG_GENERATION_RESULT') { $done = $true; break }
             if ($d -eq 'DLG_MESSAGE_BOX') { $errbox = $true; break }   # generator gave up with an error popup
@@ -120,9 +129,10 @@ try {
         # first-turn popups give way to the strategic map. This proves the scenario actually plays.
         # Keep generation-only success distinct from a playable-map success: any later throw must
         # remain red in the all-template matrix.
-        $outcome = 'generated, map not reached'
+        $outcome = 'harness failure: BTN_ACCEPT was not dispatched'
         if (-not (Invoke-Button host DLG_GENERATION_RESULT BTN_ACCEPT)) { throw "BTN_ACCEPT not found" }
-        if (-not (Wait-Dialog host DLG_LOBBY 20)) { throw "BTN_ACCEPT did not open DLG_LOBBY" }
+        $outcome = 'harness failure: BTN_ACCEPT did not open DLG_LOBBY'
+        if (-not (Wait-Dialog host DLG_LOBBY 20)) { throw $outcome }
         Write-Host "[gen] map accepted; starting solo host (AI fills the rest)..." -ForegroundColor Cyan
 
         # First-turn popups, each mapped to the button that dismisses it (same set the MP test uses).
@@ -130,10 +140,21 @@ try {
             'DLG_SCENARIO_BRIEFING' = 'BTN_CONTINUE'; 'DLG_BEGIN_TURN' = 'BTN_OK'
             'DLG_GETINFO_BOX' = 'BTN_CLOSE'; 'DLG_MESSAGE_BOX' = 'BTN_OK'; 'DLG_EVENT_POPUP' = 'BTN_RIGHTSIDE'
         }
+        $outcome = 'generated, map not reached'
         $null = Invoke-Button host DLG_LOBBY BTN_OK
-        $t0 = Get-Date; $onMap = $false
+        $t0 = Get-Date; $onMap = $false; $disconnectTicks = 0
         while ((((Get-Date) - $t0).TotalSeconds) -lt 120) {
-            $d = Get-Dialog host
+            if ($relay.HasExited) { $outcome = 'harness failure: relay exited while loading generated map'; throw $outcome }
+            if ($client.HasExited) { $outcome = 'harness failure: client exited while loading generated map'; throw $outcome }
+            $state = Get-RoleState host
+            if (-not $state -or -not [bool]$state.connected) {
+                $disconnectTicks++
+                if ($disconnectTicks -ge 5) { $outcome = 'harness failure: client disconnected while loading generated map'; throw $outcome }
+                Start-Sleep -Milliseconds 700
+                continue
+            }
+            $disconnectTicks = 0
+            $d = $state.dialog
             if ($d -eq 'DLG_STRATEGIC' -or $d -eq 'DLG_ISO_PAL') { $onMap = $true; break }
             if ($popups.ContainsKey($d)) { $null = Invoke-Button host $d $popups[$d] }   # dismiss a first-turn popup
             elseif ($d -eq 'DLG_LOBBY') { $null = Invoke-Button host DLG_LOBBY BTN_OK }   # re-press start if it lingered
