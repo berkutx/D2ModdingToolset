@@ -286,6 +286,7 @@ jobs:
           . ./tools/test/_obs.ps1
           Install-Obs
       - name: Host + joiner (relay) -> skirmish, both reach the map, host ends turn -> joiner's new day [recorded]
+        id: recorded_scenario
         run: |
           node --version  # the dispatcher starts tools/relay/relay.js; GitHub runners ship Node
           $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
@@ -325,8 +326,8 @@ jobs:
           name: multiplayer-obs-log
           path: ${{ env.REC_DIR }}/obs.log
           if-no-files-found: warn
-      - name: Link the run video in the summary
-        if: always() && steps.video.outputs.artifact-url != ''
+      - name: Link the failed run video in the summary
+        if: always() && steps.recorded_scenario.outcome == 'failure' && steps.video.outputs.artifact-url != ''
         run: |
           "### Multiplayer run video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           "[Download the recording](${{ steps.video.outputs.artifact-url }})" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
@@ -465,6 +466,7 @@ jobs:
           . ./tools/test/_obs.ps1
           Install-Obs
       - name: Host generates the map, both reach it, host ends turn -> joiner's new day [recorded]
+        id: recorded_scenario
         run: |
           node --version
           $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
@@ -504,8 +506,8 @@ jobs:
           name: generated-map-obs-log
           path: ${{ env.REC_DIR }}/obs.log
           if-no-files-found: warn
-      - name: Link the run video in the summary
-        if: always() && steps.video.outputs.artifact-url != ''
+      - name: Link the failed run video in the summary
+        if: always() && steps.recorded_scenario.outcome == 'failure' && steps.video.outputs.artifact-url != ''
         run: |
           "### Generated-map run video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           "[Download the recording](${{ steps.video.outputs.artifact-url }})" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
@@ -623,6 +625,7 @@ jobs:
           . ./tools/test/_obs.ps1
           Install-Obs
       - name: Load pinned scenario; both attack their monsters + pass turns; assert regeneration [recorded]
+        id: recorded_scenario
         run: |
           node --version
           $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
@@ -662,8 +665,8 @@ jobs:
           name: mp-attack-obs-log
           path: ${{ env.REC_DIR }}/obs.log
           if-no-files-found: warn
-      - name: Link the run video in the summary
-        if: always() && steps.video.outputs.artifact-url != ''
+      - name: Link the failed run video in the summary
+        if: always() && steps.recorded_scenario.outcome == 'failure' && steps.video.outputs.artifact-url != ''
         run: |
           "### Multiplayer attack/regen run video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           "[Download the recording](${{ steps.video.outputs.artifact-url }})" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
@@ -780,6 +783,7 @@ jobs:
           . ./tools/test/_obs.ps1
           Install-Obs
       - name: Load static arena; both roles collect, hire and arrange squads [recorded]
+        id: recorded_scenario
         run: |
           node --version
           $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
@@ -821,8 +825,8 @@ jobs:
             ${{ env.REC_DIR }}/obs.log
             ${{ env.GAME_DIR }}/mss32_*.log
           if-no-files-found: warn
-      - name: Link the run video in the summary
-        if: always() && steps.arena-video.outputs.artifact-url != ''
+      - name: Link the failed run video in the summary
+        if: always() && steps.recorded_scenario.outcome == 'failure' && steps.arena-video.outputs.artifact-url != ''
         run: |
           '### Static-arena run video' | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           '[Download the recording](${{ steps.arena-video.outputs.artifact-url }})' | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

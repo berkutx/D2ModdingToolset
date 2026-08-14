@@ -28,6 +28,11 @@ on:
         description: "unique lowercase prefix for this profile's artifacts"
         type: string
         required: true
+      job_name_prefix:
+        description: "caller job name used to build direct matrix-job links"
+        type: string
+        required: false
+        default: ""
       wait_sec:
         description: "per-attempt generation timeout"
         type: number
@@ -73,6 +78,11 @@ on:
         type: string
         required: false
         default: debug
+      job_name_prefix:
+        description: "caller job name prefix (empty for direct dispatch)"
+        type: string
+        required: false
+        default: ""
       wait_sec:
         description: "seconds to wait for each generation attempt"
         type: number
@@ -104,7 +114,7 @@ on:
 
 permissions:
   contents: read
-  actions: read # list harness runs + download the requested DLL artifact
+  actions: read # list harness runs/jobs + download the requested DLL artifact
 
 env:
   GAME_FIXTURE_XET_HASH: 6842c7d20be847eeb8aacb48d0cb89a05052f8a5b4811fe3feead2388935c0fe
@@ -611,6 +621,8 @@ jobs:
           # Retention policy: five green attempts keep only attempt 5. If anything failed, keep every
           # failed attempt and remove all successful-attempt recordings (including attempt 5).
           $failedAttempts = @($results | Where-Object { -not $_.Green })
+          "has_failures=$(([bool]($failedAttempts.Count -gt 0)).ToString().ToLowerInvariant())" |
+            Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           $keepAttempts = if ($failedAttempts.Count -eq 0) { @(5) } else { @($failedAttempts.Attempt) }
           foreach ($result in $results) {
             $keep = $result.Attempt -in $keepAttempts
@@ -733,8 +745,10 @@ jobs:
           path: evidence/
           retention-days: 90
           if-no-files-found: error
-      - name: Link retained template videos in the job summary
-        if: always()
+      - name: Link failed-attempt template videos in the job summary
+        # A 5/5-green run still retains attempt 5 as reserve evidence, but does not advertise that
+        # video in the summary. Failed jobs link only the failed-attempt recordings retained above.
+        if: always() && steps.attempts.outputs.has_failures == 'true'
         env:
           VIDEO_1: ${{ steps.video_1.outputs.artifact-url }}
           VIDEO_2: ${{ steps.video_2.outputs.artifact-url }}
@@ -748,7 +762,7 @@ jobs:
             if ($url) { $links.Add("- [attempt $attempt recording]($url)") }
           }
           if ($links.Count -gt 0) {
-            "### $($env:PROFILE_NAME) retained template video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            "### $($env:PROFILE_NAME) failed-attempt recordings" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             $links | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           }
 
@@ -776,13 +790,48 @@ jobs:
           SOURCE_REVISION: ${{ needs.setup.outputs.source_revision }}
           SOURCE_DESCRIPTION: ${{ needs.setup.outputs.source_description }}
           PROFILE_NAME: ${{ inputs.profile_name }}
+          JOB_NAME_PREFIX: ${{ inputs.job_name_prefix }}
           MESA_ASSET_URL: ${{ needs.setup.outputs.mesa_url }}
           MESA_ASSET_DIGEST: ${{ needs.setup.outputs.mesa_digest }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           failed=0
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          jobs_file="$RUNNER_TEMP/template-run-jobs.jsonl"
+          : > "$jobs_file"
+          page=1
+          while :; do
+            page_file="$RUNNER_TEMP/template-run-jobs-page-${page}.json"
+            gh api -H 'Accept: application/vnd.github+json' \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?filter=latest&per_page=100&page=${page}" \
+              > "$page_file"
+            page_count=$(jq '.jobs | length' "$page_file")
+            jq -c '.jobs[] | {name, html_url}' "$page_file" >> "$jobs_file"
+            [ "$page_count" -eq 100 ] || break
+            page=$((page + 1))
+          done
+
+          template_job_link() {
+            local idx="$1" name="$2" expected url
+            if [ -n "$JOB_NAME_PREFIX" ]; then
+              expected="${JOB_NAME_PREFIX} / #${idx} ${name}"
+            else
+              expected="#${idx} ${name}"
+            fi
+            url=$(jq -r -s --arg wanted "$expected" \
+              '[.[] | select(.name == $wanted)] | if length == 1 then .[0].html_url else empty end' \
+              "$jobs_file")
+            if [ -z "$url" ]; then
+              echo "::warning title=Template job link unavailable::Could not resolve exact job: ${expected}" >&2
+              url="$run_url"
+            fi
+            printf '%s' "$url"
+          }
+
           {
             echo "## ${PROFILE_NAME}: five random-scenario attempts per template"
             echo ""
+            echo "> Run: [#${GITHUB_RUN_NUMBER}](${run_url}). Each \`job\` link below opens the exact template matrix job."
             echo "> Strict ${PROFILE_NAME} gate: attempts 1-4 must generate; attempt 5 must also load a populated, actionable strategic map after the startup dialogs."
             echo "> Natural game randomness is preserved. All five outcomes/log sets are retained. If all pass, only attempt 5 video is retained; otherwise only failed-attempt videos are retained."
             if [ "$TEMPLATE_ORIGIN" = upstream ]; then
@@ -795,16 +844,17 @@ jobs:
             echo "| | # | Template | Attempt | Scope | Time | Outcome |"
             echo "|:--:|--:|---|--:|---|--:|---|"
             while IFS=$'\t' read -r idx name; do
+              job_url=$(template_job_link "$idx" "$name")
+              plain_name=$(printf '%s' "$name" | tr '|' '/')
+              display_name="[job](${job_url}) ${plain_name}"
               row="outcomes/$idx.tsv"
               if [ ! -f "$row" ]; then
-                display_name=$(printf '%s' "$name" | tr '|' '/')
                 echo "| ❌ | $idx | $display_name | - | - | - | infrastructure failure: no outcome artifact |"
                 failed=1
                 continue
               fi
               line_count=$(awk 'END { print NR + 0 }' "$row")
               if [ "$line_count" -ne 5 ]; then
-                display_name=$(printf '%s' "$name" | tr '|' '/')
                 echo "| ❌ | $idx | $display_name | - | - | - | infrastructure failure: expected 5 rows, found $line_count |"
                 failed=1
                 continue
@@ -812,7 +862,6 @@ jobs:
               for attempt in 1 2 3 4 5; do
                 match_count=$(awk -F '\t' -v wanted="$attempt" '$3 == wanted { n++ } END { print n + 0 }' "$row")
                 if [ "$match_count" -ne 1 ]; then
-                  display_name=$(printf '%s' "$name" | tr '|' '/')
                   echo "| ❌ | $idx | $display_name | $attempt | - | - | infrastructure failure: expected one attempt row, found $match_count |"
                   failed=1
                   continue
@@ -826,7 +875,6 @@ jobs:
                   status="infrastructure failure: outcome identity/scope mismatch"
                   failed=1
                 fi
-                display_name=$(printf '%s' "$name" | tr '|' '/')
                 mode="${status%% | *}"
                 if [ "$mode" = "$expected_status" ]; then
                   icon='✅'

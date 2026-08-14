@@ -253,6 +253,7 @@ jobs:
       dll_artifact: mss32-test-harness-debug
       profile_name: DebugTest
       artifact_prefix: master-debug
+      job_name_prefix: Tpl master · Debug
       template_origin: upstream
       wait_sec: 300
       templates_ref: ${{ needs.template_source.outputs.commit }}
@@ -271,6 +272,7 @@ jobs:
       dll_artifact: mss32-test-harness-release
       profile_name: Release + D2_TESTDRV
       artifact_prefix: master-release
+      job_name_prefix: Tpl master · Release
       template_origin: upstream
       wait_sec: 300
       templates_ref: ${{ needs.template_source.outputs.commit }}
@@ -289,6 +291,7 @@ jobs:
       dll_artifact: mss32-test-harness-debug
       profile_name: DebugTest
       artifact_prefix: game-debug
+      job_name_prefix: Tpl game · Debug
       template_origin: bundled
       wait_sec: 300
       mesa_asset_url: ${{ needs.template_source.outputs.mesa_url }}
@@ -304,6 +307,7 @@ jobs:
       dll_artifact: mss32-test-harness-release
       profile_name: Release + D2_TESTDRV
       artifact_prefix: game-release
+      job_name_prefix: Tpl game · Release
       template_origin: bundled
       wait_sec: 300
       mesa_asset_url: ${{ needs.template_source.outputs.mesa_url }}
