@@ -240,32 +240,30 @@ $($captureSources -join ",`n")
             }
         }
     if ($StartImmediately) {
-        # Required immediate evidence waits for output bytes, not merely Process.Start. This closes
-        # the race where a slow OBS process exists but has not begun recording before the test fails.
-        $launchDeadline = (Get-Date).AddSeconds($RecordingReadyTimeoutSec)
-        $recordingReady = $false
+        # Immediate mode intentionally returns once the owned OBS process is live, then the caller
+        # launches the game window that Window Capture needs before it can emit frames. Waiting for
+        # MKV bytes here would deadlock those two steps. Template CI uses deferred mode instead and
+        # independently waits for obs-recording-ready.json after its host window already exists.
+        $launchDeadline = (Get-Date).AddSeconds(20)
+        $launched = $false
         while ((Get-Date) -lt $launchDeadline) {
             try {
-                $ready = Get-Content -LiteralPath $script:ObsReadyFile -Raw | ConvertFrom-Json -ErrorAction Stop
-                $readyProcess = Get-Process -Id ([int]$ready.pid) -ErrorAction Stop
-                $readyRecording = Get-Item -LiteralPath ([string]$ready.recording) -ErrorAction Stop
-                $actual = [IO.Path]::GetFullPath($readyProcess.Path)
-                $expected = [IO.Path]::GetFullPath([string]$ready.executable)
-                $readyDir = [IO.Path]::GetFullPath($readyRecording.DirectoryName)
-                $expectedDir = [IO.Path]::GetFullPath($OutDir)
-                if ($readyRecording.Length -gt 0 -and
-                    [string]::Equals($readyDir, $expectedDir, [StringComparison]::OrdinalIgnoreCase) -and
-                    [string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
-                    $recordingReady = $true
+                $owned = Get-Content -LiteralPath $script:ObsPidFile -Raw | ConvertFrom-Json -ErrorAction Stop
+                $ownedProcess = Get-Process -Id ([int]$owned.pid) -ErrorAction Stop
+                $actual = [IO.Path]::GetFullPath($ownedProcess.Path)
+                $expected = [IO.Path]::GetFullPath([string]$owned.executable)
+                if ([string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+                    $launched = $true
                     break
                 }
             } catch {}
             Start-Sleep -Milliseconds 250
         }
-        if (-not $recordingReady) {
+        if (-not $launched) {
             try { Stop-ObsRecording | Out-Null } catch {}
-            throw "[obs] required immediate recording did not start within ${RecordingReadyTimeoutSec}s"
+            throw '[obs] required immediate OBS process did not launch within 20s'
         }
+        Start-Sleep -Seconds 2
     }
     return $OutDir
 }
