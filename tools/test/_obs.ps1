@@ -7,11 +7,12 @@
 # UI-frame callback (no separate window-tag hook or polling thread).
 #
 # By default a background watcher holds off until every requested role reports a rendered dialog.
-# The template matrix uses that HostOnly mode so recordings begin on real UI instead of a black boot
-# prefix. Dual-client CI evidence passes -StartImmediately so an early boot failure still leaves MKV.
+# The template matrix uses HostOnly mode plus a recording-ready marker, so it waits for real MKV bytes
+# before opening the generator and avoids a black boot prefix. Dual-client CI evidence passes
+# -StartImmediately so an early boot failure still leaves MKV.
 #
 #   Install-Obs
-#   $rec = Start-ObsRecording -OutDir $dir   # deferred manual mode
+#   $rec = Start-ObsRecording -OutDir $dir   # deferred mode; obs-recording-ready.json proves output
 #   $rec = Start-ObsRecording -OutDir $dir -StartImmediately  # required CI evidence
 #   ... run the test ...
 #   Stop-ObsRecording        # -> finalizes; the .mkv + obs log are in $dir
@@ -28,6 +29,7 @@ $script:ObsCfg     = Join-Path $script:ObsRoot 'config\obs-studio'
 $script:ObsWatcher = $null
 $script:RecDir     = $null
 $script:ObsPidFile = $null
+$script:ObsReadyFile = $null
 $script:ObsRelayHttpHost = if ([string]::IsNullOrWhiteSpace($env:D2_RELAY_HTTP_HOST)) { '127.0.0.1' } else { $env:D2_RELAY_HTTP_HOST }
 $script:ObsRelayHttpPort = if ([string]::IsNullOrWhiteSpace($env:D2_RELAY_HTTP_PORT)) { '8077' } else { $env:D2_RELAY_HTTP_PORT }
 $script:ObsRelayBase = "http://$($script:ObsRelayHttpHost):$($script:ObsRelayHttpPort)"
@@ -69,14 +71,19 @@ function Start-ObsRecording {
         [int]$BitrateKbps = 4000,
         [string]$WinClass = 'MQ_UIManager', [int]$Method = 2,   # the game's window class; WGC (2) captures the GL surface, an empty class fails to match
         [string]$RelayBase = $script:ObsRelayBase,      # the test relay; recording waits until both roles report a dialog (content on screen)
-        [int]$ReadyTimeoutSec = 120                      # ... then records if the run is still alive
+        [int]$ReadyTimeoutSec = 120,                     # ... then records if the run is still alive
+        [int]$RecordingReadyTimeoutSec = 90              # bound OBS initialization until a non-empty MKV proves recording started
     )
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
     $script:RecDir = $OutDir
     $script:ObsPidFile = Join-Path $OutDir 'obs-owned.json'
+    $script:ObsReadyFile = Join-Path $OutDir 'obs-recording-ready.json'
     # Invalidate an earlier marker. Stop-ObsRecording trusts only the PID + executable recorded by
     # this watcher and never enumerates or terminates unrelated OBS instances.
-    Set-Content -LiteralPath $script:ObsPidFile -Value '' -Encoding UTF8
+    Remove-Item -LiteralPath $script:ObsPidFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$($script:ObsPidFile).tmp" -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $script:ObsReadyFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$($script:ObsReadyFile).tmp" -Force -ErrorAction SilentlyContinue
     $canvasW = if ($HostOnly) { $PaneW } else { $PaneW * 2 + $Gap }
     $readyRoles = if ($HostOnly) { 'host' } else { 'host,join' }
 
@@ -172,9 +179,9 @@ $($captureSources -join ",`n")
     $startMode = if ($StartImmediately) { 'immediate' } else { "roles=$readyRoles; fallback=${ReadyTimeoutSec}s" }
     Write-Host "[obs] watcher armed (canvas ${canvasW}x${PaneH}; $startMode -> $OutDir)"
     $script:ObsWatcher = Start-Job -Name obswatch `
-        -ArgumentList $script:ObsExe, $script:ObsBin, $RelayBase, $ReadyTimeoutSec, $script:ObsPidFile, $readyRoles, ([bool]$StartImmediately) `
+        -ArgumentList $script:ObsExe, $script:ObsBin, $RelayBase, $ReadyTimeoutSec, $script:ObsPidFile, $script:ObsReadyFile, $OutDir, $readyRoles, ([bool]$StartImmediately), $RecordingReadyTimeoutSec `
         -ScriptBlock {
-            param($exe, $bin, $relayBase, $timeoutSec, $pidFile, $readyRolesCsv, $startImmediately)
+            param($exe, $bin, $relayBase, $timeoutSec, $pidFile, $readyFile, $outDir, $readyRolesCsv, $startImmediately, $recordingTimeoutSec)
             if (-not (Test-Path $exe)) { return }
             $roles = @($readyRolesCsv -split ',')
             $deadline = (Get-Date).AddSeconds($timeoutSec)
@@ -190,32 +197,75 @@ $($captureSources -join ",`n")
                 } catch {}   # relay not up yet, or a transient miss; keep polling
                 Start-Sleep -Milliseconds 1000
             }
+            $existingRecordings = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
+            Get-ChildItem -LiteralPath $outDir -Filter '*.mkv' -File -ErrorAction SilentlyContinue |
+                ForEach-Object { $existingRecordings[$_.FullName] = "$($_.Length):$($_.LastWriteTimeUtc.Ticks)" }
             $owned = Start-Process -FilePath $exe -WorkingDirectory $bin -PassThru -ArgumentList @(
                 '--portable', '--multi', '--minimize-to-tray', '--startrecording',
                 '--profile', 'CI', '--collection', 'CI', '--scene', 'CI')
-            [pscustomobject]@{
+            $metadata = [pscustomobject]@{
                 pid = $owned.Id
                 executable = [IO.Path]::GetFullPath($exe)
-            } | ConvertTo-Json -Compress | Set-Content -LiteralPath $pidFile -Encoding UTF8
+            }
+            # Publish ownership immediately so Stop-ObsRecording can always clean up a stalled OBS.
+            $ownedTemp = "$pidFile.tmp"
+            $metadata | ConvertTo-Json -Compress | Set-Content -LiteralPath $ownedTemp -Encoding UTF8
+            Move-Item -LiteralPath $ownedTemp -Destination $pidFile -Force
+
+            # Process creation is not recording readiness: hosted OBS can spend tens of seconds in
+            # graphics/encoder initialization. Publish a separate marker only after output bytes
+            # exist, which is the authoritative proof that --startrecording actually took effect.
+            $recordingDeadline = (Get-Date).AddSeconds($recordingTimeoutSec)
+            while ((Get-Date) -lt $recordingDeadline) {
+                if (-not (Get-Process -Id $owned.Id -ErrorAction SilentlyContinue)) { return }
+                $mkv = Get-ChildItem -LiteralPath $outDir -Filter '*.mkv' -File -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $signature = "$($_.Length):$($_.LastWriteTimeUtc.Ticks)"
+                        $_.Length -gt 0 -and (-not $existingRecordings.ContainsKey($_.FullName) -or
+                            $existingRecordings[$_.FullName] -ne $signature)
+                    } |
+                    Sort-Object LastWriteTime | Select-Object -Last 1
+                if ($mkv) {
+                    $readyMetadata = [pscustomobject]@{
+                        pid = $metadata.pid
+                        executable = $metadata.executable
+                        recording = $mkv.FullName
+                    }
+                    $readyTemp = "$readyFile.tmp"
+                    $readyMetadata | ConvertTo-Json -Compress | Set-Content -LiteralPath $readyTemp -Encoding UTF8
+                    Move-Item -LiteralPath $readyTemp -Destination $readyFile -Force
+                    return
+                }
+                Start-Sleep -Milliseconds 250
+            }
         }
     if ($StartImmediately) {
-        # Required evidence must be recording before the test process starts. Waiting for the owned
-        # PID record closes the race where a very early client failure could otherwise cancel the job
-        # before it launched OBS and leave no video at all.
-        $launchDeadline = (Get-Date).AddSeconds(20)
-        $launched = $false
+        # Required immediate evidence waits for output bytes, not merely Process.Start. This closes
+        # the race where a slow OBS process exists but has not begun recording before the test fails.
+        $launchDeadline = (Get-Date).AddSeconds($RecordingReadyTimeoutSec)
+        $recordingReady = $false
         while ((Get-Date) -lt $launchDeadline) {
             try {
-                $owned = Get-Content -LiteralPath $script:ObsPidFile -Raw | ConvertFrom-Json -ErrorAction Stop
-                if ($owned.pid -and (Get-Process -Id ([int]$owned.pid) -ErrorAction SilentlyContinue)) {
-                    $launched = $true
+                $ready = Get-Content -LiteralPath $script:ObsReadyFile -Raw | ConvertFrom-Json -ErrorAction Stop
+                $readyProcess = Get-Process -Id ([int]$ready.pid) -ErrorAction Stop
+                $readyRecording = Get-Item -LiteralPath ([string]$ready.recording) -ErrorAction Stop
+                $actual = [IO.Path]::GetFullPath($readyProcess.Path)
+                $expected = [IO.Path]::GetFullPath([string]$ready.executable)
+                $readyDir = [IO.Path]::GetFullPath($readyRecording.DirectoryName)
+                $expectedDir = [IO.Path]::GetFullPath($OutDir)
+                if ($readyRecording.Length -gt 0 -and
+                    [string]::Equals($readyDir, $expectedDir, [StringComparison]::OrdinalIgnoreCase) -and
+                    [string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+                    $recordingReady = $true
                     break
                 }
             } catch {}
             Start-Sleep -Milliseconds 250
         }
-        if (-not $launched) { throw '[obs] required immediate recording did not launch within 20 seconds' }
-        Start-Sleep -Seconds 2
+        if (-not $recordingReady) {
+            try { Stop-ObsRecording | Out-Null } catch {}
+            throw "[obs] required immediate recording did not start within ${RecordingReadyTimeoutSec}s"
+        }
     }
     return $OutDir
 }
@@ -274,7 +324,23 @@ function Stop-ObsRecording {
     $log = Get-ChildItem (Join-Path $script:ObsCfg 'logs') -Filter *.txt -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime | Select-Object -Last 1
     if ($log -and $script:RecDir) { Copy-Item $log.FullName (Join-Path $script:RecDir 'obs.log') -Force -ErrorAction SilentlyContinue }
-    $mkv = Get-ChildItem $script:RecDir -Filter *.mkv -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
+    $mkv = $null
+    if ($script:ObsReadyFile -and (Test-Path -LiteralPath $script:ObsReadyFile)) {
+        try {
+            $ready = Get-Content -LiteralPath $script:ObsReadyFile -Raw | ConvertFrom-Json -ErrorAction Stop
+            $readyMkv = Get-Item -LiteralPath ([string]$ready.recording) -ErrorAction Stop
+            $readyDir = [IO.Path]::GetFullPath($readyMkv.DirectoryName)
+            $expectedDir = [IO.Path]::GetFullPath($script:RecDir)
+            if ($readyMkv.Length -gt 0 -and
+                [string]::Equals($readyDir, $expectedDir, [StringComparison]::OrdinalIgnoreCase)) {
+                $mkv = $readyMkv
+            }
+        } catch {}
+    }
+    if (-not $mkv) {
+        $mkv = Get-ChildItem $script:RecDir -Filter *.mkv -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime | Select-Object -Last 1
+    }
     if ($mkv) { Write-Host "[obs] recording: $($mkv.Name) ($([int]($mkv.Length/1KB)) KB)" }
     else { Write-Host "[obs] NO .mkv produced (see obs.log)" }
     return $(if ($mkv) { $mkv.FullName } else { $null })

@@ -33,7 +33,7 @@ param(
     [int]$WaitGenerationSec = 0,  # >0: after Generate, wait this long and assert the map generates
     [switch]$ToMap,               # after the result, accept + start the game and reach the strategic map
     [switch]$UseTemplateDefaults, # do not force spin indices that may not exist for fixed-size templates
-    [string]$RecorderReadyFile,   # CI: wait for the owned OBS process before leaving the main menu
+    [string]$RecorderReadyFile,   # CI: wait for proof that owned OBS is writing MKV before leaving main menu
     [switch]$Keep
 )
 
@@ -66,11 +66,11 @@ try {
     $client = Start-GameClient -GameDir $GameDir -Role host
     if (-not (Wait-Dialog host DLG_MAIN_MENU 90)) { throw "host never reached DLG_MAIN_MENU" }
     if ($RecorderReadyFile) {
-        # Deferred HostOnly recording removes the black boot prefix. The wrapper creates an empty
-        # ownership file before launching this client; its watcher fills the file only after the
-        # first rendered host dialog and a real owned OBS process exists. Hold navigation until then
-        # so even an immediate generator failure is captured from before the form opens.
-        $recordDeadline = (Get-Date).AddSeconds(30)
+        # Deferred HostOnly recording removes the black boot prefix. Its watcher atomically publishes
+        # the readiness file only after the first rendered host dialog and a non-empty MKV prove that
+        # the owned OBS process is recording.
+        # Hold navigation until then so even an immediate generator failure is captured.
+        $recordDeadline = (Get-Date).AddSeconds(120) # exceeds the watcher's bounded 90s OBS init
         $recorderReady = $false
         while ((Get-Date) -lt $recordDeadline) {
             try {
@@ -79,16 +79,21 @@ try {
                 $process = Get-Process -Id ([int]$owned.pid) -ErrorAction Stop
                 $actual = [IO.Path]::GetFullPath($process.Path)
                 $expected = [IO.Path]::GetFullPath([string]$owned.executable)
-                if ([string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+                $recording = Get-Item -LiteralPath ([string]$owned.recording) -ErrorAction Stop
+                $readyDir = [IO.Path]::GetFullPath((Split-Path -Parent $RecorderReadyFile))
+                $recordingDir = [IO.Path]::GetFullPath($recording.DirectoryName)
+                if ($recording.Length -gt 0 -and
+                    [string]::Equals($readyDir, $recordingDir, [StringComparison]::OrdinalIgnoreCase) -and
+                    [string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
                     $recorderReady = $true
                     break
                 }
             } catch {}
             Start-Sleep -Milliseconds 250
         }
-        if (-not $recorderReady) { throw "required OBS recorder did not become ready within 30s" }
+        if (-not $recorderReady) { throw "required OBS recording did not start within 120s" }
         Start-Sleep -Seconds 2 # let --startrecording publish its first rendered frames
-        Write-Host "[gen] required recorder ready before generator navigation" -ForegroundColor Green
+        Write-Host "[gen] required recording active before generator navigation" -ForegroundColor Green
     }
 
     # Multiplayer setup -> the random-scenario generator.

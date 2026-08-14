@@ -521,7 +521,7 @@ jobs:
               # Five FPS is enough to prove the dialog/error sequence without making five recordings huge.
               # Start when the host reports its first rendered dialog. This removes the long black
               # boot prefix while still beginning well before the generator form is opened.
-              Start-ObsRecording -OutDir $attemptRecDir -HostOnly -ReadyTimeoutSec 60 -Fps 5 -BitrateKbps 1200 | Out-Null
+              Start-ObsRecording -OutDir $attemptRecDir -HostOnly -ReadyTimeoutSec 30 -Fps 5 -BitrateKbps 1200 | Out-Null
             } catch {
               $recordingError = "OBS start failed: $($_.Exception.Message)"
               Write-Host "::error::$recordingError"
@@ -536,7 +536,7 @@ jobs:
                 '-NoLogo', '-NoProfile', '-NonInteractive',
                 '-File', './tools/test/scenario-generation.ps1', '-GameDir', $env:GAME_DIR,
                 '-Template', $env:T_INDEX, '-WaitGenerationSec', $waitSec, '-UseTemplateDefaults',
-                '-RecorderReadyFile', (Join-Path $attemptRecDir 'obs-owned.json')
+                '-RecorderReadyFile', (Join-Path $attemptRecDir 'obs-recording-ready.json')
               )
               if ($attempt -eq 5) { $scenarioArgs += '-ToMap' }
               # Stream the child output while retaining it for the TSV/evidence parser. Previously it
@@ -590,7 +590,7 @@ jobs:
               "video=$videoPath"
               "recording-error=$recordingError"
             ) | Set-Content (Join-Path $attemptEvidence 'result.txt') -Encoding utf8
-            foreach ($name in @('obs.log', 'obs-owned.json')) {
+            foreach ($name in @('obs.log', 'obs-owned.json', 'obs-recording-ready.json')) {
               $file = Join-Path $attemptRecDir $name
               if (Test-Path -LiteralPath $file) { Copy-Item -LiteralPath $file -Destination $attemptEvidence -Force }
             }
@@ -715,7 +715,7 @@ jobs:
           if (Test-Path -LiteralPath outcome) {
             Copy-Item -LiteralPath outcome -Destination evidence -Recurse -Force
           }
-          foreach ($name in @('obs.log', 'obs-owned.json')) {
+          foreach ($name in @('obs.log', 'obs-owned.json', 'obs-recording-ready.json')) {
             $file = Join-Path $env:REC_DIR $name
             if (Test-Path -LiteralPath $file) { Copy-Item -LiteralPath $file -Destination evidence -Force }
           }
