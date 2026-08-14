@@ -33,7 +33,7 @@ param(
     [int]$WaitGenerationSec = 0,  # >0: after Generate, wait this long and assert the map generates
     [switch]$ToMap,               # after the result, accept + start the game and reach the strategic map
     [switch]$UseTemplateDefaults, # do not force spin indices that may not exist for fixed-size templates
-    [string]$RecorderReadyFile,   # CI: wait for owned OBS Recording Start proof before leaving main menu
+    [string]$RecorderReadyFile,   # CI: wait for this attempt's OBS MKV to appear before leaving main menu
     [switch]$Keep
 )
 
@@ -67,8 +67,7 @@ try {
     if (-not (Wait-Dialog host DLG_MAIN_MENU 90)) { throw "host never reached DLG_MAIN_MENU" }
     if ($RecorderReadyFile) {
         # Deferred HostOnly recording removes the black boot prefix. Its watcher atomically publishes
-        # the readiness file only after the first rendered host dialog and OBS's own live log proves
-        # that the owned process started recording to this attempt's MKV path.
+        # the readiness file only after the first rendered host dialog and this attempt's MKV appears.
         # Hold navigation until then so even an immediate generator failure is captured.
         $recordDeadline = (Get-Date).AddSeconds(120) # exceeds the watcher's bounded 90s OBS init
         $recorderReady = $false
@@ -79,19 +78,12 @@ try {
                 $process = Get-Process -Id ([int]$owned.pid) -ErrorAction Stop
                 $actual = [IO.Path]::GetFullPath($process.Path)
                 $expected = [IO.Path]::GetFullPath([string]$owned.executable)
-                if ([string]$owned.proof -ne 'obs-log-recording-start-v1') { throw 'unexpected recorder proof' }
+                if ([string]$owned.proof -ne 'obs-output-file-created-v1') { throw 'unexpected recorder proof' }
                 $recordingPath = [IO.Path]::GetFullPath([string]$owned.recording)
                 $readyDir = [IO.Path]::GetFullPath((Split-Path -Parent $RecorderReadyFile))
-                $recordingDir = [IO.Path]::GetFullPath((Split-Path -Parent $recordingPath))
-                $obsLog = Get-Item -LiteralPath ([string]$owned.log) -ErrorAction Stop
-                $logText = Get-Content -LiteralPath $obsLog.FullName -Raw -ErrorAction Stop
-                $logPath = $recordingPath.Replace('\', '/')
-                $startIndex = $logText.LastIndexOf('==== Recording Start', [StringComparison]::Ordinal)
-                $afterStart = if ($startIndex -ge 0) { $logText.Substring($startIndex) } else { '' }
-                $outputProof = "[ffmpeg muxer: 'simple_file_output'] Writing file '$logPath'"
-                $hasOutput = $afterStart.IndexOf($outputProof, [StringComparison]::OrdinalIgnoreCase) -ge 0
-                $hasStart = $startIndex -ge 0
-                if ($hasStart -and $hasOutput -and [IO.Path]::GetExtension($recordingPath) -ieq '.mkv' -and
+                $recording = Get-Item -LiteralPath $recordingPath -ErrorAction Stop
+                $recordingDir = [IO.Path]::GetFullPath($recording.DirectoryName)
+                if ([IO.Path]::GetExtension($recordingPath) -ieq '.mkv' -and
                     [string]::Equals($readyDir, $recordingDir, [StringComparison]::OrdinalIgnoreCase) -and
                     [string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
                     $recorderReady = $true
