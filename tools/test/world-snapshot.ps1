@@ -19,7 +19,7 @@
 param(
     [string]$GameDir,
     [string]$Template = 'Diligence', # generator template, selected by name (index resolved at runtime)
-    [int]$MapSize = 1,               # SPIN_SIZE index (0 = smallest); larger maps carry mercenary camps + more bags
+    [int]$MapSize = 0,               # SPIN_SIZE index (0 = smallest); larger maps carry mercenary camps + more bags
     [switch]$Keep
 )
 

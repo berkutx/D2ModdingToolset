@@ -96,7 +96,7 @@ try {
         # blindly writing index 1 is not a faithful user action and can leave the UI out of bounds.
         Write-Host "[gen] keeping template-provided size/goal defaults" -ForegroundColor Cyan
     } else {
-        if (-not (Set-SpinOption host $D SPIN_SIZE 1)) { throw "SPIN_SIZE not set" }
+        if (-not (Set-SpinOption host $D SPIN_SIZE 0)) { throw "SPIN_SIZE not set" }
         Start-Sleep 3
         if (-not (Set-SpinOption host $D SPIN_GOAL 0)) { throw "SPIN_GOAL not set" }
         Start-Sleep 3

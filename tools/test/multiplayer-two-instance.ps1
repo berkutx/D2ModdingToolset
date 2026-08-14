@@ -128,7 +128,7 @@ function HostGenerateMap {
     Start-Sleep 3
     if (-not (Set-EditText host $D EDIT_NAME "AutoHost")) { return $false }   # BTN_GENERATE needs a name
     Start-Sleep 3
-    if (-not (Set-SpinOption host $D SPIN_SIZE 1)) { return $false }
+    if (-not (Set-SpinOption host $D SPIN_SIZE 0)) { return $false }
     Start-Sleep 3
     if (-not (Set-SpinOption host $D SPIN_GOAL 0)) { return $false }
     Start-Sleep 3

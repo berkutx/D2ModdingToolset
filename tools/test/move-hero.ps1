@@ -58,7 +58,7 @@ try {
     Start-Sleep 3
     if (-not (Set-EditText host $D EDIT_NAME "AutoMove")) { throw "EDIT_NAME not set" } # BTN_GENERATE needs a name
     Start-Sleep 3
-    if (-not (Set-SpinOption host $D SPIN_SIZE 1)) { throw "SPIN_SIZE not set" }
+    if (-not (Set-SpinOption host $D SPIN_SIZE 0)) { throw "SPIN_SIZE not set" }
     Start-Sleep 3
     if (-not (Set-SpinOption host $D SPIN_GOAL 0)) { throw "SPIN_GOAL not set" }
     Start-Sleep 3

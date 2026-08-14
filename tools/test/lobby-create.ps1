@@ -18,7 +18,7 @@ param(
     [string]$Account  = $env:D2_LOBBY_ACCOUNT,    # or pass -Account; never hardcode a secret
     [string]$Password = $env:D2_LOBBY_PASSWORD,   # or pass -Password / set D2_LOBBY_PASSWORD
     [int]$Template    = 5,            # template listbox index; 5 = Diligence (verified to generate; index 3 Bladerunner_trinity sol3-panics)
-    [int]$SizeIndex   = 1,            # SPIN_SIZE index (1 = proven in the reference generator test)
+    [int]$SizeIndex   = 0,            # valid default/smallest SPIN_SIZE option
     [string]$RoomName = 'berkut_test',
     [int]$GenWaitSec  = 180,
     [switch]$Keep
