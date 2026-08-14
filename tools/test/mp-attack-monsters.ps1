@@ -207,7 +207,9 @@ Write-Host "[mp] relay up; launching clients..." -ForegroundColor Cyan
 $h = $null; $j = $null; $ok = $false
 try {
     $h = Start-GameClient -GameDir $GameDir -Role host
-    Start-Sleep -Seconds 10   # joiner boots 10s later (parallel); the join is gated inside Pair-AndReachMap
+    # Both clients read the same DBFs from GameDir.  Process age is not boot readiness: on a slow
+    # runner the joiner can otherwise enter DllMain while the host is still opening Grace.dbf.
+    if (-not (Wait-Dialog host DLG_MAIN_MENU 90)) { throw 'host never reached DLG_MAIN_MENU before joiner launch' }
     $j = Start-GameClient -GameDir $GameDir -Role join
 
     if (-not (Pair-AndReachMap)) { throw "pairing/stock turn startup failed (host '$(Get-Dialog host)', join '$(Get-Dialog join)')" }

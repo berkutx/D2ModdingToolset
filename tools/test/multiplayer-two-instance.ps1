@@ -148,8 +148,8 @@ function HostGenerateMap {
 
 # ---- the test (dispatcher drives both clients) --------------------------------------------------
 function Run-Pairing {
-    # Both clients boot in PARALLEL (joiner 10s after the host). Only ordering constraint: the joiner
-    # must not search/join a session until the host's lobby exists, so it stages at DLG_LOAD_NEW_MULTI.
+    # Both clients are booted before this function. The joiner must not search/join a session until
+    # the host's lobby exists, so it stages at DLG_LOAD_NEW_MULTI.
     if (-not (Wait-Dialog host DLG_MAIN_MENU 90)) { return $false }
     if (-not (Wait-Dialog join DLG_MAIN_MENU 90)) { return $false }
 
@@ -291,8 +291,10 @@ try {
     Write-Host "[disp] launching HOST..." -ForegroundColor Cyan
     $h = Start-GameClient -GameDir $GameDir -Role host; $hostLog = "$GameDir\mss32_$($h.Id).log"
     Write-Host "[disp] host pid=$($h.Id)"
-    Start-Sleep -Seconds 10   # joiner starts 10s later -> parallel boot; Run-Pairing gates its join
-    Write-Host "[disp] launching JOINER (10s after host)..." -ForegroundColor Cyan
+    # Both clients read the same DBFs from GameDir.  Wait for the host's synchronous DBF boot to
+    # finish; a fixed delay can let the joiner enter DllMain while Grace.dbf is still being opened.
+    if (-not (Wait-Dialog host DLG_MAIN_MENU 90)) { throw 'host never reached DLG_MAIN_MENU before joiner launch' }
+    Write-Host "[disp] launching JOINER after host boot..." -ForegroundColor Cyan
     $j = Start-GameClient -GameDir $GameDir -Role join; $joinLog = "$GameDir\mss32_$($j.Id).log"
     Write-Host "[disp] join pid=$($j.Id)"
 
