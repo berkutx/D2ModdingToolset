@@ -10,6 +10,7 @@ on:
     branches:
       - dev
       - master
+      - "feature/**"
     paths:
       - "mss32/**"
       - ".gitmodules"
@@ -27,6 +28,7 @@ on:
       - ".github/workflows/test-harness.yml"
       - ".github/workflows/tests.yml"
       - ".github/workflows/generation-matrix.yml"
+      - ".github/workflows/deps.yml"
       - ".github/workflows/mss32.yml"
       - ".github/workflows/mss32-production-build.yml"
   workflow_dispatch:
