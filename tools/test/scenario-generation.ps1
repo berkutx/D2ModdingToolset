@@ -8,16 +8,18 @@
   The reference example for the test toolkit. One host client navigates the multiplayer menu to
   the generator (DLG_RANDOM_SCENARIO_MULTI), reads the live UI snapshot to confirm the form is
   there, then exercises every command type: Set-ListSelection (the template list), Set-EditText
-  (the player name), Set-SpinOption (the size/goal spinners) and Invoke-Button (Generate).
+  (the player name), Set-SpinOption (the size spinner) and Invoke-Button (Generate).
 
   Verification is relay-only: the generator opened, every Step-ToDialog transition required a
   real click, the expected widgets are present, and the form commands left the client alive on
   the dialog. By default the generated map is not awaited; with -WaitGenerationSec the test also
   waits for Generate to reach DLG_GENERATION_RESULT and fails if it errors or never finishes.
   With -ToMap it goes the whole way: accept the result, start the game solo (AI fills the other
-  slots), dismiss the first-turn popups and assert the strategic map (DLG_STRATEGIC/DLG_ISO_PAL),
-  proving the generated scenario actually loads and plays, not just that generation completed.
-  The template-matrix workflow runs this once per template with -WaitGenerationSec set.
+  slots), dismiss each known first-turn popup once on its enabled button, and require a connected,
+  populated world on the bare strategic map after DLG_BEGIN_TURN with stock strategic action
+  admission open. This proves the generated scenario actually loads and becomes playable, not just
+  that generation completed. The template matrix runs each template five times; only attempt 5 uses
+  -ToMap, while attempts 1-4 stop after generation succeeds.
 
 .EXAMPLE
   .\scenario-generation.ps1                         # drive the form for template 3 and close
@@ -31,14 +33,12 @@ param(
     [int]$WaitGenerationSec = 0,  # >0: after Generate, wait this long and assert the map generates
     [switch]$ToMap,               # after the result, accept + start the game and reach the strategic map
     [switch]$UseTemplateDefaults, # do not force spin indices that may not exist for fixed-size templates
-    [uint32]$GenerationSeed = 0,  # >0: deterministic D2_TESTDRV-only C++/race/Lua seed
     [switch]$Keep
 )
 
 . "$PSScriptRoot\_relay.ps1"
 $GameDir = Resolve-GameDir $GameDir
 if ($ToMap -and $WaitGenerationSec -le 0) { $WaitGenerationSec = 300 }   # -ToMap must first reach the result
-$oldGenerationSeed = $env:D2TESTDRV_GENERATION_SEED
 
 function Convert-GameCp1251Text([string]$Text) {
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
@@ -62,7 +62,6 @@ $relay = Start-TestRelay
 Write-Host "[gen] relay up; launching host..." -ForegroundColor Cyan
 $client = $null; $ok = $false; $outcome = 'not-run'; $genSec = $null   # per-template result + generation seconds for the matrix summary
 try {
-    if ($GenerationSeed -gt 0) { $env:D2TESTDRV_GENERATION_SEED = [string]$GenerationSeed }
     $client = Start-GameClient -GameDir $GameDir -Role host
     if (-not (Wait-Dialog host DLG_MAIN_MENU 90)) { throw "host never reached DLG_MAIN_MENU" }
 
@@ -91,14 +90,12 @@ try {
     if (-not (Set-EditText host $D EDIT_NAME "AutoTest")) { throw "EDIT_NAME not set" }   # BTN_GENERATE needs a name
     Start-Sleep 3
     if ($UseTemplateDefaults) {
-        # Selecting the template row synchronously refreshes its size/goal options and leaves each at
+        # Selecting the template row synchronously refreshes its size options and leaves the spin at
         # the valid default index 0. Many shipped templates expose exactly one fixed-size option, so
         # blindly writing index 1 is not a faithful user action and can leave the UI out of bounds.
-        Write-Host "[gen] keeping template-provided size/goal defaults" -ForegroundColor Cyan
+        Write-Host "[gen] keeping template-provided size default" -ForegroundColor Cyan
     } else {
         if (-not (Set-SpinOption host $D SPIN_SIZE 0)) { throw "SPIN_SIZE not set" }
-        Start-Sleep 3
-        if (-not (Set-SpinOption host $D SPIN_GOAL 0)) { throw "SPIN_GOAL not set" }
         Start-Sleep 3
     }
 
@@ -178,15 +175,23 @@ try {
         }
         Write-Host "[gen] map accepted; starting solo host (AI fills the rest)..." -ForegroundColor Cyan
 
-        # First-turn popups, each mapped to the button that dismisses it (same set the MP test uses).
+        # First-turn popups, each mapped to its one real forward button (same set the MP test uses).
         $popups = @{
             'DLG_SCENARIO_BRIEFING' = 'BTN_CONTINUE'; 'DLG_BEGIN_TURN' = 'BTN_OK'
-            'DLG_GETINFO_BOX' = 'BTN_CLOSE'; 'DLG_MESSAGE_BOX' = 'BTN_OK'; 'DLG_EVENT_POPUP' = 'BTN_RIGHTSIDE'
+            'DLG_GETINFO_BOX' = 'BTN_CLOSE'; 'DLG_EVENT_POPUP' = 'BTN_RIGHTSIDE'
         }
-        $outcome = 'generated, map not reached'
-        $null = Invoke-Button host DLG_LOBBY BTN_OK
-        $t0 = Get-Date; $onMap = $false; $disconnectTicks = 0
-        while ((((Get-Date) - $t0).TotalSeconds) -lt 120) {
+        $outcome = 'generated, playable map startup not reached'
+        if (-not (Invoke-Button host DLG_LOBBY BTN_OK)) { throw 'BTN_OK did not start the generated scenario' }
+
+        # The first DLG_ISO_PAL/DLG_STRATEGIC frame can precede a late DLG_BEGIN_TURN and the stock
+        # object-lock drain. It is not a pass. Acknowledge only known startup dialogs, only once each,
+        # and only when their exact button is enabled. Then require the relay's live UI and world
+        # reporters to agree that the client is connected, the turn was observed, the bare strategic
+        # map is actionable, and a self player plus scenario objects are populated. No movement or
+        # other strategic action is issued by this oracle.
+        $claimed = @{}; $world = $null; $state = $null; $selfPlayer = $null
+        $t0 = Get-Date; $readyOnMap = $false; $disconnectTicks = 0
+        while ((((Get-Date) - $t0).TotalSeconds) -lt 180) {
             if ($relay.HasExited) { $outcome = 'harness failure: relay exited while loading generated map'; throw $outcome }
             if ($client.HasExited) { $outcome = 'harness failure: client exited while loading generated map'; throw $outcome }
             $state = Get-RoleState host
@@ -198,27 +203,56 @@ try {
             }
             $disconnectTicks = 0
             $d = $state.dialog
-            if ($d -eq 'DLG_STRATEGIC' -or $d -eq 'DLG_ISO_PAL') { $onMap = $true; break }
-            if ($popups.ContainsKey($d)) { $null = Invoke-Button host $d $popups[$d] }   # dismiss a first-turn popup
-            elseif ($d -eq 'DLG_LOBBY') { $null = Invoke-Button host DLG_LOBBY BTN_OK }   # re-press start if it lingered
-            Start-Sleep -Milliseconds 700
+            if ($d -eq 'DLG_MESSAGE_BOX') {
+                $raw = ((@($state.widgets) | Where-Object { $_.type -eq 'text' } |
+                    ForEach-Object { $_.state.text }) -join ' | ') -replace '[\r\n\t]+', ' '
+                $msg = Convert-GameCp1251Text $raw
+                if ([string]::IsNullOrWhiteSpace($msg)) { $msg = '(no message text reported)' }
+                $outcome = "harness failure: message box during generated-map startup: $msg"
+                throw $outcome
+            }
+            if ($d -and $popups.ContainsKey($d) -and -not $claimed.ContainsKey($d)) {
+                $button = $popups[$d]
+                $readyButton = @($state.widgets) | Where-Object {
+                    $_.name -eq $button -and $_.type -eq 'button' -and $_.state.enabled -eq $true
+                } | Select-Object -First 1
+                if ($readyButton) {
+                    # Claim before dispatch: an uncertain response is a failure, never permission to refire.
+                    $claimed[$d] = $button
+                    if (-not (Invoke-Button host $d $button)) {
+                        $outcome = "harness failure: one-shot startup action $d::$button was not accepted"
+                        throw $outcome
+                    }
+                }
+            }
+            $world = Get-World host
+            $selfPlayer = @($world.players) | Where-Object { $_.relation -eq 'self' } | Select-Object -First 1
+            $worldPopulated = $world -and $selfPlayer -and @($world.players).Count -gt 0 -and @($world.stacks).Count -gt 0
+            $onMap = $d -eq 'DLG_STRATEGIC' -or $d -eq 'DLG_ISO_PAL'
+            if ([bool]$state.connected -and $onMap -and [bool]$state.sawBeginTurn -and
+                [bool]$state.strategicActionReady -and [bool]$world.strategicActionReady -and $worldPopulated) {
+                $readyOnMap = $true
+                break
+            }
+            Start-Sleep -Milliseconds 500
         }
-        if (-not $onMap) {
-            $outcome = "generated, map not reached (stuck on $(Get-Dialog host))"
+        if (-not $readyOnMap) {
+            $outcome = "generated, playable map startup not reached (dialog=$(Get-Dialog host), connected=$([bool]$state.connected), sawBeginTurn=$([bool]$state.sawBeginTurn), strategicActionReady=$([bool]$state.strategicActionReady), selfPlayer=$([bool]$selfPlayer), stacks=$(@($world.stacks).Count))"
             throw $outcome
         }
         $outcome = 'reached map'
-        Write-Host "[gen] reached the generated map ($(Get-Dialog host))" -ForegroundColor Green
+        Write-Host "[gen] reached populated actionable map after first-turn dialogs ($(Get-Dialog host); $(@($world.stacks).Count) stacks)" -ForegroundColor Green
     }
     $ok = $true
 } catch {
     if ($outcome -eq 'not-run') { $outcome = "harness failure: $($_.Exception.Message)" }
     Write-Host "[gen] FAIL: $($_.Exception.Message)" -ForegroundColor Red
 } finally {
-    # Give the required template recorder two frames at 5 FPS (and some margin) to retain a visible
-    # error box/form before cleanup. A process-ending CRT assert is already present in the preceding
-    # video frames and the MSS log.
-    if (-not $ok -and $client -and -not $client.HasExited) { Start-Sleep -Seconds 2 }
+    # Hold a successful loaded map long enough for the final proof video to show the ready strategic
+    # state. Failures keep a shorter hold so their error box/form is visible; a process-ending CRT
+    # assert is already present in the preceding frames and the MSS log.
+    if ($ok -and $ToMap -and $client -and -not $client.HasExited) { Start-Sleep -Seconds 3 }
+    elseif (-not $ok -and $client -and -not $client.HasExited) { Start-Sleep -Seconds 2 }
     # Enrich a failure with the exact reason now captured in the DLL log (the CRT assert or the sol3
     # panic the harness routes there), so the matrix summary carries the real error text, not just the mode.
     if ($outcome -notin @('generated', 'reached map', 'not-run') -and $client) {
@@ -243,6 +277,5 @@ try {
         if ($relay) { Stop-Process -Id $relay.Id -Force -ErrorAction SilentlyContinue }
         Stop-Process -Name dplaysvr -Force -ErrorAction SilentlyContinue
     }
-    $env:D2TESTDRV_GENERATION_SEED = $oldGenerationSeed
 }
 if (-not $ok) { Write-Error "scenario-generation form drive failed"; exit 1 }

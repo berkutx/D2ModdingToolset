@@ -2,7 +2,7 @@ name: test-harness
 
 # The single automated CI entrypoint. Every PR builds production Release plus Debug and
 # Release harnesses. Gameplay runs on DebugTest; the strict template suite runs on both
-# harness profiles from the same source commit and seed.
+# harness profiles from the same immutable template source snapshot with natural game randomness.
 
 on:
   pull_request:
@@ -160,7 +160,7 @@ jobs:
       - name: Verify harness markers
         run: |
           $txt = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes('out\mss32.dll'))
-          foreach ($marker in '[testdrv]', '[testdrv][dplay]', 'skip-intro', 'D2TESTDRV_GENERATION_SEED') {
+          foreach ($marker in '[testdrv]', '[testdrv][dplay]', 'skip-intro') {
             if (-not $txt.Contains($marker)) { Write-Error "missing harness marker: $marker"; exit 1 }
           }
 
@@ -215,7 +215,7 @@ jobs:
       - name: Verify Release harness markers
         run: |
           $txt = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes('out\mss32.dll'))
-          foreach ($marker in '[testdrv]', '[testdrv][dplay]', 'skip-intro', 'D2TESTDRV_GENERATION_SEED') {
+          foreach ($marker in '[testdrv]', '[testdrv][dplay]', 'skip-intro') {
             if (-not $txt.Contains($marker)) { Write-Error "missing harness marker: $marker"; exit 1 }
           }
 
@@ -255,7 +255,6 @@ jobs:
       artifact_prefix: debug
       wait_sec: 300
       templates_ref: ${{ needs.template_source.outputs.commit }}
-      generation_seed: "1700000000"
       mesa_asset_url: ${{ needs.template_source.outputs.mesa_url }}
       mesa_asset_digest: ${{ needs.template_source.outputs.mesa_digest }}
 
@@ -273,7 +272,6 @@ jobs:
       artifact_prefix: release
       wait_sec: 300
       templates_ref: ${{ needs.template_source.outputs.commit }}
-      generation_seed: "1700000000"
       mesa_asset_url: ${{ needs.template_source.outputs.mesa_url }}
       mesa_asset_digest: ${{ needs.template_source.outputs.mesa_digest }}
 
@@ -297,6 +295,18 @@ jobs:
           pattern: release-gen-outcome-*
           path: release
           merge-multiple: true
+      - name: Download DebugTest template source manifest
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: debug-template-source-snapshot
+          path: debug-source
+      - name: Download Release template source manifest
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: release-template-source-snapshot
+          path: release-source
       - name: Build the A/B table
         shell: bash
         env:
@@ -304,41 +314,79 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          rows=(debug/*.tsv)
-          release_rows=(release/*.tsv)
-          [ "${#rows[@]}" -gt 0 ] || { echo "::error::no DebugTest outcome rows"; exit 1; }
           missing=0
           diverged=0
-          [ "${#rows[@]}" -eq "${#release_rows[@]}" ] || missing=1
+          source_ok=0
+          if [ ! -f debug-source/template-manifest.tsv ] || [ ! -f release-source/template-manifest.tsv ]; then
+            echo "::error::one or both template source manifests are missing"
+            missing=1
+          elif ! cmp -s debug-source/template-manifest.tsv release-source/template-manifest.tsv; then
+            echo "::error::DebugTest and Release used different template source snapshots"
+            missing=1
+          else
+            source_ok=1
+          fi
+          rows=(debug/*.tsv release/*.tsv)
+          [ "${#rows[@]}" -gt 0 ] || { echo "::error::no template outcome rows"; exit 1; }
+          if [ "$source_ok" -eq 1 ]; then
+            template_count=$(wc -l < debug-source/template-manifest.tsv | tr -d ' ')
+            [ "$template_count" -gt 0 ] || { echo "::error::template source manifest is empty"; exit 1; }
+            mapfile -t indices < <(seq 0 $((template_count - 1)))
+          else
+            mapfile -t indices < <(for file in "${rows[@]}"; do basename "$file" .tsv; done | sort -Vu)
+          fi
           {
             echo "## Template runtime A/B"
             echo ""
-            echo "> Same [D2-Templates commit](https://github.com/bartonsun/D2-Templates/commit/${TEMPLATE_COMMIT}), seed and digest-verified Mesa bytes; only the MSS build profile differs."
+            echo "> Both profiles use the same [D2-Templates commit](https://github.com/bartonsun/D2-Templates/commit/${TEMPLATE_COMMIT}), source manifest and digest-verified Mesa asset."
+            echo "> Each profile performs independent naturally-random game runs, so status differences are reported for diagnosis but are not themselves a gate. Missing/malformed rows or a source mismatch remain hard failures."
             echo ""
-            echo "| # | Template | DebugTest | Release + D2_TESTDRV | Match |"
-            echo "|--:|---|---|---|:--:|"
-            while IFS= read -r file; do
-              idx=$(basename "$file" .tsv)
-              other="release/$idx.tsv"
-              if [ ! -f "$other" ]; then
-                IFS=$'\t' read -r _ name debug_status _ < "$file"
-                display_name=$(printf '%s' "$name" | tr '|' '/')
-                display_debug=$(printf '%s' "$debug_status" | tr '|' '/')
-                echo "| $idx | $display_name | $display_debug | missing outcome | ❌ |"
+            echo "| # | Template | Attempt | Scope | DebugTest | Release + D2_TESTDRV | Match |"
+            echo "|--:|---|--:|---|---|---|:--:|"
+            for idx in "${indices[@]}"; do
+              debug_file="debug/$idx.tsv"
+              release_file="release/$idx.tsv"
+              if [ ! -f "$debug_file" ] || [ ! -f "$release_file" ]; then
+                echo "| $idx | - | - | - | $([ -f "$debug_file" ] && echo present || echo missing) | $([ -f "$release_file" ] && echo present || echo missing) | ❌ |"
                 missing=1
                 continue
               fi
-              IFS=$'\t' read -r _ name debug_status _ < "$file"
-              IFS=$'\t' read -r _ release_name release_status _ < "$other"
-              [ "$name" = "$release_name" ] || { echo "::error::template name mismatch at index $idx"; missing=1; }
-              same='≠'
-              if [ "$debug_status" = "$release_status" ]; then same='='; else diverged=1; fi
-              display_name=$(printf '%s' "$name" | tr '|' '/')
-              display_debug=$(printf '%s' "$debug_status" | tr '|' '/')
-              display_release=$(printf '%s' "$release_status" | tr '|' '/')
-              echo "| $idx | $display_name | $display_debug | $display_release | $same |"
-            done < <(printf '%s\n' "${rows[@]}" | sort -V)
+              debug_lines=$(awk 'END { print NR + 0 }' "$debug_file")
+              release_lines=$(awk 'END { print NR + 0 }' "$release_file")
+              if [ "$debug_lines" -ne 5 ] || [ "$release_lines" -ne 5 ]; then
+                echo "| $idx | - | - | - | malformed ($debug_lines rows) | malformed ($release_lines rows) | ❌ |"
+                missing=1
+                continue
+              fi
+              for attempt in 1 2 3 4 5; do
+                debug_count=$(awk -F '\t' -v wanted="$attempt" '$3 == wanted { n++ } END { print n + 0 }' "$debug_file")
+                release_count=$(awk -F '\t' -v wanted="$attempt" '$3 == wanted { n++ } END { print n + 0 }' "$release_file")
+                if [ "$debug_count" -ne 1 ] || [ "$release_count" -ne 1 ]; then
+                  echo "| $idx | - | $attempt | - | malformed/missing ($debug_count rows) | malformed/missing ($release_count rows) | ❌ |"
+                  missing=1
+                  continue
+                fi
+                debug_line=$(awk -F '\t' -v wanted="$attempt" '$3 == wanted { print; exit }' "$debug_file")
+                release_line=$(awk -F '\t' -v wanted="$attempt" '$3 == wanted { print; exit }' "$release_file")
+                IFS=$'\t' read -r debug_idx name debug_attempt debug_phase debug_status _ <<< "$debug_line"
+                IFS=$'\t' read -r release_idx release_name release_attempt release_phase release_status _ <<< "$release_line"
+                if [ "$debug_idx" != "$idx" ] || [ "$release_idx" != "$idx" ] || [ "$name" != "$release_name" ] ||
+                   [ "$debug_attempt" != "$attempt" ] || [ "$release_attempt" != "$attempt" ] || [ "$debug_phase" != "$release_phase" ]; then
+                  echo "::error::outcome identity/scope mismatch at template $idx attempt $attempt"
+                  missing=1
+                fi
+                same='≠'
+                if [ "$debug_status" = "$release_status" ]; then same='='; else diverged=1; fi
+                display_name=$(printf '%s' "$name" | tr '|' '/')
+                display_debug=$(printf '%s' "$debug_status" | tr '|' '/')
+                display_release=$(printf '%s' "$release_status" | tr '|' '/')
+                echo "| $idx | $display_name | $attempt | $debug_phase | $display_debug | $display_release | $same |"
+              done
+            done
+            if [ "$diverged" -ne 0 ]; then
+              echo ""
+              echo "> ℹ️ Status divergence observed; informational because the two profiles ran independent natural random generations."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"
           [ "$missing" -eq 0 ] || exit 1
-          [ "$diverged" -eq 0 ] || { echo "::error::DebugTest and Release template outcomes diverged"; exit 1; }

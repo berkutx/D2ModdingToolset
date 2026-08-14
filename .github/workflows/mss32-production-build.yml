@@ -77,7 +77,7 @@ jobs:
       - name: Verify this is a production DLL
         run: |
           $txt = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes('out\mss32.dll'))
-          foreach ($marker in '[testdrv]', '[testdrv][dplay]', 'skip-intro', 'D2TESTDRV_GENERATION_SEED') {
+          foreach ($marker in '[testdrv]', '[testdrv][dplay]', 'skip-intro') {
             if ($txt.Contains($marker)) { throw "production DLL unexpectedly contains harness marker: $marker" }
           }
 

@@ -130,8 +130,6 @@ function HostGenerateMap {
     Start-Sleep 3
     if (-not (Set-SpinOption host $D SPIN_SIZE 0)) { return $false }
     Start-Sleep 3
-    if (-not (Set-SpinOption host $D SPIN_GOAL 0)) { return $false }
-    Start-Sleep 3
     if (-not (Invoke-Button host $D BTN_GENERATE)) { return $false }
     Write-Host "[disp] HOST generating random map (template=$Scenario, up to ${GenWaitSec}s)..." -ForegroundColor Cyan
     $t0 = Get-Date

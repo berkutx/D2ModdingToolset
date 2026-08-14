@@ -56,8 +56,6 @@ try {
     Start-Sleep 3
     if (-not (Set-SpinOption host $D SPIN_SIZE $MapSize)) { throw "SPIN_SIZE not set" }
     Start-Sleep 3
-    if (-not (Set-SpinOption host $D SPIN_GOAL 0)) { throw "SPIN_GOAL not set" }
-    Start-Sleep 3
     if (-not (Invoke-Button host $D BTN_GENERATE)) { throw "BTN_GENERATE not found" }
     Write-Host "[world] generating ($Template)..." -ForegroundColor Cyan
 

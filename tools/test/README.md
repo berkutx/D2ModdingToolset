@@ -378,13 +378,20 @@ production Debug/Release entrypoint, so it does not duplicate an automated PR ru
 
 The strict template matrix checks out `bartonsun/D2-Templates` (`master` by default), resolves it once
 to a commit, flattens `sMNS/**/*.lua` into one immutable snapshot, and records source paths, sizes and
-SHA-256 hashes. Each file runs twice—with DebugTest and optimized Release+D2_TESTDRV—using the same
-commit, valid template defaults, deterministic C++/race/Lua seed and digest-verified Mesa asset for up to 300 seconds. This
-makes Debug-only CRT behavior visible without treating Release as proof that undefined behavior is
-safe. Only `reached map` passes; a CRT assert, sol3 panic, generator error, timeout, rejected map,
-parser omission, missing outcome, or missing video is red. `fail-fast:false` still runs every source
-file in both profiles. Every entry retains a required single-window MKV plus MSS/relay/OBS logs,
-provenance and its outcome row for 90 days (the repository's Actions retention window).
+SHA-256 hashes. Each file gets one job under DebugTest and one under optimized Release+D2_TESTDRV,
+using the same source snapshot, valid template defaults and digest-verified Mesa asset. Each job makes
+five sequential launches of the real game client with the game's natural randomness. Attempts 1-4
+must reach the generator result; attempt 5 also accepts the result, starts the scenario, clicks each
+known enabled startup dialog once, observes `DLG_BEGIN_TURN`, and requires a populated self world on
+the actionable bare strategic map. The ready map remains visible for three seconds in the proof video.
+
+A CRT assert, sol3 panic, generator error, timeout, rejected/unplayable map, parser omission, missing
+outcome, or required-video failure is red. `fail-fast:false` still runs every source file in both
+profiles. All five outcome rows and per-attempt MSS/relay/OBS/console evidence sets are retained for
+90 days. If all five attempts pass, only attempt 5's single-window MKV is retained; if any fail, only
+the failed-attempt MKVs are retained. Because DebugTest and Release use independent natural-random
+runs, their status comparison is diagnostic rather than a reproducibility gate; missing/malformed rows
+or a source-manifest mismatch still fail it.
 
 To add a test to CI, copy one of the test jobs in `tests.yml` (for example
 `multiplayer-strategic`) and change its final step to run your script with
@@ -794,13 +801,21 @@ CI находится в [`../../.github/workflows`](../../.github/workflows). `
 
 Строгая матрица checkout-ит `bartonsun/D2-Templates` (`master` по умолчанию), один раз фиксирует commit,
 flatten-ит `sMNS/**/*.lua` в неизменяемый snapshot и записывает исходные пути, размеры и SHA-256. Каждый
-файл запускается дважды — на DebugTest и оптимизированном Release+D2_TESTDRV — с одним commit,
-валидными defaults шаблона, детерминированным C++/race/Lua seed и проверенным по digest Mesa asset до 300 секунд. Так отдельно
-виден Debug-only CRT эффект, но зелёный Release не объявляет UB безопасным. Проходит только
-`reached map`; CRT assert, sol3 panic, error box, timeout, непринятая карта, пропуск parser-ом,
-отсутствующий outcome или видео краснят CI. `fail-fast:false` всё равно запускает каждый файл в обоих
-профилях. Для каждой строки 90 дней (retention Actions) хранятся обязательный single-window MKV,
-MSS/relay/OBS-логи, provenance и outcome.
+файл получает отдельный job на DebugTest и оптимизированном Release+D2_TESTDRV с одним source snapshot,
+валидными defaults шаблона и проверенным по digest Mesa asset. Каждый job пять раз последовательно
+запускает реальный клиент игры с естественной случайностью самой игры. Попытки 1-4 должны дойти до
+результата генератора; попытка 5 ещё принимает результат, запускает сценарий, по одному разу нажимает
+точную enabled-кнопку каждого известного стартового диалога, наблюдает `DLG_BEGIN_TURN` и требует
+заполненный self-world на готовой к действиям чистой стратегической карте. Готовая карта ещё три
+секунды остаётся в кадре доказательного видео.
+
+CRT assert, sol3 panic, error box, timeout, непринятая/неиграбельная карта, пропуск parser-ом,
+отсутствующий outcome или обязательное видео краснят CI. `fail-fast:false` всё равно запускает каждый
+файл в обоих профилях. Все пять outcome-строк и отдельные MSS/relay/OBS/console evidence-наборы хранятся
+90 дней. Если прошли все пять попыток, остаётся только single-window MKV попытки 5; если есть падения —
+только MKV упавших попыток. Поскольку DebugTest и Release выполняют независимые естественно-случайные
+прогоны, различие их статусов информационное; отсутствующие/повреждённые строки или несовпадение source
+manifest по-прежнему дают hard failure.
 
 Чтобы добавить тест в CI, скопируйте один из тест-джобов в `tests.yml` (например,
 `multiplayer-strategic`) и замените его последний шаг на запуск вашего скрипта с

@@ -44,10 +44,7 @@
 #include "utils.h"
 #include "waitgenerationinterf.h"
 #include <chrono>
-#include <cstdlib>
-#include <limits>
 #include <set>
-#include <stdexcept>
 #include <sol/sol.hpp>
 #include <spdlog/spdlog.h>
 
@@ -936,20 +933,8 @@ static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /
 
         rsg::RandomGenerator rnd;
 
-        std::size_t seed{static_cast<std::size_t>(std::time(nullptr))};
-#ifdef D2_TESTDRV
-        bool forcedSeedActive{false};
-        if (const char* forcedSeed = std::getenv("D2TESTDRV_GENERATION_SEED"); forcedSeed && *forcedSeed) {
-            char* end{};
-            const auto parsed = std::strtoull(forcedSeed, &end, 10);
-            if (!end || *end != '\0' || parsed > std::numeric_limits<std::size_t>::max())
-                throw std::invalid_argument{"Invalid D2TESTDRV_GENERATION_SEED"};
-            seed = static_cast<std::size_t>(parsed);
-            forcedSeedActive = true;
-            spdlog::info("[testdrv] forcing C++ and Lua random-scenario seed {}", parsed);
-        }
-#endif
-        rnd.setSeed(seed);
+        std::time_t seed{std::time(nullptr)};
+        rnd.setSeed(static_cast<std::size_t>(seed));
 
         // Roll actual races instead of random
         settings.replaceRandomRaces(rnd);
@@ -969,19 +954,6 @@ static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /
         // TODO: handle this in a better way
         sol::state lua;
         rsg::bindLuaApi(lua);
-#ifdef D2_TESTDRV
-        if (forcedSeedActive) {
-            // Lua seeds math.random from time/address when the math library opens, independently
-            // from D2RSG's C++ generator. Some shipped templates also call
-            // math.randomseed(os.time()) themselves. Keep table-form os.time intact, but make its
-            // no-argument clock deterministic and seed math.random before loading the template so
-            // DebugTest and Release+D2_TESTDRV execute identical template contents.
-            const auto fixedSeed = std::to_string(seed);
-            lua.script("do local originalOsTime = os.time; "
-                       "os.time = function(value) if value ~= nil then return originalOsTime(value) end return "
-                       + fixedSeed + " end; math.randomseed(" + fixedSeed + ") end");
-        }
-#endif
         rsg::readTemplateSettings(templates[selectedIndex].filename, lua);
 
         // Create template contents depending on size and races

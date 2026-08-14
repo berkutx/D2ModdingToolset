@@ -1,10 +1,11 @@
 name: generation-matrix
 
 # Generate and load every random-scenario template under one requested harness profile, one job
-# per template. Every
-# template must reach the strategic map: a CRT assert, sol3 panic, generator error, timeout, or
-# unplayable result is a real failure. The source is bartonsun/D2-Templates (master by default),
-# resolved once to an immutable per-run snapshot. fail-fast:false keeps all evidence flowing.
+# per template and five sequential real game-client attempts per job. Attempts 1-4 must generate;
+# attempt 5 must additionally accept and load an actionable strategic map. A CRT assert, sol3 panic,
+# generator error, timeout, or unplayable result is a real failure. The source is
+# bartonsun/D2-Templates (master by default), resolved once to an immutable per-run snapshot.
+# fail-fast:false keeps all evidence flowing.
 
 on:
   workflow_call:
@@ -28,7 +29,7 @@ on:
         type: string
         required: true
       wait_sec:
-        description: "per-template generation timeout"
+        description: "per-attempt generation timeout"
         type: number
         required: false
         default: 300
@@ -37,11 +38,6 @@ on:
         type: string
         required: false
         default: master
-      generation_seed:
-        description: "deterministic uint32 seed for C++ generation, races and Lua template execution"
-        type: string
-        required: false
-        default: "1700000000"
       mesa_asset_url:
         description: "exact pal1000 Mesa release-msvc.7z URL shared by both profiles"
         type: string
@@ -73,7 +69,7 @@ on:
         required: false
         default: debug
       wait_sec:
-        description: "seconds to wait for each template's generation"
+        description: "seconds to wait for each generation attempt"
         type: number
         required: false
         default: 300
@@ -82,11 +78,6 @@ on:
         type: string
         required: false
         default: master
-      generation_seed:
-        description: "deterministic uint32 seed for C++ generation, races and Lua template execution"
-        type: string
-        required: false
-        default: "1700000000"
       mesa_asset_url:
         description: "exact Mesa release-msvc.7z URL (empty = resolve latest)"
         type: string
@@ -301,7 +292,6 @@ jobs:
           TEMPLATE_NAME: ${{ matrix.template.name }}
           TEMPLATE_COMMIT: ${{ needs.setup.outputs.template_commit }}
           TEMPLATE_DIGEST: ${{ needs.setup.outputs.template_digest }}
-          GENERATION_SEED: ${{ inputs.generation_seed }}
           DLL_ARTIFACT: ${{ inputs.dll_artifact }}
         run: |
           New-Item -ItemType Directory -Force -Path evidence | Out-Null
@@ -314,7 +304,7 @@ jobs:
             "template-name=$env:TEMPLATE_NAME"
             "template-commit=$env:TEMPLATE_COMMIT"
             "template-manifest-sha256=$env:TEMPLATE_DIGEST"
-            "generation-seed=$env:GENERATION_SEED"
+            "attempts=5"
             "runner-image=$env:ImageOS-$env:ImageVersion"
           ) | Set-Content evidence/metadata.txt -Encoding utf8
           Copy-Item template-source/template-manifest.tsv evidence/template-manifest.tsv -Force
@@ -403,68 +393,212 @@ jobs:
         run: |
           . ./tools/test/_obs.ps1
           Install-Obs
-      - name: Generate + load template ${{ matrix.template.index }} (${{ matrix.template.name }}) [recorded]
+      - name: Generate template ${{ matrix.template.index }} (${{ matrix.template.name }}) five times; load attempt 5 [recorded]
+        id: attempts
         env:
           T_INDEX: ${{ matrix.template.index }}
           T_NAME: ${{ matrix.template.name }}
           WAIT_SEC: ${{ inputs.wait_sec }}
-          GENERATION_SEED: ${{ inputs.generation_seed }}
         run: |
           node --version
           $waitSec = [int]$env:WAIT_SEC
           if ($waitSec -lt 1 -or $waitSec -gt 600) { throw "wait_sec must be 1..600" }
-          $generationSeed = [uint32]$env:GENERATION_SEED
-          if ($generationSeed -lt 1) { throw "generation_seed must be positive" }
-          # Run the scenario in a child pwsh: its explicit `exit 1` must not terminate this wrapper
-          # before the outcome row is persisted for the aggregate summary.
+          # Every loop launches and drives the actual game client with its natural runtime randomness.
+          # Attempts 1-4 stop after successful generation; attempt 5 also accepts and loads the map,
+          # dismisses the startup dialogs, and waits for a populated actionable strategic state. A child
+          # pwsh keeps one failed attempt from preventing the remaining four from producing evidence.
           $ErrorActionPreference = 'Continue'
           New-Item -ItemType Directory -Force -Path $env:REC_DIR | Out-Null
           . ./tools/test/_obs.ps1
-          # Five FPS is enough to prove the dialog/error sequence and keeps twenty recordings small.
-          Start-ObsRecording -OutDir $env:REC_DIR -HostOnly -StartImmediately -Fps 5 -BitrateKbps 1200 | Out-Null
-          # Capture every stream so the GEN_OUTCOME line is readable. (The sol3 panic prints to the
-          # game's stderr and stays in the raw job log.)
-          $out = $null
-          $code = 1
-          try {
-            $out = & "$PSHOME\pwsh.exe" -NoLogo -NoProfile -NonInteractive `
-              -File ./tools/test/scenario-generation.ps1 -GameDir "$env:GAME_DIR" `
-              -Template $env:T_INDEX -WaitGenerationSec $waitSec -ToMap -UseTemplateDefaults `
-              -GenerationSeed $generationSeed 2>&1
-            $code = $LASTEXITCODE
-          } finally {
-            try {
-              $mkv = Stop-ObsRecording
-              if ($mkv) {
-                Move-Item -LiteralPath $mkv -Destination (Join-Path $env:REC_DIR "$($env:ARTIFACT_PREFIX)-template-$($env:T_INDEX).mkv") -Force
-              }
-            } catch { Write-Host "::error::OBS stop failed: $($_.Exception.Message)" }
-          }
-          $out | ForEach-Object { Write-Host $_ }
-          $oc = $out | Select-String '^GEN_OUTCOME=' | Select-Object -Last 1
-          $status = if ($oc) { ($oc.Line -replace '^GEN_OUTCOME=', '') } else { "failed (exit $code, no outcome line)" }
-          $status = (($status -replace '[\r\n\t]+', ' ').Trim())
-          $sc = $out | Select-String '^GEN_SECONDS=' | Select-Object -Last 1
-          $secs = if ($sc) { ($sc.Line -replace '^GEN_SECONDS=', '') } else { '' }
           New-Item -ItemType Directory -Force outcome | Out-Null
-          # index<TAB>name<TAB>outcome<TAB>generation-seconds; the summarize job assembles the table
-          ("{0}`t{1}`t{2}`t{3}`n" -f $env:T_INDEX, $env:T_NAME, $status, $secs) | Set-Content "outcome/$($env:T_INDEX).tsv" -Encoding utf8 -NoNewline
-          Write-Host "::notice title=$($env:T_NAME)::$status"
-          # Strict profile contract: every template must generate, be accepted, start and reach the map.
-          # The row is written before this verdict so all failures remain diagnosable in the summary.
-          $green = $status -eq 'reached map'
-          if (-not $oc -or ($green -and $code -ne 0) -or (-not $green -and $code -eq 0)) {
-            throw "template harness produced an inconsistent/unrecognized outcome '$status' (child exit $code)"
+          $outcomeFile = "outcome/$($env:T_INDEX).tsv"
+          Remove-Item -LiteralPath $outcomeFile -Force -ErrorAction SilentlyContinue
+          $results = [Collections.Generic.List[object]]::new()
+
+          foreach ($attempt in 1..5) {
+            $phase = if ($attempt -eq 5) { 'generation+map' } else { 'generation-only' }
+            $expectedStatus = if ($attempt -eq 5) { 'reached map' } else { 'generated' }
+            $attemptStarted = Get-Date
+            $attemptRecDir = Join-Path $env:REC_DIR "attempt-$attempt"
+            $attemptEvidence = Join-Path 'evidence' "attempt-$attempt"
+            New-Item -ItemType Directory -Force -Path $attemptRecDir, $attemptEvidence | Out-Null
+            Write-Host "`n===== $($env:PROFILE_NAME) / $($env:T_NAME) / attempt $attempt of 5 / $phase =====" -ForegroundColor Cyan
+
+            $recordingError = $null
+            $videoPath = $null
+            try {
+              # Five FPS is enough to prove the dialog/error sequence without making five recordings huge.
+              Start-ObsRecording -OutDir $attemptRecDir -HostOnly -StartImmediately -Fps 5 -BitrateKbps 1200 | Out-Null
+            } catch {
+              $recordingError = "OBS start failed: $($_.Exception.Message)"
+              Write-Host "::error::$recordingError"
+            }
+
+            # Capture every stream so GEN_OUTCOME and GEN_SECONDS remain available in a standalone
+            # per-attempt console log as well as the raw job log.
+            $out = @()
+            $code = 1
+            try {
+              $scenarioArgs = @(
+                '-NoLogo', '-NoProfile', '-NonInteractive',
+                '-File', './tools/test/scenario-generation.ps1', '-GameDir', $env:GAME_DIR,
+                '-Template', $env:T_INDEX, '-WaitGenerationSec', $waitSec, '-UseTemplateDefaults'
+              )
+              if ($attempt -eq 5) { $scenarioArgs += '-ToMap' }
+              $out = @(& "$PSHOME\pwsh.exe" @scenarioArgs 2>&1)
+              $code = $LASTEXITCODE
+            } catch {
+              $out += "attempt wrapper exception: $($_.Exception.Message)"
+              $code = 1
+            } finally {
+              try {
+                $mkv = Stop-ObsRecording
+                if ($mkv) {
+                  $videoPath = Join-Path $attemptRecDir "$($env:ARTIFACT_PREFIX)-template-$($env:T_INDEX)-attempt-$attempt.mkv"
+                  Move-Item -LiteralPath $mkv -Destination $videoPath -Force
+                }
+              } catch {
+                $stopError = "OBS stop failed: $($_.Exception.Message)"
+                $recordingError = if ($recordingError) { "$recordingError; $stopError" } else { $stopError }
+                Write-Host "::error::$stopError"
+              }
+            }
+
+            $out | ForEach-Object { Write-Host $_ }
+            $out | ForEach-Object { [string]$_ } | Set-Content (Join-Path $attemptEvidence 'console.log') -Encoding utf8
+            $oc = $out | Select-String '^GEN_OUTCOME=' | Select-Object -Last 1
+            $status = if ($oc) { ($oc.Line -replace '^GEN_OUTCOME=', '') } else { "failed (exit $code, no outcome line)" }
+            $status = (($status -replace '[\r\n\t]+', ' ').Trim())
+            $sc = $out | Select-String '^GEN_SECONDS=' | Select-Object -Last 1
+            $secs = if ($sc) { (($sc.Line -replace '^GEN_SECONDS=', '') -replace '[^0-9]', '') } else { '' }
+            $green = $oc -and $status -eq $expectedStatus -and $code -eq 0
+            $consistent = $oc -and (($status -eq $expectedStatus -and $code -eq 0) -or ($status -ne $expectedStatus -and $code -ne 0))
+            if (-not $consistent) {
+              $reported = $status
+              $status = "harness failure: inconsistent outcome '$reported' (child exit $code)"
+              $green = $false
+            }
+
+            # index<TAB>name<TAB>attempt<TAB>phase<TAB>outcome<TAB>generation-seconds
+            ("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`n" -f $env:T_INDEX, $env:T_NAME, $attempt, $phase, $status, $secs) |
+              Add-Content -LiteralPath $outcomeFile -Encoding utf8 -NoNewline
+            @(
+              "attempt=$attempt"
+              "phase=$phase"
+              "child-exit=$code"
+              "scenario-passed=$($green.ToString().ToLowerInvariant())"
+              "scenario-outcome=$status"
+              "generation-seconds=$secs"
+              "video=$videoPath"
+              "recording-error=$recordingError"
+            ) | Set-Content (Join-Path $attemptEvidence 'result.txt') -Encoding utf8
+            foreach ($name in @('obs.log', 'obs-owned.json')) {
+              $file = Join-Path $attemptRecDir $name
+              if (Test-Path -LiteralPath $file) { Copy-Item -LiteralPath $file -Destination $attemptEvidence -Force }
+            }
+            Get-ChildItem -LiteralPath $env:GAME_DIR -Filter 'mss32_*.log' -File -ErrorAction SilentlyContinue |
+              Where-Object LastWriteTime -GE $attemptStarted.AddSeconds(-2) |
+              Copy-Item -Destination $attemptEvidence -Force
+            Get-ChildItem -LiteralPath $env:RUNNER_TEMP -Filter 'relay-*.out.log*' -File -ErrorAction SilentlyContinue |
+              Where-Object LastWriteTime -GE $attemptStarted.AddSeconds(-2) |
+              Copy-Item -Destination $attemptEvidence -Force
+
+            $results.Add([pscustomobject]@{
+              Attempt = $attempt; Phase = $phase; Status = $status; Seconds = $secs
+              Green = [bool]$green; VideoPath = $videoPath
+            })
+            Write-Host "::notice title=$($env:T_NAME) attempt $attempt/5::$status ($phase)"
           }
-          if (-not $green) { Write-Error "template failed under $($env:PROFILE_NAME): $status"; exit 1 }
+
+          # Retention policy: five green attempts keep only attempt 5. If anything failed, keep every
+          # failed attempt and remove all successful-attempt recordings (including attempt 5).
+          $failedAttempts = @($results | Where-Object { -not $_.Green })
+          $keepAttempts = if ($failedAttempts.Count -eq 0) { @(5) } else { @($failedAttempts.Attempt) }
+          foreach ($result in $results) {
+            $keep = $result.Attempt -in $keepAttempts
+            "keep_$($result.Attempt)=$($keep.ToString().ToLowerInvariant())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+            if (-not $keep -and $result.VideoPath -and (Test-Path -LiteralPath $result.VideoPath)) {
+              Remove-Item -LiteralPath $result.VideoPath -Force
+            }
+          }
+          $missingVideos = @($results | Where-Object {
+            $_.Attempt -in $keepAttempts -and (-not $_.VideoPath -or -not (Test-Path -LiteralPath $_.VideoPath))
+          })
+          foreach ($missing in $missingVideos) {
+            $scenarioStatus = $missing.Status
+            $missing.Status = "harness failure: required retained video missing (scenario outcome: $scenarioStatus)"
+            $missing.Green = $false
+            Add-Content -LiteralPath (Join-Path 'evidence' "attempt-$($missing.Attempt)\result.txt") `
+              -Value "evidence-error=required retained video missing" -Encoding utf8
+          }
+          # The aggregate summaries consume this file, so rewrite its five rows after evidence
+          # validation. This prevents a missing mandatory proof video from being reported as 5/5 green.
+          $results | ForEach-Object {
+            "{0}`t{1}`t{2}`t{3}`t{4}`t{5}" -f $env:T_INDEX, $env:T_NAME, $_.Attempt, $_.Phase, $_.Status, $_.Seconds
+          } | Set-Content -LiteralPath $outcomeFile -Encoding utf8
+          foreach ($result in $results) {
+            @(
+              "final-passed=$($result.Green.ToString().ToLowerInvariant())"
+              "final-outcome=$($result.Status)"
+            ) | Add-Content -LiteralPath (Join-Path 'evidence' "attempt-$($result.Attempt)\result.txt") -Encoding utf8
+          }
+          $finalFailures = @($results | Where-Object { -not $_.Green })
+          if ($missingVideos.Count -gt 0) {
+            Write-Error "required retained video missing for attempt(s): $($missingVideos.Attempt -join ', ')"
+          }
+          if ($failedAttempts.Count -gt 0) {
+            Write-Error "template failed under $($env:PROFILE_NAME) in attempt(s): $($failedAttempts.Attempt -join ', ')"
+          }
+          if ($finalFailures.Count -gt 0) { exit 1 }
           exit 0
-      - name: Upload this template's video (raw MKV)
-        id: video
-        if: always()
+
+      - name: Upload retained attempt 1 video (raw MKV)
+        id: video_1
+        if: always() && steps.attempts.outputs.keep_1 == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ inputs.artifact_prefix }}-template-${{ matrix.template.index }}-video
-          path: ${{ env.REC_DIR }}/${{ inputs.artifact_prefix }}-template-${{ matrix.template.index }}.mkv
+          name: ${{ inputs.artifact_prefix }}-template-${{ matrix.template.index }}-attempt-1-video
+          path: ${{ env.REC_DIR }}/attempt-1/${{ inputs.artifact_prefix }}-template-${{ matrix.template.index }}-attempt-1.mkv
+          archive: false
+          retention-days: 90
+          if-no-files-found: error
+      - name: Upload retained attempt 2 video (raw MKV)
+        id: video_2
+        if: always() && steps.attempts.outputs.keep_2 == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix }}-template-${{ matrix.template.index }}-attempt-2-video
+          path: ${{ env.REC_DIR }}/attempt-2/${{ inputs.artifact_prefix }}-template-${{ matrix.template.index }}-attempt-2.mkv
+          archive: false
+          retention-days: 90
+          if-no-files-found: error
+      - name: Upload retained attempt 3 video (raw MKV)
+        id: video_3
+        if: always() && steps.attempts.outputs.keep_3 == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix }}-template-${{ matrix.template.index }}-attempt-3-video
+          path: ${{ env.REC_DIR }}/attempt-3/${{ inputs.artifact_prefix }}-template-${{ matrix.template.index }}-attempt-3.mkv
+          archive: false
+          retention-days: 90
+          if-no-files-found: error
+      - name: Upload retained attempt 4 video (raw MKV)
+        id: video_4
+        if: always() && steps.attempts.outputs.keep_4 == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix }}-template-${{ matrix.template.index }}-attempt-4-video
+          path: ${{ env.REC_DIR }}/attempt-4/${{ inputs.artifact_prefix }}-template-${{ matrix.template.index }}-attempt-4.mkv
+          archive: false
+          retention-days: 90
+          if-no-files-found: error
+      - name: Upload retained attempt 5 video (raw MKV)
+        id: video_5
+        if: always() && steps.attempts.outputs.keep_5 == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix }}-template-${{ matrix.template.index }}-attempt-5-video
+          path: ${{ env.REC_DIR }}/attempt-5/${{ inputs.artifact_prefix }}-template-${{ matrix.template.index }}-attempt-5.mkv
           archive: false
           retention-days: 90
           if-no-files-found: error
@@ -501,11 +635,24 @@ jobs:
           path: evidence/
           retention-days: 90
           if-no-files-found: error
-      - name: Link this template's video in the job summary
-        if: always() && steps.video.outputs.artifact-url != ''
+      - name: Link retained template videos in the job summary
+        if: always()
+        env:
+          VIDEO_1: ${{ steps.video_1.outputs.artifact-url }}
+          VIDEO_2: ${{ steps.video_2.outputs.artifact-url }}
+          VIDEO_3: ${{ steps.video_3.outputs.artifact-url }}
+          VIDEO_4: ${{ steps.video_4.outputs.artifact-url }}
+          VIDEO_5: ${{ steps.video_5.outputs.artifact-url }}
         run: |
-          "### $($env:PROFILE_NAME) template video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          "[Download template ${{ matrix.template.index }} recording](${{ steps.video.outputs.artifact-url }})" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          $links = [Collections.Generic.List[string]]::new()
+          foreach ($attempt in 1..5) {
+            $url = [Environment]::GetEnvironmentVariable("VIDEO_$attempt")
+            if ($url) { $links.Add("- [attempt $attempt recording]($url)") }
+          }
+          if ($links.Count -gt 0) {
+            "### $($env:PROFILE_NAME) retained template video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            $links | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
 
   # Aggregate every template's outcome into one table in the run summary.
   summarize:
@@ -528,44 +675,66 @@ jobs:
           TEMPLATE_DIGEST: ${{ needs.setup.outputs.template_digest }}
           TEMPLATE_COUNT: ${{ needs.setup.outputs.template_count }}
           TEMPLATE_COMMIT: ${{ needs.setup.outputs.template_commit }}
-          GENERATION_SEED: ${{ inputs.generation_seed }}
           PROFILE_NAME: ${{ inputs.profile_name }}
           MESA_ASSET_URL: ${{ needs.setup.outputs.mesa_url }}
           MESA_ASSET_DIGEST: ${{ needs.setup.outputs.mesa_digest }}
         run: |
           failed=0
           {
-            echo "## ${PROFILE_NAME}: random-scenario generation + map load, per template"
+            echo "## ${PROFILE_NAME}: five random-scenario attempts per template"
             echo ""
-            echo "> Strict ${PROFILE_NAME} gate: every template must reach the strategic map. Every entry keeps its video, logs and outcome row."
+            echo "> Strict ${PROFILE_NAME} gate: attempts 1-4 must generate; attempt 5 must also load a populated, actionable strategic map after the startup dialogs."
+            echo "> Natural game randomness is preserved. All five outcomes/log sets are retained. If all pass, only attempt 5 video is retained; otherwise only failed-attempt videos are retained."
             echo "> Source: [bartonsun/D2-Templates@${TEMPLATE_COMMIT}](https://github.com/bartonsun/D2-Templates/commit/${TEMPLATE_COMMIT}); ${TEMPLATE_COUNT} files; manifest SHA-256 \`${TEMPLATE_DIGEST}\`."
-            echo "> Deterministic seed: \`${GENERATION_SEED}\` (C++ generator, random races, Lua PRNG/time and Lua string hashes)."
             echo "> Mesa runtime asset: \`${MESA_ASSET_URL}\`; verified \`${MESA_ASSET_DIGEST}\`."
             echo ""
-            echo "| | # | Template | Time | Outcome |"
-            echo "|:--:|--:|---|--:|---|"
+            echo "| | # | Template | Attempt | Scope | Time | Outcome |"
+            echo "|:--:|--:|---|--:|---|--:|---|"
             while IFS=$'\t' read -r idx name; do
               row="outcomes/$idx.tsv"
               if [ ! -f "$row" ]; then
                 display_name=$(printf '%s' "$name" | tr '|' '/')
-                echo "| ❌ | $idx | $display_name | - | infrastructure failure: no outcome artifact |"
+                echo "| ❌ | $idx | $display_name | - | - | - | infrastructure failure: no outcome artifact |"
                 failed=1
                 continue
               fi
-              IFS=$'\t' read -r actual_idx actual_name status secs < "$row"
-              idx="$actual_idx"; name="$actual_name"
-              [ -z "$name" ] && continue
-              display_name=$(printf '%s' "$name" | tr '|' '/')
-              mode="${status%% | *}"                          # the part before the first " | "
-              case "$mode" in
-                "reached map") icon='✅' ;;                  # generated, accepted, started and loaded
-                "no result"*) icon='⏳'; failed=1 ;;          # never finished in the budget
-                *)            icon='❌'; failed=1 ;;          # crashed / sol3 / error box / harness failure
-              esac
-              # generation seconds, capped at two digits (99+s) per the requested format
-              if [ -z "$secs" ]; then t='-'; elif [ "$secs" -gt 99 ] 2>/dev/null; then t='99+s'; else t="${secs}s"; fi
-              detail=$(printf '%s' "$status" | tr '|' '/')    # a literal | would split the table cell
-              echo "| $icon | $idx | $display_name | $t | ${detail:0:150} |"
+              line_count=$(awk 'END { print NR + 0 }' "$row")
+              if [ "$line_count" -ne 5 ]; then
+                display_name=$(printf '%s' "$name" | tr '|' '/')
+                echo "| ❌ | $idx | $display_name | - | - | - | infrastructure failure: expected 5 rows, found $line_count |"
+                failed=1
+                continue
+              fi
+              for attempt in 1 2 3 4 5; do
+                match_count=$(awk -F '\t' -v wanted="$attempt" '$3 == wanted { n++ } END { print n + 0 }' "$row")
+                if [ "$match_count" -ne 1 ]; then
+                  display_name=$(printf '%s' "$name" | tr '|' '/')
+                  echo "| ❌ | $idx | $display_name | $attempt | - | - | infrastructure failure: expected one attempt row, found $match_count |"
+                  failed=1
+                  continue
+                fi
+                line=$(awk -F '\t' -v wanted="$attempt" '$3 == wanted { print; exit }' "$row")
+                IFS=$'\t' read -r actual_idx actual_name actual_attempt phase status secs <<< "$line"
+                secs=${secs%$'\r'}
+                expected_phase=$(if [ "$attempt" -eq 5 ]; then echo 'generation+map'; else echo 'generation-only'; fi)
+                expected_status=$(if [ "$attempt" -eq 5 ]; then echo 'reached map'; else echo 'generated'; fi)
+                if [ "$actual_idx" != "$idx" ] || [ "$actual_name" != "$name" ] || [ "$actual_attempt" != "$attempt" ] || [ "$phase" != "$expected_phase" ]; then
+                  status="infrastructure failure: outcome identity/scope mismatch"
+                  failed=1
+                fi
+                display_name=$(printf '%s' "$name" | tr '|' '/')
+                mode="${status%% | *}"
+                if [ "$mode" = "$expected_status" ]; then
+                  icon='✅'
+                elif [[ "$mode" == "no result"* ]]; then
+                  icon='⏳'; failed=1
+                else
+                  icon='❌'; failed=1
+                fi
+                if [ -z "$secs" ]; then t='-'; elif [ "$secs" -gt 99 ] 2>/dev/null; then t='99+s'; else t="${secs}s"; fi
+                detail=$(printf '%s' "$status" | tr '|' '/')
+                echo "| $icon | $idx | $display_name | $attempt | $expected_phase | $t | ${detail:0:150} |"
+              done
             done < <(printf '%s' "$EXPECTED_MATRIX" | jq -r '.[] | [.index,.name] | @tsv')
           } >> "$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"
