@@ -1,10 +1,18 @@
 name: deps
 
-# Manually builds the rarely-changing dependency libs (Detours, SLikeNet LibStatic,
-# ScenarioGenerator) as an optional reusable artifact. Automated production and harness
-# CI build exact-checkout dependencies in their own run and do not consume this artifact.
+# Builds the rarely-changing dependency libs (Detours, SLikeNet LibStatic,
+# ScenarioGenerator) as an optional reusable artifact. A relevant gitlink/workflow change
+# rebuilds it automatically and stamps the exact D2RSG revision. Automated production and
+# harness CI still build exact-checkout dependencies in their own run.
 
 on:
+  push:
+    # In particular, a D2RSG bump must never leave the reusable ScenarioGenerator stale.
+    paths:
+      - "D2RSG"
+      - "SLikeNet"
+      - "Detours"
+      - ".github/workflows/deps.yml"
   workflow_dispatch:
 
 permissions:
@@ -50,6 +58,13 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           Get-ChildItem mss32\Lib
+
+      - name: Stamp deps-libs with its source D2RSG commit
+        # Preserve artifact provenance so downstream consumers can reject a stale generator.
+        run: |
+          $d2rsgSha = (git -C D2RSG rev-parse HEAD).Trim()
+          $d2rsgSha | Set-Content -LiteralPath mss32\Lib\D2RSG.sha -NoNewline
+          Write-Host "stamped D2RSG $d2rsgSha"
 
       - name: Upload dependency libs
         uses: actions/upload-artifact@v7
