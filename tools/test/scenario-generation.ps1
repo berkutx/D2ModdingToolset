@@ -30,12 +30,26 @@ param(
     [int]$Template = 3,           # listbox index of the template to generate
     [int]$WaitGenerationSec = 0,  # >0: after Generate, wait this long and assert the map generates
     [switch]$ToMap,               # after the result, accept + start the game and reach the strategic map
+    [switch]$UseTemplateDefaults, # do not force spin indices that may not exist for fixed-size templates
+    [uint32]$GenerationSeed = 0,  # >0: deterministic D2_TESTDRV-only C++/race/Lua seed
     [switch]$Keep
 )
 
 . "$PSScriptRoot\_relay.ps1"
 $GameDir = Resolve-GameDir $GameDir
 if ($ToMap -and $WaitGenerationSec -le 0) { $WaitGenerationSec = 300 }   # -ToMap must first reach the result
+$oldGenerationSeed = $env:D2TESTDRV_GENERATION_SEED
+
+function Convert-GameCp1251Text([string]$Text) {
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    $bytes = [Collections.Generic.List[byte]]::new($Text.Length)
+    foreach ($ch in $Text.ToCharArray()) {
+        $value = [int][char]$ch
+        if ($value -gt 255) { return $Text } # already decoded Unicode; do not reinterpret it
+        $bytes.Add([byte]$value)
+    }
+    try { return [Text.Encoding]::GetEncoding(1251).GetString($bytes.ToArray()) } catch { return $Text }
+}
 
 # Clean slate without a blanket kill: only our tagged window + a stale dplaysvr.
 Get-Process Discipl2 -ErrorAction SilentlyContinue |
@@ -48,6 +62,7 @@ $relay = Start-TestRelay
 Write-Host "[gen] relay up; launching host..." -ForegroundColor Cyan
 $client = $null; $ok = $false; $outcome = 'not-run'; $genSec = $null   # per-template result + generation seconds for the matrix summary
 try {
+    if ($GenerationSeed -gt 0) { $env:D2TESTDRV_GENERATION_SEED = [string]$GenerationSeed }
     $client = Start-GameClient -GameDir $GameDir -Role host
     if (-not (Wait-Dialog host DLG_MAIN_MENU 90)) { throw "host never reached DLG_MAIN_MENU" }
 
@@ -75,10 +90,17 @@ try {
     Start-Sleep 3
     if (-not (Set-EditText host $D EDIT_NAME "AutoTest")) { throw "EDIT_NAME not set" }   # BTN_GENERATE needs a name
     Start-Sleep 3
-    if (-not (Set-SpinOption host $D SPIN_SIZE 1)) { throw "SPIN_SIZE not set" }
-    Start-Sleep 3
-    if (-not (Set-SpinOption host $D SPIN_GOAL 0)) { throw "SPIN_GOAL not set" }
-    Start-Sleep 3
+    if ($UseTemplateDefaults) {
+        # Selecting the template row synchronously refreshes its size/goal options and leaves each at
+        # the valid default index 0. Many shipped templates expose exactly one fixed-size option, so
+        # blindly writing index 1 is not a faithful user action and can leave the UI out of bounds.
+        Write-Host "[gen] keeping template-provided size/goal defaults" -ForegroundColor Cyan
+    } else {
+        if (-not (Set-SpinOption host $D SPIN_SIZE 1)) { throw "SPIN_SIZE not set" }
+        Start-Sleep 3
+        if (-not (Set-SpinOption host $D SPIN_GOAL 0)) { throw "SPIN_GOAL not set" }
+        Start-Sleep 3
+    }
 
     if ((Get-Dialog host) -ne $D) { throw "client left '$D' while driving the form (crash?)" }
     if (-not (Invoke-Button host $D BTN_GENERATE)) { throw "BTN_GENERATE not found" }
@@ -115,7 +137,8 @@ try {
         if ($done) { $outcome = 'generated'; Write-Host "[gen] generation finished (DLG_GENERATION_RESULT) in ${genSec}s" -ForegroundColor Green }
         elseif ($crashed) { $outcome = 'crashed (generator assert)'; throw "the game crashed during generation (template $Template; see the captured assert)" }
         elseif ($errbox) {
-            $msg = ((((Get-GameUi host).widgets | Where-Object { $_.type -eq 'text' }).state.text) -join ' | ') -replace '[\r\n\t]+', ' '
+            $raw = ((((Get-GameUi host).widgets | Where-Object { $_.type -eq 'text' }).state.text) -join ' | ') -replace '[\r\n\t]+', ' '
+            $msg = Convert-GameCp1251Text $raw
             $outcome = "error box: $msg"
             throw "generation errored after starting (template $Template; DLG_MESSAGE_BOX: $msg)"
         }
@@ -192,6 +215,10 @@ try {
     if ($outcome -eq 'not-run') { $outcome = "harness failure: $($_.Exception.Message)" }
     Write-Host "[gen] FAIL: $($_.Exception.Message)" -ForegroundColor Red
 } finally {
+    # Give the required template recorder two frames at 5 FPS (and some margin) to retain a visible
+    # error box/form before cleanup. A process-ending CRT assert is already present in the preceding
+    # video frames and the MSS log.
+    if (-not $ok -and $client -and -not $client.HasExited) { Start-Sleep -Seconds 2 }
     # Enrich a failure with the exact reason now captured in the DLL log (the CRT assert or the sol3
     # panic the harness routes there), so the matrix summary carries the real error text, not just the mode.
     if ($outcome -notin @('generated', 'reached map', 'not-run') -and $client) {
@@ -216,5 +243,6 @@ try {
         if ($relay) { Stop-Process -Id $relay.Id -Force -ErrorAction SilentlyContinue }
         Stop-Process -Name dplaysvr -Force -ErrorAction SilentlyContinue
     }
+    $env:D2TESTDRV_GENERATION_SEED = $oldGenerationSeed
 }
 if (-not $ok) { Write-Error "scenario-generation form drive failed"; exit 1 }

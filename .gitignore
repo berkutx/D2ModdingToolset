@@ -385,4 +385,5 @@ ASALocalRun/
 
 # Local DebugTest verification output (never commit generated DLL/OBJ/PDB files).
 .build-out/
+.build-out-*/
 .build-temp/

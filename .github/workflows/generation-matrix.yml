@@ -1,17 +1,30 @@
 name: generation-matrix
 
-# Generate and load every random-scenario template, one job per template, and report which reaches
-# the strategic map vs errors (the harness distinguishes a sol3 panic, a mid-generation error box,
-# a timeout, and a generated scenario that cannot be started). The matrix axis is parsed from the
-# game's Templates/*.lua by tools/test/list-templates.js.
+# Generate and load every random-scenario template under one requested harness profile, one job
+# per template. Every
+# template must reach the strategic map: a CRT assert, sol3 panic, generator error, timeout, or
+# unplayable result is a real failure. The source is bartonsun/D2-Templates (master by default),
+# resolved once to an immutable per-run snapshot. fail-fast:false keeps all evidence flowing.
 
 on:
   workflow_call:
     inputs:
       dll_run_id:
-        description: "test-harness run id containing mss32-test-harness-debug"
+        description: "test-harness run id containing the requested DLL artifact"
         # github.run_id is a string expression. Validate its numeric shape in setup instead of making
         # reusable-workflow dispatch fail before the setup job can report a useful error.
+        type: string
+        required: true
+      dll_artifact:
+        description: "harness DLL artifact to execute"
+        type: string
+        required: true
+      profile_name:
+        description: "human-readable build profile (for jobs and evidence)"
+        type: string
+        required: true
+      artifact_prefix:
+        description: "unique lowercase prefix for this profile's artifacts"
         type: string
         required: true
       wait_sec:
@@ -19,30 +32,93 @@ on:
         type: number
         required: false
         default: 300
+      templates_ref:
+        description: "bartonsun/D2-Templates git ref"
+        type: string
+        required: false
+        default: master
+      generation_seed:
+        description: "deterministic uint32 seed for C++ generation, races and Lua template execution"
+        type: string
+        required: false
+        default: "1700000000"
+      mesa_asset_url:
+        description: "exact pal1000 Mesa release-msvc.7z URL shared by both profiles"
+        type: string
+        required: true
+      mesa_asset_digest:
+        description: "GitHub release asset digest (sha256:...) shared by both profiles"
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       dll_run_id:
-        description: "test-harness run id for the debug harness DLL (empty = latest successful build)"
+        description: "test-harness run id for the harness DLL (empty = latest run with the artifact)"
         type: string
         required: false
         default: ""
+      dll_artifact:
+        description: "harness DLL artifact to execute"
+        type: string
+        required: false
+        default: mss32-test-harness-debug
+      profile_name:
+        description: "human-readable build profile"
+        type: string
+        required: false
+        default: DebugTest
+      artifact_prefix:
+        description: "unique lowercase prefix for evidence artifacts"
+        type: string
+        required: false
+        default: debug
       wait_sec:
         description: "seconds to wait for each template's generation"
         type: number
         required: false
         default: 300
+      templates_ref:
+        description: "bartonsun/D2-Templates git ref"
+        type: string
+        required: false
+        default: master
+      generation_seed:
+        description: "deterministic uint32 seed for C++ generation, races and Lua template execution"
+        type: string
+        required: false
+        default: "1700000000"
+      mesa_asset_url:
+        description: "exact Mesa release-msvc.7z URL (empty = resolve latest)"
+        type: string
+        required: false
+        default: ""
+      mesa_asset_digest:
+        description: "matching GitHub asset digest (empty with URL = resolve latest pair)"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
-  actions: read # list harness runs + download the mss32-test-harness-debug artifact
+  actions: read # list harness runs + download the requested DLL artifact
+
+env:
+  GAME_FIXTURE_XET_HASH: 6842c7d20be847eeb8aacb48d0cb89a05052f8a5b4811fe3feead2388935c0fe
+  GAME_FIXTURE_BYTES: "1948898431"
+  GAME_CACHE_KEY: slasher-min-xet-6842c7d20be847eeb8aacb48d0cb89a05052f8a5b4811fe3feead2388935c0fe
 
 jobs:
   setup:
-    name: Parse templates + resolve harness DLL
+    name: Parse templates + resolve ${{ inputs.profile_name }} harness DLL
     runs-on: ubuntu-latest
     outputs:
       run_id: ${{ steps.dll.outputs.run_id }}
       matrix: ${{ steps.parse.outputs.matrix }}
+      template_digest: ${{ steps.parse.outputs.template_digest }}
+      template_count: ${{ steps.parse.outputs.template_count }}
+      template_commit: ${{ steps.parse.outputs.template_commit }}
+      mesa_url: ${{ steps.mesa.outputs.url }}
+      mesa_digest: ${{ steps.mesa.outputs.digest }}
     steps:
       # Sparse, no submodules: this root job only needs the parser, not the whole repo.
       - uses: actions/checkout@v6
@@ -51,6 +127,44 @@ jobs:
           fetch-depth: 1
           sparse-checkout: tools/test
           sparse-checkout-cone-mode: true
+          persist-credentials: false
+      - name: Checkout authoritative template source
+        uses: actions/checkout@v6
+        with:
+          repository: bartonsun/D2-Templates
+          ref: ${{ inputs.templates_ref }}
+          path: template-repo
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Resolve one immutable Mesa asset for every template job
+        id: mesa
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIVEN_URL: ${{ inputs.mesa_asset_url }}
+          GIVEN_DIGEST: ${{ inputs.mesa_asset_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="$GIVEN_URL"
+          digest="$GIVEN_DIGEST"
+          if [ -z "$url" ] && [ -z "$digest" ]; then
+            asset=$(gh api repos/pal1000/mesa-dist-win/releases/latest \
+              --jq '[.assets[] | select(.name | test("release-msvc\\.7z$"))][0] | [.browser_download_url, .digest] | @tsv')
+            IFS=$'\t' read -r url digest <<< "$asset"
+          elif [ -z "$url" ] || [ -z "$digest" ]; then
+            echo "::error::mesa_asset_url and mesa_asset_digest must be supplied together"
+            exit 1
+          fi
+          [[ "$url" =~ ^https://github[.]com/pal1000/mesa-dist-win/releases/download/.+/[^/]*release-msvc\.7z$ ]] || {
+            echo "::error::unexpected Mesa asset URL"
+            exit 1
+          }
+          [[ "$digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || {
+            echo "::error::unexpected Mesa asset digest"
+            exit 1
+          }
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest,,}" >> "$GITHUB_OUTPUT"
       - name: Resolve the test-harness DLL run
         id: dll
         env:
@@ -58,49 +172,95 @@ jobs:
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.ref_name }}
           GIVEN: ${{ inputs.dll_run_id }}
+          DLL_ARTIFACT: ${{ inputs.dll_artifact }}
+          ARTIFACT_PREFIX: ${{ inputs.artifact_prefix }}
         shell: bash
         run: |
           set -euo pipefail
+          [[ "$DLL_ARTIFACT" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::invalid DLL artifact name"; exit 1; }
+          [[ "$ARTIFACT_PREFIX" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "::error::artifact_prefix must be lowercase letters, digits and hyphens"; exit 1; }
           rid="$GIVEN"
           if [ -z "$rid" ]; then
             for id in $(gh run list --workflow test-harness.yml --branch "$BRANCH" --status completed \
                           -L 20 --json databaseId --jq '.[].databaseId' -R "$REPO"); do
-              if gh api "repos/$REPO/actions/runs/$id/artifacts" --jq '.artifacts[].name' 2>/dev/null | grep -qx 'mss32-test-harness-debug'; then
+              if gh api --paginate "repos/$REPO/actions/runs/$id/artifacts?per_page=100" \
+                    --jq '.artifacts[] | select(.expired == false) | .name' 2>/dev/null | grep -Fxq "$DLL_ARTIFACT"; then
                 rid="$id"; break
               fi
             done
           fi
-          [ -n "$rid" ] || { echo "::error::no test-harness build with a live mss32-test-harness-debug artifact on '$BRANCH'"; exit 1; }
+          [ -n "$rid" ] || { echo "::error::no test-harness build with a live $DLL_ARTIFACT artifact on '$BRANCH'"; exit 1; }
           [[ "$rid" =~ ^[0-9]+$ ]] || { echo "::error::dll_run_id must be a numeric Actions run id"; exit 1; }
-          artifact_id=$(gh api "repos/$REPO/actions/runs/$rid/artifacts" \
-            --jq '.artifacts[] | select(.name == "mss32-test-harness-debug" and (.expired | not)) | .id' | head -1)
+          artifact_id=$(gh api --paginate "repos/$REPO/actions/runs/$rid/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.expired == false) | [.name, .id] | @tsv' | \
+            awk -F '\t' -v name="$DLL_ARTIFACT" '$1 == name { print $2; exit }')
           [ -n "$artifact_id" ] || {
-            echo "::error::run $rid has no live mss32-test-harness-debug artifact"
+            echo "::error::run $rid has no live $DLL_ARTIFACT artifact"
             exit 1
           }
           echo "run_id=$rid" >> "$GITHUB_OUTPUT"
-      - name: Restore game cache (extract only Templates)
-        uses: actions/cache/restore@v5
-        with:
-          path: game.tar.gz
-          key: slasher-min-v1
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
       - name: Parse template list -> matrix
         id: parse
+        env:
+          TEMPLATES_REF: ${{ inputs.templates_ref }}
         shell: bash
         run: |
           set -euo pipefail
-          mkdir tpl
-          tar -xzf game.tar.gz -C tpl --wildcards '*/Templates/*.lua'   # only the templates, not the 2 GB game
-          tpldir=$(dirname "$(find tpl -ipath '*/Templates/*.lua' | head -1)")
-          echo "templates dir: $tpldir"
+          mkdir -p template-snapshot/Templates
+          : > template-snapshot/template-manifest.tsv
+          template_commit=$(git -C template-repo rev-parse HEAD)
+          if [[ "$TEMPLATES_REF" =~ ^[0-9a-fA-F]{40}$ && "${template_commit,,}" != "${TEMPLATES_REF,,}" ]]; then
+            echo "::error::template checkout resolved to $template_commit, expected $TEMPLATES_REF"
+            exit 1
+          fi
+          declare -A seen
+          while IFS= read -r -d '' src; do
+            base=$(basename "$src")
+            if [[ "$base" == *$'\t'* || "$base" == *$'\r'* || "$base" == *$'\n'* ]]; then
+              echo "::error::template filename contains a TSV/control-line delimiter"
+              exit 1
+            fi
+            key=${base,,}
+            if [[ -n "${seen[$key]:-}" ]]; then
+              echo "::error::case-insensitive template basename collision: ${seen[$key]} and $src"
+              exit 1
+            fi
+            seen[$key]="$src"
+            cp "$src" "template-snapshot/Templates/$base"
+            hash=$(sha256sum "$src" | cut -d' ' -f1)
+            bytes=$(stat -c '%s' "$src")
+            relative=${src#template-repo/}
+            if [[ "$relative" == *$'\t'* || "$relative" == *$'\r'* || "$relative" == *$'\n'* ]]; then
+              echo "::error::template source path contains a TSV/control-line delimiter"
+              exit 1
+            fi
+            printf '%s\t%s\t%s\t%s\n' "$hash" "$bytes" "$base" "$relative" >> template-snapshot/template-manifest.tsv
+          done < <(find template-repo/sMNS -type f -name '*.lua' -print0 | sort -z)
+          template_count=$(wc -l < template-snapshot/template-manifest.tsv | tr -d ' ')
+          template_digest=$(sha256sum template-snapshot/template-manifest.tsv | cut -d' ' -f1)
+          [ "$template_count" -gt 0 ] || { echo "::error::template snapshot is empty"; exit 1; }
+          echo "template_count=$template_count" >> "$GITHUB_OUTPUT"
+          echo "template_digest=$template_digest" >> "$GITHUB_OUTPUT"
+          echo "template_commit=$template_commit" >> "$GITHUB_OUTPUT"
+          echo "template snapshot: repo=bartonsun/D2-Templates ref=$TEMPLATES_REF commit=$template_commit count=$template_count manifest-sha256=$template_digest"
           npm install luaparse@0.3.1 --no-save --ignore-scripts --silent
-          node tools/test/list-templates.js "$tpldir" > matrix.json
+          node tools/test/list-templates.js template-snapshot/Templates --strict > matrix.json
+          parsed_count=$(jq 'length' matrix.json)
+          [ "$parsed_count" -eq "$template_count" ] || {
+            echo "::error::strict parser returned $parsed_count entries for $template_count .lua files"
+            exit 1
+          }
           echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+      - name: Upload the exact template snapshot + manifest
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix }}-template-source-snapshot
+          path: template-snapshot/
+          retention-days: 90
+          if-no-files-found: error
 
   generate:
-    name: ${{ matrix.template.name }}
+    name: ${{ inputs.profile_name }} / ${{ matrix.template.name }}
     needs: setup
     strategy:
       fail-fast: false
@@ -109,6 +269,9 @@ jobs:
     runs-on: windows-2025-vs2026
     env:
       GALLIUM_DRIVER: llvmpipe
+      REC_DIR: ${{ github.workspace }}/recording
+      PROFILE_NAME: ${{ inputs.profile_name }}
+      ARTIFACT_PREFIX: ${{ inputs.artifact_prefix }}
     defaults:
       run:
         shell: pwsh
@@ -119,13 +282,42 @@ jobs:
           fetch-depth: 1
           sparse-checkout: tools
           sparse-checkout-cone-mode: true
-      - name: Get the test-harness DLL (Debug)
+          persist-credentials: false
+      - name: Get the ${{ inputs.profile_name }} harness DLL
         uses: actions/download-artifact@v8
         with:
-          name: mss32-test-harness-debug
+          name: ${{ inputs.dll_artifact }}
           path: dll
           run-id: ${{ needs.setup.outputs.run_id }}
           github-token: ${{ github.token }}
+      - name: Get the exact template snapshot parsed by setup
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact_prefix }}-template-source-snapshot
+          path: template-source
+      - name: Prepare immutable evidence metadata
+        env:
+          TEMPLATE_INDEX: ${{ matrix.template.index }}
+          TEMPLATE_NAME: ${{ matrix.template.name }}
+          TEMPLATE_COMMIT: ${{ needs.setup.outputs.template_commit }}
+          TEMPLATE_DIGEST: ${{ needs.setup.outputs.template_digest }}
+          GENERATION_SEED: ${{ inputs.generation_seed }}
+          DLL_ARTIFACT: ${{ inputs.dll_artifact }}
+        run: |
+          New-Item -ItemType Directory -Force -Path evidence | Out-Null
+          @(
+            "profile=$env:PROFILE_NAME"
+            "artifact-prefix=$env:ARTIFACT_PREFIX"
+            "dll-artifact=$env:DLL_ARTIFACT"
+            "dll-sha256=$((Get-FileHash -LiteralPath 'dll/mss32.dll' -Algorithm SHA256).Hash.ToLowerInvariant())"
+            "template-index=$env:TEMPLATE_INDEX"
+            "template-name=$env:TEMPLATE_NAME"
+            "template-commit=$env:TEMPLATE_COMMIT"
+            "template-manifest-sha256=$env:TEMPLATE_DIGEST"
+            "generation-seed=$env:GENERATION_SEED"
+            "runner-image=$env:ImageOS-$env:ImageVersion"
+          ) | Set-Content evidence/metadata.txt -Encoding utf8
+          Copy-Item template-source/template-manifest.tsv evidence/template-manifest.tsv -Force
       - name: Enable DirectPlay (TCP/IP protocol for the multiplayer setup path)
         run: |
           try {
@@ -136,16 +328,36 @@ jobs:
       - name: Restore game from cache
         uses: actions/cache/restore@v5
         with:
-          path: game.tar.gz
-          key: slasher-min-v1
+          path: |
+            game.tar.gz
+            game.sha256
+            game.xet
+          key: ${{ env.GAME_CACHE_KEY }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - name: Unpack game + deploy DLL + force OpenGL/ColdCPU
         run: |
+          if ((Get-Content game.xet -Raw).Trim() -ne $env:GAME_FIXTURE_XET_HASH) { throw 'wrong game Xet identity' }
+          if ((Get-Item game.tar.gz).Length -ne [int64]$env:GAME_FIXTURE_BYTES) { throw 'wrong game archive size' }
+          $expectedSha = ((Get-Content game.sha256 -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          if ($expectedSha -notmatch '^[0-9a-f]{64}$' -or (Get-FileHash game.tar.gz -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedSha) { throw 'wrong game archive SHA-256' }
           New-Item -ItemType Directory -Force -Path game | Out-Null
           tar -xzf game.tar.gz -C game
           $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
           Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
+          $templates = Join-Path $dir 'Templates'
+          Remove-Item -LiteralPath $templates -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item -LiteralPath 'template-source\Templates' -Destination $templates -Recurse -Force
+          foreach ($line in Get-Content 'template-source\template-manifest.tsv') {
+            $parts = @($line -split "`t", 4)
+            if ($parts.Count -ne 4 -or $parts[0] -notmatch '^[0-9a-fA-F]{64}$') { throw "invalid template manifest row: $line" }
+            $expectedHash, $expectedBytes, $flatName, $sourcePath = $parts
+            $sourceFile = Join-Path 'template-source\Templates' $flatName
+            $deployedFile = Join-Path $templates $flatName
+            if ((Get-Item -LiteralPath $sourceFile).Length -ne [int64]$expectedBytes) { throw "template snapshot size mismatch: $sourcePath" }
+            if ((Get-FileHash -LiteralPath $sourceFile -Algorithm SHA256).Hash -ne $expectedHash) { throw "template snapshot hash mismatch: $sourcePath" }
+            if ((Get-FileHash -LiteralPath $deployedFile -Algorithm SHA256).Hash -ne $expectedHash) { throw "deployed template hash mismatch: $flatName" }
+          }
           $ini = Join-Path $dir 'Disciple.ini'
           if (Test-Path $ini) {
             $c = Get-Content $ini -Raw
@@ -159,66 +371,141 @@ jobs:
           "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Deploy Mesa3D software OpenGL (llvmpipe)
         env:
-          GH_TOKEN: ${{ github.token }}
+          MESA_ASSET_URL: ${{ needs.setup.outputs.mesa_url }}
+          MESA_ASSET_DIGEST: ${{ needs.setup.outputs.mesa_digest }}
         run: |
           $dir = $env:GAME_DIR
-          $asset = (gh api repos/pal1000/mesa-dist-win/releases/latest | ConvertFrom-Json).assets |
-            Where-Object { $_.name -match 'release-msvc\.7z$' } | Select-Object -First 1
+          $url = $env:MESA_ASSET_URL
+          $expectedDigest = $env:MESA_ASSET_DIGEST
+          if ($url -notmatch '^https://github\.com/pal1000/mesa-dist-win/releases/download/.+/[^/]*release-msvc\.7z$') {
+            throw "unexpected Mesa asset URL: $url"
+          }
+          if ($expectedDigest -notmatch '^sha256:[0-9a-fA-F]{64}$') {
+            throw "unexpected Mesa asset digest: $expectedDigest"
+          }
           $z = Join-Path $env:TEMP 'mesa.7z'
-          Invoke-WebRequest $asset.browser_download_url -OutFile $z -UseBasicParsing
+          Invoke-WebRequest $url -OutFile $z -UseBasicParsing
+          $actualDigest = 'sha256:' + (Get-FileHash -LiteralPath $z -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualDigest -ne $expectedDigest.ToLowerInvariant()) {
+            throw "Mesa digest mismatch: expected $expectedDigest, got $actualDigest"
+          }
+          New-Item -ItemType Directory -Force -Path evidence | Out-Null
+          @(
+            "url=$url"
+            "digest=$actualDigest"
+          ) | Set-Content evidence/mesa.txt -Encoding utf8
           $ex = Join-Path $env:TEMP 'mesa'
           $sevenzip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
           if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
           & $sevenzip x $z "-o$ex" -y "x86" | Out-Null
           Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
-      - name: Generate + load template ${{ matrix.template.index }} (${{ matrix.template.name }})
+      - name: Install OBS Studio (portable) for required template video
+        run: |
+          . ./tools/test/_obs.ps1
+          Install-Obs
+      - name: Generate + load template ${{ matrix.template.index }} (${{ matrix.template.name }}) [recorded]
         env:
           T_INDEX: ${{ matrix.template.index }}
           T_NAME: ${{ matrix.template.name }}
           WAIT_SEC: ${{ inputs.wait_sec }}
+          GENERATION_SEED: ${{ inputs.generation_seed }}
         run: |
           node --version
           $waitSec = [int]$env:WAIT_SEC
           if ($waitSec -lt 1 -or $waitSec -gt 600) { throw "wait_sec must be 1..600" }
+          $generationSeed = [uint32]$env:GENERATION_SEED
+          if ($generationSeed -lt 1) { throw "generation_seed must be positive" }
           # Run the scenario in a child pwsh: its explicit `exit 1` must not terminate this wrapper
           # before the outcome row is persisted for the aggregate summary.
           $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path $env:REC_DIR | Out-Null
+          . ./tools/test/_obs.ps1
+          # Five FPS is enough to prove the dialog/error sequence and keeps twenty recordings small.
+          Start-ObsRecording -OutDir $env:REC_DIR -HostOnly -StartImmediately -Fps 5 -BitrateKbps 1200 | Out-Null
           # Capture every stream so the GEN_OUTCOME line is readable. (The sol3 panic prints to the
           # game's stderr and stays in the raw job log.)
-          $out = & "$PSHOME\pwsh.exe" -NoLogo -NoProfile -NonInteractive `
-            -File ./tools/test/scenario-generation.ps1 -GameDir "$env:GAME_DIR" `
-            -Template $env:T_INDEX -WaitGenerationSec $waitSec -ToMap 2>&1
-          $code = $LASTEXITCODE
+          $out = $null
+          $code = 1
+          try {
+            $out = & "$PSHOME\pwsh.exe" -NoLogo -NoProfile -NonInteractive `
+              -File ./tools/test/scenario-generation.ps1 -GameDir "$env:GAME_DIR" `
+              -Template $env:T_INDEX -WaitGenerationSec $waitSec -ToMap -UseTemplateDefaults `
+              -GenerationSeed $generationSeed 2>&1
+            $code = $LASTEXITCODE
+          } finally {
+            try {
+              $mkv = Stop-ObsRecording
+              if ($mkv) {
+                Move-Item -LiteralPath $mkv -Destination (Join-Path $env:REC_DIR "$($env:ARTIFACT_PREFIX)-template-$($env:T_INDEX).mkv") -Force
+              }
+            } catch { Write-Host "::error::OBS stop failed: $($_.Exception.Message)" }
+          }
           $out | ForEach-Object { Write-Host $_ }
           $oc = $out | Select-String '^GEN_OUTCOME=' | Select-Object -Last 1
           $status = if ($oc) { ($oc.Line -replace '^GEN_OUTCOME=', '') } else { "failed (exit $code, no outcome line)" }
+          $status = (($status -replace '[\r\n\t]+', ' ').Trim())
           $sc = $out | Select-String '^GEN_SECONDS=' | Select-Object -Last 1
           $secs = if ($sc) { ($sc.Line -replace '^GEN_SECONDS=', '') } else { '' }
           New-Item -ItemType Directory -Force outcome | Out-Null
           # index<TAB>name<TAB>outcome<TAB>generation-seconds; the summarize job assembles the table
           ("{0}`t{1}`t{2}`t{3}`n" -f $env:T_INDEX, $env:T_NAME, $status, $secs) | Set-Content "outcome/$($env:T_INDEX).tsv" -Encoding utf8 -NoNewline
           Write-Host "::notice title=$($env:T_NAME)::$status"
-          # Templates come from the external game cache and have no all-green baseline. Preserve known
-          # generator outcomes in the table without making every Barton harness PR permanently red. A
-          # relay/client/action failure, an unrecognized result, a map-load failure, or a missing row stays hard.
+          # Strict profile contract: every template must generate, be accepted, start and reach the map.
+          # The row is written before this verdict so all failures remain diagnosable in the summary.
           $green = $status -eq 'reached map'
-          $knownFailure = $status -match '^error box:' -or
-            $status -match '^no result in \d+s' -or
-            $status -match '^crashed \(generator assert\) \| \[crt-assert\]' -or
-            $status -match '^sol3 panic \(errored on the generator form\) \| \[stderr\]'
-          if (-not $oc -or (-not $green -and -not $knownFailure) -or ($green -and $code -ne 0) -or ($knownFailure -and $code -eq 0)) {
+          if (-not $oc -or ($green -and $code -ne 0) -or (-not $green -and $code -eq 0)) {
             throw "template harness produced an inconsistent/unrecognized outcome '$status' (child exit $code)"
           }
-          if ($knownFailure) { Write-Warning "template outcome is non-green (recorded above; child exit $code)" }
-          exit 0 # clear the child pwsh's LASTEXITCODE; the Actions pwsh footer would otherwise re-propagate it
+          if (-not $green) { Write-Error "template failed under $($env:PROFILE_NAME): $status"; exit 1 }
+          exit 0
+      - name: Upload this template's video (raw MKV)
+        id: video
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix }}-template-${{ matrix.template.index }}-video
+          path: ${{ env.REC_DIR }}/${{ inputs.artifact_prefix }}-template-${{ matrix.template.index }}.mkv
+          archive: false
+          retention-days: 90
+          if-no-files-found: error
       - name: Upload this template's outcome
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: gen-outcome-${{ matrix.template.index }}
+          name: ${{ inputs.artifact_prefix }}-gen-outcome-${{ matrix.template.index }}
           path: outcome/*.tsv
-          retention-days: 1 # ephemeral scratch (one row) the summarize job merges; do not let it linger
-          if-no-files-found: warn
+          retention-days: 90
+          if-no-files-found: error
+      - name: Collect this template's diagnostics
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force -Path evidence | Out-Null
+          if (Test-Path -LiteralPath outcome) {
+            Copy-Item -LiteralPath outcome -Destination evidence -Recurse -Force
+          }
+          foreach ($name in @('obs.log', 'obs-owned.json')) {
+            $file = Join-Path $env:REC_DIR $name
+            if (Test-Path -LiteralPath $file) { Copy-Item -LiteralPath $file -Destination evidence -Force }
+          }
+          if ($env:GAME_DIR -and (Test-Path -LiteralPath $env:GAME_DIR)) {
+            Get-ChildItem -LiteralPath $env:GAME_DIR -Filter 'mss32_*.log' -File -ErrorAction SilentlyContinue |
+              Copy-Item -Destination evidence -Force
+          }
+          Get-ChildItem -LiteralPath $env:RUNNER_TEMP -Filter 'relay-*.out.log*' -File -ErrorAction SilentlyContinue |
+            Copy-Item -Destination evidence -Force
+      - name: Upload this template's diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix }}-template-${{ matrix.template.index }}-evidence
+          path: evidence/
+          retention-days: 90
+          if-no-files-found: error
+      - name: Link this template's video in the job summary
+        if: always() && steps.video.outputs.artifact-url != ''
+        run: |
+          "### $($env:PROFILE_NAME) template video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "[Download template ${{ matrix.template.index }} recording](${{ steps.video.outputs.artifact-url }})" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
   # Aggregate every template's outcome into one table in the run summary.
   summarize:
@@ -231,43 +518,55 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          pattern: gen-outcome-*
+          pattern: ${{ inputs.artifact_prefix }}-gen-outcome-*
           path: outcomes
           merge-multiple: true
       - name: Build the results table
         shell: bash
         env:
           EXPECTED_MATRIX: ${{ needs.setup.outputs.matrix }}
+          TEMPLATE_DIGEST: ${{ needs.setup.outputs.template_digest }}
+          TEMPLATE_COUNT: ${{ needs.setup.outputs.template_count }}
+          TEMPLATE_COMMIT: ${{ needs.setup.outputs.template_commit }}
+          GENERATION_SEED: ${{ inputs.generation_seed }}
+          PROFILE_NAME: ${{ inputs.profile_name }}
+          MESA_ASSET_URL: ${{ needs.setup.outputs.mesa_url }}
+          MESA_ASSET_DIGEST: ${{ needs.setup.outputs.mesa_digest }}
         run: |
-          missing=0
+          failed=0
           {
-            echo "## Random-scenario generation + map load, per template"
+            echo "## ${PROFILE_NAME}: random-scenario generation + map load, per template"
             echo ""
-            echo "> Known generator outcomes over the external game cache are informational; harness/map-load failures and missing artifacts still fail CI."
+            echo "> Strict ${PROFILE_NAME} gate: every template must reach the strategic map. Every entry keeps its video, logs and outcome row."
+            echo "> Source: [bartonsun/D2-Templates@${TEMPLATE_COMMIT}](https://github.com/bartonsun/D2-Templates/commit/${TEMPLATE_COMMIT}); ${TEMPLATE_COUNT} files; manifest SHA-256 \`${TEMPLATE_DIGEST}\`."
+            echo "> Deterministic seed: \`${GENERATION_SEED}\` (C++ generator, random races, Lua PRNG/time and Lua string hashes)."
+            echo "> Mesa runtime asset: \`${MESA_ASSET_URL}\`; verified \`${MESA_ASSET_DIGEST}\`."
             echo ""
             echo "| | # | Template | Time | Outcome |"
             echo "|:--:|--:|---|--:|---|"
             while IFS=$'\t' read -r idx name; do
               row="outcomes/$idx.tsv"
               if [ ! -f "$row" ]; then
-                echo "| ❌ | $idx | $name | - | infrastructure failure: no outcome artifact |"
-                missing=1
+                display_name=$(printf '%s' "$name" | tr '|' '/')
+                echo "| ❌ | $idx | $display_name | - | infrastructure failure: no outcome artifact |"
+                failed=1
                 continue
               fi
               IFS=$'\t' read -r actual_idx actual_name status secs < "$row"
               idx="$actual_idx"; name="$actual_name"
               [ -z "$name" ] && continue
+              display_name=$(printf '%s' "$name" | tr '|' '/')
               mode="${status%% | *}"                          # the part before the first " | "
               case "$mode" in
                 "reached map") icon='✅' ;;                  # generated, accepted, started and loaded
-                "no result"*) icon='⏳' ;;                    # never finished in the budget
-                *)            icon='❌' ;;                    # crashed / sol3 / error box
+                "no result"*) icon='⏳'; failed=1 ;;          # never finished in the budget
+                *)            icon='❌'; failed=1 ;;          # crashed / sol3 / error box / harness failure
               esac
               # generation seconds, capped at two digits (99+s) per the requested format
               if [ -z "$secs" ]; then t='-'; elif [ "$secs" -gt 99 ] 2>/dev/null; then t='99+s'; else t="${secs}s"; fi
               detail=$(printf '%s' "$status" | tr '|' '/')    # a literal | would split the table cell
-              echo "| $icon | $idx | $name | $t | ${detail:0:150} |"
+              echo "| $icon | $idx | $display_name | $t | ${detail:0:150} |"
             done < <(printf '%s' "$EXPECTED_MATRIX" | jq -r '.[] | [.index,.name] | @tsv')
           } >> "$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"
-          [ "$missing" -eq 0 ] || exit 1
+          [ "$failed" -eq 0 ] || exit 1

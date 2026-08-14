@@ -1,11 +1,17 @@
 name: test-harness
 
-# The production mss32 workflow stays untouched. This workflow alone builds the
-# compile-gated debug harness configuration and runs the external game harness from
-# the exact checkout under test (including the exact dependency gitlinks).
+# The single automated CI entrypoint. Every PR builds production Release plus Debug and
+# Release harnesses. Gameplay runs on DebugTest; the strict template suite runs on both
+# harness profiles from the same source commit and seed.
 
 on:
+  pull_request:
   push:
+    branches:
+      - dev
+      - master
+      # Temporary proof-run trigger for the extraction branch; remove after the hosted proof run completes.
+      - feature/test-harness-dev-20260813
     paths:
       - "mss32/**"
       - ".gitmodules"
@@ -23,6 +29,8 @@ on:
       - ".github/workflows/test-harness.yml"
       - ".github/workflows/tests.yml"
       - ".github/workflows/generation-matrix.yml"
+      - ".github/workflows/mss32.yml"
+      - ".github/workflows/mss32-production-build.yml"
   workflow_dispatch:
 
 permissions:
@@ -30,10 +38,17 @@ permissions:
   actions: read
 
 concurrency:
-  group: test-harness-${{ github.ref }}
+  group: test-harness-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  production-release:
+    name: Production Release compile gate
+    uses: ./.github/workflows/mss32-production-build.yml
+    with:
+      configuration: Release
+      artifact_name: mss32-production-release
+
   validate:
     name: Validate scripts + relay transports
     runs-on: windows-2025-vs2026
@@ -42,7 +57,10 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v6
-        with: { submodules: false, fetch-depth: 1 }
+        with:
+          submodules: false
+          fetch-depth: 1
+          persist-credentials: false
       - name: Parse every PowerShell and JavaScript tool
         run: |
           $failed = $false
@@ -64,6 +82,42 @@ jobs:
       - name: TCP framed-protocol smoke (Wine/Docker transport)
         run: ./tools/test/relay-transport-smoke.ps1 -Transport tcp
 
+  template_source:
+    name: Resolve shared template runtime inputs
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.resolve.outputs.commit }}
+      mesa_url: ${{ steps.resolve.outputs.mesa_url }}
+      mesa_digest: ${{ steps.resolve.outputs.mesa_digest }}
+    steps:
+      - name: Resolve immutable source commit
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEMPLATE_REPO: https://github.com/bartonsun/D2-Templates.git
+          TEMPLATE_REF: master
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit=$(git ls-remote "$TEMPLATE_REPO" "refs/heads/$TEMPLATE_REF" | awk 'NR == 1 { print $1 }')
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::could not resolve D2-Templates/$TEMPLATE_REF"; exit 1; }
+          asset=$(gh api repos/pal1000/mesa-dist-win/releases/latest \
+            --jq '[.assets[] | select(.name | test("release-msvc\\.7z$"))][0] | [.browser_download_url, .digest] | @tsv')
+          IFS=$'\t' read -r mesa_url mesa_digest <<< "$asset"
+          [[ "$mesa_url" =~ ^https://github[.]com/pal1000/mesa-dist-win/releases/download/.+/[^/]*release-msvc\.7z$ ]] || {
+            echo "::error::could not resolve an exact Mesa release-msvc.7z asset"
+            exit 1
+          }
+          [[ "$mesa_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::Mesa release asset has no valid SHA-256 digest"
+            exit 1
+          }
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "mesa_url=$mesa_url" >> "$GITHUB_OUTPUT"
+          echo "mesa_digest=$mesa_digest" >> "$GITHUB_OUTPUT"
+          echo "D2-Templates/$TEMPLATE_REF -> $commit"
+          echo "Mesa -> $mesa_url ($mesa_digest)"
+
   build:
     name: Build test-harness DLL (Debug)
     runs-on: windows-2025-vs2026
@@ -71,10 +125,11 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Build exact Debug dependencies
         run: |
@@ -107,7 +162,7 @@ jobs:
       - name: Verify harness markers
         run: |
           $txt = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes('out\mss32.dll'))
-          foreach ($marker in '[testdrv]', '[testdrv][dplay]', 'skip-intro') {
+          foreach ($marker in '[testdrv]', '[testdrv][dplay]', 'skip-intro', 'D2TESTDRV_GENERATION_SEED') {
             if (-not $txt.Contains($marker)) { Write-Error "missing harness marker: $marker"; exit 1 }
           }
 
@@ -118,18 +173,174 @@ jobs:
           path: out/mss32.dll
           if-no-files-found: error
 
+  release_harness:
+    name: Build test-harness DLL (Release)
+    runs-on: windows-2025-vs2026
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build exact Release dependencies
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
+          $env:_CL_ = '/WX- /FS /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS'
+          New-Item -ItemType Directory -Force -Path mss32\Lib | Out-Null
+          msbuild mss32\mss32.sln '/t:LibStatic;ScenarioGenerator' `
+            /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v143 `
+            /p:MultiProcessorCompilation=true /p:MinimalRebuild=false /m /nologo /verbosity:minimal
+          exit $LASTEXITCODE
+
+      - name: Build test-harness DLL (Release + D2_TESTDRV)
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
+          $env:_CL_ = '/WX- /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS'
+          $env:DISCIPLES2_PATH = "$env:GITHUB_WORKSPACE\out\"
+          New-Item -ItemType Directory -Force -Path $env:DISCIPLES2_PATH | Out-Null
+          msbuild mss32\mss32.vcxproj `
+            /t:Build /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 `
+            /p:D2TestDrv=true /p:SolutionDir=$env:GITHUB_WORKSPACE\mss32\ `
+            /p:MultiProcessorCompilation=false /p:UseMultiToolTask=true `
+            /p:EnforceProcessCountAcrossBuilds=true /p:MinimalRebuild=false `
+            /m /nologo /clp:Summary /verbosity:minimal
+          exit $LASTEXITCODE
+
+      - name: Verify Release harness markers
+        run: |
+          $txt = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes('out\mss32.dll'))
+          foreach ($marker in '[testdrv]', '[testdrv][dplay]', 'skip-intro', 'D2TESTDRV_GENERATION_SEED') {
+            if (-not $txt.Contains($marker)) { Write-Error "missing harness marker: $marker"; exit 1 }
+          }
+
+      - name: Upload test-harness DLL (Release)
+        uses: actions/upload-artifact@v7
+        with:
+          name: mss32-test-harness-release
+          path: out/mss32.dll
+          if-no-files-found: error
+
+      - name: Upload Release harness symbols
+        uses: actions/upload-artifact@v7
+        with:
+          name: mss32-test-harness-release-symbols
+          path: out/mss32.pdb
+          if-no-files-found: warn
+
   tests:
     name: Tests
-    needs: [build, validate]
+    needs: [build, validate, template_source]
     uses: ./.github/workflows/tests.yml
+    with:
+      mesa_asset_url: ${{ needs.template_source.outputs.mesa_url }}
+      mesa_asset_digest: ${{ needs.template_source.outputs.mesa_digest }}
 
-  templates:
-    name: Every random-scenario template
-    needs: [build, validate, tests]
+  templates_debug:
+    name: Every master template (DebugTest)
+    needs: [build, validate, tests, template_source]
     # The ordinary suite warms the shared game cache. Run the template matrix even when an
     # unrelated gameplay job failed, but never without the exact harness DLL from this run.
-    if: ${{ always() && !cancelled() && needs.build.result == 'success' && needs.validate.result == 'success' }}
+    if: ${{ always() && !cancelled() && needs.build.result == 'success' && needs.validate.result == 'success' && needs.template_source.result == 'success' }}
     uses: ./.github/workflows/generation-matrix.yml
     with:
       dll_run_id: ${{ github.run_id }}
+      dll_artifact: mss32-test-harness-debug
+      profile_name: DebugTest
+      artifact_prefix: debug
       wait_sec: 300
+      templates_ref: ${{ needs.template_source.outputs.commit }}
+      generation_seed: "1700000000"
+      mesa_asset_url: ${{ needs.template_source.outputs.mesa_url }}
+      mesa_asset_digest: ${{ needs.template_source.outputs.mesa_digest }}
+
+  templates_release:
+    name: Every master template (Release + harness)
+    needs: [release_harness, validate, tests, template_source]
+    # tests contains the one cache-preparation job; wait for it even if an unrelated gameplay
+    # assertion failed so both template profiles consume the same prepared game archive.
+    if: ${{ always() && !cancelled() && needs.release_harness.result == 'success' && needs.validate.result == 'success' && needs.template_source.result == 'success' }}
+    uses: ./.github/workflows/generation-matrix.yml
+    with:
+      dll_run_id: ${{ github.run_id }}
+      dll_artifact: mss32-test-harness-release
+      profile_name: Release + D2_TESTDRV
+      artifact_prefix: release
+      wait_sec: 300
+      templates_ref: ${{ needs.template_source.outputs.commit }}
+      generation_seed: "1700000000"
+      mesa_asset_url: ${{ needs.template_source.outputs.mesa_url }}
+      mesa_asset_digest: ${{ needs.template_source.outputs.mesa_digest }}
+
+  templates_compare:
+    name: Compare DebugTest vs Release template outcomes
+    needs: [templates_debug, templates_release, template_source]
+    if: ${{ always() && !cancelled() && needs.template_source.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download DebugTest outcomes
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: debug-gen-outcome-*
+          path: debug
+          merge-multiple: true
+      - name: Download Release outcomes
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-gen-outcome-*
+          path: release
+          merge-multiple: true
+      - name: Build the A/B table
+        shell: bash
+        env:
+          TEMPLATE_COMMIT: ${{ needs.template_source.outputs.commit }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          rows=(debug/*.tsv)
+          release_rows=(release/*.tsv)
+          [ "${#rows[@]}" -gt 0 ] || { echo "::error::no DebugTest outcome rows"; exit 1; }
+          missing=0
+          diverged=0
+          [ "${#rows[@]}" -eq "${#release_rows[@]}" ] || missing=1
+          {
+            echo "## Template runtime A/B"
+            echo ""
+            echo "> Same [D2-Templates commit](https://github.com/bartonsun/D2-Templates/commit/${TEMPLATE_COMMIT}), seed and digest-verified Mesa bytes; only the MSS build profile differs."
+            echo ""
+            echo "| # | Template | DebugTest | Release + D2_TESTDRV | Match |"
+            echo "|--:|---|---|---|:--:|"
+            while IFS= read -r file; do
+              idx=$(basename "$file" .tsv)
+              other="release/$idx.tsv"
+              if [ ! -f "$other" ]; then
+                IFS=$'\t' read -r _ name debug_status _ < "$file"
+                display_name=$(printf '%s' "$name" | tr '|' '/')
+                display_debug=$(printf '%s' "$debug_status" | tr '|' '/')
+                echo "| $idx | $display_name | $display_debug | missing outcome | ❌ |"
+                missing=1
+                continue
+              fi
+              IFS=$'\t' read -r _ name debug_status _ < "$file"
+              IFS=$'\t' read -r _ release_name release_status _ < "$other"
+              [ "$name" = "$release_name" ] || { echo "::error::template name mismatch at index $idx"; missing=1; }
+              same='≠'
+              if [ "$debug_status" = "$release_status" ]; then same='='; else diverged=1; fi
+              display_name=$(printf '%s' "$name" | tr '|' '/')
+              display_debug=$(printf '%s' "$debug_status" | tr '|' '/')
+              display_release=$(printf '%s' "$release_status" | tr '|' '/')
+              echo "| $idx | $display_name | $display_debug | $display_release | $same |"
+            done < <(printf '%s\n' "${rows[@]}" | sort -V)
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$GITHUB_STEP_SUMMARY"
+          [ "$missing" -eq 0 ] || exit 1
+          [ "$diverged" -eq 0 ] || { echo "::error::DebugTest and Release template outcomes diverged"; exit 1; }

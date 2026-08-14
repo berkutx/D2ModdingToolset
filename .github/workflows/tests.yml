@@ -5,9 +5,26 @@ name: tests
 
 on:
   workflow_call:
+    inputs:
+      mesa_asset_url:
+        description: Immutable Mesa release-msvc.7z URL resolved once by the caller
+        required: true
+        type: string
+      mesa_asset_digest:
+        description: GitHub asset digest (sha256:<64 hex>) for mesa_asset_url
+        required: true
+        type: string
 permissions:
   contents: read
   actions: read # download the same run's mss32-test-harness-debug artifact
+
+# The game archive is mutable bucket storage, so pin its content-addressed Xet identity and size.
+# A raw SHA-256 sidecar is generated on download and verified on every cache restore.
+env:
+  GAME_FIXTURE_URL: https://huggingface.co/buckets/berkut/d2_slasher_mini/resolve/slasher_mns_2_4_min.tar.gz
+  GAME_FIXTURE_XET_HASH: 6842c7d20be847eeb8aacb48d0cb89a05052f8a5b4811fe3feead2388935c0fe
+  GAME_FIXTURE_BYTES: "1948898431"
+  GAME_CACHE_KEY: slasher-min-xet-6842c7d20be847eeb8aacb48d0cb89a05052f8a5b4811fe3feead2388935c0fe
 
 jobs:
   # Warm the ~1.95 GB minimal game into the Actions cache once per run/branch.
@@ -22,28 +39,45 @@ jobs:
         id: c
         uses: actions/cache/restore@v5
         with:
-          path: game.tar.gz
-          key: slasher-min-v1
+          path: |
+            game.tar.gz
+            game.sha256
+            game.xet
+          key: ${{ env.GAME_CACHE_KEY }}
           enableCrossOsArchive: true
-      - name: Set up Python
-        if: steps.c.outputs.cache-hit != 'true'
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - name: Download from the public HF bucket
+      - name: Resolve and download the exact public HF Xet object
         if: steps.c.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          pip install -U "huggingface_hub[cli]" >/dev/null
-          hf buckets cp "hf://buckets/berkut/d2_slasher_mini/slasher_mns_2_4_min.tar.gz" game.tar.gz
+          headers=$(curl -fsSI "$GAME_FIXTURE_URL" | tr -d '\r')
+          remote_hash=$(printf '%s\n' "$headers" | awk 'tolower($1)=="x-xet-hash:" {print $2; exit}')
+          remote_bytes=$(printf '%s\n' "$headers" | awk 'tolower($1)=="x-linked-size:" {print $2; exit}')
+          resolved_url=$(printf '%s\n' "$headers" | awk 'tolower($1)=="location:" {$1=""; sub(/^ /, ""); print; exit}')
+          [ "$remote_hash" = "$GAME_FIXTURE_XET_HASH" ] || { echo "::error::HF Xet hash changed: $remote_hash"; exit 1; }
+          [ "$remote_bytes" = "$GAME_FIXTURE_BYTES" ] || { echo "::error::HF fixture size changed: $remote_bytes"; exit 1; }
+          [[ "$resolved_url" =~ ^https:// ]] || { echo "::error::HF did not return an immutable Xet download URL"; exit 1; }
+          # Xet identity and Location come from the same response. Downloading that resolved CAS URL
+          # avoids a second lookup of the mutable bucket path between identity check and transfer.
+          curl -fL --retry 5 --retry-all-errors "$resolved_url" -o game.tar.gz
           ls -l game.tar.gz
-          sha256sum game.tar.gz
+          [ "$(stat -c '%s' game.tar.gz)" = "$GAME_FIXTURE_BYTES" ] || { echo "::error::downloaded game archive has wrong size"; exit 1; }
+          printf '%s\n' "$GAME_FIXTURE_XET_HASH" > game.xet
+          sha256sum game.tar.gz | tee game.sha256
+      - name: Verify pinned game fixture
+        run: |
+          set -euo pipefail
+          [ "$(cat game.xet)" = "$GAME_FIXTURE_XET_HASH" ] || { echo "::error::wrong game Xet identity in cache"; exit 1; }
+          [ "$(stat -c '%s' game.tar.gz)" = "$GAME_FIXTURE_BYTES" ] || { echo "::error::wrong game archive size in cache"; exit 1; }
+          sha256sum -c game.sha256
       - name: Save cache
         if: steps.c.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
-          path: game.tar.gz
-          key: slasher-min-v1
+          path: |
+            game.tar.gz
+            game.sha256
+            game.xet
+          key: ${{ env.GAME_CACHE_KEY }}
           enableCrossOsArchive: true
 
   boot-smoke:
@@ -55,7 +89,7 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v6
-        with: { submodules: false, fetch-depth: 1 }
+        with: { submodules: false, fetch-depth: 1, persist-credentials: false }
       - name: Get test-harness DLL (Debug)
         uses: actions/download-artifact@v8
         with:
@@ -64,12 +98,19 @@ jobs:
       - name: Restore game from cache
         uses: actions/cache/restore@v5
         with:
-          path: game.tar.gz
-          key: slasher-min-v1
+          path: |
+            game.tar.gz
+            game.sha256
+            game.xet
+          key: ${{ env.GAME_CACHE_KEY }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - name: Unpack game + deploy test-harness mss32.dll
         run: |
+          if ((Get-Content game.xet -Raw).Trim() -ne $env:GAME_FIXTURE_XET_HASH) { throw 'wrong game Xet identity' }
+          if ((Get-Item game.tar.gz).Length -ne [int64]$env:GAME_FIXTURE_BYTES) { throw 'wrong game archive size' }
+          $expectedSha = ((Get-Content game.sha256 -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          if ($expectedSha -notmatch '^[0-9a-f]{64}$' -or (Get-FileHash game.tar.gz -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedSha) { throw 'wrong game archive SHA-256' }
           New-Item -ItemType Directory -Force -Path game | Out-Null
           tar -xzf game.tar.gz -C game
           $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
@@ -89,7 +130,7 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v6
-        with: { submodules: false, fetch-depth: 1 }
+        with: { submodules: false, fetch-depth: 1, persist-credentials: false }
       - name: Get test-harness DLL (Debug)
         uses: actions/download-artifact@v8
         with:
@@ -98,12 +139,19 @@ jobs:
       - name: Restore game from cache
         uses: actions/cache/restore@v5
         with:
-          path: game.tar.gz
-          key: slasher-min-v1
+          path: |
+            game.tar.gz
+            game.sha256
+            game.xet
+          key: ${{ env.GAME_CACHE_KEY }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - name: Unpack game + deploy test-harness mss32.dll
         run: |
+          if ((Get-Content game.xet -Raw).Trim() -ne $env:GAME_FIXTURE_XET_HASH) { throw 'wrong game Xet identity' }
+          if ((Get-Item game.tar.gz).Length -ne [int64]$env:GAME_FIXTURE_BYTES) { throw 'wrong game archive size' }
+          $expectedSha = ((Get-Content game.sha256 -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          if ($expectedSha -notmatch '^[0-9a-f]{64}$' -or (Get-FileHash game.tar.gz -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedSha) { throw 'wrong game archive SHA-256' }
           New-Item -ItemType Directory -Force -Path game | Out-Null
           tar -xzf game.tar.gz -C game
           $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
@@ -128,7 +176,7 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v6
-        with: { submodules: false, fetch-depth: 1 }
+        with: { submodules: false, fetch-depth: 1, persist-credentials: false }
       - name: Get test-harness DLL (Debug)
         uses: actions/download-artifact@v8
         with:
@@ -164,12 +212,19 @@ jobs:
       - name: Restore game from cache
         uses: actions/cache/restore@v5
         with:
-          path: game.tar.gz
-          key: slasher-min-v1
+          path: |
+            game.tar.gz
+            game.sha256
+            game.xet
+          key: ${{ env.GAME_CACHE_KEY }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - name: Unpack game + deploy test-harness mss32.dll + force OpenGL/ColdCPU
         run: |
+          if ((Get-Content game.xet -Raw).Trim() -ne $env:GAME_FIXTURE_XET_HASH) { throw 'wrong game Xet identity' }
+          if ((Get-Item game.tar.gz).Length -ne [int64]$env:GAME_FIXTURE_BYTES) { throw 'wrong game archive size' }
+          $expectedSha = ((Get-Content game.sha256 -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          if ($expectedSha -notmatch '^[0-9a-f]{64}$' -or (Get-FileHash game.tar.gz -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedSha) { throw 'wrong game archive SHA-256' }
           New-Item -ItemType Directory -Force -Path game | Out-Null
           tar -xzf game.tar.gz -C game
           $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
@@ -197,14 +252,16 @@ jobs:
           "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Deploy Mesa3D software OpenGL (llvmpipe) next to the game
         env:
-          GH_TOKEN: ${{ github.token }}
+          MESA_ASSET_URL: ${{ inputs.mesa_asset_url }}
+          MESA_ASSET_DIGEST: ${{ inputs.mesa_asset_digest }}
         run: |
           $dir = $env:GAME_DIR
-          $rel = gh api repos/pal1000/mesa-dist-win/releases/latest | ConvertFrom-Json
-          $asset = $rel.assets | Where-Object { $_.name -match 'release-msvc\.7z$' } | Select-Object -First 1
-          Write-Host "mesa asset: $($asset.name)"
+          if ($env:MESA_ASSET_URL -notmatch '^https://github\.com/pal1000/mesa-dist-win/releases/download/.+/[^/]*release-msvc\.7z$') { throw 'invalid Mesa asset URL' }
+          if ($env:MESA_ASSET_DIGEST -notmatch '^sha256:[0-9a-f]{64}$') { throw 'invalid Mesa asset digest' }
           $z = Join-Path $env:TEMP 'mesa.7z'
-          Invoke-WebRequest $asset.browser_download_url -OutFile $z -UseBasicParsing
+          Invoke-WebRequest $env:MESA_ASSET_URL -OutFile $z -UseBasicParsing
+          $actual = (Get-FileHash $z -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:MESA_ASSET_DIGEST.Substring(7)) { throw "Mesa SHA-256 mismatch: $actual" }
           $ex = Join-Path $env:TEMP 'mesa'
           $sevenzip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
           if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
@@ -216,12 +273,15 @@ jobs:
           $pd = Join-Path $env:GITHUB_WORKSPACE 'procdump.exe'
           # 32-bit procdump -> captures the x86 thread context of the WOW64 game
           Invoke-WebRequest 'https://live.sysinternals.com/procdump.exe' -OutFile $pd -UseBasicParsing
+          $sig = Get-AuthenticodeSignature -LiteralPath $pd
+          if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'Microsoft') {
+            throw "ProcDump signature validation failed: $($sig.Status) / $($sig.StatusMessage)"
+          }
           $dumps = Join-Path $env:GITHUB_WORKSPACE 'dumps'
           New-Item -ItemType Directory -Force -Path $dumps | Out-Null
           "PROCDUMP=$pd"   | Out-File -FilePath $env:GITHUB_ENV -Append
           "DUMPDIR=$dumps" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Install OBS Studio (portable) for the run video
-        continue-on-error: true   # recording is best-effort; never fail the test on an OBS hiccup
         run: |
           . ./tools/test/_obs.ps1
           Install-Obs
@@ -230,8 +290,8 @@ jobs:
           node --version  # the dispatcher starts tools/relay/relay.js; GitHub runners ship Node
           $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
           "REC_DIR=$rec" | Out-File -FilePath $env:GITHUB_ENV -Append
-          # Dot-source inside the try so a parse error in _obs.ps1 cannot fail the functional test.
-          try { . ./tools/test/_obs.ps1; Start-ObsRecording -OutDir $rec | Out-Null } catch { Write-Host "::warning::OBS start failed: $($_.Exception.Message)" }
+          . ./tools/test/_obs.ps1
+          Start-ObsRecording -OutDir $rec -StartImmediately | Out-Null
           $code = 1
           try {
             ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -EndHostTurn -Kill -ProcDump "$env:PROCDUMP" -DumpDir "$env:DUMPDIR"
@@ -250,13 +310,14 @@ jobs:
           }
           exit $code
       - name: Upload the run video (raw single file, no zip)
-        if: always() && env.VIDEO_FILE != ''
+        if: always()
         id: video
         uses: actions/upload-artifact@v7
         with:
-          path: ${{ env.VIDEO_FILE }}
+          path: ${{ env.REC_DIR }}/multiplayer-strategic.mkv
           archive: false
-          if-no-files-found: warn
+          retention-days: 90
+          if-no-files-found: error
       - name: Upload the OBS log (diagnostics)
         if: always()
         uses: actions/upload-artifact@v7
@@ -264,8 +325,8 @@ jobs:
           name: multiplayer-obs-log
           path: ${{ env.REC_DIR }}/obs.log
           if-no-files-found: warn
-      - name: Link the run video in the summary on failure
-        if: failure() && steps.video.outputs.artifact-url != ''
+      - name: Link the run video in the summary
+        if: always() && steps.video.outputs.artifact-url != ''
         run: |
           "### Multiplayer run video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           "[Download the recording](${{ steps.video.outputs.artifact-url }})" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
@@ -336,7 +397,7 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v6
-        with: { submodules: false, fetch-depth: 1 }
+        with: { submodules: false, fetch-depth: 1, persist-credentials: false }
       - name: Get test-harness DLL (Debug)
         uses: actions/download-artifact@v8
         with:
@@ -354,12 +415,19 @@ jobs:
       - name: Restore game from cache
         uses: actions/cache/restore@v5
         with:
-          path: game.tar.gz
-          key: slasher-min-v1
+          path: |
+            game.tar.gz
+            game.sha256
+            game.xet
+          key: ${{ env.GAME_CACHE_KEY }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - name: Unpack game + deploy test-harness mss32.dll + force OpenGL/ColdCPU
         run: |
+          if ((Get-Content game.xet -Raw).Trim() -ne $env:GAME_FIXTURE_XET_HASH) { throw 'wrong game Xet identity' }
+          if ((Get-Item game.tar.gz).Length -ne [int64]$env:GAME_FIXTURE_BYTES) { throw 'wrong game archive size' }
+          $expectedSha = ((Get-Content game.sha256 -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          if ($expectedSha -notmatch '^[0-9a-f]{64}$' -or (Get-FileHash game.tar.gz -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedSha) { throw 'wrong game archive SHA-256' }
           New-Item -ItemType Directory -Force -Path game | Out-Null
           tar -xzf game.tar.gz -C game
           $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
@@ -377,20 +445,22 @@ jobs:
           "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Deploy Mesa3D software OpenGL (llvmpipe)
         env:
-          GH_TOKEN: ${{ github.token }}
+          MESA_ASSET_URL: ${{ inputs.mesa_asset_url }}
+          MESA_ASSET_DIGEST: ${{ inputs.mesa_asset_digest }}
         run: |
           $dir = $env:GAME_DIR
-          $asset = (gh api repos/pal1000/mesa-dist-win/releases/latest | ConvertFrom-Json).assets |
-            Where-Object { $_.name -match 'release-msvc\.7z$' } | Select-Object -First 1
+          if ($env:MESA_ASSET_URL -notmatch '^https://github\.com/pal1000/mesa-dist-win/releases/download/.+/[^/]*release-msvc\.7z$') { throw 'invalid Mesa asset URL' }
+          if ($env:MESA_ASSET_DIGEST -notmatch '^sha256:[0-9a-f]{64}$') { throw 'invalid Mesa asset digest' }
           $z = Join-Path $env:TEMP 'mesa.7z'
-          Invoke-WebRequest $asset.browser_download_url -OutFile $z -UseBasicParsing
+          Invoke-WebRequest $env:MESA_ASSET_URL -OutFile $z -UseBasicParsing
+          $actual = (Get-FileHash $z -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:MESA_ASSET_DIGEST.Substring(7)) { throw "Mesa SHA-256 mismatch: $actual" }
           $ex = Join-Path $env:TEMP 'mesa'
           $sevenzip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
           if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
           & $sevenzip x $z "-o$ex" -y "x86" | Out-Null
           Copy-Item "$ex\x86\*.dll" $dir -Force -ErrorAction SilentlyContinue
       - name: Install OBS Studio (portable) for the run video
-        continue-on-error: true
         run: |
           . ./tools/test/_obs.ps1
           Install-Obs
@@ -399,7 +469,8 @@ jobs:
           node --version
           $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
           "REC_DIR=$rec" | Out-File -FilePath $env:GITHUB_ENV -Append
-          try { . ./tools/test/_obs.ps1; Start-ObsRecording -OutDir $rec | Out-Null } catch { Write-Host "::warning::OBS start failed: $($_.Exception.Message)" }
+          . ./tools/test/_obs.ps1
+          Start-ObsRecording -OutDir $rec -StartImmediately | Out-Null
           $code = 1
           try {
             ./tools/test/multiplayer-two-instance.ps1 -GameDir "$env:GAME_DIR" -RandomMap -EndHostTurn -Scenario 7 -GenWaitSec 60 -Kill
@@ -418,13 +489,14 @@ jobs:
           }
           exit $code
       - name: Upload the run video (raw single file, no zip)
-        if: always() && env.VIDEO_FILE != ''
+        if: always()
         id: video
         uses: actions/upload-artifact@v7
         with:
-          path: ${{ env.VIDEO_FILE }}
+          path: ${{ env.REC_DIR }}/generated-map-turn-pass.mkv
           archive: false
-          if-no-files-found: warn
+          retention-days: 90
+          if-no-files-found: error
       - name: Upload the OBS log (diagnostics)
         if: always()
         uses: actions/upload-artifact@v7
@@ -432,8 +504,8 @@ jobs:
           name: generated-map-obs-log
           path: ${{ env.REC_DIR }}/obs.log
           if-no-files-found: warn
-      - name: Link the run video in the summary on failure
-        if: failure() && steps.video.outputs.artifact-url != ''
+      - name: Link the run video in the summary
+        if: always() && steps.video.outputs.artifact-url != ''
         run: |
           "### Generated-map run video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           "[Download the recording](${{ steps.video.outputs.artifact-url }})" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
@@ -466,7 +538,7 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v6
-        with: { submodules: false, fetch-depth: 1 }
+        with: { submodules: false, fetch-depth: 1, persist-credentials: false }
       - name: Get test-harness DLL (Debug)
         uses: actions/download-artifact@v8
         with:
@@ -484,12 +556,19 @@ jobs:
       - name: Restore game from cache
         uses: actions/cache/restore@v5
         with:
-          path: game.tar.gz
-          key: slasher-min-v1
+          path: |
+            game.tar.gz
+            game.sha256
+            game.xet
+          key: ${{ env.GAME_CACHE_KEY }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - name: Unpack game + deploy test-harness mss32.dll + force OpenGL/ColdCPU
         run: |
+          if ((Get-Content game.xet -Raw).Trim() -ne $env:GAME_FIXTURE_XET_HASH) { throw 'wrong game Xet identity' }
+          if ((Get-Item game.tar.gz).Length -ne [int64]$env:GAME_FIXTURE_BYTES) { throw 'wrong game archive size' }
+          $expectedSha = ((Get-Content game.sha256 -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          if ($expectedSha -notmatch '^[0-9a-f]{64}$' -or (Get-FileHash game.tar.gz -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedSha) { throw 'wrong game archive SHA-256' }
           New-Item -ItemType Directory -Force -Path game | Out-Null
           tar -xzf game.tar.gz -C game
           $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
@@ -507,13 +586,16 @@ jobs:
           "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Deploy Mesa3D software OpenGL (llvmpipe)
         env:
-          GH_TOKEN: ${{ github.token }}
+          MESA_ASSET_URL: ${{ inputs.mesa_asset_url }}
+          MESA_ASSET_DIGEST: ${{ inputs.mesa_asset_digest }}
         run: |
           $dir = $env:GAME_DIR
-          $asset = (gh api repos/pal1000/mesa-dist-win/releases/latest | ConvertFrom-Json).assets |
-            Where-Object { $_.name -match 'release-msvc\.7z$' } | Select-Object -First 1
+          if ($env:MESA_ASSET_URL -notmatch '^https://github\.com/pal1000/mesa-dist-win/releases/download/.+/[^/]*release-msvc\.7z$') { throw 'invalid Mesa asset URL' }
+          if ($env:MESA_ASSET_DIGEST -notmatch '^sha256:[0-9a-f]{64}$') { throw 'invalid Mesa asset digest' }
           $z = Join-Path $env:TEMP 'mesa.7z'
-          Invoke-WebRequest $asset.browser_download_url -OutFile $z -UseBasicParsing
+          Invoke-WebRequest $env:MESA_ASSET_URL -OutFile $z -UseBasicParsing
+          $actual = (Get-FileHash $z -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:MESA_ASSET_DIGEST.Substring(7)) { throw "Mesa SHA-256 mismatch: $actual" }
           $ex = Join-Path $env:TEMP 'mesa'
           $sevenzip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
           if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
@@ -537,7 +619,6 @@ jobs:
           }
           Write-Host "repository-pinned mp-battle-regen.sg verified: $actual"
       - name: Install OBS Studio (portable) for the run video
-        continue-on-error: true
         run: |
           . ./tools/test/_obs.ps1
           Install-Obs
@@ -546,7 +627,8 @@ jobs:
           node --version
           $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
           "REC_DIR=$rec" | Out-File -FilePath $env:GITHUB_ENV -Append
-          try { . ./tools/test/_obs.ps1; Start-ObsRecording -OutDir $rec | Out-Null } catch { Write-Host "::warning::OBS start failed: $($_.Exception.Message)" }
+          . ./tools/test/_obs.ps1
+          Start-ObsRecording -OutDir $rec -StartImmediately | Out-Null
           $code = 1
           try {
             ./tools/test/mp-attack-monsters.ps1 -GameDir "$env:GAME_DIR" -Scenario 0 -Kill
@@ -565,13 +647,14 @@ jobs:
           }
           exit $code
       - name: Upload the run video (raw single file, no zip)
-        if: always() && env.VIDEO_FILE != ''
+        if: always()
         id: video
         uses: actions/upload-artifact@v7
         with:
-          path: ${{ env.VIDEO_FILE }}
+          path: ${{ env.REC_DIR }}/mp-attack-monsters.mkv
           archive: false
-          if-no-files-found: warn
+          retention-days: 90
+          if-no-files-found: error
       - name: Upload the OBS log (diagnostics)
         if: always()
         uses: actions/upload-artifact@v7
@@ -579,8 +662,8 @@ jobs:
           name: mp-attack-obs-log
           path: ${{ env.REC_DIR }}/obs.log
           if-no-files-found: warn
-      - name: Link the run video in the summary on failure
-        if: failure() && steps.video.outputs.artifact-url != ''
+      - name: Link the run video in the summary
+        if: always() && steps.video.outputs.artifact-url != ''
         run: |
           "### Multiplayer attack/regen run video" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           "[Download the recording](${{ steps.video.outputs.artifact-url }})" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
@@ -613,7 +696,7 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v6
-        with: { submodules: false, fetch-depth: 1 }
+        with: { submodules: false, fetch-depth: 1, persist-credentials: false }
       - name: Get test-harness DLL (Debug)
         uses: actions/download-artifact@v8
         with:
@@ -631,12 +714,19 @@ jobs:
       - name: Restore game from cache
         uses: actions/cache/restore@v5
         with:
-          path: game.tar.gz
-          key: slasher-min-v1
+          path: |
+            game.tar.gz
+            game.sha256
+            game.xet
+          key: ${{ env.GAME_CACHE_KEY }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
       - name: Unpack game + deploy test-harness mss32.dll + force OpenGL/ColdCPU
         run: |
+          if ((Get-Content game.xet -Raw).Trim() -ne $env:GAME_FIXTURE_XET_HASH) { throw 'wrong game Xet identity' }
+          if ((Get-Item game.tar.gz).Length -ne [int64]$env:GAME_FIXTURE_BYTES) { throw 'wrong game archive size' }
+          $expectedSha = ((Get-Content game.sha256 -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          if ($expectedSha -notmatch '^[0-9a-f]{64}$' -or (Get-FileHash game.tar.gz -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedSha) { throw 'wrong game archive SHA-256' }
           New-Item -ItemType Directory -Force -Path game | Out-Null
           tar -xzf game.tar.gz -C game
           $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
@@ -654,12 +744,15 @@ jobs:
           "GAME_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Deploy Mesa3D software OpenGL (llvmpipe)
         env:
-          GH_TOKEN: ${{ github.token }}
+          MESA_ASSET_URL: ${{ inputs.mesa_asset_url }}
+          MESA_ASSET_DIGEST: ${{ inputs.mesa_asset_digest }}
         run: |
-          $asset = (gh api repos/pal1000/mesa-dist-win/releases/latest | ConvertFrom-Json).assets |
-            Where-Object { $_.name -match 'release-msvc\.7z$' } | Select-Object -First 1
+          if ($env:MESA_ASSET_URL -notmatch '^https://github\.com/pal1000/mesa-dist-win/releases/download/.+/[^/]*release-msvc\.7z$') { throw 'invalid Mesa asset URL' }
+          if ($env:MESA_ASSET_DIGEST -notmatch '^sha256:[0-9a-f]{64}$') { throw 'invalid Mesa asset digest' }
           $z = Join-Path $env:TEMP 'mesa.7z'
-          Invoke-WebRequest $asset.browser_download_url -OutFile $z -UseBasicParsing
+          Invoke-WebRequest $env:MESA_ASSET_URL -OutFile $z -UseBasicParsing
+          $actual = (Get-FileHash $z -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:MESA_ASSET_DIGEST.Substring(7)) { throw "Mesa SHA-256 mismatch: $actual" }
           $ex = Join-Path $env:TEMP 'mesa'
           $sevenzip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
           if (-not $sevenzip) { $sevenzip = 'C:\Program Files\7-Zip\7z.exe' }
@@ -683,7 +776,6 @@ jobs:
           }
           Write-Host "repository-pinned arena.sg verified: $actual"
       - name: Install OBS Studio (portable) for the run video
-        continue-on-error: true
         run: |
           . ./tools/test/_obs.ps1
           Install-Obs
@@ -692,7 +784,8 @@ jobs:
           node --version
           $rec = Join-Path $env:GITHUB_WORKSPACE 'rec'
           "REC_DIR=$rec" | Out-File -FilePath $env:GITHUB_ENV -Append
-          try { . ./tools/test/_obs.ps1; Start-ObsRecording -OutDir $rec | Out-Null } catch { Write-Host "::warning::OBS start failed: $($_.Exception.Message)" }
+          . ./tools/test/_obs.ps1
+          Start-ObsRecording -OutDir $rec -StartImmediately | Out-Null
           $code = 1
           try {
             & ./tools/test/luckytest-arena.ps1 -GameDir "$env:GAME_DIR" -Scenario 0 -Ci -Kill
@@ -711,13 +804,14 @@ jobs:
           }
           exit $code
       - name: Upload the run video (raw single file, no zip)
-        if: always() && env.VIDEO_FILE != ''
+        if: always()
         id: arena-video
         uses: actions/upload-artifact@v7
         with:
-          path: ${{ env.VIDEO_FILE }}
+          path: ${{ env.REC_DIR }}/static-arena-squad-actions.mkv
           archive: false
-          if-no-files-found: warn
+          retention-days: 90
+          if-no-files-found: error
       - name: Upload OBS and game logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -727,8 +821,8 @@ jobs:
             ${{ env.REC_DIR }}/obs.log
             ${{ env.GAME_DIR }}/mss32_*.log
           if-no-files-found: warn
-      - name: Link the run video in the summary on failure
-        if: failure() && steps.arena-video.outputs.artifact-url != ''
+      - name: Link the run video in the summary
+        if: always() && steps.arena-video.outputs.artifact-url != ''
         run: |
           '### Static-arena run video' | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           '[Download the recording](${{ steps.arena-video.outputs.artifact-url }})' | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

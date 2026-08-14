@@ -1,18 +1,18 @@
 #requires -Version 7.0
-# OBS Studio recording helper for the two-instance multiplayer tests. It captures the [HOST] and
-# [CLIENT] game windows side by side, with a 20px empty gap between them, into one best-effort video.
+# OBS Studio recording helper for the game tests. By default it captures the [HOST] and [CLIENT]
+# windows side by side; -HostOnly records the single [HOST] window used by the template matrix.
 # CI keeps the video as a raw artifact when recording actually starts. Portable OBS (a release .zip,
 # no install); a fresh config is written
 # per run. The windows are matched by their [HOST]/[CLIENT] caption, refreshed by autonav's existing
 # UI-frame callback (no separate window-tag hook or polling thread).
 #
-# Recording does NOT begin at Start-ObsRecording: the two games spend ~30s booting to a black screen,
-# so a background watcher holds off and starts OBS only once BOTH windows show content (the relay
-# reports a dialog for each role). A timeout fallback starts recording only if the test is still running;
-# an early failure may end and remove both clients before OBS starts, in which case logs/screenshots remain.
+# By default a background watcher holds off until every requested role reports a rendered dialog.
+# Required CI evidence passes -StartImmediately instead: OBS records from before game launch, so an
+# early boot/relay failure still leaves an MKV rather than silently cancelling the watcher.
 #
 #   Install-Obs
-#   $rec = Start-ObsRecording -OutDir $dir   # arms the watcher; recording starts on first host content
+#   $rec = Start-ObsRecording -OutDir $dir   # deferred manual mode
+#   $rec = Start-ObsRecording -OutDir $dir -StartImmediately  # required CI evidence
 #   ... run the test ...
 #   Stop-ObsRecording        # -> finalizes; the .mkv + obs log are in $dir
 #
@@ -20,6 +20,7 @@
 # function logs to the host and the caller uploads $dir (video + obs log) for diagnosis.
 
 $script:ObsVersion = '32.1.2'
+$script:ObsSha256  = '8d97e4563bd8d22d03e63042aa7dccede1d555c9bd35ce8a9e5019b0d0201bf6'
 $script:ObsRoot    = Join-Path $env:TEMP 'obs-portable'
 $script:ObsBin     = Join-Path $script:ObsRoot 'bin\64bit'
 $script:ObsExe     = Join-Path $script:ObsBin 'obs64.exe'
@@ -33,12 +34,20 @@ $script:ObsRelayBase = "http://$($script:ObsRelayHttpHost):$($script:ObsRelayHtt
 
 # Download + extract the portable OBS release once; portable_mode.txt keeps its config local.
 function Install-Obs {
-    param([string]$Version = $script:ObsVersion)
+    param(
+        [string]$Version = $script:ObsVersion,
+        [string]$ExpectedSha256 = $script:ObsSha256
+    )
     if (Test-Path $script:ObsExe) { Write-Host "[obs] already present"; return }
     $url = "https://github.com/obsproject/obs-studio/releases/download/$Version/OBS-Studio-$Version-Windows-x64.zip"
     $zip = Join-Path $env:TEMP 'obs.zip'
     Write-Host "[obs] downloading $Version ..."
     Invoke-WebRequest $url -OutFile $zip -UseBasicParsing
+    $actualSha256 = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($ExpectedSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+        $actualSha256 -ne $ExpectedSha256.ToLowerInvariant()) {
+        throw "OBS archive SHA-256 mismatch: expected $ExpectedSha256, got $actualSha256"
+    }
     New-Item -ItemType Directory -Force -Path $script:ObsRoot | Out-Null
     Write-Host "[obs] extracting ..."
     Expand-Archive -Path $zip -DestinationPath $script:ObsRoot -Force
@@ -52,9 +61,12 @@ function Install-Obs {
 function Start-ObsRecording {
     param(
         [Parameter(Mandatory)][string]$OutDir,
+        [switch]$HostOnly,
+        [switch]$StartImmediately,
         [string]$HostTitle   = 'Disciples II  [HOST]',   # NB: two spaces before the tag (autonav.cpp)
         [string]$ClientTitle = 'Disciples II  [CLIENT]',
         [int]$PaneW = 1024, [int]$PaneH = 768, [int]$Gap = 20, [int]$Fps = 15,
+        [int]$BitrateKbps = 4000,
         [string]$WinClass = 'MQ_UIManager', [int]$Method = 2,   # the game's window class; WGC (2) captures the GL surface, an empty class fails to match
         [string]$RelayBase = $script:ObsRelayBase,      # the test relay; recording waits until both roles report a dialog (content on screen)
         [int]$ReadyTimeoutSec = 120                      # ... then records if the run is still alive
@@ -65,7 +77,8 @@ function Start-ObsRecording {
     # Invalidate an earlier marker. Stop-ObsRecording trusts only the PID + executable recorded by
     # this watcher and never enumerates or terminates unrelated OBS instances.
     Set-Content -LiteralPath $script:ObsPidFile -Value '' -Encoding UTF8
-    $canvasW = $PaneW * 2 + $Gap
+    $canvasW = if ($HostOnly) { $PaneW } else { $PaneW * 2 + $Gap }
+    $readyRoles = if ($HostOnly) { 'host' } else { 'host,join' }
 
     $prof = Join-Path $script:ObsCfg 'basic\profiles\CI'
     $scn  = Join-Path $script:ObsCfg 'basic\scenes'
@@ -100,7 +113,7 @@ FilePath=$($OutDir -replace '\\','/')
 RecFormat2=mkv
 RecEncoder=x264
 RecQuality=Small
-VBitrate=4000
+VBitrate=$BitrateKbps
 "@ | Set-Content (Join-Path $prof 'basic.ini') -Encoding UTF8
 
     # window string is "title:class:exe"; priority 1 = match by TITLE (so [HOST] vs [CLIENT] is
@@ -122,6 +135,25 @@ VBitrate=4000
         { "name": "$name", "visible": true, "locked": false, "pos": { "x": $x, "y": 0 }, "scale": { "x": 1.0, "y": 1.0 }, "align": 5, "bounds_type": 2, "bounds_align": 0, "bounds": { "x": $PaneW, "y": $PaneH } }
 "@
     }
+    $captureSources = @((srcJson 'host' $HostTitle))
+    $sceneItems = @((itemJson 'host' 0))
+    if (-not $HostOnly) {
+        $captureSources += (srcJson 'client' $ClientTitle)
+        $sceneItems += (itemJson 'client' ($PaneW + $Gap))
+    }
+    $sceneSource = @"
+    {
+      "name": "CI",
+      "id": "scene",
+      "versioned_id": "scene",
+      "settings": {
+        "items": [
+$($sceneItems -join ",`n")
+        ]
+      }
+    }
+"@
+    $captureSources += $sceneSource
     @"
 {
   "current_scene": "CI",
@@ -129,40 +161,32 @@ VBitrate=4000
   "scene_order": [ { "name": "CI" } ],
   "name": "CI",
   "sources": [
-$(srcJson 'host' $HostTitle),
-$(srcJson 'client' $ClientTitle),
-    {
-      "name": "CI",
-      "id": "scene",
-      "versioned_id": "scene",
-      "settings": {
-        "items": [
-$(itemJson 'host' 0),
-$(itemJson 'client' ($PaneW + $Gap))
-        ]
-      }
-    }
+$($captureSources -join ",`n")
   ]
 }
 "@ | Set-Content (Join-Path $scn 'CI.json') -Encoding UTF8
 
-    # Defer the real launch. From t=0 the two games spend ~30s booting to their first rendered dialog,
-    # so recording immediately would just capture a black screen. A background watcher polls the relay
-    # and launches OBS only once BOTH roles report a dialog (both windows show content, so neither pane
-    # is black); if readiness is slow, the ReadyTimeoutSec fallback records while the run remains alive.
-    # A failure that kills both clients before this point cannot produce a video. OBS with
-    # --startrecording captures until Stop-ObsRecording.
-    Write-Host "[obs] watcher armed (canvas ${canvasW}x${PaneH} -> $OutDir; records when both roles render, fallback ${ReadyTimeoutSec}s)"
+    # Manual/default mode waits for rendered dialogs to avoid a long black lead-in. Required CI mode
+    # skips that wait and records immediately, trading a black boot prefix for evidence of early
+    # failures. OBS with --startrecording captures until Stop-ObsRecording.
+    $startMode = if ($StartImmediately) { 'immediate' } else { "roles=$readyRoles; fallback=${ReadyTimeoutSec}s" }
+    Write-Host "[obs] watcher armed (canvas ${canvasW}x${PaneH}; $startMode -> $OutDir)"
     $script:ObsWatcher = Start-Job -Name obswatch `
-        -ArgumentList $script:ObsExe, $script:ObsBin, $RelayBase, $ReadyTimeoutSec, $script:ObsPidFile `
+        -ArgumentList $script:ObsExe, $script:ObsBin, $RelayBase, $ReadyTimeoutSec, $script:ObsPidFile, $readyRoles, ([bool]$StartImmediately) `
         -ScriptBlock {
-            param($exe, $bin, $relayBase, $timeoutSec, $pidFile)
+            param($exe, $bin, $relayBase, $timeoutSec, $pidFile, $readyRolesCsv, $startImmediately)
             if (-not (Test-Path $exe)) { return }
+            $roles = @($readyRolesCsv -split ',')
             $deadline = (Get-Date).AddSeconds($timeoutSec)
-            while ((Get-Date) -lt $deadline) {
+            while (-not $startImmediately -and (Get-Date) -lt $deadline) {
                 try {
                     $st = Invoke-RestMethod "$relayBase/api/state" -TimeoutSec 2
-                    if ($st.roles.host.dialog -and $st.roles.join.dialog) { break }   # BOTH windows rendered -> neither pane is black
+                    $ready = $true
+                    foreach ($role in $roles) {
+                        $roleState = $st.roles.PSObject.Properties[$role].Value
+                        if (-not $roleState -or -not $roleState.dialog) { $ready = $false; break }
+                    }
+                    if ($ready) { break }
                 } catch {}   # relay not up yet, or a transient miss; keep polling
                 Start-Sleep -Milliseconds 1000
             }
@@ -174,6 +198,25 @@ $(itemJson 'client' ($PaneW + $Gap))
                 executable = [IO.Path]::GetFullPath($exe)
             } | ConvertTo-Json -Compress | Set-Content -LiteralPath $pidFile -Encoding UTF8
         }
+    if ($StartImmediately) {
+        # Required evidence must be recording before the test process starts. Waiting for the owned
+        # PID record closes the race where a very early client failure could otherwise cancel the job
+        # before it launched OBS and leave no video at all.
+        $launchDeadline = (Get-Date).AddSeconds(20)
+        $launched = $false
+        while ((Get-Date) -lt $launchDeadline) {
+            try {
+                $owned = Get-Content -LiteralPath $script:ObsPidFile -Raw | ConvertFrom-Json -ErrorAction Stop
+                if ($owned.pid -and (Get-Process -Id ([int]$owned.pid) -ErrorAction SilentlyContinue)) {
+                    $launched = $true
+                    break
+                }
+            } catch {}
+            Start-Sleep -Milliseconds 250
+        }
+        if (-not $launched) { throw '[obs] required immediate recording did not launch within 20 seconds' }
+        Start-Sleep -Seconds 2
+    }
     return $OutDir
 }
 

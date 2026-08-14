@@ -1,9 +1,8 @@
 name: deps
 
-# Builds the rarely-changing dependency libs (Detours, SLikeNet LibStatic,
-# ScenarioGenerator) and publishes them as the "deps-libs" artifact that mss32
-# downloads. Manual dispatch: a dep submodule was bumped, or the 90-day artifact
-# lapsed.
+# Manually builds the rarely-changing dependency libs (Detours, SLikeNet LibStatic,
+# ScenarioGenerator) as an optional reusable artifact. Automated production and harness
+# CI build exact-checkout dependencies in their own run and do not consume this artifact.
 
 on:
   workflow_dispatch:
@@ -19,10 +18,11 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Build Detours + SLikeNet + ScenarioGenerator
         run: |
@@ -54,7 +54,7 @@ jobs:
       - name: Upload dependency libs
         uses: actions/upload-artifact@v7
         with:
-          name: deps-libs # multiple .lib files -> keep the (default) archive; also downloaded every mss32 run
+          name: deps-libs # multiple .lib files: keep the default archive for optional manual reuse
           path: mss32/Lib/
           retention-days: 90
           if-no-files-found: error

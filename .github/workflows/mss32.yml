@@ -1,108 +1,40 @@
-name: mss32
+name: mss32-manual
 
-# Builds mss32.dll. The heavy deps are not rebuilt here — they come from the
-# latest successful "deps" run as the "deps-libs" artifact (run "deps" once first).
+# Ad-hoc production build entrypoint. Automated PR/default-branch coverage lives in
+# test-harness.yml so one commit does not create two competing CI runs.
 
 on:
-  push:
-    paths:
-      - "mss32/**"
-      - ".github/workflows/mss32.yml"
   workflow_dispatch:
+    inputs:
+      configuration:
+        description: "Production configuration to build"
+        type: choice
+        required: true
+        default: Release
+        options:
+          - Release
+          - Debug
 
 permissions:
   contents: read
-  actions: read # to download the deps-libs artifact
 
 concurrency:
-  group: mss32-${{ github.ref }}
+  group: mss32-manual-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  prepare:
-    name: Pre-checks (submodules)
-    runs-on: ubuntu-slim
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          submodules: false
-          fetch-depth: 1
-      - name: Verify submodule wiring
-        shell: bash # ubuntu-slim has no pwsh
-        run: |
-          set -e
-          n=$(git submodule status | wc -l)
-          echo "submodules wired: $n"
-          [ "$n" -ge 7 ] || { echo "::error::expected >=7 submodules, found $n"; exit 1; }
+  debug:
+    name: Production Debug
+    if: ${{ inputs.configuration == 'Debug' }}
+    uses: ./.github/workflows/mss32-production-build.yml
+    with:
+      configuration: Debug
+      artifact_name: mss32-production-debug
 
-  build:
-    name: Build mss32.dll (MSVC x86)
-    needs: prepare
-    runs-on: windows-2025-vs2026
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          submodules: recursive
-          fetch-depth: 1
-
-      - name: Fetch deps-libs from the latest 'deps' run
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $rid = (gh run list --workflow deps.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId').Trim()
-          if (-not $rid) { Write-Error "No successful 'deps' run found; run the 'deps' workflow once."; exit 1 }
-          gh run download $rid -n deps-libs -D mss32/Lib
-          Get-ChildItem mss32/Lib
-
-      - name: Build mss32.dll
-        run: |
-          # Load the MSVC x86 env natively (vswhere + Enter-VsDevShell, no third-party action).
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
-          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
-
-          # /WX- keeps newer-MSVC warnings non-fatal; the define quiets fmt v7's C4996.
-          $env:_CL_ = '/WX- /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS'
-          $env:DISCIPLES2_PATH = "$env:GITHUB_WORKSPACE\out\"
-          New-Item -ItemType Directory -Force -Path $env:DISCIPLES2_PATH | Out-Null
-
-          # Speed comes from the PCH + /Z7 + per-file parallel tasks (set in mss32.vcxproj).
-          msbuild mss32\mss32.vcxproj `
-            /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 `
-            /p:SolutionDir=$env:GITHUB_WORKSPACE\mss32\ `
-            /p:MultiProcessorCompilation=false /p:UseMultiToolTask=true `
-            /p:EnforceProcessCountAcrossBuilds=true /p:MinimalRebuild=false `
-            /m /nologo /clp:Summary /verbosity:minimal 2>&1 | Tee-Object build.log
-          exit $LASTEXITCODE
-
-      # archive: false uploads the file as-is (no zip). It only supports a single
-      # file, so the build outputs go up as separate artifacts.
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: build.log
-          path: build.log
-          if-no-files-found: ignore
-          archive: false
-
-      - name: Upload mss32.dll
-        if: success()
-        uses: actions/upload-artifact@v7
-        with:
-          name: mss32.dll
-          path: out/mss32.dll
-          if-no-files-found: warn
-          archive: false
-
-      - name: Upload mss32.pdb
-        if: success()
-        uses: actions/upload-artifact@v7
-        with:
-          name: mss32.pdb
-          path: out/mss32.pdb
-          if-no-files-found: warn
-          archive: false
+  release:
+    name: Production Release
+    if: ${{ inputs.configuration == 'Release' }}
+    uses: ./.github/workflows/mss32-production-build.yml
+    with:
+      configuration: Release
+      artifact_name: mss32-production-release

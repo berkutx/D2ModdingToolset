@@ -1,0 +1,104 @@
+name: mss32-production-build
+
+# Reusable, exact-checkout production builder. The caller chooses Debug or Release; this workflow
+# never enables D2_TESTDRV and never downloads an unversioned dependency artifact from another run.
+
+on:
+  workflow_call:
+    inputs:
+      configuration:
+        description: "MSBuild configuration: Debug or Release"
+        type: string
+        required: true
+      artifact_name:
+        description: "artifact containing mss32.dll"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build production mss32 (${{ inputs.configuration }})
+    runs-on: windows-2025-vs2026
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate configuration and submodule wiring
+        env:
+          CONFIGURATION: ${{ inputs.configuration }}
+        run: |
+          if ($env:CONFIGURATION -notin @('Debug', 'Release')) {
+            throw "configuration must be Debug or Release, got '$env:CONFIGURATION'"
+          }
+          $count = @(git submodule status).Count
+          if ($count -lt 7) { throw "expected at least 7 submodules, found $count" }
+
+      - name: Build exact ${{ inputs.configuration }} dependencies
+        env:
+          CONFIGURATION: ${{ inputs.configuration }}
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
+          $env:_CL_ = '/WX- /FS /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS'
+          New-Item -ItemType Directory -Force -Path mss32\Lib | Out-Null
+          msbuild mss32\mss32.sln '/t:LibStatic;ScenarioGenerator' `
+            /p:Configuration=$env:CONFIGURATION /p:Platform=x86 /p:PlatformToolset=v143 `
+            /p:MultiProcessorCompilation=true /p:MinimalRebuild=false /m /nologo /verbosity:minimal
+          exit $LASTEXITCODE
+
+      - name: Build production mss32.dll (${{ inputs.configuration }})
+        env:
+          CONFIGURATION: ${{ inputs.configuration }}
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
+          $env:_CL_ = '/WX- /D_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS'
+          $env:DISCIPLES2_PATH = "$env:GITHUB_WORKSPACE\out\"
+          New-Item -ItemType Directory -Force -Path $env:DISCIPLES2_PATH | Out-Null
+          msbuild mss32\mss32.vcxproj `
+            /t:Build /p:Configuration=$env:CONFIGURATION /p:Platform=Win32 /p:PlatformToolset=v143 `
+            /p:SolutionDir=$env:GITHUB_WORKSPACE\mss32\ `
+            /p:MultiProcessorCompilation=false /p:UseMultiToolTask=true `
+            /p:EnforceProcessCountAcrossBuilds=true /p:MinimalRebuild=false `
+            /m /nologo /clp:Summary /verbosity:minimal 2>&1 | Tee-Object "build-$($env:CONFIGURATION.ToLowerInvariant()).log"
+          exit $LASTEXITCODE
+
+      - name: Verify this is a production DLL
+        run: |
+          $txt = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes('out\mss32.dll'))
+          foreach ($marker in '[testdrv]', '[testdrv][dplay]', 'skip-intro', 'D2TESTDRV_GENERATION_SEED') {
+            if ($txt.Contains($marker)) { throw "production DLL unexpectedly contains harness marker: $marker" }
+          }
+
+      - name: Upload production DLL
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: out/mss32.dll
+          if-no-files-found: error
+
+      - name: Upload production symbols
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_name }}-symbols
+          path: out/mss32.pdb
+          if-no-files-found: error
+
+      - name: Upload production build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_name }}-build-log
+          path: build-*.log
+          if-no-files-found: warn

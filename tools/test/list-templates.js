@@ -4,7 +4,7 @@
 // (string literals, top-level locals, `..` concatenation, and simple if/elseif/return
 // functions like getName/smm/gmm). No Lua runtime, no game, no compilation.
 //
-// Usage:  npm i luaparse  &&  node list-templates.js <TemplatesDir>
+// Usage:  npm i luaparse  &&  node list-templates.js <TemplatesDir> [--strict]
 //   stdout: the JSON array (consumed by the generation-matrix workflow)
 //   stderr: a readable index | name table
 //
@@ -86,6 +86,11 @@ function tableField(tbl, key) {
   }
   return null;
 }
+function requireSafeLabel(value, what, maxLength) {
+  if (typeof value !== 'string' || value.length > maxLength || /[\x00-\x1f\x7f]/.test(value))
+    throw new Error(`${what} contains control characters or exceeds ${maxLength} characters`);
+  return value;
+}
 function readTemplate(code) {
   const ast = luaparse.parse(code, { comments: false, luaVersion: '5.3' });
   const { locals, funcs } = collect(ast);
@@ -110,22 +115,40 @@ function readTemplate(code) {
   }
 }
 
-const dir = process.argv[2];
+const dir = process.argv.slice(2).find(a => a !== '--strict');
+const strict = process.argv.includes('--strict');
 if (!dir) { console.error('usage: node list-templates.js <TemplatesDir>'); process.exit(2); }
 // Match the generator's order: scenariotemplates.cpp inserts full paths into
 // std::set<std::filesystem::path>, whose path::compare ordering is case-sensitive.
 const files = fs.readdirSync(dir).filter(f => f.endsWith('.lua'))
   .sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
 const list = [];
+const rejected = [];
 for (const file of files) {
   try {
+    requireSafeLabel(file, 'template filename', 240);
     const parsed = readTemplate(fs.readFileSync(path.join(dir, file), 'latin1'));
-    if (!parsed) continue;
+    if (!parsed) {
+      rejected.push(`${file}: no global template table with a callable getContents`);
+      continue;
+    }
     // Name is optional in D2RSG, and valid templates may compute it with Lua beyond this tiny
     // evaluator. Keep their numeric index and use the filename only as a diagnostic label.
-    const name = parsed.resolved ? parsed.name : `${path.parse(file).name} (dynamic name)`;
+    const rawName = parsed.resolved ? parsed.name : `${path.parse(file).name} (dynamic name)`;
+    const name = requireSafeLabel(
+      rawName === '' ? `${path.parse(file).name} (empty name)` : rawName,
+      'template display name', 200);
     list.push({ index: list.length, file, name });
-  } catch (e) { /* mirror the game's skip-on-template-read-error behavior */ }
+  } catch (e) {
+    rejected.push(`${file}: ${e && e.message ? e.message : String(e)}`);
+  }
+}
+if (rejected.length) {
+  for (const reason of rejected) console.error(`REJECTED | ${reason}`);
+  if (strict) {
+    console.error(`strict template discovery rejected ${rejected.length}/${files.length} .lua files`);
+    process.exit(1);
+  }
 }
 for (const t of list) console.error(String(t.index).padStart(2) + ' | ' + t.name);
 process.stdout.write(JSON.stringify(list));
