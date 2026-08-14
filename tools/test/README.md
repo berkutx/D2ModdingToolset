@@ -414,7 +414,7 @@ explicitly and `-Kill` makes the run clean up after itself.
 | `_relay.ps1` | the toolkit: config, relay, clients, and the commands above |
 | `relay-transport-smoke.ps1` | framed-protocol smoke for named pipe and TCP: Hello/state/chat plus delayed command correlation without duplicate dispatch |
 | `_battle.ps1` | the shared battle flow (`Invoke-HeroAttack`): use a required free hero or exit a garrisoned one, attack the nearest free neutral, auto-battle, dismiss dialogs, report before/after |
-| `_obs.ps1` | owned portable-OBS setup/record/stop helper: two-pane gameplay proof starts before the game; single-host template proof starts at the first dialog (60s black-screen fallback for boot hangs); missing required MKV fails the job |
+| `_obs.ps1` | owned portable-OBS setup/record/stop helper: two-pane gameplay proof starts before the game; single-host template proof starts at the first dialog (30s black-screen fallback for boot hangs); missing required MKV fails the job |
 | `test.config.sample.psd1` | per-machine config template; copy to `test.config.psd1` |
 | `scenario-generation.ps1` | single-instance generator example: drive the form, and with `-ToMap` play the generated map into the strategic screen |
 | `list-templates.js` | enumerate valid generator templates in the same compact numeric order as the game; drives the automatic all-template matrix |
@@ -846,7 +846,7 @@ manifest по-прежнему дают hard failure.
 | `_relay.ps1` | тулкит: конфиг, рилей, клиенты и команды выше |
 | `relay-transport-smoke.ps1` | smoke framed-протокола для named pipe и TCP: Hello/state/chat и задержанный command-result без повторной отправки |
 | `_battle.ps1` | общий сценарий боя (`Invoke-HeroAttack`): взять требуемого свободного героя или вывести гарнизонного, атаковать ближайшего свободного нейтрала, автобой, закрытие диалогов, отчёт до/после |
-| `_obs.ps1` | helper собственного portable OBS: двухпанельная gameplay-запись стартует до игры; single-host template proof — с первого диалога (через 60с чёрный fallback для boot hang); отсутствие обязательного MKV краснит job |
+| `_obs.ps1` | helper собственного portable OBS: двухпанельная gameplay-запись стартует до игры; single-host template proof — с первого диалога (через 30с чёрный fallback для boot hang); отсутствие обязательного MKV краснит job |
 | `test.config.sample.psd1` | шаблон конфига машины; копируется в `test.config.psd1` |
 | `scenario-generation.ps1` | одиночный пример генератора: прогон по форме, а с `-ToMap` доиграть сгенерированную карту до стратегического экрана |
 | `list-templates.js` | перечисляет валидные шаблоны генератора в том же компактном числовом порядке, что игра; питает автоматическую матрицу всех шаблонов |
