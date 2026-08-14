@@ -211,14 +211,23 @@ bool setSpinOption(const char* dlgName, const char* spinName, int option, std::u
 {
     game::CDialogInterf* dlg = uistatereporter::findDialog(dlgName);
     game::CSpinButtonInterf* spin = nullptr;
+    int optionsTotal = 0;
     __try {
         spin = dlg ? game::CDialogInterfApi::get().findSpinButton(dlg, spinName) : nullptr;
+        if (spin && spin->data)
+            optionsTotal = static_cast<int>(spin->data->options.size());
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         spin = nullptr;
+        optionsTotal = 0;
     }
-    reportFound(seq, spin != nullptr);
-    if (!spin)
+    const bool valid = spin && option >= 0 && option < optionsTotal;
+    reportFound(seq, valid);
+    if (!valid) {
+        if (spin)
+            spdlog::warn("[testdrv] nav spin {}::{} rejected option {:d} (total={:d})", dlgName,
+                         spinName, option, optionsTotal);
         return false;
+    }
     bool ok = false;
     __try {
         game::CSpinButtonInterfApi::get().setSelectedOption(spin, option);

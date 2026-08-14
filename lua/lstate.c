@@ -12,6 +12,9 @@
 
 #include <stddef.h>
 #include <string.h>
+#if defined(D2_TESTDRV)
+#include <stdlib.h>
+#endif
 
 #include "lua.h"
 
@@ -69,6 +72,16 @@ typedef struct LG {
     memcpy(b + p, &t, sizeof(t)); p += sizeof(t); }
 
 static unsigned int luai_makeseed (lua_State *L) {
+#if defined(D2_TESTDRV)
+  const char *forcedSeed = getenv("D2TESTDRV_GENERATION_SEED");
+  if (forcedSeed != NULL && *forcedSeed != '\0') {
+    /* Test-only reproducibility: Lua normally mixes time and ASLR addresses into
+    ** every state's string-hash seed. A fixed generator seed must also make
+    ** pairs() traversal stable across DebugTest and Release+D2_TESTDRV. The
+    ** generation path validates the same value before constructing its execution state. */
+    return cast_uint(strtoul(forcedSeed, NULL, 10)) ^ 0xD2D2D2D2u;
+  }
+#endif
   char buff[3 * sizeof(size_t)];
   unsigned int h = cast_uint(time(NULL));
   int p = 0;

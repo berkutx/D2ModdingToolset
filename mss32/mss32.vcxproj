@@ -36,13 +36,13 @@
     <CharacterSet>MultiByte</CharacterSet>
   </PropertyGroup>
   <!-- DebugTest is the internal MSBuild configuration: Debug profile + D2_TESTDRV.
-       Published artifacts use mss32-test-harness-{debug|release}, so the capability and
-       optimization profile remain distinct if a Release+D2_TESTDRV variant is added later. -->
+       CI also enables the same orthogonal capability on the ordinary Release profile. -->
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='DebugTest|Win32'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
     <PlatformToolset>v142</PlatformToolset>
     <CharacterSet>MultiByte</CharacterSet>
+    <D2TestDrv>true</D2TestDrv>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
@@ -138,7 +138,7 @@ call ..\buildDetours.bat ..\Detours
       <WarningLevel>Level3</WarningLevel>
       <Optimization>Disabled</Optimization>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;_DEBUG;MSS32_EXPORTS;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;NOMINMAX;__INTEGRATE_LOBBY2_WITH_ROOMS_PLUGIN;SOL_NO_CHECK_NUMBER_PRECISION;D2_TESTDRV;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;_DEBUG;MSS32_EXPORTS;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;NOMINMAX;__INTEGRATE_LOBBY2_WITH_ROOMS_PLUGIN;SOL_NO_CHECK_NUMBER_PRECISION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>false</ConformanceMode>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <DebugInformationFormat>OldStyle</DebugInformationFormat>
@@ -158,6 +158,14 @@ call ..\buildDetours.bat ..\Detours
 call ..\buildDetours.bat ..\Detours
 )</Command>
     </PreBuildEvent>
+  </ItemDefinitionGroup>
+  <!-- D2TestDrv is an orthogonal capability switch. DebugTest enables it by
+       default; CI can also build the ordinary Release profile with
+       /p:D2TestDrv=true for an optimized harness runtime comparison. -->
+  <ItemDefinitionGroup Condition="'$(D2TestDrv)'=='true'">
+    <ClCompile>
+      <PreprocessorDefinitions>D2_TESTDRV;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\fmt\src\format.cc" />
@@ -529,15 +537,15 @@ call ..\buildDetours.bat ..\Detours
     <ClCompile Include="src\idlistutils.cpp" />
     <ClCompile Include="src\lordcat.cpp" />
     <ClCompile Include="src\main.cpp" />
-    <ClCompile Include="src\testdrv\autonav.cpp" Condition="'$(Configuration)'=='DebugTest'" />
-    <ClCompile Include="src\testdrv\bootfixes.cpp" Condition="'$(Configuration)'=='DebugTest'" />
-    <ClCompile Include="src\testdrv\directplaysessionhooks.cpp" Condition="'$(Configuration)'=='DebugTest'" />
-    <ClCompile Include="src\testdrv\lobbychatreporter.cpp" Condition="'$(Configuration)'=='DebugTest'" />
-    <ClCompile Include="src\testdrv\packetlogicbridge.cpp" Condition="'$(Configuration)'=='DebugTest'" />
-    <ClCompile Include="src\testdrv\testdrv.cpp" Condition="'$(Configuration)'=='DebugTest'" />
-    <ClCompile Include="src\testdrv\uistatereporter.cpp" Condition="'$(Configuration)'=='DebugTest'" />
-    <ClCompile Include="src\testdrv\worldactions.cpp" Condition="'$(Configuration)'=='DebugTest'" />
-    <ClCompile Include="src\testdrv\worldreporter.cpp" Condition="'$(Configuration)'=='DebugTest'" />
+    <ClCompile Include="src\testdrv\autonav.cpp" Condition="'$(D2TestDrv)'=='true'" />
+    <ClCompile Include="src\testdrv\bootfixes.cpp" Condition="'$(D2TestDrv)'=='true'" />
+    <ClCompile Include="src\testdrv\directplaysessionhooks.cpp" Condition="'$(D2TestDrv)'=='true'" />
+    <ClCompile Include="src\testdrv\lobbychatreporter.cpp" Condition="'$(D2TestDrv)'=='true'" />
+    <ClCompile Include="src\testdrv\packetlogicbridge.cpp" Condition="'$(D2TestDrv)'=='true'" />
+    <ClCompile Include="src\testdrv\testdrv.cpp" Condition="'$(D2TestDrv)'=='true'" />
+    <ClCompile Include="src\testdrv\uistatereporter.cpp" Condition="'$(D2TestDrv)'=='true'" />
+    <ClCompile Include="src\testdrv\worldactions.cpp" Condition="'$(D2TestDrv)'=='true'" />
+    <ClCompile Include="src\testdrv\worldreporter.cpp" Condition="'$(D2TestDrv)'=='true'" />
     <ClCompile Include="src\mainview2.cpp" />
     <ClCompile Include="src\mainview2hooks.cpp" />
     <ClCompile Include="src\mapgraphics.cpp" />
