@@ -178,10 +178,13 @@ driven.
 
 With `-WaitGenerationSec` the test also waits for the map to generate and asserts it reaches
 `DLG_GENERATION_RESULT`; with `-ToMap` it goes on to accept the map, start the game, and reach the
-strategic map. The generator fails several ways, each reported separately: a sol3 panic that
-leaves the client on the form, a debug-CRT assert (a generator heap fault) that the DebugTest build
+strategic map. The generator fails several ways, each reported separately: a DebugTest sol3 panic
+identified by its captured `[sol3]` stderr line (Release uses the visible error box, or the full
+no-start timeout when no UI error appears), a debug-CRT
+assert (a generator heap fault) that the DebugTest build
 routes to the log and fails the run on instead of a blocking dialog, an error box (`DLG_MESSAGE_BOX`)
-raised after the generator gives up, or a timeout still on `DLG_WAIT_GENERATION`. The two-instance
+raised after the generator gives up, or a timeout before generation starts / while it remains on
+`DLG_WAIT_GENERATION`. The two-instance
 [`multiplayer-two-instance.ps1`](multiplayer-two-instance.ps1) `-RandomMap` builds the session from a
 generated map instead of a skirmish, so with `-EndHostTurn` it runs the full honest flow: generate,
 both clients reach the map, the host ends its turn, and the joiner clicks through its own new day.
@@ -376,11 +379,14 @@ the complete `tests.yml` gameplay suite on DebugTest, and independently builds e
 production Release through the reusable `mss32-production-build.yml`. `mss32.yml` is the manual
 production Debug/Release entrypoint, so it does not duplicate an automated PR run.
 
-The strict template matrix checks out `bartonsun/D2-Templates` (`master` by default), resolves it once
-to a commit, flattens `sMNS/**/*.lua` into one immutable snapshot, and records source paths, sizes and
-SHA-256 hashes. Each file gets one job under DebugTest and one under optimized Release+D2_TESTDRV,
-using the same source snapshot, valid template defaults and digest-verified Mesa asset. Each job makes
-five sequential launches of the real game client with the game's natural randomness. Attempts 1-4
+The strict template suite has two separate sources. `Tpl master` resolves the current
+`bartonsun/D2-Templates` `master` once to an immutable commit and discovers every `sMNS/**/*.lua`.
+`Tpl game` discovers the 20 `Templates/*.lua` files shipped inside the pinned game fixture and leaves
+that runtime directory untouched. Both sources record exact paths, sizes and SHA-256 manifests; they
+are never merged because some filenames denote different versions. Every discovered file gets one
+job under DebugTest and one under optimized Release+D2_TESTDRV, using valid template defaults and the
+same digest-verified Mesa asset. Each job makes five sequential launches of the real game client with
+the game's natural randomness. Attempts 1-4
 must reach the generator result; attempt 5 also accepts the result, starts the scenario, clicks each
 known enabled startup dialog once, observes `DLG_BEGIN_TURN`, and requires a populated self world on
 the actionable bare strategic map. The ready map remains visible for three seconds in the proof video.
@@ -388,8 +394,10 @@ the actionable bare strategic map. The ready map remains visible for three secon
 A CRT assert, sol3 panic, generator error, timeout, rejected/unplayable map, parser omission, missing
 outcome, or required-video failure is red. `fail-fast:false` still runs every source file in both
 profiles. All five outcome rows and per-attempt MSS/relay/OBS/console evidence sets are retained for
-90 days. If all five attempts pass, only attempt 5's single-window MKV is retained; if any fail, only
-the failed-attempt MKVs are retained. Because DebugTest and Release use independent natural-random
+90 days. Recording begins at the first rendered client dialog rather than at process launch, avoiding
+a black boot prefix. If all five attempts pass, only attempt 5's single-window MKV is retained; if any
+fail, only the failed-attempt MKVs are retained, with the live failure state held for five seconds.
+Because DebugTest and Release use independent natural-random
 runs, their status comparison is diagnostic rather than a reproducibility gate; missing/malformed rows
 or a source-manifest mismatch still fail it.
 
@@ -406,7 +414,7 @@ explicitly and `-Kill` makes the run clean up after itself.
 | `_relay.ps1` | the toolkit: config, relay, clients, and the commands above |
 | `relay-transport-smoke.ps1` | framed-protocol smoke for named pipe and TCP: Hello/state/chat plus delayed command correlation without duplicate dispatch |
 | `_battle.ps1` | the shared battle flow (`Invoke-HeroAttack`): use a required free hero or exit a garrisoned one, attack the nearest free neutral, auto-battle, dismiss dialogs, report before/after |
-| `_obs.ps1` | owned portable-OBS setup/record/stop helper: two-pane multiplayer/static-arena or single-host template proof; required CI recordings start before the game and fail if no MKV is produced |
+| `_obs.ps1` | owned portable-OBS setup/record/stop helper: two-pane gameplay proof starts before the game; single-host template proof starts at the first dialog (60s black-screen fallback for boot hangs); missing required MKV fails the job |
 | `test.config.sample.psd1` | per-machine config template; copy to `test.config.psd1` |
 | `scenario-generation.ps1` | single-instance generator example: drive the form, and with `-ToMap` play the generated map into the strategic screen |
 | `list-templates.js` | enumerate valid generator templates in the same compact numeric order as the game; drives the automatic all-template matrix |
@@ -604,10 +612,13 @@ Invoke-Button     host $D BTN_GENERATE
 
 С `-WaitGenerationSec` тест также ждёт генерацию карты и проверяет, что дошло до
 `DLG_GENERATION_RESULT`; с `-ToMap` он идёт дальше: принимает карту, запускает игру и доходит до
-стратегической карты. Генератор падает по-разному, каждый случай сообщается отдельно: sol3-паника,
-оставляющая клиента на форме, ассерт отладочного CRT (порча кучи в генераторе), который сборка
+стратегической карты. Генератор падает по-разному, каждый случай сообщается отдельно: DebugTest
+sol3-паника, подтверждённая захваченной строкой `[sol3]` из stderr (Release использует видимый
+месседж-бокс либо полный тайм-аут отсутствия старта, если UI-ошибка не появилась), ассерт
+отладочного CRT (порча кучи в генераторе), который сборка
 DebugTest пишет в лог и роняет на нём прогон вместо блокирующего диалога, месседж-бокс
-(`DLG_MESSAGE_BOX`) после того как генератор сдался, или тайм-аут всё ещё на `DLG_WAIT_GENERATION`. Двух-инстансный
+(`DLG_MESSAGE_BOX`) после того как генератор сдался, или тайм-аут до старта генерации / всё ещё на
+`DLG_WAIT_GENERATION`. Двух-инстансный
 [`multiplayer-two-instance.ps1`](multiplayer-two-instance.ps1) с `-RandomMap` создаёт сессию из
 сгенерированной карты вместо скирмиша, поэтому с `-EndHostTurn` он проходит полный честный сценарий:
 сгенерировать, оба клиента доходят до карты, хост завершает ход, а присоединяющийся прокликивает свой
@@ -799,10 +810,13 @@ CI находится в [`../../.github/workflows`](../../.github/workflows). `
 `mss32-production-build.yml`. `mss32.yml` оставлен ручным входом production Debug/Release, поэтому
 второй автоматический PR-run не создаётся.
 
-Строгая матрица checkout-ит `bartonsun/D2-Templates` (`master` по умолчанию), один раз фиксирует commit,
-flatten-ит `sMNS/**/*.lua` в неизменяемый snapshot и записывает исходные пути, размеры и SHA-256. Каждый
-файл получает отдельный job на DebugTest и оптимизированном Release+D2_TESTDRV с одним source snapshot,
-валидными defaults шаблона и проверенным по digest Mesa asset. Каждый job пять раз последовательно
+Строгая проверка имеет два независимых источника. `Tpl master` один раз фиксирует текущий commit
+`bartonsun/D2-Templates` `master` и находит все `sMNS/**/*.lua`. `Tpl game` находит 20 файлов
+`Templates/*.lua`, поставляемых внутри закреплённого игрового fixture, и не подменяет эту runtime-папку.
+Для обоих источников записываются точные пути, размеры и SHA-256 manifest; наборы не смешиваются,
+поскольку одинаковые имена могут означать разные версии. Каждый найденный файл получает отдельный job
+на DebugTest и оптимизированном Release+D2_TESTDRV с валидными defaults шаблона и одним проверенным по
+digest Mesa asset. Каждый job пять раз последовательно
 запускает реальный клиент игры с естественной случайностью самой игры. Попытки 1-4 должны дойти до
 результата генератора; попытка 5 ещё принимает результат, запускает сценарий, по одному разу нажимает
 точную enabled-кнопку каждого известного стартового диалога, наблюдает `DLG_BEGIN_TURN` и требует
@@ -812,8 +826,10 @@ flatten-ит `sMNS/**/*.lua` в неизменяемый snapshot и запис�
 CRT assert, sol3 panic, error box, timeout, непринятая/неиграбельная карта, пропуск parser-ом,
 отсутствующий outcome или обязательное видео краснят CI. `fail-fast:false` всё равно запускает каждый
 файл в обоих профилях. Все пять outcome-строк и отдельные MSS/relay/OBS/console evidence-наборы хранятся
-90 дней. Если прошли все пять попыток, остаётся только single-window MKV попытки 5; если есть падения —
-только MKV упавших попыток. Поскольку DebugTest и Release выполняют независимые естественно-случайные
+90 дней. Запись начинается с первого отрисованного диалога клиента, без длинного чёрного префикса.
+Если прошли все пять попыток, остаётся только single-window MKV попытки 5; если есть падения — только
+MKV упавших попыток, причём живое состояние ошибки ещё пять секунд остаётся в кадре. Поскольку
+DebugTest и Release выполняют независимые естественно-случайные
 прогоны, различие их статусов информационное; отсутствующие/повреждённые строки или несовпадение source
 manifest по-прежнему дают hard failure.
 
@@ -830,7 +846,7 @@ manifest по-прежнему дают hard failure.
 | `_relay.ps1` | тулкит: конфиг, рилей, клиенты и команды выше |
 | `relay-transport-smoke.ps1` | smoke framed-протокола для named pipe и TCP: Hello/state/chat и задержанный command-result без повторной отправки |
 | `_battle.ps1` | общий сценарий боя (`Invoke-HeroAttack`): взять требуемого свободного героя или вывести гарнизонного, атаковать ближайшего свободного нейтрала, автобой, закрытие диалогов, отчёт до/после |
-| `_obs.ps1` | helper собственного portable OBS: две панели для multiplayer/static-arena или один host для template proof; обязательная CI-запись стартует до игры и краснит job при отсутствии MKV |
+| `_obs.ps1` | helper собственного portable OBS: двухпанельная gameplay-запись стартует до игры; single-host template proof — с первого диалога (через 60с чёрный fallback для boot hang); отсутствие обязательного MKV краснит job |
 | `test.config.sample.psd1` | шаблон конфига машины; копируется в `test.config.psd1` |
 | `scenario-generation.ps1` | одиночный пример генератора: прогон по форме, а с `-ToMap` доиграть сгенерированную карту до стратегического экрана |
 | `list-templates.js` | перечисляет валидные шаблоны генератора в том же компактном числовом порядке, что игра; питает автоматическую матрицу всех шаблонов |

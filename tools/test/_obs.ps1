@@ -7,8 +7,8 @@
 # UI-frame callback (no separate window-tag hook or polling thread).
 #
 # By default a background watcher holds off until every requested role reports a rendered dialog.
-# Required CI evidence passes -StartImmediately instead: OBS records from before game launch, so an
-# early boot/relay failure still leaves an MKV rather than silently cancelling the watcher.
+# The template matrix uses that HostOnly mode so recordings begin on real UI instead of a black boot
+# prefix. Dual-client CI evidence passes -StartImmediately so an early boot failure still leaves MKV.
 #
 #   Install-Obs
 #   $rec = Start-ObsRecording -OutDir $dir   # deferred manual mode

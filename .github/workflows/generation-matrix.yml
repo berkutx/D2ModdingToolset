@@ -3,9 +3,9 @@ name: generation-matrix
 # Generate and load every random-scenario template under one requested harness profile, one job
 # per template and five sequential real game-client attempts per job. Attempts 1-4 must generate;
 # attempt 5 must additionally accept and load an actionable strategic map. A CRT assert, sol3 panic,
-# generator error, timeout, or unplayable result is a real failure. The source is
-# bartonsun/D2-Templates (master by default), resolved once to an immutable per-run snapshot.
-# fail-fast:false keeps all evidence flowing.
+# generator error, timeout, or unplayable result is a real failure. The source is either the
+# latest bartonsun/D2-Templates snapshot resolved by the caller, or the Templates directory
+# shipped in the pinned game fixture. fail-fast:false keeps all evidence flowing.
 
 on:
   workflow_call:
@@ -38,6 +38,11 @@ on:
         type: string
         required: false
         default: master
+      template_origin:
+        description: "template source: upstream or bundled"
+        type: string
+        required: false
+        default: upstream
       mesa_asset_url:
         description: "exact pal1000 Mesa release-msvc.7z URL shared by both profiles"
         type: string
@@ -78,6 +83,14 @@ on:
         type: string
         required: false
         default: master
+      template_origin:
+        description: "template source"
+        type: choice
+        options:
+          - upstream
+          - bundled
+        required: false
+        default: upstream
       mesa_asset_url:
         description: "exact Mesa release-msvc.7z URL (empty = resolve latest)"
         type: string
@@ -100,14 +113,16 @@ env:
 
 jobs:
   setup:
-    name: Parse templates + resolve ${{ inputs.profile_name }} harness DLL
+    name: Setup
     runs-on: ubuntu-latest
     outputs:
       run_id: ${{ steps.dll.outputs.run_id }}
       matrix: ${{ steps.parse.outputs.matrix }}
       template_digest: ${{ steps.parse.outputs.template_digest }}
       template_count: ${{ steps.parse.outputs.template_count }}
-      template_commit: ${{ steps.parse.outputs.template_commit }}
+      template_origin: ${{ steps.parse.outputs.template_origin }}
+      source_revision: ${{ steps.parse.outputs.source_revision }}
+      source_description: ${{ steps.parse.outputs.source_description }}
       mesa_url: ${{ steps.mesa.outputs.url }}
       mesa_digest: ${{ steps.mesa.outputs.digest }}
     steps:
@@ -120,6 +135,7 @@ jobs:
           sparse-checkout-cone-mode: true
           persist-credentials: false
       - name: Checkout authoritative template source
+        if: ${{ inputs.template_origin == 'upstream' }}
         uses: actions/checkout@v6
         with:
           repository: bartonsun/D2-Templates
@@ -127,6 +143,17 @@ jobs:
           path: template-repo
           fetch-depth: 1
           persist-credentials: false
+      - name: Restore the pinned game fixture for bundled templates
+        if: ${{ inputs.template_origin == 'bundled' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            game.tar.gz
+            game.sha256
+            game.xet
+          key: ${{ env.GAME_CACHE_KEY }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
       - name: Resolve one immutable Mesa asset for every template job
         id: mesa
         env:
@@ -194,18 +221,55 @@ jobs:
         id: parse
         env:
           TEMPLATES_REF: ${{ inputs.templates_ref }}
+          TEMPLATE_ORIGIN: ${{ inputs.template_origin }}
         shell: bash
         run: |
           set -euo pipefail
+          case "$TEMPLATE_ORIGIN" in
+            upstream|bundled) ;;
+            *) echo "::error::template_origin must be upstream or bundled"; exit 1 ;;
+          esac
           mkdir -p template-snapshot/Templates
           : > template-snapshot/template-manifest.tsv
-          template_commit=$(git -C template-repo rev-parse HEAD)
-          if [[ "$TEMPLATES_REF" =~ ^[0-9a-fA-F]{40}$ && "${template_commit,,}" != "${TEMPLATES_REF,,}" ]]; then
-            echo "::error::template checkout resolved to $template_commit, expected $TEMPLATES_REF"
-            exit 1
+          if [ "$TEMPLATE_ORIGIN" = upstream ]; then
+            source_root=template-repo/sMNS
+            source_revision=$(git -C template-repo rev-parse HEAD)
+            if [[ "$TEMPLATES_REF" =~ ^[0-9a-fA-F]{40}$ && "${source_revision,,}" != "${TEMPLATES_REF,,}" ]]; then
+              echo "::error::template checkout resolved to $source_revision, expected $TEMPLATES_REF"
+              exit 1
+            fi
+            source_description="bartonsun/D2-Templates@$source_revision"
+          else
+            actual_xet=$(tr -d '\r\n ' < game.xet)
+            [ "$actual_xet" = "$GAME_FIXTURE_XET_HASH" ] || { echo "::error::wrong game Xet identity"; exit 1; }
+            actual_bytes=$(stat -c '%s' game.tar.gz)
+            [ "$actual_bytes" = "$GAME_FIXTURE_BYTES" ] || { echo "::error::wrong game archive size"; exit 1; }
+            expected_sha=$(awk 'NR == 1 { print tolower($1) }' game.sha256)
+            [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::invalid cached game SHA-256"; exit 1; }
+            actual_sha=$(sha256sum game.tar.gz | cut -d' ' -f1)
+            [ "$actual_sha" = "$expected_sha" ] || { echo "::error::wrong game archive SHA-256"; exit 1; }
+            mkdir -p bundled-game
+            tar -xzf game.tar.gz -C bundled-game --wildcards '*/Templates/*.lua'
+            mapfile -d '' template_dirs < <(find bundled-game -type d -name Templates -print0)
+            [ "${#template_dirs[@]}" -eq 1 ] || {
+              echo "::error::expected exactly one bundled Templates directory, found ${#template_dirs[@]}"
+              exit 1
+            }
+            source_root=${template_dirs[0]}
+            source_revision=$actual_sha
+            source_description="pinned-game-fixture-xet:$actual_xet"
+          fi
+          if [ "$TEMPLATE_ORIGIN" = upstream ]; then
+            mapfile -d '' source_files < <(find "$source_root" -type f -name '*.lua' -print0 | sort -z)
+          else
+            mapfile -d '' source_files < <(find "$source_root" -maxdepth 1 -type f -name '*.lua' -print0 | sort -z)
+            [ "${#source_files[@]}" -eq 20 ] || {
+              echo "::error::pinned game fixture must contain exactly 20 root Templates/*.lua files, found ${#source_files[@]}"
+              exit 1
+            }
           fi
           declare -A seen
-          while IFS= read -r -d '' src; do
+          for src in "${source_files[@]}"; do
             base=$(basename "$src")
             if [[ "$base" == *$'\t'* || "$base" == *$'\r'* || "$base" == *$'\n'* ]]; then
               echo "::error::template filename contains a TSV/control-line delimiter"
@@ -220,20 +284,29 @@ jobs:
             cp "$src" "template-snapshot/Templates/$base"
             hash=$(sha256sum "$src" | cut -d' ' -f1)
             bytes=$(stat -c '%s' "$src")
-            relative=${src#template-repo/}
+            if [ "$TEMPLATE_ORIGIN" = upstream ]; then
+              relative=${src#${source_root}/}
+            else
+              relative="game://Templates/$base"
+            fi
             if [[ "$relative" == *$'\t'* || "$relative" == *$'\r'* || "$relative" == *$'\n'* ]]; then
               echo "::error::template source path contains a TSV/control-line delimiter"
               exit 1
             fi
             printf '%s\t%s\t%s\t%s\n' "$hash" "$bytes" "$base" "$relative" >> template-snapshot/template-manifest.tsv
-          done < <(find template-repo/sMNS -type f -name '*.lua' -print0 | sort -z)
+          done
           template_count=$(wc -l < template-snapshot/template-manifest.tsv | tr -d ' ')
           template_digest=$(sha256sum template-snapshot/template-manifest.tsv | cut -d' ' -f1)
           [ "$template_count" -gt 0 ] || { echo "::error::template snapshot is empty"; exit 1; }
           echo "template_count=$template_count" >> "$GITHUB_OUTPUT"
           echo "template_digest=$template_digest" >> "$GITHUB_OUTPUT"
-          echo "template_commit=$template_commit" >> "$GITHUB_OUTPUT"
-          echo "template snapshot: repo=bartonsun/D2-Templates ref=$TEMPLATES_REF commit=$template_commit count=$template_count manifest-sha256=$template_digest"
+          echo "template_origin=$TEMPLATE_ORIGIN" >> "$GITHUB_OUTPUT"
+          echo "source_revision=$source_revision" >> "$GITHUB_OUTPUT"
+          echo "source_description=$source_description" >> "$GITHUB_OUTPUT"
+          printf 'origin=%s\nrevision=%s\ndescription=%s\nmanifest-sha256=%s\ncount=%s\n' \
+            "$TEMPLATE_ORIGIN" "$source_revision" "$source_description" "$template_digest" "$template_count" \
+            > template-snapshot/source-metadata.txt
+          echo "template snapshot: origin=$TEMPLATE_ORIGIN source=$source_description count=$template_count manifest-sha256=$template_digest"
           npm install luaparse@0.3.1 --no-save --ignore-scripts --silent
           node tools/test/list-templates.js template-snapshot/Templates --strict > matrix.json
           parsed_count=$(jq 'length' matrix.json)
@@ -251,7 +324,7 @@ jobs:
           if-no-files-found: error
 
   generate:
-    name: ${{ inputs.profile_name }} / ${{ matrix.template.name }}
+    name: '#${{ matrix.template.index }} ${{ matrix.template.name }}'
     needs: setup
     strategy:
       fail-fast: false
@@ -263,6 +336,7 @@ jobs:
       REC_DIR: ${{ github.workspace }}/recording
       PROFILE_NAME: ${{ inputs.profile_name }}
       ARTIFACT_PREFIX: ${{ inputs.artifact_prefix }}
+      TEMPLATE_ORIGIN: ${{ needs.setup.outputs.template_origin }}
     defaults:
       run:
         shell: pwsh
@@ -290,7 +364,8 @@ jobs:
         env:
           TEMPLATE_INDEX: ${{ matrix.template.index }}
           TEMPLATE_NAME: ${{ matrix.template.name }}
-          TEMPLATE_COMMIT: ${{ needs.setup.outputs.template_commit }}
+          SOURCE_REVISION: ${{ needs.setup.outputs.source_revision }}
+          SOURCE_DESCRIPTION: ${{ needs.setup.outputs.source_description }}
           TEMPLATE_DIGEST: ${{ needs.setup.outputs.template_digest }}
           DLL_ARTIFACT: ${{ inputs.dll_artifact }}
         run: |
@@ -302,12 +377,15 @@ jobs:
             "dll-sha256=$((Get-FileHash -LiteralPath 'dll/mss32.dll' -Algorithm SHA256).Hash.ToLowerInvariant())"
             "template-index=$env:TEMPLATE_INDEX"
             "template-name=$env:TEMPLATE_NAME"
-            "template-commit=$env:TEMPLATE_COMMIT"
+            "template-origin=$env:TEMPLATE_ORIGIN"
+            "template-source=$env:SOURCE_DESCRIPTION"
+            "template-source-revision=$env:SOURCE_REVISION"
             "template-manifest-sha256=$env:TEMPLATE_DIGEST"
             "attempts=5"
             "runner-image=$env:ImageOS-$env:ImageVersion"
           ) | Set-Content evidence/metadata.txt -Encoding utf8
           Copy-Item template-source/template-manifest.tsv evidence/template-manifest.tsv -Force
+          Copy-Item template-source/source-metadata.txt evidence/source-metadata.txt -Force
       - name: Enable DirectPlay (TCP/IP protocol for the multiplayer setup path)
         run: |
           try {
@@ -336,17 +414,30 @@ jobs:
           $dir = (Get-ChildItem game -Directory | Select-Object -First 1).FullName
           Copy-Item dll\mss32.dll "$dir\mss32.dll" -Force
           $templates = Join-Path $dir 'Templates'
-          Remove-Item -LiteralPath $templates -Recurse -Force -ErrorAction SilentlyContinue
-          Copy-Item -LiteralPath 'template-source\Templates' -Destination $templates -Recurse -Force
+          if ($env:TEMPLATE_ORIGIN -eq 'upstream') {
+            Remove-Item -LiteralPath $templates -Recurse -Force -ErrorAction SilentlyContinue
+            Copy-Item -LiteralPath 'template-source\Templates' -Destination $templates -Recurse -Force
+          } elseif ($env:TEMPLATE_ORIGIN -ne 'bundled') {
+            throw "unexpected template origin: $env:TEMPLATE_ORIGIN"
+          }
+          $manifestNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
           foreach ($line in Get-Content 'template-source\template-manifest.tsv') {
             $parts = @($line -split "`t", 4)
             if ($parts.Count -ne 4 -or $parts[0] -notmatch '^[0-9a-fA-F]{64}$') { throw "invalid template manifest row: $line" }
             $expectedHash, $expectedBytes, $flatName, $sourcePath = $parts
+            if (-not $manifestNames.Add($flatName)) { throw "duplicate template manifest name: $flatName" }
             $sourceFile = Join-Path 'template-source\Templates' $flatName
             $deployedFile = Join-Path $templates $flatName
             if ((Get-Item -LiteralPath $sourceFile).Length -ne [int64]$expectedBytes) { throw "template snapshot size mismatch: $sourcePath" }
             if ((Get-FileHash -LiteralPath $sourceFile -Algorithm SHA256).Hash -ne $expectedHash) { throw "template snapshot hash mismatch: $sourcePath" }
             if ((Get-FileHash -LiteralPath $deployedFile -Algorithm SHA256).Hash -ne $expectedHash) { throw "deployed template hash mismatch: $flatName" }
+          }
+          $deployedLua = @(Get-ChildItem -LiteralPath $templates -Filter '*.lua' -File)
+          if ($deployedLua.Count -ne $manifestNames.Count) {
+            throw "deployed template count mismatch: expected $($manifestNames.Count), got $($deployedLua.Count)"
+          }
+          foreach ($file in $deployedLua) {
+            if (-not $manifestNames.Contains($file.Name)) { throw "unexpected deployed template: $($file.Name)" }
           }
           $ini = Join-Path $dir 'Disciple.ini'
           if (Test-Path $ini) {
@@ -428,7 +519,9 @@ jobs:
             $videoPath = $null
             try {
               # Five FPS is enough to prove the dialog/error sequence without making five recordings huge.
-              Start-ObsRecording -OutDir $attemptRecDir -HostOnly -StartImmediately -Fps 5 -BitrateKbps 1200 | Out-Null
+              # Start when the host reports its first rendered dialog. This removes the long black
+              # boot prefix while still beginning well before the generator form is opened.
+              Start-ObsRecording -OutDir $attemptRecDir -HostOnly -ReadyTimeoutSec 60 -Fps 5 -BitrateKbps 1200 | Out-Null
             } catch {
               $recordingError = "OBS start failed: $($_.Exception.Message)"
               Write-Host "::error::$recordingError"
@@ -436,19 +529,25 @@ jobs:
 
             # Capture every stream so GEN_OUTCOME and GEN_SECONDS remain available in a standalone
             # per-attempt console log as well as the raw job log.
-            $out = @()
+            $out = [Collections.Generic.List[object]]::new()
             $code = 1
             try {
               $scenarioArgs = @(
                 '-NoLogo', '-NoProfile', '-NonInteractive',
                 '-File', './tools/test/scenario-generation.ps1', '-GameDir', $env:GAME_DIR,
-                '-Template', $env:T_INDEX, '-WaitGenerationSec', $waitSec, '-UseTemplateDefaults'
+                '-Template', $env:T_INDEX, '-WaitGenerationSec', $waitSec, '-UseTemplateDefaults',
+                '-RecorderReadyFile', (Join-Path $attemptRecDir 'obs-owned.json')
               )
               if ($attempt -eq 5) { $scenarioArgs += '-ToMap' }
-              $out = @(& "$PSHOME\pwsh.exe" @scenarioArgs 2>&1)
+              # Stream the child output while retaining it for the TSV/evidence parser. Previously it
+              # was buffered until after OBS stopped, which made GitHub timestamps misleading.
+              & "$PSHOME\pwsh.exe" @scenarioArgs 2>&1 | ForEach-Object {
+                [void]$out.Add($_)
+                Write-Host $_
+              }
               $code = $LASTEXITCODE
             } catch {
-              $out += "attempt wrapper exception: $($_.Exception.Message)"
+              [void]$out.Add("attempt wrapper exception: $($_.Exception.Message)")
               $code = 1
             } finally {
               try {
@@ -464,7 +563,6 @@ jobs:
               }
             }
 
-            $out | ForEach-Object { Write-Host $_ }
             $out | ForEach-Object { [string]$_ } | Set-Content (Join-Path $attemptEvidence 'console.log') -Encoding utf8
             $oc = $out | Select-String '^GEN_OUTCOME=' | Select-Object -Last 1
             $status = if ($oc) { ($oc.Line -replace '^GEN_OUTCOME=', '') } else { "failed (exit $code, no outcome line)" }
@@ -656,7 +754,7 @@ jobs:
 
   # Aggregate every template's outcome into one table in the run summary.
   summarize:
-    name: Results summary
+    name: Summary
     needs: [setup, generate]
     if: always()
     runs-on: ubuntu-latest
@@ -674,7 +772,9 @@ jobs:
           EXPECTED_MATRIX: ${{ needs.setup.outputs.matrix }}
           TEMPLATE_DIGEST: ${{ needs.setup.outputs.template_digest }}
           TEMPLATE_COUNT: ${{ needs.setup.outputs.template_count }}
-          TEMPLATE_COMMIT: ${{ needs.setup.outputs.template_commit }}
+          TEMPLATE_ORIGIN: ${{ needs.setup.outputs.template_origin }}
+          SOURCE_REVISION: ${{ needs.setup.outputs.source_revision }}
+          SOURCE_DESCRIPTION: ${{ needs.setup.outputs.source_description }}
           PROFILE_NAME: ${{ inputs.profile_name }}
           MESA_ASSET_URL: ${{ needs.setup.outputs.mesa_url }}
           MESA_ASSET_DIGEST: ${{ needs.setup.outputs.mesa_digest }}
@@ -685,7 +785,11 @@ jobs:
             echo ""
             echo "> Strict ${PROFILE_NAME} gate: attempts 1-4 must generate; attempt 5 must also load a populated, actionable strategic map after the startup dialogs."
             echo "> Natural game randomness is preserved. All five outcomes/log sets are retained. If all pass, only attempt 5 video is retained; otherwise only failed-attempt videos are retained."
-            echo "> Source: [bartonsun/D2-Templates@${TEMPLATE_COMMIT}](https://github.com/bartonsun/D2-Templates/commit/${TEMPLATE_COMMIT}); ${TEMPLATE_COUNT} files; manifest SHA-256 \`${TEMPLATE_DIGEST}\`."
+            if [ "$TEMPLATE_ORIGIN" = upstream ]; then
+              echo "> Source: [${SOURCE_DESCRIPTION}](https://github.com/bartonsun/D2-Templates/commit/${SOURCE_REVISION}); ${TEMPLATE_COUNT} files; manifest SHA-256 \`${TEMPLATE_DIGEST}\`."
+            else
+              echo "> Source: templates shipped in ${SOURCE_DESCRIPTION}; archive SHA-256 \`${SOURCE_REVISION}\`; ${TEMPLATE_COUNT} files; manifest SHA-256 \`${TEMPLATE_DIGEST}\`."
+            fi
             echo "> Mesa runtime asset: \`${MESA_ASSET_URL}\`; verified \`${MESA_ASSET_DIGEST}\`."
             echo ""
             echo "| | # | Template | Attempt | Scope | Time | Outcome |"

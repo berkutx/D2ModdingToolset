@@ -1,8 +1,8 @@
 name: test-harness
 
 # The single automated CI entrypoint. Every PR builds production Release plus Debug and
-# Release harnesses. Gameplay runs on DebugTest; the strict template suite runs on both
-# harness profiles from the same immutable template source snapshot with natural game randomness.
+# Release harnesses. Gameplay runs on DebugTest; both latest-master and bundled-game template
+# suites run on both harness profiles with matched immutable source snapshots and natural randomness.
 
 on:
   pull_request:
@@ -241,8 +241,8 @@ jobs:
       mesa_asset_url: ${{ needs.template_source.outputs.mesa_url }}
       mesa_asset_digest: ${{ needs.template_source.outputs.mesa_digest }}
 
-  templates_debug:
-    name: Every master template (DebugTest)
+  templates_master_debug:
+    name: Tpl master · Debug
     needs: [build, validate, tests, template_source]
     # The ordinary suite warms the shared game cache. Run the template matrix even when an
     # unrelated gameplay job failed, but never without the exact harness DLL from this run.
@@ -252,14 +252,15 @@ jobs:
       dll_run_id: ${{ github.run_id }}
       dll_artifact: mss32-test-harness-debug
       profile_name: DebugTest
-      artifact_prefix: debug
+      artifact_prefix: master-debug
+      template_origin: upstream
       wait_sec: 300
       templates_ref: ${{ needs.template_source.outputs.commit }}
       mesa_asset_url: ${{ needs.template_source.outputs.mesa_url }}
       mesa_asset_digest: ${{ needs.template_source.outputs.mesa_digest }}
 
-  templates_release:
-    name: Every master template (Release + harness)
+  templates_master_release:
+    name: Tpl master · Release
     needs: [release_harness, validate, tests, template_source]
     # tests contains the one cache-preparation job; wait for it even if an unrelated gameplay
     # assertion failed so both template profiles consume the same prepared game archive.
@@ -269,54 +270,108 @@ jobs:
       dll_run_id: ${{ github.run_id }}
       dll_artifact: mss32-test-harness-release
       profile_name: Release + D2_TESTDRV
-      artifact_prefix: release
+      artifact_prefix: master-release
+      template_origin: upstream
       wait_sec: 300
       templates_ref: ${{ needs.template_source.outputs.commit }}
       mesa_asset_url: ${{ needs.template_source.outputs.mesa_url }}
       mesa_asset_digest: ${{ needs.template_source.outputs.mesa_digest }}
 
+  templates_game_debug:
+    name: Tpl game · Debug
+    needs: [build, validate, tests, template_source]
+    # Keep the immutable game's own Templates directory intact. Waiting for tests guarantees that
+    # its verified archive is already present in the shared cross-OS cache.
+    if: ${{ always() && !cancelled() && needs.build.result == 'success' && needs.validate.result == 'success' && needs.template_source.result == 'success' }}
+    uses: ./.github/workflows/generation-matrix.yml
+    with:
+      dll_run_id: ${{ github.run_id }}
+      dll_artifact: mss32-test-harness-debug
+      profile_name: DebugTest
+      artifact_prefix: game-debug
+      template_origin: bundled
+      wait_sec: 300
+      mesa_asset_url: ${{ needs.template_source.outputs.mesa_url }}
+      mesa_asset_digest: ${{ needs.template_source.outputs.mesa_digest }}
+
+  templates_game_release:
+    name: Tpl game · Release
+    needs: [release_harness, validate, tests, template_source]
+    if: ${{ always() && !cancelled() && needs.release_harness.result == 'success' && needs.validate.result == 'success' && needs.template_source.result == 'success' }}
+    uses: ./.github/workflows/generation-matrix.yml
+    with:
+      dll_run_id: ${{ github.run_id }}
+      dll_artifact: mss32-test-harness-release
+      profile_name: Release + D2_TESTDRV
+      artifact_prefix: game-release
+      template_origin: bundled
+      wait_sec: 300
+      mesa_asset_url: ${{ needs.template_source.outputs.mesa_url }}
+      mesa_asset_digest: ${{ needs.template_source.outputs.mesa_digest }}
+
   templates_compare:
-    name: Compare DebugTest vs Release template outcomes
-    needs: [templates_debug, templates_release, template_source]
+    name: Tpl ${{ matrix.label }} · A/B
+    needs:
+      - templates_master_debug
+      - templates_master_release
+      - templates_game_debug
+      - templates_game_release
+      - template_source
     if: ${{ always() && !cancelled() && needs.template_source.result == 'success' }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: master
+            expected_origin: upstream
+            debug_prefix: master-debug
+            release_prefix: master-release
+          - label: game
+            expected_origin: bundled
+            debug_prefix: game-debug
+            release_prefix: game-release
     steps:
       - name: Download DebugTest outcomes
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          pattern: debug-gen-outcome-*
+          pattern: ${{ matrix.debug_prefix }}-gen-outcome-*
           path: debug
           merge-multiple: true
       - name: Download Release outcomes
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          pattern: release-gen-outcome-*
+          pattern: ${{ matrix.release_prefix }}-gen-outcome-*
           path: release
           merge-multiple: true
       - name: Download DebugTest template source manifest
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          name: debug-template-source-snapshot
+          name: ${{ matrix.debug_prefix }}-template-source-snapshot
           path: debug-source
       - name: Download Release template source manifest
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          name: release-template-source-snapshot
+          name: ${{ matrix.release_prefix }}-template-source-snapshot
           path: release-source
       - name: Build the A/B table
         shell: bash
         env:
-          TEMPLATE_COMMIT: ${{ needs.template_source.outputs.commit }}
+          SOURCE_LABEL: ${{ matrix.label }}
+          EXPECTED_ORIGIN: ${{ matrix.expected_origin }}
         run: |
           set -euo pipefail
           shopt -s nullglob
           missing=0
           diverged=0
           source_ok=0
+          metadata_ok=0
+          source_description="$SOURCE_LABEL"
+          source_revision=unknown
           if [ ! -f debug-source/template-manifest.tsv ] || [ ! -f release-source/template-manifest.tsv ]; then
             echo "::error::one or both template source manifests are missing"
             missing=1
@@ -325,6 +380,35 @@ jobs:
             missing=1
           else
             source_ok=1
+          fi
+          if [ ! -f debug-source/source-metadata.txt ] || [ ! -f release-source/source-metadata.txt ]; then
+            echo "::error::one or both template source metadata files are missing"
+            missing=1
+          elif ! cmp -s debug-source/source-metadata.txt release-source/source-metadata.txt; then
+            echo "::error::DebugTest and Release used different template source metadata"
+            missing=1
+          else
+            metadata=debug-source/source-metadata.txt
+            metadata_keys=$(cut -d= -f1 "$metadata" | paste -sd, -)
+            source_origin=$(awk -F= '$1 == "origin" { print substr($0, index($0, "=") + 1) }' "$metadata")
+            source_revision=$(awk -F= '$1 == "revision" { print substr($0, index($0, "=") + 1) }' "$metadata")
+            source_description=$(awk -F= '$1 == "description" { print substr($0, index($0, "=") + 1) }' "$metadata")
+            metadata_manifest=$(awk -F= '$1 == "manifest-sha256" { print substr($0, index($0, "=") + 1) }' "$metadata")
+            metadata_count=$(awk -F= '$1 == "count" { print substr($0, index($0, "=") + 1) }' "$metadata")
+            actual_manifest=$(sha256sum debug-source/template-manifest.tsv 2>/dev/null | cut -d' ' -f1 || true)
+            actual_count=$(wc -l < debug-source/template-manifest.tsv 2>/dev/null | tr -d ' ' || true)
+            if [ "$metadata_keys" != 'origin,revision,description,manifest-sha256,count' ] ||
+               [ "$source_origin" != "$EXPECTED_ORIGIN" ] ||
+               [[ ! "$source_revision" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] ||
+               [[ ! "$source_description" =~ ^[A-Za-z0-9._@/:+-]+$ ]] ||
+               [[ ! "$metadata_manifest" =~ ^[0-9a-f]{64}$ ]] ||
+               [[ ! "$metadata_count" =~ ^[1-9][0-9]*$ ]] ||
+               [ "$metadata_manifest" != "$actual_manifest" ] || [ "$metadata_count" != "$actual_count" ]; then
+              echo "::error::template source metadata is malformed or does not describe its manifest"
+              missing=1
+            else
+              metadata_ok=1
+            fi
           fi
           rows=(debug/*.tsv release/*.tsv)
           [ "${#rows[@]}" -gt 0 ] || { echo "::error::no template outcome rows"; exit 1; }
@@ -336,9 +420,13 @@ jobs:
             mapfile -t indices < <(for file in "${rows[@]}"; do basename "$file" .tsv; done | sort -Vu)
           fi
           {
-            echo "## Template runtime A/B"
+            echo "## ${SOURCE_LABEL} templates: runtime A/B"
             echo ""
-            echo "> Both profiles use the same [D2-Templates commit](https://github.com/bartonsun/D2-Templates/commit/${TEMPLATE_COMMIT}), source manifest and digest-verified Mesa asset."
+            if [ "$source_ok" -eq 1 ] && [ "$metadata_ok" -eq 1 ]; then
+              echo "> Source: \`${source_description}\`, revision \`${source_revision}\`. Both profiles use byte-identical source metadata/manifests and a digest-verified Mesa asset."
+            else
+              echo "> ❌ Template source provenance could not be verified; see annotations above."
+            fi
             echo "> Each profile performs independent naturally-random game runs, so status differences are reported for diagnosis but are not themselves a gate. Missing/malformed rows or a source mismatch remain hard failures."
             echo ""
             echo "| # | Template | Attempt | Scope | DebugTest | Release + D2_TESTDRV | Match |"

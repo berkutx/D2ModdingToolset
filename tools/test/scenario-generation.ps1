@@ -33,6 +33,7 @@ param(
     [int]$WaitGenerationSec = 0,  # >0: after Generate, wait this long and assert the map generates
     [switch]$ToMap,               # after the result, accept + start the game and reach the strategic map
     [switch]$UseTemplateDefaults, # do not force spin indices that may not exist for fixed-size templates
+    [string]$RecorderReadyFile,   # CI: wait for the owned OBS process before leaving the main menu
     [switch]$Keep
 )
 
@@ -64,6 +65,31 @@ $client = $null; $ok = $false; $outcome = 'not-run'; $genSec = $null   # per-tem
 try {
     $client = Start-GameClient -GameDir $GameDir -Role host
     if (-not (Wait-Dialog host DLG_MAIN_MENU 90)) { throw "host never reached DLG_MAIN_MENU" }
+    if ($RecorderReadyFile) {
+        # Deferred HostOnly recording removes the black boot prefix. The wrapper creates an empty
+        # ownership file before launching this client; its watcher fills the file only after the
+        # first rendered host dialog and a real owned OBS process exists. Hold navigation until then
+        # so even an immediate generator failure is captured from before the form opens.
+        $recordDeadline = (Get-Date).AddSeconds(30)
+        $recorderReady = $false
+        while ((Get-Date) -lt $recordDeadline) {
+            try {
+                $owned = Get-Content -LiteralPath $RecorderReadyFile -Raw -ErrorAction Stop |
+                    ConvertFrom-Json -ErrorAction Stop
+                $process = Get-Process -Id ([int]$owned.pid) -ErrorAction Stop
+                $actual = [IO.Path]::GetFullPath($process.Path)
+                $expected = [IO.Path]::GetFullPath([string]$owned.executable)
+                if ([string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+                    $recorderReady = $true
+                    break
+                }
+            } catch {}
+            Start-Sleep -Milliseconds 250
+        }
+        if (-not $recorderReady) { throw "required OBS recorder did not become ready within 30s" }
+        Start-Sleep -Seconds 2 # let --startrecording publish its first rendered frames
+        Write-Host "[gen] required recorder ready before generator navigation" -ForegroundColor Green
+    }
 
     # Multiplayer setup -> the random-scenario generator.
     if (-not (Step-ToDialog host DLG_MAIN_MENU BTN_MULTI DLG_PROTOCOL)) { throw "no DLG_PROTOCOL" }
@@ -100,17 +126,23 @@ try {
     }
 
     if ((Get-Dialog host) -ne $D) { throw "client left '$D' while driving the form (crash?)" }
+    $clientLog = Join-Path $GameDir "mss32_$($client.Id).log"
+    $sol3Baseline = if (Test-Path -LiteralPath $clientLog) {
+        @(Get-Content -LiteralPath $clientLog -ErrorAction SilentlyContinue |
+            Select-String '\[testdrv\]\[stderr\].*\[sol3\]').Count
+    } else { 0 }
     if (-not (Invoke-Button host $D BTN_GENERATE)) { throw "BTN_GENERATE not found" }
     Write-Host "[gen] form driven (template=$Template) + BTN_GENERATE clicked" -ForegroundColor Green
 
     if ($WaitGenerationSec -gt 0) {
         # Assert generation runs to a result. A bad template fails three ways: it errors at once and
-        # stays on the form (sol3 panic, printed to the game's stderr), it runs a while then pops
+        # stays on the form (a captured DebugTest sol3 error on stderr), it runs a while then pops
         # DLG_MESSAGE_BOX (the generator gave up after N attempts), or it never leaves
         # DLG_WAIT_GENERATION. Some large shipped templates take more than a minute, so the matrix uses
         # the same bounded 300s budget as -ToMap; $outcome records which case occurred for its summary.
         Write-Host "[gen] waiting up to ${WaitGenerationSec}s for generation to finish..." -ForegroundColor Cyan
-        $t0 = Get-Date; $started = $false; $done = $false; $errbox = $false; $crashed = $false; $disconnectTicks = 0
+        $t0 = Get-Date; $started = $false; $done = $false; $errbox = $false; $crashed = $false
+        $sol3Panic = $null; $disconnectTicks = 0
         while ((((Get-Date) - $t0).TotalSeconds) -lt $WaitGenerationSec) {
             if ($relay.HasExited) { $outcome = 'harness failure: relay exited during generation'; throw $outcome }
             if ($client.HasExited) { $crashed = $true; break }   # a debug assert / fault killed the game
@@ -126,8 +158,15 @@ try {
             if ($d -eq 'DLG_WAIT_GENERATION') { $started = $true }
             if ($d -eq 'DLG_GENERATION_RESULT') { $done = $true; break }
             if ($d -eq 'DLG_MESSAGE_BOX') { $errbox = $true; break }   # generator gave up with an error popup
-            # A sol3 panic never leaves the form for DLG_WAIT_GENERATION; fail it fast, do not wait it out.
-            if (-not $started -and $d -eq $D -and (((Get-Date) - $t0).TotalSeconds) -ge 8) { break }
+            # CommandResult acknowledges dispatch before the synchronous Generate callback finishes.
+            # A slow callback can legitimately leave the last relay snapshot on the form for several
+            # seconds, so elapsed time is not evidence of a panic. Fail fast only on an actual sol3
+            # stderr record emitted after the click; other generator diagnostics are non-fatal.
+            if (-not $started -and $d -eq $D -and (Test-Path -LiteralPath $clientLog)) {
+                $sol3Lines = @(Get-Content -LiteralPath $clientLog -ErrorAction SilentlyContinue |
+                    Select-String '\[testdrv\]\[stderr\].*\[sol3\]')
+                if ($sol3Lines.Count -gt $sol3Baseline) { $sol3Panic = $sol3Lines[-1]; break }
+            }
             Start-Sleep -Milliseconds 1000
         }
         $genSec = [int]((Get-Date) - $t0).TotalSeconds   # seconds spent generating (from BTN_GENERATE), for the summary
@@ -139,8 +178,9 @@ try {
             $outcome = "error box: $msg"
             throw "generation errored after starting (template $Template; DLG_MESSAGE_BOX: $msg)"
         }
+        elseif ($sol3Panic) { $outcome = 'sol3 panic (captured on stderr)'; throw "generation failed on the form (template $Template; captured sol3 stderr)" }
         elseif ($started) { $outcome = "no result in ${WaitGenerationSec}s"; throw "generation did not finish in ${WaitGenerationSec}s (still on DLG_WAIT_GENERATION)" }
-        else { $outcome = 'sol3 panic (errored on the generator form)'; throw "generation never started (template $Template; sol3 panic on the form)" }
+        else { $outcome = "no generation start in ${WaitGenerationSec}s"; throw "generation did not start in ${WaitGenerationSec}s (still on $D; no stderr panic captured)" }
     }
 
     if ($ToMap) {
@@ -252,9 +292,9 @@ try {
     # state. Failures keep a shorter hold so their error box/form is visible; a process-ending CRT
     # assert is already present in the preceding frames and the MSS log.
     if ($ok -and $ToMap -and $client -and -not $client.HasExited) { Start-Sleep -Seconds 3 }
-    elseif (-not $ok -and $client -and -not $client.HasExited) { Start-Sleep -Seconds 2 }
-    # Enrich a failure with the exact reason now captured in the DLL log (the CRT assert or the sol3
-    # panic the harness routes there), so the matrix summary carries the real error text, not just the mode.
+    elseif (-not $ok -and $client -and -not $client.HasExited) { Start-Sleep -Seconds 5 }
+    # Enrich a failure with the exact reason now captured in the DLL log (the CRT assert or generator
+    # stderr the harness routes there), so the matrix summary carries the real error text, not just the mode.
     if ($outcome -notin @('generated', 'reached map', 'not-run') -and $client) {
         $log = Join-Path $GameDir "mss32_$($client.Id).log"
         if (Test-Path $log) {
