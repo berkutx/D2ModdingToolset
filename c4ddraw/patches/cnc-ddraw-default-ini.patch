@@ -2,7 +2,7 @@ diff --git a/src/config.c b/src/config.c
 index 18cfacdd..c37086c8 100644
 --- a/src/config.c
 +++ b/src/config.c
-@@ -182,1771 +182,105 @@ static void cfg_create_ini()
+@@ -182,1771 +182,107 @@ static void cfg_create_ini()
      if (fh)
      {
          fputs(
@@ -170,8 +170,8 @@ index 18cfacdd..c37086c8 100644
 +            "aspect_ratio=\n"
 +            "; scale mouse to the window; required for correct filtered downscaling\n"
 +            "adjmouse=true\n"
-+            "; image filter / upscaling (renderer=opengl only) - cnc-ddraw's equivalent of\n"
-+            "; DisciplesGL's Interpolation + Upscaling. Pick ONE (no inline comment after it!).\n"
++            "; image filter / upscaling - cnc-ddraw's equivalent of DisciplesGL's options.\n"
++            "; All presets work in OpenGL; portable choices also set the D3D9/GDI fallback.\n"
 +            "; Alternatives (paste over the active line):\n"
 +            ";   Shaders\\interpolation\\catmull-rom-bilinear.glsl   cubic (cnc default, softer)\n"
 +            ";   Shaders\\nearest-neighbor.glsl                     none (sharp pixels)\n"
@@ -180,6 +180,8 @@ index 18cfacdd..c37086c8 100644
 +            ";   Shaders\\interpolation\\fsr.glsl                    AMD FSR (modern, crisp)\n"
 +            ";   Shaders\\xbr\\xbr-lv2-noblend.glsl                  xBR-lv2\n"
 +            "shader=Shaders\\interpolation\\lanczos2-sharp.glsl\n"
++            "; portable fallback: 0 nearest, 1 linear, 2 cubic, 3 Lanczos\n"
++            "d3d9_filter=3\n"
 +            "savesettings=0\n"
 +            "\n"
 +            "; --- mouse / cursor ---------------------------------------------------------\n"

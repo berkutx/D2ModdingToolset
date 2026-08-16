@@ -99,8 +99,10 @@ The addresses below are the 3.01/R7 reference row; the other eight rows are carr
 All original bytes and call targets are validated before any write; unsupported executables keep
 the stock battle path. The selector mirrors the original table: five `ProductVersion` values and
 nine layouts (including duplicate-version variants distinguished by their exact code probe). The
-user choice is latched when a battle opens and becomes active only when the game's logical
-DirectDraw width is at least 990. RCDATA `10` contains the reviewed `DLG_BATTLE_B` layout and is
+user choice is latched when a battle opens and becomes active only when both the logical DirectDraw
+canvas and the original fixed-screen view computed from `EnableZoom` / `ZoomFactor` are at least
+990 pixels wide. The mirror-aware stock-background correction at `0x6482A8` remains active even when
+the 990-wide dialog is not selected. RCDATA `10` contains the reviewed `DLG_BATTLE_B` layout and is
 prepended once through the selected layout's CRT reader while the startup interface database is
 parsed. The addresses below are the 3.01/R7 reference row; `widebattle.cpp` carries and validates
 the corresponding address in every selected row, plus the distinct V2/V3 object offsets and ABI.

@@ -1,0 +1,52 @@
+diff --git a/src/opengl_utils.c b/src/opengl_utils.c
+index 0a07eb6..ab8dc70 100644
+--- a/src/opengl_utils.c
++++ b/src/opengl_utils.c
+@@ -99,8 +99,12 @@ char g_oglu_version_long[128];
+ 
+ BOOL oglu_load_dll()
+ {
++    BOOL ready;
++    BOOL tried_system = FALSE;
++
++resolve_exports:
+     if (!g_oglu_hmodule)
+         g_oglu_hmodule = real_LoadLibraryA("opengl32.dll");
+ 
+     if (g_oglu_hmodule)
+     {
+@@ -130,10 +134,33 @@ BOOL oglu_load_dll()
+         glVertex2f = (PFNGLVERTEX2FPROC)real_GetProcAddress(g_oglu_hmodule, "glVertex2f");
+     }
+ 
+-    return xwglCreateContext && xwglDeleteContext && xwglGetProcAddress && xwglMakeCurrent && glViewport &&
++    ready = xwglCreateContext && xwglDeleteContext && xwglGetProcAddress && xwglMakeCurrent && glViewport &&
+         glBindTexture && glGenTextures && glTexParameteri && glDeleteTextures && glTexImage2D &&
+         glDrawElements && glTexSubImage2D && glGetError && glGetString && glGetTexImage && glPixelStorei &&
+         glEnable && glClear && glBegin && glEnd && glTexCoord2f && glVertex2f;
++
++    /* Old wrapper/Mesa installations can leave either an unloadable application-local shim or a
++     * DLL that loads but does not expose cnc-ddraw's required WGL/GL entry points.  Windows stops
++     * DLL search at that local candidate.  Keep a complete local Mesa installation, but retry an
++     * incomplete one through the trusted 32-bit system ICD loader by absolute path. */
++    if (!ready && !tried_system)
++    {
++        char system_opengl[MAX_PATH] = { 0 };
++        UINT length = GetSystemDirectoryA(system_opengl, MAX_PATH);
++        static const char suffix[] = "\\opengl32.dll";
++
++        tried_system = TRUE;
++        if (length > 0 && length + sizeof(suffix) <= MAX_PATH)
++        {
++            memcpy(system_opengl + length, suffix, sizeof(suffix));
++            if (g_oglu_hmodule)
++                FreeLibrary(g_oglu_hmodule);
++            g_oglu_hmodule = real_LoadLibraryA(system_opengl);
++            goto resolve_exports;
++        }
++    }
++
++    return ready;
+ }
+ 
+ void oglu_init()

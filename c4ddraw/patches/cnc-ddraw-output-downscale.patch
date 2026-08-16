@@ -1,50 +1,6 @@
-diff --git a/src/dd.c b/src/dd.c
---- a/src/dd.c
-+++ b/src/dd.c
-@@ -772,7 +772,11 @@ HRESULT dd_SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwFl
-         g_config.hotkeys.toggle_fullscreen = 0;
-     }
- 
--    if (!zooming || g_config.fullscreen)
-+    /* A filtered output may be smaller than the logical game canvas.  This is safe only when
-+       window coordinates are mapped back to game coordinates by adjmouse. */
-+    BOOL allow_downscale = g_config.adjmouse &&
-+        g_ddraw.render.width > 0 && g_ddraw.render.height > 0;
-+    if ((!zooming || g_config.fullscreen) && !allow_downscale)
-     {
-         if (g_ddraw.render.width < g_ddraw.width)
-         {
-diff --git a/src/wndproc.c b/src/wndproc.c
---- a/src/wndproc.c
-+++ b/src/wndproc.c
-@@ -397,8 +397,8 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
-                     }
-                 }
- 
--                /* enforce minimum window size */
--                if (CopyRect(&clientrc, windowrc) &&
-+                /* Without mouse remapping, keep the historical logical-size minimum. */
-+                if (!g_config.adjmouse && CopyRect(&clientrc, windowrc) &&
-                     util_unadjust_window_rect(
-                         &clientrc, 
-                         real_GetWindowLongA(hWnd, GWL_STYLE),
-@@ -509,7 +509,8 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
- 
-                         dd_SetDisplayMode(0, 0, 0, 0);
- 
--                        if (width < g_ddraw.width || height < g_ddraw.height)
-+                        if (!g_config.adjmouse &&
-+                            (width < g_ddraw.width || height < g_ddraw.height))
-                         {
-                             /* Can't enforce minimum window size in linux because there is no WM_SIZING and 
-                                WM_GETMINMAXINFO is ignored for whatever reasons */
-@@ -532,7 +533,8 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
- 
-                         dd_SetDisplayMode(0, 0, 0, 0);
- 
--                        if (width < g_ddraw.width || height < g_ddraw.height)
-+                        if (!g_config.adjmouse &&
-+                            (width < g_ddraw.width || height < g_ddraw.height))
-                         {
-                             /* Can't enforce minimum window size in linux because there is no WM_SIZING and
-                                WM_GETMINMAXINFO is ignored for whatever reasons */
+This patch was retired in C4dll-R 1.7.
+
+The wrapper again keeps a normal output/window at least as large as the logical
+game canvas. build.ps1 deliberately does not apply this file; it remains only as
+a tombstone because this workspace's ACL does not permit deleting the tracked
+file in place.

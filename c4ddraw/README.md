@@ -16,16 +16,16 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 | `patches/cnc-ddraw-render-null.patch` | The `render_null` headless backend: `dd.c` renderer branch + vcxproj entries + new `inc/render_null.h`, `src/render_null.c` | yes |
 | `patches/cnc-ddraw-default-ini.patch` | The Disciples II tuned `ddraw.ini` template written by `cfg_create_ini` (`config.c`) when no ini exists on first run | yes |
 | `patches/cnc-ddraw-simple-zoom.patch` | Narrow WndProc + OpenGL/D3D9/GDI integration for wrapper-owned Ctrl+Wheel zoom and address-free editor menu routing | yes |
-| `patches/cnc-ddraw-output-downscale.patch` | Allows filtered output below the logical game canvas only with mouse-coordinate remapping, including manual window resize | yes |
+| `patches/cnc-ddraw-system-opengl-fallback.patch`, `cnc-ddraw-gdi-filter.patch`, `cnc-ddraw-d2-cursor-ownership.patch` | OpenGL/GDI fallbacks and D2-specific single-cursor ownership | yes |
 | `patches/cnc-ddraw-decorative-background.patch`, `features/decorative.cpp`, `features/decor/` | Presentation-only DisciplesGL background and Alternative frame around classic 4:3 screens | yes |
-| `features/featuremenu.cpp` | The in-game menu + feature hooks, self-contained (no mss32 deps) | yes |
+| `features/featuremenu.cpp`, `cursorcapture.cpp`, `fastai.cpp` | The in-game menu, dynamic cursor capture and bounded Fast AI hooks | yes |
 | `features/widebattle.cpp`, `DLG_BATTLE_B.dlg` | Signature-gated Widescreen Battle hooks for the original D2 2.00-3.01 layout table + embedded 990-wide dialog, derived from DisciplesGL under MIT | yes |
 | `features/horplus.cpp` | Signature-gated true Hor+ game-canvas presets reconstructed from the legacy wrapper | yes |
 | `features/clouds.cpp` | Signature-gated loader, archive lookup and update pipeline for an external `Imgs\IsoClouds.ff` | yes |
 | `release/Shaders/` | The eight OpenGL presets exposed by the menu, including their multipass files and retained license headers | yes |
 | `features/rendererbridge.c` | Wrapper-owned adapters to cnc-ddraw internals: live reload, screenshot, coordinate mapping and simple-zoom state/formula | yes |
 | `features/localization.cpp` | Locale/encoding bridge modelled after the legacy wrapper; no hard-coded Russian code pages | yes |
-| `features/savelogic.cpp`, `cursorfix.cpp` | Version-independent save/archive hooks and the Disciples II edge-scroll guard | yes |
+| `features/savelogic.cpp` | Version-independent save/archive hooks | yes |
 | `docs/hook-points.md` | Every MNS/SMNS game address/structure C4dll-R attaches to | yes |
 | `forwarder/C4dll-R.cb63.def` | The 483 CB63 export forwards (`Name=CB63.Name @ord`) | yes |
 | `build.ps1` | Reproducible build + deploy/restore | yes |
@@ -60,11 +60,11 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 ./build.ps1 -Restore        # put the baseline C4dll-R.dll + standalone ddraw.dll back
 ```
 
-`build.ps1` copies the pinned `upstream/cnc-ddraw` submodule to `build/`, applies six focused patches
+`build.ps1` copies the pinned `upstream/cnc-ddraw` submodule to `build/`, applies eight focused patches
 (`cnc-ddraw-c4dll-r` integration + `render-null` + `default-ini` + `simple-zoom` +
-`output-downscale` + `decorative-background`), copies in the
-wrapper-owned feature sources (renderer bridge, menu, Hor+, Widescreen Battle, clouds, plugins,
-locale, saves, cursor guard and headless mode), embeds the reviewed wide-battle dialog and decorative
+`decorative-background` + system-OpenGL/GDI fallbacks + D2 cursor ownership), copies in the
+wrapper-owned feature sources (renderer bridge, menu, Hor+, Widescreen Battle, cursor capture,
+clouds, plugins/timer, Fast AI, locale, saves and headless mode), embeds the reviewed wide-battle dialog and decorative
 resources as RCDATA,
 generates `C4dll-R.def` (the CB63 forwards plus the two exports), retargets the vcxproj
 (`TargetName` + `.def` + the extra source), stamps the version identity (`-Version <ver>`, default
@@ -120,7 +120,7 @@ One binary, three layers:
 | cnc-ddraw core | all upstream `src/*.c`: `dd`, `ddsurface`, `blt`, `config`, renderers `render_ogl` / `render_d3d9` / `render_gdi`, `winapi_hooks`, `wndproc`, `hook`, `fps_limiter`, `utils`, `lodepng` (screenshots), the `IDirectDraw*` / `IDirect3D*` COM shims | the DirectDraw replacement itself |
 | render_null | added by `patches/cnc-ddraw-render-null.patch` | headless backend (`renderer=null`) for test harnesses, no visible output |
 | Microsoft Detours | upstream `src/detours/` | function/IAT hooking used by cnc-ddraw and the feature layer |
-| C4dll-R layer | `features/rendererbridge.c`, `c4features.cpp`, `featuremenu.cpp`, `decorative.cpp`, `horplus.cpp`, `widebattle.cpp`, `clouds.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `localization.cpp`, `savelogic.cpp`, `cursorfix.cpp`, `headless.cpp` | wrapper integration, menu, presentation-only decorative background, true Hor+ game canvas, wide battle, external cloud archive pipeline, plugins, locale conversion, save/archive logic, D2 cursor guard and headless windowing |
+| C4dll-R layer | `features/rendererbridge.c`, `c4features.cpp`, `featuremenu.cpp`, `cursorcapture.cpp`, `fastai.cpp`, `decorative.cpp`, `horplus.cpp`, `widebattle.cpp`, `clouds.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `localization.cpp`, `savelogic.cpp`, `headless.cpp` | wrapper integration, menu, presentation-only decorative background, true Hor+ game canvas, wide battle, external cloud archive pipeline, plugins, locale conversion, save/archive logic, D2 cursor ownership and headless windowing |
 
 Exports: the 483 CodeBase forwards (`name=CB63.name`) plus `DDReloadConfig` (live settings
 reload) and `DDTakeScreenshot`. `Mods\timer.c4p` is built separately from `plugins/timer/` and is
@@ -137,7 +137,7 @@ Three files, three owners:
 | File | Who creates it | What lives there |
 | --- | --- | --- |
 | `ddraw.ini` | shipped in the release zip (recommended defaults); if absent, C4dll-R generates a Disciples II tuned one on first launch (`patches/cnc-ddraw-default-ini.patch`) | renderer, window mode, resolution, shader, performance caps |
-| `C4menu.ini` | generated by the menu on first launch | gameplay toggles: animation speed, attack burst, drag-scroll and unit-hire auto-confirm; the presentation-only `decorativeBackground` toggle (on by default); the retained internal `wideBattle` default/config flag has no menu item in 1.5; plus `language` (auto/en/ru) and `debugLog` (0 = no C4menu-<pid>.log / C4plugins.log files, default; 1 or the `C4DLL_DEBUG` env var enables diagnostics) |
+| `C4menu.ini` | generated by the menu on first launch | gameplay toggles, Fast AI, language and diagnostics; the internal `wideBattle` flag has no menu item in 1.7 |
 | `Disciple.ini` | the game's own/wrapper-compatible file | native `[Disciple] DisplaySize`, `[Settings] IsoBirds` (map-cloud visibility), Hor+ `[Wrapper] GameCanvasMode/Width/Height`, native speed presets, editor `ScenEditDatabase`, `[Wrapper] Locale`, `Archive` and `IncludeSubdirectories` |
 
 Old settings conversion: on first launch (no `C4menu.ini` yet) the menu reads the legacy
@@ -332,8 +332,8 @@ WideBattle in the legacy wrapper was reverse-checked, including its embedded dia
 hook sites. It selects a fixed 990x600 battle layout instead of the stock 800x600 one, keeps both
 unit panels visible, moves the units/controls/background, and fixes side selection and item hit
 areas. It does not choose the game resolution, output size, scaling or strategic-map view. The
-current port intentionally gates it on the **actual game-resolution width >= 990**, never on the
-output/window width. It is enabled by default and latched when the next battle opens; 1.5 exposes
+current port requires both the logical canvas and its effective fixed-screen view to be at least
+990 pixels wide. It is enabled by default and latched when the next battle opens; 1.7 exposes
 no user-facing WideBattle switch.
 
 Map clouds use the real legacy pipeline rather than a renderer effect: when the executable and
@@ -453,7 +453,7 @@ the legacy wrapper. The switch uses no executable or `mss32.dll` addresses; the 
 | (MNS/SMNS) Map clouds | loads and animates the real external `Imgs\IsoClouds.ff` through the legacy allocation/archive/resource pipeline; the menu aliases the game's native visibility option and is unavailable without the validated archive or matching executable signatures | `Disciple.ini` `[Settings] IsoBirds` | full restart |
 
 The 15x entries are test presets, exaggerated on purpose.
-Widescreen Battle is intentionally absent from the 1.5 menu. On a recognized original layout it
+Widescreen Battle is intentionally absent from the 1.7 menu. On a recognized original layout it
 remains enabled by default and selects the fixed 990x600 two-panel dialog when the next battle opens.
 
 ### Video
@@ -575,16 +575,16 @@ C4dll-R.
 | `patches/cnc-ddraw-render-null.patch` | Headless-бэкенд `render_null`: ветка рендерера в `dd.c` + записи vcxproj + новые `inc/render_null.h`, `src/render_null.c` | да |
 | `patches/cnc-ddraw-default-ini.patch` | Настроенный под Disciples II шаблон `ddraw.ini`, который `cfg_create_ini` (`config.c`) пишет при первом запуске, если файла нет | да |
 | `patches/cnc-ddraw-simple-zoom.patch` | Узкая интеграция WndProc и OpenGL/D3D9/GDI для `Ctrl+колесо` и адресно-независимой маршрутизации меню редактора | да |
-| `patches/cnc-ddraw-output-downscale.patch` | Разрешает фильтрованный вывод меньше логического кадра только при пересчёте координат мыши, включая ручной resize окна | да |
+| `patches/cnc-ddraw-system-opengl-fallback.patch`, `cnc-ddraw-gdi-filter.patch`, `cnc-ddraw-d2-cursor-ownership.patch` | Fallback для OpenGL/GDI и единое владение курсором D2 | да |
 | `patches/cnc-ddraw-decorative-background.patch`, `features/decorative.cpp`, `features/decor/` | Фон DisciplesGL и рамка Alternative вокруг классических экранов 4:3, только на этапе вывода | да |
-| `features/featuremenu.cpp` | Внутриигровое меню + хуки фич, самодостаточное (без зависимостей mss32) | да |
+| `features/featuremenu.cpp`, `cursorcapture.cpp`, `fastai.cpp` | Внутриигровое меню, захват динамического курсора и ограниченный Fast AI | да |
 | `features/widebattle.cpp`, `DLG_BATTLE_B.dlg` | Защищённые сигнатурами хуки широкого боя для исходной таблицы D2 2.00-3.01 + встроенная раскладка диалога шириной 990, перенесённые из DisciplesGL по MIT | да |
 | `features/horplus.cpp` | Защищённые сигнатурами пресеты настоящего Hor+ кадра игры, восстановленные по старому враперу | да |
 | `features/clouds.cpp` | Защищённые сигнатурами загрузка, поиск ресурсов и обновление внешнего `Imgs\IsoClouds.ff` | да |
 | `release/Shaders/` | Восемь OpenGL-пресетов из меню, включая multipass-файлы и сохранённые заголовки лицензий | да |
 | `features/rendererbridge.c` | Собственные адаптеры врапера к внутренностям cnc-ddraw: live reload, скриншот, перевод координат, состояние и формула simple zoom | да |
 | `features/localization.cpp` | Мост локали/кодировок по образцу старого врапера, без жёстких русских кодовых страниц | да |
-| `features/savelogic.cpp`, `cursorfix.cpp` | Независимые от версии хуки сейвов/архива и защита edge-scroll для Disciples II | да |
+| `features/savelogic.cpp` | Независимые от версии хуки сейвов/архива | да |
 | `docs/hook-points.md` | Все адреса/структуры MNS/SMNS, к которым цепляется C4dll-R | да |
 | `forwarder/C4dll-R.cb63.def` | 483 форварда экспортов CB63 (`Name=CB63.Name @ord`) | да |
 | `build.ps1` | Воспроизводимая сборка + deploy/restore | да |
@@ -618,11 +618,11 @@ C4dll-R.
 ./build.ps1 -Restore        # вернуть baseline C4dll-R.dll + отдельный ddraw.dll
 ```
 
-`build.ps1` копирует запиненный submodule `upstream/cnc-ddraw` в `build/`, накладывает шесть
+`build.ps1` копирует запиненный submodule `upstream/cnc-ddraw` в `build/`, накладывает восемь
 тематических патчей (`cnc-ddraw-c4dll-r` + `render-null` + `default-ini` + `simple-zoom` +
-`output-downscale` + `decorative-background`) и копирует
-собственные исходники features (renderer bridge, меню, Hor+, широкий бой, облака, плагины,
-локаль, сейвы, cursor guard и headless), встраивает проверенный диалог широкого боя и декоративные
+`decorative-background` + fallback OpenGL/GDI + владение курсором D2) и копирует
+собственные исходники features (renderer bridge, меню, Hor+, широкий бой, захват курсора,
+облака, плагины/таймер, Fast AI, локаль, сейвы и headless), встраивает проверенный диалог широкого боя и декоративные
 ресурсы как RCDATA,
 генерирует `C4dll-R.def` (форварды CB63 плюс два экспорта), перенацеливает vcxproj (`TargetName` +
 `.def` + доп. исходник), зашивает версию (`-Version <ver>`, по умолчанию `dev-<sha репо>`: пишет
@@ -677,7 +677,7 @@ git push origin c4dll-r-v1.0
 | Ядро cnc-ddraw | все апстримные `src/*.c`: `dd`, `ddsurface`, `blt`, `config`, рендереры `render_ogl` / `render_d3d9` / `render_gdi`, `winapi_hooks`, `wndproc`, `hook`, `fps_limiter`, `utils`, `lodepng` (скриншоты), COM-прослойки `IDirectDraw*` / `IDirect3D*` | сама замена DirectDraw |
 | render_null | добавляется `patches/cnc-ddraw-render-null.patch` | headless-бэкенд (`renderer=null`) для тест-харнессов, без видимого вывода |
 | Microsoft Detours | апстримный `src/detours/` | function/IAT-хуки для cnc-ddraw и слоя фич |
-| Слой C4dll-R | `features/rendererbridge.c`, `c4features.cpp`, `featuremenu.cpp`, `decorative.cpp`, `horplus.cpp`, `widebattle.cpp`, `clouds.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `localization.cpp`, `savelogic.cpp`, `cursorfix.cpp`, `headless.cpp` | интеграция врапера, меню, декоративный фон только на этапе вывода, настоящий Hor+ кадр, широкий бой, pipeline внешнего архива облаков, плагины, локаль, сейвы/архив, защита курсора D2 и headless-окна |
+| Слой C4dll-R | `features/rendererbridge.c`, `c4features.cpp`, `featuremenu.cpp`, `cursorcapture.cpp`, `fastai.cpp`, `decorative.cpp`, `horplus.cpp`, `widebattle.cpp`, `clouds.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `localization.cpp`, `savelogic.cpp`, `headless.cpp` | интеграция врапера, меню, декоративный фон только на этапе вывода, настоящий Hor+ кадр, широкий бой, pipeline внешнего архива облаков, плагины, локаль, сейвы/архив, владение курсором D2 и headless-окна |
 
 Экспорты: 483 форварда CodeBase (`name=CB63.name`) плюс `DDReloadConfig` (живое перечтение
 настроек) и `DDTakeScreenshot`. `Mods\timer.c4p` собирается отдельно из `plugins/timer/` и внутрь
@@ -694,7 +694,7 @@ DLL НЕ входит.
 | Файл | Кто создаёт | Что хранит |
 | --- | --- | --- |
 | `ddraw.ini` | лежит в релизном zip (рекомендованные значения); если отсутствует, C4dll-R при первом запуске создаст настроенный под Disciples II (`patches/cnc-ddraw-default-ini.patch`) | рендерер, режим окна, разрешение, шейдер, капы производительности |
-| `C4menu.ini` | создаётся меню при первом запуске | игровые тумблеры: скорости анимаций, attack burst, drag-scroll, облака карты и автоподтверждение найма; тумблер оформления `decorativeBackground` (включён по умолчанию); сохранённый внутренний флаг `wideBattle` не имеет пункта меню в 1.5; плюс `language` (auto/en/ru) и `debugLog` (0 = не писать файлы C4menu-<pid>.log / C4plugins.log, по умолчанию; 1 или env `C4DLL_DEBUG` включает диагностику) |
+| `C4menu.ini` | создаётся меню при первом запуске | игровые тумблеры, Fast AI, язык и диагностика; внутренний флаг `wideBattle` не имеет пункта меню в 1.7 |
 | `Disciple.ini` | собственный/совместимый со старым врапером файл игры | штатный `[Disciple] DisplaySize`, Hor+ `[Wrapper] GameCanvasMode/Width/Height`, родные пресеты скорости, редакторский `ScenEditDatabase`, `[Wrapper] Locale`, `Archive` и `IncludeSubdirectories` |
 
 Конвертация старых настроек: при первом запуске (когда `C4menu.ini` ещё нет) меню читает
@@ -854,9 +854,9 @@ WideBattle старого враппера сверен по его встрое
 фиксированную боевую раскладку 990x600 вместо штатной 800x600, одновременно показывает обе панели
 отрядов, двигает юнитов/кнопки/фон и исправляет выбор стороны мышью и hit-area предметов. Он не
 выбирает разрешение игры, размер вывода, масштабирование или обзор стратегической карты. Текущий порт
-намеренно проверяет **фактическую ширину разрешения игры >= 990**, а не размер окна/вывода. Режим
+требует ширину не менее 990 и у логического кадра, и у эффективного фиксированного вида. Режим
 включён по умолчанию и фиксируется при открытии следующего боя; пользовательского переключателя в
-меню 1.5 нет.
+меню 1.7 нет.
 
 Облака карты используют настоящий legacy-pipeline, а не эффект рендерера: при поддерживаемых exe и
 архиве защищённые сигнатурами хуки расширяют объект-владелец, загружают и индексируют
@@ -974,7 +974,7 @@ override его не отменит. Автосохранение состоян
 | (MNS/SMNS) Облака на карте | загружает и анимирует настоящий внешний `Imgs\IsoClouds.ff` через legacy-pipeline аллокации, архива и ресурсов; пункт меню управляет штатной видимостью и недоступен без валидированного архива или совпавших сигнатур exe | `Disciple.ini` `[Settings] IsoBirds` | полный перезапуск |
 
 Пункты 15x - тестовые пресеты, преувеличены намеренно.
-«Широкий бой» намеренно отсутствует в меню 1.5. На распознанной исходной раскладке он остаётся
+«Широкий бой» намеренно отсутствует в меню 1.7. На распознанной исходной раскладке он остаётся
 включённым по умолчанию и выбирает фиксированный двухпанельный диалог 990x600 при открытии боя.
 
 ### Видео

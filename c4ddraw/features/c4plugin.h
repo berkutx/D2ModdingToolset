@@ -6,6 +6,7 @@
 #ifndef C4PLUGIN_H
 #define C4PLUGIN_H
 
+#include <stddef.h>
 #include <stdint.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -27,6 +28,23 @@ typedef struct C4P_Canvas
     int32_t stride; /* bytes per row */
 } C4P_Canvas;
 
+/* One PvP-timer snapshot. Battle identity/kind/decision/playback fields are generation-consistent;
+ * animation_active is a live sample tied to the same verified viewer and can change without a new
+ * generation. ChooseAction is directed only to the client that must choose; playback_local comes
+ * from the broadcast Result lifecycle. Unknown values must be treated fail-closed. */
+typedef struct C4P_BattleTimerState
+{
+    uint32_t struct_size;       /* sizeof(C4P_BattleTimerState) */
+    uint32_t generation;        /* changes after every published battle transition */
+    uint32_t battle_instance;   /* changes at battle construction/end/reset */
+    int32_t battle_kind;        /* 0 none / 1 PvP / 2 PvE-or-other combat */
+    int32_t local_active;       /* 1 accepted choice is local / 0 remote if known / -1 unknown */
+    int32_t selection_open;     /* 1 while a local action choice is accepted and not submitted */
+    int32_t continuation;       /* sticky mandatory-second-hit phase until the next accepted choice */
+    int32_t animation_active;   /* diagnostic/non-PvP legacy sample; never gates an open PvP choice */
+    int32_t playback_local;     /* current Result playback: 1 local / 0 opponent / -1 none/unknown */
+} C4P_BattleTimerState;
+
 /* Host services, valid for the plugin's lifetime. */
 typedef struct C4P_Host
 {
@@ -45,8 +63,8 @@ typedef struct C4P_Host
     int(__cdecl* get_turn_player)(void);
     int(__cdecl* is_in_game)(void);
 
-    /* Appended after ABI v2, no version bump: callers MUST check struct_size >= sizeof(C4P_Host) before calling.
-     * is_in_battle: 1 while a battle viewer is on screen (Combat Pause). */
+    /* Appended after ABI v2, no version bump: callers MUST check that struct_size reaches the
+     * individual member before calling it. is_in_battle: 1 while a battle viewer is on screen. */
     int(__cdecl* is_in_battle)(void);
 
     /* get_day: current scenario day (CScenarioInfo.currentTurn), or -1 if unavailable. struct_size guard applies. */
@@ -56,8 +74,9 @@ typedef struct C4P_Host
      * turn_active:   1 when local human's turn AND End-Turn button exists.
      * is_animating:  1 while a battle attack animation plays (Animation Pause).
      * battle_kind:   0 none / 1 PvP / 2 any combat (Combat Pause PvP vs PvAny).
-     * turn_player_id: current turn player identity byte, or -1.
-     * retreat/end_day: on-elapse actions - queue the press (host performs it on its idle WM_TIMER); return 1.
+     * turn_player_id: local network player's CMidgardID type index, or -1.
+     * retreat: legacy callback retained for ABI compatibility; new timer builds do not call it.
+     * end_day: queue the press (host performs it on its idle WM_TIMER); return 1.
      * cancel_elapse: discard queued actions when the clock becomes positive or its turn changes.
      * begin_turn_ack_serial: Russobit-only monotonic counter bumped after BTN_OK's normal
      *   DLG_BEGIN_TURN callback finishes; UINT32_MAX means that this executable has no hook. */
@@ -69,7 +88,26 @@ typedef struct C4P_Host
     int(__cdecl* end_day)(void);
     int(__cdecl* cancel_elapse)(void);
     uint32_t(__cdecl* begin_turn_ack_serial)(void);
+
+    /* PvP timer layer, appended after begin_turn_ack_serial (struct_size-guarded):
+     * battle_turn_active: legacy last directed-choice side; it is not a broadcast turn stream.
+     *   New timers must use get_battle_timer_state for exact decision/playback billing.
+     * force_auto_battle: idempotently latches native Auto Battle for the current battle instance;
+     *   the latch is released only by battle end/destruction or a scenario reset. */
+    int(__cdecl* battle_turn_active)(void);
+    int(__cdecl* force_auto_battle)(void);
+
+    /* Atomic battle-timer snapshot, appended for C4dll-R 1.7. New plugins should prefer this over
+     * separately polling battle_kind/battle_turn_active/is_animating. Returns 1 on success. */
+    int(__cdecl* get_battle_timer_state)(C4P_BattleTimerState* out);
 } C4P_Host;
+
+#if defined(__cplusplus) && defined(_WIN32) && !defined(_WIN64)
+static_assert(sizeof(C4P_BattleTimerState) == 36, "C4P battle snapshot ABI drift");
+static_assert(offsetof(C4P_Host, get_battle_timer_state) == 84,
+              "C4P host callback offset drift");
+static_assert(sizeof(C4P_Host) == 88, "C4P host ABI drift");
+#endif
 
 /* Plugin self-report, queried before init. */
 typedef struct C4P_Info

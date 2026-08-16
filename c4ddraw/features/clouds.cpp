@@ -833,14 +833,24 @@ bool persistDesired(LONG desired)
                                       g_gameIniPath) != FALSE;
 }
 
-LONG readNativeDesired()
+LONG readNativeDesired(bool* present = nullptr)
 {
+    if (present)
+        *present = false;
     if (!g_gameIniPath[0])
         return 0;
-    return GetPrivateProfileIntA("Settings", "IsoBirds", 0, g_gameIniPath) != 0 ? 1 : 0;
+
+    char raw[16] = {};
+    GetPrivateProfileStringA("Settings", "IsoBirds", "\x01", raw,
+                             static_cast<DWORD>(sizeof(raw)), g_gameIniPath);
+    if (raw[0] == '\x01' && raw[1] == 0)
+        return 0;
+    if (present)
+        *present = true;
+    return std::atoi(raw) != 0 ? 1 : 0;
 }
 
-LONG migrateLegacyDesired(LONG nativeDesired)
+LONG migrateLegacyDesired(LONG nativeDesired, bool nativeSettingPresent)
 {
     // A short-lived local diagnostic build wrote this key to the wrong section. Reconcile it
     // before the public migration so the test installation repairs itself on the next launch.
@@ -849,7 +859,7 @@ LONG migrateLegacyDesired(LONG nativeDesired)
         GetPrivateProfileStringA("Disciple", "IsoBirds", "", misplaced,
                                  static_cast<DWORD>(sizeof(misplaced)), g_gameIniPath)) {
         bool reconciled = true;
-        if (std::atoi(misplaced) != 0 && !nativeDesired) {
+        if (!nativeSettingPresent && std::atoi(misplaced) != 0 && !nativeDesired) {
             reconciled = persistDesired(1);
             if (reconciled)
                 nativeDesired = 1;
@@ -870,7 +880,7 @@ LONG migrateLegacyDesired(LONG nativeDesired)
     // explicit ON needs carrying forward: a generated/default OFF must not overwrite the
     // game's own option. Once reconciled, remove the duplicate key permanently.
     bool reconciled = true;
-    if (std::atoi(legacy) != 0 && !nativeDesired) {
+    if (!nativeSettingPresent && std::atoi(legacy) != 0 && !nativeDesired) {
         reconciled = persistDesired(1);
         if (reconciled)
             nativeDesired = 1;
@@ -889,15 +899,25 @@ extern "C" void clouds_install(void)
     pathNextToExe(g_assetPath, sizeof(g_assetPath), "Imgs\\IsoClouds.ff");
 
     InterlockedExchange(&g_assetPresent, reviewedAssetPresent(g_assetPath) ? 1 : 0);
-    const LONG desired = migrateLegacyDesired(readNativeDesired());
+    const bool supported = signaturesMatch();
+    if (supported)
+        InterlockedExchange(&g_supported, 1);
+
+    bool nativeSettingPresent = false;
+    LONG nativeDesired = readNativeDesired(&nativeSettingPresent);
+    // Clouds are ON by default only when this build can really provide them. Preserve every
+    // explicit native IsoBirds=0 opt-out, and avoid creating a checked-but-unusable setting on an
+    // unsupported executable or without the reviewed archive.
+    if (!nativeSettingPresent && supported && g_assetPresent && persistDesired(1))
+        nativeDesired = 1;
+    const LONG desired = migrateLegacyDesired(nativeDesired, nativeSettingPresent);
     InterlockedExchange(&g_desired, desired);
     InterlockedExchange(&g_startupVisible, desired);
 
-    if (!signaturesMatch()) {
+    if (!supported) {
         OutputDebugStringA("C4dll-R: cloud hooks unavailable for this Discipl2.exe build\n");
         return;
     }
-    InterlockedExchange(&g_supported, 1);
 
     if (!g_assetPresent) {
         OutputDebugStringA("C4dll-R: Imgs\\IsoClouds.ff is missing; cloud pipeline disabled\n");

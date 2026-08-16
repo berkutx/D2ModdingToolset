@@ -6,24 +6,467 @@
  */
 
 #include <windows.h>
+#include <ctype.h>
 #include <intrin.h>
 #include <stdlib.h>
+#include <string.h>
 
 #pragma intrinsic(_ReturnAddress)
 
 #include "config.h"
 #include "dd.h"
 #include "debug.h"
+#include "ddsurface.h"
+#include "hook.h"
 #include "mouse.h"
+#include "opengl_utils.h"
+#include "render_d3d9.h"
+#include "render_gdi.h"
+#include "render_null.h"
+#include "render_ogl.h"
 #include "screenshot.h"
 #include "utils.h"
+#include "versionhelpers.h"
 
 extern const void* DDGetDecoratedSurface(
     const void* source, int width, int height, int pitch, int bpp, int rgb555);
 
+/* Read by the D2-only winapi_hooks patch. Generic cnc-ddraw users retain upstream semantics. */
+volatile LONG g_c4_d2_cursor_ownership;
+
+/*
+ * Physical Win32 bridge for featuremenu.cpp.  cnc-ddraw's legacy hook=2 mode detours the
+ * user32 entry points process-wide, so calling GetCursorPos/SetCursor/etc. by their import names
+ * from our own code can recurse into fake_* just like a game call.  hook.c preserves the original
+ * entry points in real_*; keep all wrapper-owned cursor/focus decisions on those functions.
+ */
+HCURSOR DDSetPhysicalCursor(HCURSOR cursor)
+{
+    return real_SetCursor(cursor);
+}
+
+BOOL DDGetPhysicalCursorPos(POINT* point)
+{
+    return real_GetCursorPos(point);
+}
+
+BOOL DDPhysicalScreenToClient(HWND hwnd, POINT* point)
+{
+    return real_ScreenToClient(hwnd, point);
+}
+
+BOOL DDGetPhysicalClientRect(HWND hwnd, RECT* rect)
+{
+    return real_GetClientRect(hwnd, rect);
+}
+
+HWND DDGetPhysicalForegroundWindow(void)
+{
+    return real_GetForegroundWindow();
+}
+
+HWND DDPhysicalWindowFromPoint(POINT point)
+{
+    return real_WindowFromPoint(point);
+}
+
+static unsigned dd_cursor_mask_shift(DWORD mask)
+{
+    unsigned shift = 0;
+    while (mask && !(mask & 1u))
+    {
+        mask >>= 1u;
+        ++shift;
+    }
+    return shift;
+}
+
+static unsigned dd_cursor_expand_channel(DWORD pixel, DWORD mask)
+{
+    const unsigned shift = dd_cursor_mask_shift(mask);
+    const DWORD maximum = mask >> shift;
+    const DWORD value = (pixel & mask) >> shift;
+    return maximum ? (unsigned)((value * 255u + maximum / 2u) / maximum) : 0u;
+}
+
+/*
+ * Copy one already-decoded cursor tile without calling IDirectDrawSurface7::Lock. The public Lock
+ * path runs util_pull_messages(), which may dispatch a teardown message re-entrantly while the
+ * game's CCursorImpl and renderer vtable are on the stack. This helper accepts only surfaces owned
+ * by this embedded cnc-ddraw instance and reads their stable backing buffer directly.
+ */
+int DDSnapshotCursorSurfaceArgb(void* surface7,
+                                int source_x,
+                                int source_y,
+                                int width,
+                                int height,
+                                DWORD* destination,
+                                DWORD capacity,
+                                int* any_opaque)
+{
+    IDirectDrawSurfaceImpl* surface = (IDirectDrawSurfaceImpl*)surface7;
+    BOOL referenced = FALSE;
+    BOOL locked = FALSE;
+    int success = 0;
+
+    if (any_opaque)
+        *any_opaque = 0;
+    if (!surface || !destination || !any_opaque || source_x < 0 || source_y < 0 ||
+        width <= 0 || height <= 0 ||
+        (ULONGLONG)(unsigned)width * (ULONGLONG)(unsigned)height > capacity)
+        return 0;
+
+    __try
+    {
+        __try
+        {
+            DWORD bits;
+            DWORD bytes_per_pixel;
+            DWORD surface_width;
+            DWORD surface_height;
+            DWORD pitch;
+            DWORD red_mask;
+            DWORD green_mask;
+            DWORD blue_mask;
+            DWORD pixel_mask;
+            DWORD colour_low;
+            DWORD colour_high;
+            const BYTE* buffer;
+            int y;
+
+            if (surface->lpVtbl != &g_dds_vtbl)
+                __leave;
+
+            g_dds_vtbl.AddRef(surface);
+            referenced = TRUE;
+            if (g_config.lock_surfaces)
+            {
+                EnterCriticalSection(&surface->cs);
+                locked = TRUE;
+            }
+
+            bits = surface->bpp;
+            bytes_per_pixel = surface->bytes_pp;
+            surface_width = surface->width;
+            surface_height = surface->height;
+            pitch = surface->pitch;
+            if ((bits != 16 && bits != 32) || bytes_per_pixel != bits / 8u ||
+                !surface_width || !surface_height ||
+                !(surface->flags & DDSD_CKSRCBLT) ||
+                (ULONGLONG)(unsigned)source_x + (unsigned)width > surface_width ||
+                (ULONGLONG)(unsigned)source_y + (unsigned)height > surface_height ||
+                (ULONGLONG)pitch < (ULONGLONG)surface_width * bytes_per_pixel ||
+                (ULONGLONG)pitch * surface_height > surface->size)
+                __leave;
+
+            buffer = (const BYTE*)dds_GetBuffer(surface);
+            if (!buffer)
+                __leave;
+
+            if (bits == 16)
+            {
+                red_mask = g_config.rgb555 ? 0x7C00u : 0xF800u;
+                green_mask = g_config.rgb555 ? 0x03E0u : 0x07E0u;
+                blue_mask = 0x001Fu;
+                pixel_mask = 0x0000FFFFu;
+            }
+            else
+            {
+                red_mask = 0x00FF0000u;
+                green_mask = 0x0000FF00u;
+                blue_mask = 0x000000FFu;
+                pixel_mask = 0x00FFFFFFu;
+            }
+            colour_low = surface->color_key.dwColorSpaceLowValue & pixel_mask;
+            colour_high = surface->color_key.dwColorSpaceHighValue & pixel_mask;
+
+            for (y = 0; y < height; ++y)
+            {
+                const BYTE* source = buffer +
+                    (SIZE_T)(source_y + y) * pitch +
+                    (SIZE_T)source_x * bytes_per_pixel;
+                int x;
+                for (x = 0; x < width; ++x)
+                {
+                    DWORD raw = 0;
+                    DWORD output = 0;
+                    memcpy(&raw, source + (SIZE_T)x * bytes_per_pixel,
+                           bytes_per_pixel);
+                    raw &= pixel_mask;
+                    if (!(raw >= colour_low && raw <= colour_high))
+                    {
+                        const unsigned red = dd_cursor_expand_channel(raw, red_mask);
+                        const unsigned green = dd_cursor_expand_channel(raw, green_mask);
+                        const unsigned blue = dd_cursor_expand_channel(raw, blue_mask);
+                        output = 0xFF000000u | (red << 16u) | (green << 8u) | blue;
+                        *any_opaque = 1;
+                    }
+                    destination[(SIZE_T)y * width + x] = output;
+                }
+            }
+            success = 1;
+        }
+        __finally
+        {
+            if (locked)
+                LeaveCriticalSection(&surface->cs);
+            if (referenced)
+                g_dds_vtbl.Release(surface);
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        success = 0;
+    }
+    return success;
+}
+
 int DDGetDisplayMode(void);
 static BOOL dd_prepare_normal_window_output(RECT* saved_rect);
 static void dd_restore_output_request(const RECT* saved_rect);
+
+typedef DWORD (WINAPI *DDRendererProc)(void);
+static volatile LONG g_renderer_switch_error;
+static volatile LONG g_d3d9_available = -1;
+
+static BOOL dd_compat_forces_d3d9on12(void)
+{
+    char compatibility[1024] = {0};
+    char* context = NULL;
+    char* token;
+
+    if (!GetEnvironmentVariableA(
+            "__COMPAT_LAYER", compatibility, sizeof(compatibility)))
+        return FALSE;
+
+    token = strtok_s(compatibility, " ", &context);
+    while (token)
+    {
+        if (_strcmpi(token, "Win7RTM") == 0)
+            return TRUE;
+        token = strtok_s(NULL, " ", &context);
+    }
+    return FALSE;
+}
+
+/*
+ * The upstream renderer choice is normally latched in dd_CreateEx().  A menu reload already
+ * restarts the presentation thread, so a backend change only needs the missing middle step:
+ * release the stopped backend and select the new function pointer before dd_SetDisplayMode().
+ */
+static DDRendererProc dd_resolve_renderer(BOOL* unavailable)
+{
+    if (unavailable)
+        *unavailable = FALSE;
+
+    /* These two are derived values in dd_CreateEx(), not independent live settings. */
+    g_config.d3d9on12 = dd_compat_forces_d3d9on12();
+    g_config.opengl_core = FALSE;
+    if (_strcmpi(g_config.renderer, "direct3d9on12") == 0)
+        g_config.d3d9on12 = TRUE;
+    else if (_strcmpi(g_config.renderer, "openglcore") == 0)
+        g_config.opengl_core = TRUE;
+
+    if (tolower((unsigned char)g_config.renderer[0]) == 'd')
+        return d3d9_render_main;
+    if (tolower((unsigned char)g_config.renderer[0]) == 's' ||
+        tolower((unsigned char)g_config.renderer[0]) == 'g')
+        return gdi_render_main;
+    if (tolower((unsigned char)g_config.renderer[0]) == 'o')
+    {
+        if (oglu_load_dll())
+            return ogl_render_main;
+        if (unavailable)
+            *unavailable = TRUE;
+        InterlockedExchange(&g_renderer_switch_error, 10);
+        return gdi_render_main;
+    }
+    if (tolower((unsigned char)g_config.renderer[0]) == 'n')
+        return null_render_main;
+
+    /* auto: keep the exact startup preference order. */
+    if (!IsWine())
+    {
+        LONG available;
+        if (g_ddraw.renderer == d3d9_render_main)
+            available = TRUE;
+        else
+        {
+            available = InterlockedExchangeAdd(&g_d3d9_available, 0);
+            if (available < 0)
+            {
+                available = d3d9_is_available() ? TRUE : FALSE;
+                InterlockedExchange(&g_d3d9_available, available);
+            }
+        }
+        if (available)
+            return d3d9_render_main;
+    }
+    if (oglu_load_dll())
+        return ogl_render_main;
+    if (unavailable)
+        *unavailable = TRUE;
+    InterlockedExchange(&g_renderer_switch_error, 11);
+    return gdi_render_main;
+}
+
+static BOOL dd_try_set_opengl_pixel_format(BYTE color_bits)
+{
+    PIXELFORMATDESCRIPTOR pfd;
+    int format;
+
+    memset(&pfd, 0, sizeof(pfd));
+    pfd.nSize = sizeof(pfd);
+    pfd.nVersion = 1;
+    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_DOUBLEBUFFER | PFD_SUPPORT_OPENGL;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = color_bits;
+    pfd.iLayerType = PFD_MAIN_PLANE;
+
+    format = ChoosePixelFormat(g_ddraw.render.hdc, &pfd);
+    if (!format)
+    {
+        InterlockedExchange(
+            &g_renderer_switch_error, 2000 + (LONG)GetLastError());
+        return FALSE;
+    }
+    if (!SetPixelFormat(g_ddraw.render.hdc, format, &pfd))
+    {
+        InterlockedExchange(
+            &g_renderer_switch_error, 3000 + (LONG)GetLastError());
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL dd_prepare_opengl_pixel_format(void)
+{
+    PIXELFORMATDESCRIPTOR pfd;
+    int format;
+    BYTE mode_bits;
+
+    if (!g_ddraw.render.hdc)
+    {
+        InterlockedExchange(&g_renderer_switch_error, 1);
+        return FALSE;
+    }
+
+    memset(&pfd, 0, sizeof(pfd));
+    pfd.nSize = sizeof(pfd);
+    format = GetPixelFormat(g_ddraw.render.hdc);
+    if (format)
+    {
+        if (!DescribePixelFormat(
+                g_ddraw.render.hdc, format, sizeof(pfd), &pfd))
+        {
+            InterlockedExchange(
+                &g_renderer_switch_error, 4000 + (LONG)GetLastError());
+            return FALSE;
+        }
+        if ((pfd.dwFlags & (PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL |
+                           PFD_DOUBLEBUFFER)) ==
+            (PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER))
+            return TRUE;
+
+        InterlockedExchange(&g_renderer_switch_error, 2);
+        return FALSE;
+    }
+
+    mode_bits =
+        (BYTE)(g_ddraw.mode.dmBitsPerPel ? g_ddraw.mode.dmBitsPerPel : 32);
+    if (dd_try_set_opengl_pixel_format(mode_bits))
+        return TRUE;
+    if (mode_bits != 32 && dd_try_set_opengl_pixel_format(32))
+        return TRUE;
+
+    /* A renderer that never used its cached DC may leave a replaceable common DC behind.  Reacquire
+     * once before giving up; CS_OWNDC windows simply return the same stable handle. */
+    ReleaseDC(g_ddraw.hwnd, g_ddraw.render.hdc);
+    g_ddraw.render.hdc = GetDC(g_ddraw.hwnd);
+    if (!g_ddraw.render.hdc)
+    {
+        InterlockedExchange(
+            &g_renderer_switch_error, 5000 + (LONG)GetLastError());
+        return FALSE;
+    }
+
+    format = GetPixelFormat(g_ddraw.render.hdc);
+    if (format)
+        return dd_prepare_opengl_pixel_format();
+    return dd_try_set_opengl_pixel_format(32);
+}
+
+/* Called only after dd_RestoreDisplayMode() has joined the old renderer thread. */
+static BOOL dd_switch_renderer(DDRendererProc old_renderer,
+                               DDRendererProc* requested_renderer)
+{
+    BOOL unavailable = FALSE;
+    DDRendererProc selected;
+
+    InterlockedExchange(&g_renderer_switch_error, 0);
+    selected = dd_resolve_renderer(&unavailable);
+
+    if (requested_renderer)
+        *requested_renderer = selected;
+
+    /* The menu never exposes null.  Refuse a hand-edited null transition because its window and
+     * headless lifecycle is intentionally startup-only. */
+    if (old_renderer == null_render_main || selected == null_render_main)
+        return old_renderer == selected;
+
+    if (unavailable)
+    {
+        g_ddraw.show_driver_warning = TRUE;
+        return FALSE;
+    }
+
+    if (selected == ogl_render_main && !dd_prepare_opengl_pixel_format())
+    {
+        g_ddraw.show_driver_warning = TRUE;
+        return FALSE;
+    }
+
+    /* A renderer command is a full backend recreation even when the function pointer is unchanged:
+     * openglcore/opengl and direct3d9on12/direct3d9 share pointers but not device configuration.
+     * Releasing both also cleans a stale GL context left by upstream's asynchronous GDI fallback. */
+    ogl_release();
+    d3d9_release();
+
+    g_ddraw.renderer = selected;
+    return TRUE;
+}
+
+int DDGetRendererSwitchError(void)
+{
+    return (int)InterlockedExchangeAdd(&g_renderer_switch_error, 0);
+}
+
+/* 0 OpenGL, 1 GDI, 2 Direct3D 9, 3 null/headless, -1 not initialized/unknown. */
+int DDGetActiveRenderer(void)
+{
+    if (!g_ddraw.ref || !g_ddraw.renderer)
+        return -1;
+    if (g_ddraw.renderer == ogl_render_main)
+        return 0;
+    if (g_ddraw.renderer == gdi_render_main)
+        return 1;
+    if (g_ddraw.renderer == d3d9_render_main)
+        return 2;
+    if (g_ddraw.renderer == null_render_main)
+        return 3;
+    return -1;
+}
+
+/* Effective portable filter after D3D9 has had a chance to downgrade unsupported Lanczos. */
+int DDGetActivePortableFilter(void)
+{
+    int filter;
+    const int renderer = DDGetActiveRenderer();
+    if (renderer != 1 && renderer != 2)
+        return -1;
+    filter = g_config.d3d9_filter;
+    return filter >= 0 && filter <= 3 ? filter : -1;
+}
 
 /*
  * Keep cnc-ddraw's live fake desktop geometry aligned with a validated Hor+
@@ -97,7 +540,7 @@ int DDHandleSimpleZoom(HWND hwnd, WPARAM wParam, LPARAM lParam)
             zoom = 8000;
 
         POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
-        ScreenToClient(hwnd, &pt);
+        real_ScreenToClient(hwnd, &pt);
         {
             const LONG viewport_x =
                 g_ddraw.child_window_exists ? 0 : g_ddraw.render.viewport.x;
@@ -185,16 +628,22 @@ void DDApplySimpleZoomViewport(int bottom_origin, int* x, int* y, int* width, in
     *height = (int)(base_h * zoom);
 }
 
-static void dd_reload_config(
+static BOOL dd_reload_config(
     BOOL preserve_output_size,
     BOOL preserve_display_mode,
-    BOOL clear_pending_display_mode)
+    BOOL clear_pending_display_mode,
+    BOOL renderer_changed)
 {
+    DDRendererProc old_renderer;
+    DDRendererProc requested_renderer = NULL;
+    BOOL renderer_switch_ok = TRUE;
+
     TRACE("%s [%p]\n", __FUNCTION__, _ReturnAddress());
 
     if (!g_ddraw.ref || !g_ddraw.hwnd || !g_ddraw.width)
-        return;
+        return FALSE;
 
+    old_renderer = g_ddraw.renderer;
     LONG saved_left = g_config.window_rect.left;
     LONG saved_top = g_config.window_rect.top;
     LONG saved_width = g_config.window_rect.right;
@@ -204,7 +653,19 @@ static void dd_reload_config(
     BOOL saved_toggle_borderless = g_config.toggle_borderless;
     BOOL saved_toggle_upscaled = g_config.toggle_upscaled;
     BOOL saved_singlecpu = g_config.singlecpu;
+
+    /* Use the old backend/config while returning an exclusive device to the desktop and joining
+     * its render thread.  Ordinary shader/viewport reloads keep the existing upstream path. */
+    if (renderer_changed)
+        dd_RestoreDisplayMode();
+
     cfg_load();
+    /* Cursor ownership depends on unlocked absolute coordinates, but it is deliberately not
+     * persisted as a user setting.  A live menu reload re-reads ddraw.ini and could otherwise
+     * restore legacy devmode=false mid-process, resurrecting cnc-ddraw's synthetic-centre and
+     * inactive-mouse suppression branches immediately after any Video menu change. */
+    if (InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) != 0)
+        g_config.devmode = TRUE;
     /* singlecpu is startup-latched. A later live renderer reload must not expose its pending
      * next-start value to DLL_THREAD_ATTACH while existing threads retain the startup policy. */
     g_config.singlecpu = saved_singlecpu;
@@ -234,6 +695,19 @@ static void dd_reload_config(
         g_config.upscaled_state = -1;
     }
 
+    if (renderer_changed)
+    {
+        renderer_switch_ok =
+            dd_switch_renderer(old_renderer, &requested_renderer);
+        if (!renderer_switch_ok)
+        {
+            /* Preflight failed before old resources were released.  Keep the working backend and
+             * restart its stopped thread; the requested INI value remains saved for next launch. */
+            g_ddraw.renderer = old_renderer;
+            requested_renderer = old_renderer;
+        }
+    }
+
     /*
      * C4dll-R owns its normal-window menu. Migrated/custom cnc-ddraw configs may contain
      * remove_menu=true; letting dd_SetDisplayMode consume our freshly attached bar would create an
@@ -243,6 +717,9 @@ static void dd_reload_config(
     g_config.remove_menu = FALSE;
     dd_SetDisplayMode(0, 0, 0, 0);
     g_config.remove_menu = saved_remove_menu;
+
+    if (renderer_changed && g_ddraw.renderer != requested_renderer)
+        renderer_switch_ok = FALSE;
 
     if (g_mouse_locked)
     {
@@ -254,11 +731,13 @@ static void dd_reload_config(
     if (g_ddraw.render.sem)
         ReleaseSemaphore(g_ddraw.render.sem, 1, NULL);
     RedrawWindow(g_ddraw.hwnd, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_UPDATENOW);
+
+    return renderer_switch_ok;
 }
 
 void DDReloadConfig(void)
 {
-    dd_reload_config(FALSE, FALSE, FALSE);
+    dd_reload_config(FALSE, FALSE, FALSE, FALSE);
 }
 
 /*
@@ -267,12 +746,15 @@ void DDReloadConfig(void)
  * preserving a manual resize; every other choice preserves both. Explicit mode selection also
  * supersedes pending window_state/upscaled_state left by an earlier F4/Alt+Enter.
  */
-void DDReloadConfigForMenu(int output_size_changed, int display_mode_changed)
+int DDReloadConfigForMenu(int output_size_changed,
+                          int display_mode_changed,
+                          int renderer_changed)
 {
-    dd_reload_config(
+    return dd_reload_config(
         output_size_changed ? FALSE : TRUE,
         display_mode_changed ? FALSE : TRUE,
-        display_mode_changed ? TRUE : FALSE);
+        display_mode_changed ? TRUE : FALSE,
+        renderer_changed ? TRUE : FALSE);
 }
 
 /*
@@ -452,6 +934,46 @@ int DDWriteConfigString(const char* key, const char* value)
 }
 
 /*
+ * Enable the single-owner cursor model only after featuremenu has validated the exact MNS/SMNS
+ * executable. DisciplesGL's model assumes unlocked, absolute pointer coordinates. Pin devmode for
+ * this process only: cursor ownership is an implementation detail, not a user setting, and must not
+ * rewrite an existing ddraw.ini merely because the validated runtime path became available.
+ */
+void DDEnableD2CursorOwnership(void)
+{
+    int count;
+
+    if (!g_config.devmode)
+        g_config.devmode = TRUE;
+
+    /* Repair at most once any negative Win32 show-count left by an earlier hook/DLL. Region changes
+     * are handle-only after this point, so there is no recurring counter-balancing algorithm. */
+    count = real_ShowCursor(TRUE);
+    if (count > 0)
+    {
+        real_ShowCursor(FALSE);
+    }
+    else
+    {
+        while (count < 0)
+            count = real_ShowCursor(TRUE);
+    }
+
+    InterlockedExchange(&g_c4_d2_cursor_ownership, 1);
+}
+
+/*
+ * A startup migration may repair width/height after cfg_load() but before DirectDraw is created.
+ * Mirror the completed transactional write into memory so cfg_save() cannot resurrect the stale
+ * pair at process exit. Normal live menu changes still use cfg_load through DDReloadConfigForMenu.
+ */
+void DDSetOutputConfigMemory(int width, int height)
+{
+    g_config.window_rect.right = width;
+    g_config.window_rect.bottom = height;
+}
+
+/*
  * Fullscreen modes replace cnc-ddraw's live render geometry with the monitor dimensions.  On the
  * return trip a width=0/height=0 configuration can therefore inherit that fullscreen geometry
  * instead of becoming a visibly smaller normal window.  Keep the last real normal-window client
@@ -464,6 +986,8 @@ int DDWriteConfigString(const char* key, const char* value)
  */
 static LONG g_last_normal_output_width;
 static LONG g_last_normal_output_height;
+static WINDOWPLACEMENT g_last_normal_window_placement;
+static volatile LONG g_restore_normal_placement_pending;
 
 static LONG dd_read_config_long(const char* key, LONG fallback)
 {
@@ -591,6 +1115,28 @@ static void dd_restore_output_request(const RECT* saved_rect)
         g_config.window_rect = *saved_rect;
 }
 
+/* Capture the whole Win32 placement, not merely the client size. Every recognized F4/Alt+Enter
+ * transition is routed through the C4-owned toggle below, so the snapshot is taken only on the
+ * normal-to-fullscreen edge and cannot be overwritten by the following key-up. */
+void DDCaptureNormalWindowPlacement(void)
+{
+    WINDOWPLACEMENT placement;
+
+    if (DDGetDisplayMode() != 0 || !g_ddraw.hwnd)
+        return;
+
+    ZeroMemory(&placement, sizeof(placement));
+    placement.length = sizeof(placement);
+    if (real_GetWindowPlacement(g_ddraw.hwnd, &placement))
+        g_last_normal_window_placement = placement;
+
+    if (g_ddraw.render.width > 0 && g_ddraw.render.height > 0)
+    {
+        g_last_normal_output_width = (LONG)g_ddraw.render.width;
+        g_last_normal_output_height = (LONG)g_ddraw.render.height;
+    }
+}
+
 /*
  * F4 is owned by C4dll-R so it also works with an existing ddraw.ini that predates the hotkey.
  * Remember which kind of fullscreen was left, but always make the return trip a real normal
@@ -613,11 +1159,7 @@ void DDToggleWindowedMode(void)
 
     if (mode == 0)
     {
-        if (g_ddraw.render.width > 0 && g_ddraw.render.height > 0)
-        {
-            g_last_normal_output_width = (LONG)g_ddraw.render.width;
-            g_last_normal_output_height = (LONG)g_ddraw.render.height;
-        }
+        DDCaptureNormalWindowPlacement();
         if (InterlockedExchangeAdd(&last_fullscreen_mode, 0) == 2)
         {
             g_config.fullscreen = FALSE;
@@ -656,6 +1198,9 @@ void DDToggleWindowedMode(void)
      */
     {
         const int after = DDGetDisplayMode();
+        if (mode != 0 && after == 0 &&
+            g_last_normal_window_placement.length == sizeof(WINDOWPLACEMENT))
+            InterlockedExchange(&g_restore_normal_placement_pending, 1);
         if (after == 1)
             g_config.toggle_borderless = TRUE;
         else if (after == 2)
@@ -663,6 +1208,28 @@ void DDToggleWindowedMode(void)
         else
             g_config.toggle_borderless = saved_toggle_borderless;
     }
+}
+
+/*
+ * DisciplesGL restores the exact WINDOWPLACEMENT saved before fullscreen. C4dll-R first lets
+ * cnc-ddraw rebuild the normal client and lets featuremenu reattach its menu; only then can the
+ * original outer placement be restored without subtracting the menu height from the game image.
+ */
+void DDCompleteWindowedModeToggle(void)
+{
+    WINDOWPLACEMENT placement;
+
+    if (InterlockedExchange(&g_restore_normal_placement_pending, 0) == 0 ||
+        DDGetDisplayMode() != 0 || !g_ddraw.hwnd)
+        return;
+
+    placement = g_last_normal_window_placement;
+    if (placement.length != sizeof(WINDOWPLACEMENT))
+        return;
+
+    real_SetWindowPlacement(g_ddraw.hwnd, &placement);
+    RedrawWindow(g_ddraw.hwnd, NULL, NULL,
+                 RDW_FRAME | RDW_ERASE | RDW_INVALIDATE | RDW_UPDATENOW);
 }
 
 /*

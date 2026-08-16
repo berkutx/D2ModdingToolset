@@ -1,0 +1,21 @@
+diff --git a/src/render_gdi.c b/src/render_gdi.c
+index 0cf1004..03105df 100644
+--- a/src/render_gdi.c
++++ b/src/render_gdi.c
+@@ -42,7 +42,16 @@ DWORD WINAPI gdi_render_main(void)
+     Sleep(500);
+ 
+     fpsl_init();
++
++    /* Keep the shared Filter menu useful when OpenGL is unavailable.  GDI has no programmable
++     * Lanczos/cubic pipeline, but HALFTONE is a materially better fallback than the default
++     * COLORONCOLOR pixel replication for every non-nearest filter choice. */
++    SetStretchBltMode(
++        g_ddraw.render.hdc,
++        g_config.d3d9_filter == FILTER_NEAREST ? COLORONCOLOR : HALFTONE);
++    if (g_config.d3d9_filter != FILTER_NEAREST)
++        SetBrushOrgEx(g_ddraw.render.hdc, 0, 0, NULL);
+ 
+     DWORD timeout = g_config.minfps > 0 ? g_ddraw.minfps_tick_len : INFINITE;
+ 
+     while (g_ddraw.render.run &&

@@ -137,6 +137,9 @@ extern "C" int timerhost_retreat(void);
 extern "C" int timerhost_end_day(void);
 extern "C" int timerhost_cancel_elapse(void);
 extern "C" uint32_t timerhost_begin_turn_ack_serial(void);
+extern "C" int timerhost_battle_turn_active(void);
+extern "C" int timerhost_force_auto_battle(void);
+extern "C" int timerhost_get_battle_timer_state(C4P_BattleTimerState* out);
 
 volatile LONG g_turnSerial = 0; // bumped on every detected turn change (including a skip)
 volatile LONG g_turnPlayer = -1; // current turn player index, -1 if unknown / not in a game (cross-thread)
@@ -200,6 +203,12 @@ uint32_t __cdecl host_begin_turn_ack_serial(void)
 {
     return timerhost_begin_turn_ack_serial();
 }
+int __cdecl host_battle_turn_active(void) { return timerhost_battle_turn_active(); }
+int __cdecl host_force_auto_battle(void) { return timerhost_force_auto_battle(); }
+int __cdecl host_get_battle_timer_state(C4P_BattleTimerState* out)
+{
+    return timerhost_get_battle_timer_state(out);
+}
 
 C4P_Host g_host = {sizeof(C4P_Host),     host_get_hwnd,        host_invalidate,
                    host_get_config_int,  host_set_config_int,  host_config_path_cb,
@@ -207,7 +216,9 @@ C4P_Host g_host = {sizeof(C4P_Host),     host_get_hwnd,        host_invalidate,
                    host_is_in_battle,    host_get_day,
                    host_turn_active,     host_is_animating,    host_battle_kind,
                    host_turn_player_id,  host_retreat,         host_end_day,
-                   host_cancel_elapse,   host_begin_turn_ack_serial};
+                   host_cancel_elapse,   host_begin_turn_ack_serial,
+                   host_battle_turn_active, host_force_auto_battle,
+                   host_get_battle_timer_state};
 
 // plugin records
 using C4pQuery = int(__cdecl*)(C4P_Info*);
@@ -448,7 +459,6 @@ DWORD WINAPI overlayWorker(LPVOID)
     plog("[plugins] overlay window up; compositing %d plugin(s)", g_pluginCount);
 
     bool announced = false;
-    int topmostState = -1; // -1 unknown, 0 normal band, 1 topmost band
     for (;;) {
         MSG msg;
         while (PeekMessageA(&msg, g_overlayWnd, 0, 0, PM_REMOVE)) {
@@ -498,28 +508,13 @@ DWORD WINAPI overlayWorker(LPVOID)
                     }
                 }
 
-                // A tracked native popup menu must always win over plugin pixels. Windows creates
-                // that popup above the active game's existing topmost windows; keep moving the
-                // overlay with the client but do not reassert its z-order while menu tracking is
-                // active. The timer therefore remains visible where the menu does not cover it.
-                if (InterlockedCompareExchange(&g_menuLoopActive, 0, 0) != 0) {
-                    SetWindowPos(g_overlayWnd, nullptr, tl.x, tl.y, 0, 0,
-                                 SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
-                } else {
-                    // Promote only when the game window itself owns the foreground. A dialog from
-                    // the same process is a different HWND and must remain above the timer. Once a
-                    // band is selected, move the overlay without reasserting z-order every 33 ms;
-                    // otherwise a popup created later can be pulled back underneath it.
-                    const int wantTopmost = GetForegroundWindow() == game ? 1 : 0;
-                    UINT flags = SWP_NOSIZE | SWP_NOACTIVATE;
-                    HWND z = wantTopmost ? HWND_TOPMOST : HWND_NOTOPMOST;
-                    if (topmostState == wantTopmost) {
-                        flags |= SWP_NOZORDER;
-                        z = nullptr;
-                    }
-                    SetWindowPos(g_overlayWnd, z, tl.x, tl.y, 0, 0, flags);
-                    topmostState = wantTopmost;
-                }
+                // The overlay is an owned popup, so Windows already keeps it directly above the
+                // game and below unrelated applications. Never promote it into the TOPMOST band:
+                // doing that to an owned window can drag its owner (observed on the host instance)
+                // above every other application even after the game loses focus. Native popup menus
+                // also remain above this NOACTIVATE/transparent owned window without z-order churn.
+                SetWindowPos(g_overlayWnd, nullptr, tl.x, tl.y, 0, 0,
+                             SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
             }
         }
         Sleep(33);
@@ -533,6 +528,25 @@ DWORD WINAPI overlayWorker(LPVOID)
 extern "C" void pluginhost_menu_loop(int active)
 {
     InterlockedExchange(&g_menuLoopActive, active ? 1 : 0);
+}
+
+// Fast AI is meaningful only in the process that owns CMidServer.  Keep that decision in the
+// already SEH-guarded server accessor instead of inferring it from window titles, MP role labels,
+// or the mere presence of ThreadWindowClass (all of which proved too broad for mixed host/client
+// test runs).  g_hasServer is the lock-free fast path maintained by the plugin worker; the lazy
+// probe makes the predicate independent of whether any overlay plugin happened to be loaded.
+extern "C" int pluginhost_has_server(void)
+{
+    if (InterlockedCompareExchange(&g_hasServer, 0, 0) != 0)
+        return 1;
+
+    int inGame = 0;
+    if (featuremenu_server_player(&inGame) >= 0 && inGame) {
+        g_inGame = 1;
+        InterlockedExchange(&g_hasServer, 1);
+        return 1;
+    }
+    return 0;
 }
 
 // Called from cnc-ddraw's DllMain (after embed + featuremenu). Starts the overlay worker; zero cost

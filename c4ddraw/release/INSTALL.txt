@@ -27,20 +27,21 @@ INSTALL
   5. Copy Mods\timer.c4p into the game's Mods\ folder.
   6. (Optional) Copy C4plugins.ini next to Discipl2.exe to configure the timer.
   7. (Optional) Keep an existing Imgs\IsoClouds.ff from a DisciplesGL install
-     if you want to enable Game > Map clouds. The archive is not redistributed
+     if you want to use Game > Show map clouds. The archive is not redistributed
      in this package. The required 30393-byte file has SHA-256:
      962F334E1CFA3226AF27B953AF0F6EBA6C1F82EF708A948C0D4C2A76FF804EE6
      If it is absent or its exact hash differs, clouds cannot be enabled. An
      already-requested invalid setting remains clickable only so it can be
-     switched OFF. Clouds default to OFF and require a full game restart.
+     switched OFF. If [Settings] IsoBirds is absent, the native default is ON;
+     an explicit IsoBirds=0 remains OFF. A change requires a full game restart.
   8. If the game folder contains a standalone ddraw.dll from another wrapper,
      rename or remove it. A clean installation normally has no such file; if it
      is absent, do nothing.
   9. Launch the game.
 
   Note: without ddraw.ini the renderer generates its tuned first-run config:
-  a bordered window with the menu, OpenGL, automatic output following the game
-  resolution, and game speed cap 100. The bundled ddraw.ini additionally enables
+  a bordered window with the menu, OpenGL, a normal window following the selected
+  game resolution, and game speed cap 100. The bundled ddraw.ini additionally enables
   resizing and remembers window size/position, so copying it remains the intended setup.
 
 USING IT
@@ -49,10 +50,12 @@ USING IT
     The menu bar is intentionally hidden in borderless and exclusive
     fullscreen. F4 switches either fullscreen mode back to a normal window
     (and returns to the last fullscreen kind); Alt+Enter is also available.
-  - Video > Decorative background around classic screens is ON by default when
-    a widescreen game resolution is active. It decorates fixed-size screens
-    inside that game canvas. In a stock native resolution the item is gray;
-    separate output letter/pillar bars are renderer space and remain black.
+  - On a validated widescreen game resolution, the decorative background/frame
+    around fixed-size screens is always active and has no menu switch. An obsolete
+    decorativeBackground value in C4menu.ini is ignored and removed on startup.
+  - Game > (MNS/SMNS) Auto-confirm unit hire is ON by default only for the
+    signature-validated Russobit/MNS executable. Explicit settings in an existing
+    C4menu.ini remain authoritative.
   - If the game randomly crashes or freezes on any map, enable
     Performance > 1 CPU stability (restart). It is ON by default; changing it
     requires a full game restart.
@@ -61,35 +64,42 @@ USING IT
      map drag-scroll (ON by default; exact button-down anchor, movement starts on
      the first changed game pixel; native edge-scroll remains available),
      plus Battle speed / Map turn speed (engine presets, saved per game) and
-     restart-only Map clouds (the game's native option; requires external IsoClouds.ff).
-  - Video > Resolution is one popup. Automatic resolution is the main choice;
-    the three `★` stock modes and ten validated widescreen game-view modes
-    (1066x600 through 2560x1440) are in two short manual submenus. Auto uses the
-    usable work area in a normal window and the full monitor in fullscreen, then
-    selects the largest fitting canvas. The shader handles fractional scaling.
-    A regular game-resolution choice also returns output to follow the game
-    canvas and needs a full restart; manual choices remain authoritative.
+     restart-only Show map clouds (the game's native option; requires external IsoClouds.ff).
+  - Video > Resolution is one direct list. Auto is first; all 13 manual game
+    resolutions follow in the same list. `★` marks the three native modes
+    (800x600, 1024x768 and 1280x1024); the other ten are validated Hor+ canvases
+    from 1066x600 through 2560x1440. Auto selects the largest fitting canvas.
+    Its status and restart notice show only the current and after-restart sizes,
+    not a theoretical available area or scale. Every choice returns normal output
+    to follow the game canvas and needs a full restart.
+  - Native 1024x768 and 1280x1024 do not stretch fixed 800x600 menus. The game
+    centres them and draws its own GrBorder/ShowInterfBorder surround inside the
+    game canvas. Hor+ decoration is a separate wrapper-owned compositor.
   - Video > Scaling controls Fit, Integer and Stretch and shows the actual
     output, coefficient, viewport and bars. `1:1` means one game pixel equals one
-    output pixel. A resizable window may be smaller than the game canvas: the
-    renderer filters it down and remaps the mouse. Borderless fullscreen always
-    adapts to the desktop.
-  - Resolution > Advanced output... sets the saved output/window target. Automatic stores
-    `0x0` and follows the game resolution in a normal window; a custom width of
-    320–8192 and height of 240–8192 apply immediately and are saved to the
-    effective ddraw.ini section. This does not change the game canvas. Borderless
-    always uses the desktop. If mouse remapping was disabled by hand, the current
-    game canvas becomes the minimum safe custom size.
+    output pixel. A normal window cannot be smaller than the logical game canvas;
+    stale undersized width/height pairs are repaired to `0x0` (follow the game).
+    Borderless fullscreen always adapts to the desktop.
+  - There is no separate output-resolution item in the game menu. Old or manually
+    edited ddraw.ini width/height values remain supported for compatibility; a
+    game-resolution choice resets them to `0x0` (follow the game). The Scenario
+    Editor may retain its Window size command because it has no game-canvas list.
+    Borderless always uses the desktop.
   - `fake_mode=1024x768x16` is only an internal virtual 16-bit compatibility
     bootstrap. It is not the game resolution, output size or scaling mode; the
     widescreen startup fix adjusts process-local geometry without rewriting it.
   - Widescreen Battle is automatic and ON by default on a recognized original
-    layout; there is no menu switch in 1.5. It selects a fixed 990-wide
-    battle layout and shows both unit panels when the game resolution is at
-    least 990 pixels wide; it does not select or replace the game resolution.
+    layout; there is no menu switch in 1.7. It selects a fixed 990-wide
+    battle layout and shows both unit panels when both the logical canvas and
+    effective fixed-screen view are at least 990 pixels wide. Thus default
+    1024x768/1280x1024 zoom stays 800-wide, while Hor+ is 990-wide; it does not
+    select or replace the game resolution.
   - The turn timer is configured in C4plugins.ini, section [Timer]. The bundled
     PvP defaults use a 5-minute Force countdown, pause for battle animations and
-    player-vs-player combat, then end the turn without retreat. Hold Ctrl+Alt
+    player-vs-player combat, then end the turn without retreat. With Combat Pause
+    off, an accepted local choice is always billed; opponent phases are never billed.
+    Local attack playback is billed only when Animation Pause is off. Mandatory
+    second-target selection is a new billed choice. Hold Ctrl+Alt
     and drag the clock with LMB to reposition it. On the exact Russobit/MNS
     layout the countdown starts only after you accept the normal begin-turn
     summary with OK; time does not run under that dialog. A running Force clock
@@ -100,8 +110,8 @@ UNINSTALL / REVERT
   - Restore your backed-up C4dll-R.dll and remove Mods\timer.c4p.
 
 This package is independent of the mss32 mod and is versioned separately.
-It is distributed under GPL-3.0; see LICENSE. Matching source for 1.5 is at
-https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.5
+It is distributed under GPL-3.0; see LICENSE. Matching source for 1.7 is at
+https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.7
 
 ================================================================================
  C4dll-R  -  самодостаточный DirectDraw-врапер для Disciples II
@@ -133,20 +143,21 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.5
   6. (Необязательно) Скопируйте C4plugins.ini рядом с Discipl2.exe для настройки
      таймера.
   7. (Необязательно) Сохраните имеющийся Imgs\IsoClouds.ff от установки
-     DisciplesGL, если хотите включить «Game > Облака на карте». Этот архив не
+     DisciplesGL, если хотите использовать «Игра > Показывать облака». Этот архив не
      распространяется в комплекте. SHA-256 нужного файла размером 30393 байта:
      962F334E1CFA3226AF27B953AF0F6EBA6C1F82EF708A948C0D4C2A76FF804EE6
      Если файла нет или точный хеш отличается, включить облака нельзя. Уже
      запрошенная ошибочная настройка остаётся доступной только для выключения.
-     По умолчанию облака выключены; их смена требует полного перезапуска игры.
+     Если [Settings] IsoBirds отсутствует, штатное значение по умолчанию — включено;
+     явный IsoBirds=0 остаётся выключенным. Смена требует полного перезапуска игры.
   8. Если в папке игры есть отдельный ddraw.dll от другого врапера, переименуйте
      или удалите его. В чистой установке такого файла обычно нет; если его нет,
      ничего делать не нужно.
   9. Запустите игру.
 
   Примечание: без ddraw.ini рендерер при первом запуске создаст свой настроенный
-  конфиг: окно с рамкой и меню, OpenGL, автоматическое следование вывода
-  разрешению игры и кап скорости игры 100. Комплектный ddraw.ini дополнительно
+  конфиг: окно с рамкой и меню, OpenGL, обычное окно следует выбранному разрешению
+  игры, кап скорости игры — 100. Комплектный ddraw.ini дополнительно
   разрешает менять размер окна и запоминает его размер/позицию, поэтому его
   копирование остаётся задуманным вариантом.
 
@@ -156,10 +167,12 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.5
     В безрамочном и эксклюзивном полном экране меню-бар намеренно скрыт. F4
     возвращает из обоих режимов в обычное окно (и обратно в последний вид
     полного экрана); также доступен Alt+Enter.
-  - «Видео > Декоративный фон вокруг классических экранов» включён по умолчанию
-    при активном широком разрешении игры и оформляет фиксированные экраны внутри
-    этого кадра. В штатном разрешении пункт серый; отдельные поля вывода
-    принадлежат рендереру и остаются чёрными.
+  - На проверенном широком разрешении декоративный фон/рамка вокруг фиксированных
+    экранов всегда активен и не имеет пункта меню. Устаревшее значение
+    decorativeBackground в C4menu.ini игнорируется и удаляется при запуске.
+  - «Игра > (MNS/SMNS) Автоподтверждение найма» включено по умолчанию только
+    для exe Russobit/MNS с совпавшими сигнатурами. Явные значения существующего
+    C4menu.ini сохраняются.
   - Если игра случайно вылетает или зависает на любой карте, включите
     Производительность > 1 CPU: стабильность (рестарт). По умолчанию режим уже
     включён; после изменения полностью перезапустите игру.
@@ -167,36 +180,43 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.5
      (живое ускорение x1.5..x5),
      перетаскивание карты (включено по умолчанию; точка нажатия сохраняется без
      стартового рывка, штатный краевой скролл остаётся), а также Battle speed / Map turn speed (пресеты движка,
-     хранятся в сейве), и restart-only «Облака на карте» (штатная опция игры;
+     хранятся в сейве), и restart-only «Показывать облака» (штатная опция игры;
      нужен внешний IsoClouds.ff).
-  - Видео > Разрешение — один popup. Основной выбор — «Автоматическое
-     разрешение»; три штатных режима со `★` и десять проверенных широких
-     (1066x600–2560x1440) находятся в двух коротких ручных подменю. В обычном
-     окне авто использует область без рамки, меню и панели задач, в fullscreen —
-     весь монитор, затем выбирает самый крупный помещающийся кадр. Дробный
-     масштаб обрабатывает шейдер. Обычный выбор также снова привязывает вывод к
-     игровому кадру и требует полного перезапуска; ручной выбор сохраняется.
+  - Видео > Разрешение — один прямой список. Сначала идёт «Авто», затем все 13
+     ручных разрешений игры. `★` отмечает три штатных режима (800x600, 1024x768 и
+     1280x1024), остальные десять — проверенные Hor+ от 1066x600 до 2560x1440.
+     Авто выбирает самый крупный помещающийся кадр. Его строка и сообщение о
+     перезапуске показывают только текущий и будущий размеры, без теоретической
+     доступной области и коэффициента. Каждый выбор снова привязывает вывод к
+     игровому кадру и требует полного перезапуска.
+  - Штатные 1024x768 и 1280x1024 не растягивают фиксированные меню 800x600. Игра
+     центрирует их и рисует собственный GrBorder/ShowInterfBorder внутри игрового
+     кадра. Декор Hor+ — отдельный композитор враппера.
   - Видео > Масштаб содержит «Вписать», «Целые» и «Растянуть» и показывает
      фактический вывод, коэффициент, viewport и поля. `1:1` означает один игровой
-     пиксель на один выходной. Окно разрешено уменьшать ниже кадра: рендерер
-     фильтрует картинку и пересчитывает мышь. Безрамочный полный экран всегда
-     адаптируется к рабочему столу.
-  - Разрешение > Доп. вывод... задаёт сохраняемый размер окна/вывода. «Автоматически»
-     сохраняет `0×0` и в обычном окне следует разрешению игры; пользовательская
-     ширина 320–8192 и высота 240–8192 применяются сразу и записываются в
-     эффективную секцию ddraw.ini. Игровой кадр от этого не меняется. Безрамочный
-     режим всегда берёт рабочий стол. Если пересчёт мыши был вручную выключен,
-     текущий игровой кадр становится минимальным безопасным размером.
+     пиксель на один выходной. Обычное окно не может быть меньше логического кадра;
+     старые меньшие width/height исправляются на `0x0` (следовать игре). Безрамочный
+     полный экран всегда адаптируется к рабочему столу.
+  - Отдельного разрешения вывода в игровом меню нет. Старые или вручную заданные
+     ddraw.ini width/height поддерживаются для совместимости; выбор разрешения игры
+     сбрасывает их в `0x0` (следовать игре). Редактор сценариев может сохранять
+     команду «Размер окна», потому что списка игровых кадров у него нет.
+     Безрамочный режим всегда берёт рабочий стол.
   - `fake_mode=1024x768x16` — только внутренний виртуальный 16-битный bootstrap
      совместимости. Это не разрешение игры, вывод или режим масштаба; исправление
      широкого запуска меняет process-local геометрию без перезаписи значения.
   - «Широкий бой» включается автоматически и по умолчанию на распознанной
-     исходной раскладке; отдельного пункта меню в 1.5 нет. Он выбирает
+     исходной раскладке; отдельного пункта меню в 1.7 нет. Он выбирает
      фиксированную боевую раскладку шириной 990 и показывает обе панели при
-     разрешении игры не уже 990; само разрешение игры она не выбирает и не заменяет.
+     логическом кадре и эффективном фиксированном виде не уже 990. Поэтому
+     штатные 1024x768/1280x1024 с обычным zoom остаются 800-wide, а Hor+ —
+     990-wide; само разрешение игры этот режим не выбирает и не заменяет.
   - Таймер хода настраивается в C4plugins.ini, секция [Timer]. Комплектные PvP-
     настройки включают принудительный отсчёт 5 минут, паузу на анимациях и в бою
-    игрок-против-игрока, затем завершают ход без retreat. Для перемещения часов
+    игрок-против-игрока, затем завершают ход без retreat. При выключенном Combat Pause
+    принятый локальный выбор всегда расходует банк, чужие фазы — никогда. Собственная
+    анимация учитывается только при выключенном Animation Pause, а обязательная вторая
+    цель открывает новый оплачиваемый выбор. Для перемещения часов
     зажмите Ctrl+Alt и перетащите их ЛКМ. На точной Russobit/MNS-раскладке
     отсчёт начинается только после штатного OK в сводке начала хода: под диалогом
     время не уходит. Уже запущенный Force вручную на паузу не ставится, а Set
@@ -206,5 +226,5 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.5
   - Верните сохранённый C4dll-R.dll и удалите Mods\timer.c4p.
 
 Пакет независим от мода mss32 и версионируется отдельно. Лицензия — GPL-3.0,
-см. LICENSE. Соответствующие исходники 1.5:
-https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.5
+см. LICENSE. Соответствующие исходники 1.7:
+https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.7

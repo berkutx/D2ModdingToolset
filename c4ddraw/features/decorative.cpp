@@ -24,7 +24,11 @@ extern "C" {
 
 extern "C" int horplus_get_decor_layout(int* contentWidth, int* contentHeight,
                                          int* wideBattle);
+extern "C" int horplus_is_available(void);
 extern "C" void DDInvalidateDecorativeFrame(void);
+extern "C" int cursorcapture_replay(
+    void* destination, int width, int height, int pitch, int bpp, int rgb555,
+    int contentLeft, int contentTop, int contentWidth, int contentHeight);
 
 namespace {
 
@@ -40,7 +44,6 @@ struct Image
 };
 
 SRWLOCK g_lock = SRWLOCK_INIT;
-volatile LONG g_enabled = 1;
 bool g_loadAttempted = false;
 bool g_assetsReady = false;
 Image g_back = {};
@@ -297,16 +300,22 @@ void buildBaseLocked(int width, int height, int pitch, int bpp,
 
 extern "C" void decorative_install(void)
 {
-    InterlockedExchange(
-        &g_enabled,
-        GetPrivateProfileIntA("menu", "decorativeBackground", 1, menuIni())
-            ? 1
-            : 0);
+    // Decoration is part of the supported Hor+ presentation contract, not a
+    // user preference.  Remove the obsolete switch so an old
+    // decorativeBackground=0 cannot bring back unpainted (black) margins.
+    // This migration is best-effort; the key is ignored even if the INI is
+    // read-only.
+    const char* ini = menuIni();
+    if (horplus_is_available() &&
+        GetFileAttributesA(ini) != INVALID_FILE_ATTRIBUTES) {
+        WritePrivateProfileStringA("menu", "decorativeBackground", nullptr,
+                                   ini);
+    }
 }
 
 extern "C" int decorative_get_enabled(void)
 {
-    return InterlockedExchangeAdd(&g_enabled, 0) != 0;
+    return 1;
 }
 
 extern "C" int decorative_is_available(void)
@@ -319,11 +328,9 @@ extern "C" int decorative_is_available(void)
 
 extern "C" int decorative_set_enabled(int enabled)
 {
-    const char* value = enabled ? "1" : "0";
-    if (!WritePrivateProfileStringA(
-            "menu", "decorativeBackground", value, menuIni()))
-        return 0;
-    InterlockedExchange(&g_enabled, enabled ? 1 : 0);
+    // Retain this internal ABI for older in-tree callers, but deliberately
+    // ignore attempts to disable the mandatory compositor.
+    (void)enabled;
     DDInvalidateDecorativeFrame();
     return 1;
 }
@@ -331,8 +338,7 @@ extern "C" int decorative_set_enabled(int enabled)
 extern "C" const void* DDGetDecoratedSurface(
     const void* source, int width, int height, int pitch, int bpp, int rgb555)
 {
-    if (!source || InterlockedExchangeAdd(&g_enabled, 0) == 0 ||
-        width <= 0 || height <= 0 || pitch <= 0 ||
+    if (!source || width <= 0 || height <= 0 || pitch <= 0 ||
         (bpp != 16 && bpp != 32))
         return source;
 
@@ -382,6 +388,14 @@ extern "C" const void* DDGetDecoratedSurface(
         src += pitch;
         dst += pitch;
     }
+
+    // The 16-bit primary has no coverage/alpha plane, so copying its margins would also copy stale
+    // black pixels and effects over the frame.  cursorcapture observes only the exact native
+    // CCursorImpl DrawTexture operations on the game thread and publishes owned colour-keyed
+    // fragments. Replaying just those fragments outside the centered screen preserves the same
+    // context-sensitive/animated D2 cursor across the whole decorated viewport.
+    cursorcapture_replay(g_present, width, height, pitch, bpp, rgb555,
+                         left, top, contentWidth, contentHeight);
 
     const void* result = g_present;
     ReleaseSRWLockExclusive(&g_lock);

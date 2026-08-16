@@ -1,0 +1,210 @@
+--- a/src/winapi_hooks.c
++++ b/src/winapi_hooks.c
+@@ -1,5 +1,6 @@
+ #include <windows.h>
+ #include <windowsx.h>
++#include <intrin.h>
+ #include <math.h>
+ #include <vfw.h>
+ #include "debug.h"
+@@ -23,6 +24,10 @@
+ #include "directinput.h"
+ #include "ddpalette.h"
+ #include "palette.h"
++
++extern volatile LONG g_c4_d2_cursor_ownership;
++static __declspec(thread) BOOL g_c4_synthetic_mouse_pending;
++static __declspec(thread) DWORD g_c4_synthetic_mouse_lparam;
+ 
+ 
+ BOOL WINAPI fake_GetCursorPos(LPPOINT lpPoint)
+@@ -40,2 +45,3 @@ BOOL WINAPI fake_GetCursorPos(LPPOINT lpPoint)
+-    if ((g_mouse_locked || g_config.devmode || g_ddraw.bnet_active) && 
++    if ((InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) != 0 ||
++         g_mouse_locked || g_config.devmode || g_ddraw.bnet_active) &&
+         (!g_config.windowed || real_ScreenToClient(g_ddraw.hwnd, &pt)))
+@@ -55,5 +60,6 @@ BOOL WINAPI fake_GetCursorPos(LPPOINT lpPoint)
+         if (g_config.vhack && 
+             !g_ddraw.isworms2 && 
++            InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) == 0 &&
+             !g_config.devmode && 
+             !g_ddraw.bnet_active && 
+             InterlockedExchangeAdd(&g_ddraw.upscale_hack_active, 0))
+@@ -147,5 +152,10 @@ int WINAPI fake_ShowCursor(BOOL bShow)
+ int WINAPI fake_ShowCursor(BOOL bShow)
+ {
++    /* Exact DisciplesGL rule for the validated D2 layout: game calls update virtual state only
++     * and never mutate Win32's per-thread show-count. */
++    if (InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) != 0)
++        return bShow ? 1 : -1;
++
+     if (g_ddraw.ref && g_ddraw.hwnd)
+     {
+         if (g_mouse_locked || g_config.devmode)
+@@ -168,5 +178,11 @@ HCURSOR WINAPI fake_SetCursor(HCURSOR hCursor)
+ HCURSOR WINAPI fake_SetCursor(HCURSOR hCursor)
+ {
++    /* WM_SETCURSOR is the sole visual owner. Preserve D2's requested game cursor for the
++     * decorative frame without letting an asynchronous game call create a second HW layer. */
++    if (InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) != 0)
++        return (HCURSOR)InterlockedExchange(
++            (LONG*)&g_ddraw.old_cursor, (LONG)hCursor);
++
+     if (g_ddraw.ref && g_ddraw.hwnd)
+     {
+         HCURSOR cursor = (HCURSOR)InterlockedExchange((LONG*)&g_ddraw.old_cursor, (LONG)hCursor);
+@@ -255,7 +271,17 @@ BOOL WINAPI fake_SetCursorPos(int X, int Y)
+ BOOL WINAPI fake_SetCursorPos(int X, int Y)
+ {
++    /* D2's sole SetCursorPos call is immediately paired with a synthetic WM_MOUSEMOVE. Under
++     * wrapper ownership neither half may move the real pointer or the software cursor. */
++    if (InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) != 0)
++    {
++        g_c4_synthetic_mouse_pending =
++            (ULONG_PTR)_ReturnAddress() == 0x00562B64u;
++        g_c4_synthetic_mouse_lparam = (DWORD)MAKELPARAM(X, Y);
++        return TRUE;
++    }
++
+     if (!g_ddraw.ref || !g_ddraw.hwnd || !g_ddraw.width)
+         return real_SetCursorPos(X, Y);
+ 
+     if (!g_mouse_locked && !g_config.devmode)
+         return TRUE;
+@@ -415,6 +440,19 @@ LRESULT WINAPI fake_SendMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lPa
+ LRESULT WINAPI fake_SendMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
+ {
++    if (InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) != 0 &&
++        g_c4_synthetic_mouse_pending)
++    {
++        const BOOL swallow =
++            (ULONG_PTR)_ReturnAddress() == 0x00562B8Au &&
++            Msg == WM_MOUSEMOVE &&
++            (!g_ddraw.hwnd || hWnd == g_ddraw.hwnd) &&
++            (DWORD)lParam == g_c4_synthetic_mouse_lparam;
++        g_c4_synthetic_mouse_pending = FALSE;
++        if (swallow)
++            return 0;
++    }
++
+     if (!g_ddraw.ref || !g_ddraw.hwnd)
+         return real_SendMessageA(hWnd, Msg, wParam, lParam);
+ 
+     if (g_ddraw.hwnd == hWnd && Msg == WM_MOUSEMOVE)
+@@ -661,7 +699,8 @@ static void HandleMessage(LPMSG lpMsg, UINT wRemoveMsg, UINT wMsgFilterMin, UINT
+         case WM_RBUTTONUP:
+         case WM_MBUTTONUP:
+         {
+-            if (!g_config.devmode && !g_mouse_locked && (wRemoveMsg & PM_REMOVE))
++            if (InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) == 0 &&
++                !g_config.devmode && !g_mouse_locked && (wRemoveMsg & PM_REMOVE))
+             {
+                 int x = GET_X_LPARAM(lpMsg->lParam);
+                 int y = GET_Y_LPARAM(lpMsg->lParam);
+@@ -709,7 +748,8 @@ static void HandleMessage(LPMSG lpMsg, UINT wRemoveMsg, UINT wMsgFilterMin, UINT
+         case WM_MBUTTONDOWN:
+         case WM_MOUSEMOVE:
+         {
+-            if (!g_config.devmode && !g_mouse_locked)
++            if (InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) == 0 &&
++                !g_config.devmode && !g_mouse_locked)
+             {
+                 if (!wMsgFilterMin &&
+                     !wMsgFilterMax &&
+@@ -732,7 +772,8 @@ static void HandleMessage(LPMSG lpMsg, UINT wRemoveMsg, UINT wMsgFilterMin, UINT
+ 
+             if (g_config.adjmouse)
+             {
+-                if (g_config.vhack && !g_config.devmode)
++                if (g_config.vhack && !g_config.devmode &&
++                    InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) == 0)
+                 {
+                     POINT pt = { 0, 0 };
+                     fake_GetCursorPos(&pt);
+--- a/src/mouse.c
++++ b/src/mouse.c
+@@ -4,7 +4,9 @@
+ #include "hook.h"
+ #include "utils.h"
+ #include "config.h"
++
++extern volatile LONG g_c4_d2_cursor_ownership;
+ 
+ 
+ BOOL g_mouse_locked;
+ HHOOK g_mouse_hook;
+@@ -14,5 +16,8 @@ HOOKPROC g_mouse_proc;
+ void mouse_lock()
+ {
++    if (InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) != 0)
++        return;
++
+     if (g_config.devmode || g_ddraw.bnet_active || !g_ddraw.hwnd)
+         return;
+ 
+@@ -56,6 +61,16 @@ void mouse_lock()
+ void mouse_unlock()
+ {
++    if (InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) != 0)
++    {
++        if (InterlockedExchange((LONG*)&g_mouse_locked, FALSE))
++        {
++            real_ClipCursor(NULL);
++            ReleaseCapture();
++        }
++        return;
++    }
++
+     if (g_config.devmode || !g_hook_active || !g_ddraw.hwnd)
+         return;
+ 
+     if (g_mouse_locked)
+--- a/src/wndproc.c
++++ b/src/wndproc.c
+@@ -1,4 +1,6 @@
+ #include <windows.h>
+ #include <windowsx.h>
+ #include <math.h>
++
++extern volatile LONG g_c4_d2_cursor_ownership;
+ #include "dllmain.h"
+@@ -883,7 +885,8 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
+     case WM_RBUTTONUP:
+     case WM_MBUTTONUP:
+     {
+-        if (!g_config.devmode && !g_mouse_locked)
++        if (InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) == 0 &&
++            !g_config.devmode && !g_mouse_locked)
+         {
+             int x = GET_X_LPARAM(lParam);
+             int y = GET_Y_LPARAM(lParam);
+@@ -927,7 +930,8 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
+     case WM_MBUTTONDOWN:
+     case WM_MOUSEMOVE:
+     {
+-        if (!g_config.devmode && !g_mouse_locked)
++        if (InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) == 0 &&
++            !g_config.devmode && !g_mouse_locked)
+         {
+             return 0;
+         }
+@@ -944,7 +948,8 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
+ 
+         if (g_config.adjmouse)
+         {
+-            if (g_config.vhack && !g_config.devmode)
++            if (g_config.vhack && !g_config.devmode &&
++                InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) == 0)
+             {
+                 POINT pt = { 0, 0 };
+                 fake_GetCursorPos(&pt);
+@@ -981,7 +986,8 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
+         case WM_RBUTTONDOWN:
+         case WM_XBUTTONDOWN:
+         {
+-            if (!g_config.devmode && !g_mouse_locked)
++            if (InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) == 0 &&
++                !g_config.devmode && !g_mouse_locked)
+             {
+                 int x = GET_X_LPARAM(lParam);
+                 int y = GET_Y_LPARAM(lParam);

@@ -43,7 +43,8 @@
 #include <limits>
 
 extern "C" int DDGetGameWidth(void);
-extern "C" int horplus_is_active(void);
+extern "C" int horplus_get_battle_view_width(void);
+extern "C" void featuremenu_debug_log_line(const char* line);
 
 namespace {
 
@@ -609,10 +610,22 @@ char* __stdcall localStreamReadHook(char* buffer, int maxCount, FILE* stream)
 
 void __stdcall calculateWideBattle()
 {
+    const int canvasWidth = DDGetGameWidth();
+    const int battleViewWidth = horplus_get_battle_view_width();
     const bool active = InterlockedExchangeAdd(&g_wideAvailable, 0) &&
                         InterlockedExchangeAdd(&g_wideAllowed, 0) &&
-                        DDGetGameWidth() >= 990;
+                        canvasWidth >= 990 &&
+                        battleViewWidth >= 990;
     InterlockedExchange(&g_wideActive, active ? 1 : 0);
+
+    char line[192] = {};
+    wsprintfA(line,
+              "[widebattle] latch canvas=%d fixedView=%d available=%d enabled=%d active=%d dialog=%s",
+              canvasWidth, battleViewWidth,
+              InterlockedExchangeAdd(&g_wideAvailable, 0) != 0 ? 1 : 0,
+              InterlockedExchangeAdd(&g_wideAllowed, 0) != 0 ? 1 : 0,
+              active ? 1 : 0, active ? "DLG_BATTLE_B" : "DLG_BATTLE_A");
+    featuremenu_debug_log_line(line);
 }
 
 void __stdcall centerUnitsHook(DWORD* object)
@@ -931,23 +944,11 @@ void __declspec(naked) centerBackgroundHook()
         retn
 
     non_wide:
-        // This hook is installed even when WideBattle is disabled.  The
-        // legacy centering formula below belongs to a custom game canvas;
-        // preserve the game's original `sub esi,[eax]; mov [ebp-8],esi`
-        // behavior for an ordinary native DisplaySize canvas.
-        push ecx
-        push edx
-        call horplus_is_active
-        pop edx
-        pop ecx
-        test eax, eax
-        jnz custom_canvas
-
-        pop eax
-        mov [ebp-8], esi
-        retn
-
-    custom_canvas:
+        // DisciplesGL installs this centering correction independently of
+        // WideBattle and uses it on the stock 800x600 canvas too. preparePlans
+        // has already NOPed the native orientation branch, so falling back to
+        // only `sub esi,[eax]` here would force the mirrored/right-aligned
+        // offset onto both views (800-950=-150 on the stock battle).
         pop eax
         sub eax, 950
         shr eax, 1

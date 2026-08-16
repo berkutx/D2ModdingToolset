@@ -211,6 +211,8 @@ struct ProfileValueSnapshot
     char raw[256];
 };
 
+ProfileValueSnapshot snapshotProfileValue(const char* key);
+
 struct PatchPlan
 {
     void* address;
@@ -234,8 +236,10 @@ volatile LONG g_available = 0;
 volatile LONG g_active = 0;
 volatile LONG g_activeCanvas[2] = {kBaseWidth, kBaseHeight};
 volatile LONG g_zoomEnabled = 1;
+volatile LONG g_zoomFactor = 100;
 volatile LONG g_surfaceAdjustActive = 0;
 volatile LONG g_wideBattleSurface = 0;
+volatile LONG g_legacyCanvasNativeFallback = 0;
 PatchSites g_sites = {};
 const AddressLayout* g_layout = nullptr;
 uintptr_t g_imageEnd = kImageBase;
@@ -337,7 +341,7 @@ bool adaptiveCanvasForOutput(int outputWidth, int outputHeight,
     // the validated 2560x1440 canvas can show.
     const CanvasPreset* selected = bestFit;
     if (!selected)
-        selected = &presets[0]; // filtered down only on very small outputs
+        selected = &presets[0]; // smallest reviewed canvas; a normal window grows to this minimum
     if (width)
         *width = selected->width;
     if (height)
@@ -349,16 +353,6 @@ bool adaptiveCanvasForOutput(int outputWidth, int outputHeight,
     return true;
 }
 
-bool ddrawBool(const char* key, bool fallback)
-{
-    char raw[16] = {};
-    if (!DDReadConfigString(key, fallback ? "true" : "false", raw,
-                            static_cast<unsigned int>(sizeof(raw))))
-        return fallback;
-    return lstrcmpiA(raw, "true") == 0 || lstrcmpiA(raw, "yes") == 0 ||
-           lstrcmpiA(raw, "on") == 0 || lstrcmpA(raw, "1") == 0;
-}
-
 bool automaticOutputPixels(int* width, int* height)
 {
     // cnc-ddraw establishes per-monitor DPI awareness before installing this
@@ -368,27 +362,22 @@ bool automaticOutputPixels(int* width, int* height)
     if (outputWidth <= 0 || outputHeight <= 0)
         return false;
 
-    // A normal window needs room for its title, frame, one-row C4 menu and the
-    // taskbar. Borderless/exclusive modes own the monitor and use all pixels.
-    // This is the missing distinction in a monitor-only Auto policy: on a
-    // 1920x1080 desktop, 1920x1080 is ideal fullscreen but cannot be a usable
-    // 1920x1080 client without pushing chrome off-screen.
-    const bool normalWindow =
-        ddrawBool("windowed", true) && !ddrawBool("fullscreen", false);
-    if (normalWindow) {
-        RECT work = {};
-        if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
-            const int workWidth = work.right - work.left;
-            const int workHeight = work.bottom - work.top;
-            RECT frame = {0, 0, 100, 100};
-            if (AdjustWindowRectEx(&frame, WS_OVERLAPPEDWINDOW, TRUE, 0)) {
-                const int extraWidth = (frame.right - frame.left) - 100;
-                const int extraHeight = (frame.bottom - frame.top) - 100;
-                if (workWidth - extraWidth > 0)
-                    outputWidth = workWidth - extraWidth;
-                if (workHeight - extraHeight > 0)
-                    outputHeight = workHeight - extraHeight;
-            }
+    // Auto is one restart-latched game canvas, not a different logical resolution for fullscreen
+    // and windowed launches. Always budget for the normal window's title/frame/menu/taskbar so F4
+    // can return to a smaller 1:1 client without reintroducing forbidden output downscaling. A
+    // borderless/exclusive presentation may upscale that same canvas to the monitor.
+    RECT work = {};
+    if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
+        const int workWidth = work.right - work.left;
+        const int workHeight = work.bottom - work.top;
+        RECT frame = {0, 0, 100, 100};
+        if (AdjustWindowRectEx(&frame, WS_OVERLAPPEDWINDOW, TRUE, 0)) {
+            const int extraWidth = (frame.right - frame.left) - 100;
+            const int extraHeight = (frame.bottom - frame.top) - 100;
+            if (workWidth - extraWidth > 0)
+                outputWidth = workWidth - extraWidth;
+            if (workHeight - extraHeight > 0)
+                outputHeight = workHeight - extraHeight;
         }
     }
 
@@ -403,6 +392,20 @@ bool readRequestedCanvas(RequestedCanvas* requested)
 {
     if (!requested)
         return false;
+
+    // If a legacy profile was recognized but its INI could not be migrated atomically, keep this
+    // process on a stock canvas. In particular, never let an absent GameCanvasMode fall through to
+    // adaptive Hor+ after a write or rollback failure in the compatibility path below.
+    if (InterlockedExchangeAdd(&g_legacyCanvasNativeFallback, 0) != 0) {
+        requested->mode = 0;
+        nativeCanvas(&requested->width, &requested->height);
+        int displaySize = 0;
+        readProfileInt("Disciple", "DisplaySize", &displaySize);
+        requested->nativeDisplaySize =
+            displaySize >= 0 && displaySize <= 2 ? displaySize : 0;
+        requested->wide = false;
+        return true;
+    }
 
     // A supported build defaults to monitor-adaptive selection only while
     // GameCanvasMode is absent. Explicit native/manual Hor+ modes remain authoritative.
@@ -430,9 +433,11 @@ bool readRequestedCanvas(RequestedCanvas* requested)
         requested->wide = false;
     }
 
+    const ProfileValueSnapshot storedMode =
+        snapshotProfileValue("GameCanvasMode");
     int mode = 0;
     if (!readProfileInt("Wrapper", "GameCanvasMode", &mode))
-        return true;
+        return !storedMode.present;
     if (mode != 0 && mode != 1 && mode != 2)
         return false;
     if (mode == 0) {
@@ -481,7 +486,13 @@ void prepareLegacyZoomState()
     if (!readProfileInt("Disciple", "EnableZoom", &enabled))
         enabled = 1;
 
+    int factor = 100;
+    if (!readProfileInt("Wrapper", "ZoomFactor", &factor) || factor <= 0 ||
+        factor > 100)
+        factor = 100;
+
     InterlockedExchange(&g_zoomEnabled, enabled ? 1 : 0);
+    InterlockedExchange(&g_zoomFactor, factor);
     InterlockedExchange(&g_surfaceAdjustActive, 0);
     InterlockedExchange(&g_wideBattleSurface, 0);
 }
@@ -1326,6 +1337,82 @@ bool restoreRequestedCanvas(const ProfileValueSnapshot& mode,
     return restored;
 }
 
+int legacyNativeDisplaySize(int width, int height)
+{
+    for (int i = 0; i < static_cast<int>(
+             sizeof(kNativeCanvasPresets) / sizeof(kNativeCanvasPresets[0])); ++i) {
+        if (kNativeCanvasPresets[i].width == width &&
+            kNativeCanvasPresets[i].height == height)
+            return i;
+    }
+    return -1;
+}
+
+void migrateLegacyCanvasRequest()
+{
+    // Before v1.6, DisciplesGL/C4dll-R profiles had no GameCanvasMode. Treat the presence of the
+    // old DisplayWidth/DisplayHeight pair as an explicit legacy request, not as consent to the new
+    // monitor-adaptive Hor+ default. This also repairs profiles carrying the old migration marker:
+    // that migration wrote DisplaySize too late and never pinned GameCanvasMode, so a fixed 4:3
+    // output could start a 16:9 canvas and acquire symmetric renderer letterbox bars.
+    const ProfileValueSnapshot mode = snapshotProfileValue("GameCanvasMode");
+    int configuredMode = 0;
+    const bool validMode =
+        readProfileInt("Wrapper", "GameCanvasMode", &configuredMode) &&
+        configuredMode >= 0 && configuredMode <= 2;
+    if (mode.present && validMode)
+        return;
+
+    int legacyWidth = 0;
+    int legacyHeight = 0;
+    if (!readProfileInt("Wrapper", "DisplayWidth", &legacyWidth) ||
+        !readProfileInt("Wrapper", "DisplayHeight", &legacyHeight))
+        return;
+
+    // Keep an in-memory native fallback armed until the two durable keys below have both been
+    // written. This covers read-only or transiently failing INI files for the current launch.
+    InterlockedExchange(&g_legacyCanvasNativeFallback, 1);
+
+    const ProfileValueSnapshot oldDisplaySize =
+        snapshotProfileValueInSection("Disciple", "DisplaySize");
+    int configuredDisplaySize = 0;
+    const bool validDisplaySize =
+        readProfileInt("Disciple", "DisplaySize", &configuredDisplaySize) &&
+        configuredDisplaySize >= 0 &&
+        configuredDisplaySize < static_cast<int>(
+            sizeof(kNativeCanvasPresets) / sizeof(kNativeCanvasPresets[0]));
+    // A malformed old value cannot describe a usable stock canvas. Fall back to DisplaySize 0
+    // instead of interpreting the legacy dimensions around it; leaving GameCanvasMode absent
+    // would opt a supported build into adaptive Hor+ and could reintroduce the bars.
+    int selectedDisplaySize = validDisplaySize ? configuredDisplaySize : 0;
+    const int recognizedLegacySize =
+        legacyNativeDisplaySize(legacyWidth, legacyHeight);
+    if ((!oldDisplaySize.present ||
+         (validDisplaySize && configuredDisplaySize == 0)) &&
+        recognizedLegacySize >= 0) {
+        selectedDisplaySize = recognizedLegacySize;
+    }
+
+    if (!writeProfileIntInSection("Disciple", "DisplaySize", selectedDisplaySize))
+        return;
+    if (!writeProfileInt("GameCanvasMode", 0)) {
+        restoreProfileValueInSection("Disciple", "DisplaySize", oldDisplaySize);
+        return;
+    }
+
+    InterlockedExchange(&g_legacyCanvasNativeFallback, 0);
+
+    // Best effort only: GameCanvasMode=0 is the durable/idempotent migration marker. Keep the old
+    // marker populated for compatibility with featuremenu builds that know only that key.
+    writeProfileInt("LegacyDisplaySizeMigrated", 1);
+    char message[224] = {};
+    wsprintfA(message,
+              "C4dll-R: v1.7 legacy canvas migration pinned stock DisplaySize=%d "
+              "(legacy Wrapper canvas %dx%d)\n",
+              selectedDisplaySize, legacyWidth, legacyHeight);
+    OutputDebugStringA(message);
+}
+
 } // namespace
 
 extern "C" void horplus_install(void)
@@ -1338,6 +1425,10 @@ extern "C" void horplus_install(void)
     nativeCanvas(&nativeWidth, &nativeHeight);
     InterlockedExchange(&g_activeCanvas[0], nativeWidth);
     InterlockedExchange(&g_activeCanvas[1], nativeHeight);
+    // WideBattle is installed before Hor+ but latches only when a battle is
+    // created. Cache the original wrapper's fixed-screen zoom inputs for both
+    // stock and Hor+ canvases before either startup branch can return.
+    prepareLegacyZoomState();
 
     PatchSites selectedSites = {};
     const AddressLayout* selectedLayout = nullptr;
@@ -1365,6 +1456,10 @@ extern "C" void horplus_install(void)
     g_wideBattleSurfaceVtable = battleSurfaceVtable;
     g_battleCenterShared = sharedBattleCenter;
     InterlockedExchange(&g_available, 1);
+
+    // Must happen before readRequestedCanvas(): the old feature-menu migration ran only after
+    // horplus_install(), when the adaptive wide patch had already been selected for this process.
+    migrateLegacyCanvasRequest();
 
     RequestedCanvas requested = {};
     if (!readRequestedCanvas(&requested)) {
@@ -1421,7 +1516,6 @@ extern "C" void horplus_install(void)
 
     InterlockedExchange(&g_activeCanvas[0], requested.width);
     InterlockedExchange(&g_activeCanvas[1], requested.height);
-    prepareLegacyZoomState();
     if (!preparePlans(requested.width, requested.height) || !applyPlans()) {
         InterlockedExchange(&g_activeCanvas[0], nativeWidth);
         InterlockedExchange(&g_activeCanvas[1], nativeHeight);
@@ -1463,6 +1557,31 @@ extern "C" int horplus_get_active_size(int* width, int* height)
     if (height)
         *height = InterlockedExchangeAdd(&g_activeCanvas[1], 0);
     return InterlockedExchangeAdd(&g_installAttempted, 0) != 0;
+}
+
+extern "C" int horplus_get_battle_view_width(void)
+{
+    const int canvasWidth =
+        static_cast<int>(InterlockedExchangeAdd(&g_activeCanvas[0], 0));
+    const int canvasHeight =
+        static_cast<int>(InterlockedExchangeAdd(&g_activeCanvas[1], 0));
+    if (canvasWidth <= 0 || canvasHeight <= 0 ||
+        InterlockedExchangeAdd(&g_zoomEnabled, 0) == 0)
+        return canvasWidth;
+
+    // Exact CalcZoomed width policy used by DisciplesGL's CalcWideBattle.
+    // ZoomFactor is a percentage of the distance from the full game canvas
+    // toward its fixed 800x600-equivalent view. Keep FLOAT arithmetic and the
+    // truncating DWORD conversion so the >=990 boundary matches the original.
+    const float aspect = static_cast<float>(canvasWidth) /
+                         static_cast<float>(canvasHeight);
+    const float fixedWidth = aspect >= 4.0f / 3.0f
+                                 ? 600.0f * aspect
+                                 : 800.0f;
+    const float reduction =
+        (static_cast<float>(canvasWidth) - fixedWidth) *
+        static_cast<float>(InterlockedExchangeAdd(&g_zoomFactor, 0)) * 0.01;
+    return canvasWidth - static_cast<int>(static_cast<DWORD>(reduction));
 }
 
 extern "C" int horplus_get_decor_layout(int* contentWidth,

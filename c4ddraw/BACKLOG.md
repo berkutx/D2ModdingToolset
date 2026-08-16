@@ -11,21 +11,29 @@ the fidelity audit. Approach agreed with the user: **transcribe the working lega
   (pending the user's visual confirm). The BACKLOG's original guess (menu-height/viewport not
   recomputed) was WRONG: a multi-agent source audit proved `dd_SetDisplayMode` IS coherent and DOES
   rescale render+viewport+mouse+swapchain in one pass. The real cause was OUR OWN `featuremenu.cpp`
-  `menuWorker`/`ensureChrome`: it grew the window by `SM_CYMENU` via a raw `SetWindowPos` on a 1500ms
+  `menuWorker`/old chrome sync: it grew the window by `SM_CYMENU` via a raw `SetWindowPos` on a 1500ms
   poll, OUT-OF-BAND and ~1.5s AFTER `dd_SetDisplayMode`. That async grow fires a Win32 `WM_SIZE` which
   cnc-ddraw treats as a geometric no-op (wndproc.c recompute is IsLinux-gated), so render/viewport/
   mouse.rc were never recomputed for the grown client and the added strip stayed black; the game's
   edge-scroll kept the old `g_ddraw.width/height`-derived bounds. A restart worked because everything
   settled in one pass.
-  - Fix (implemented): (1) DELETE the async grow; `ensureChrome` now attaches the menu then posts a
-    registered message (`C4dllR_MenuRelayout`) so the menu-aware re-lay runs THROUGH the renderer on
-    the GUI thread (`DDReloadConfig` -> `dd_SetDisplayMode` grows by one menu row via
-    `AdjustWindowRectEx(GetMenu!=NULL)` AND recomputes viewport+mouse in the same pass). (2) Hardened
-    `DDReloadConfig` (patch): re-clip the cursor (`mouse_unlock/lock` when locked) + force a
-    renderer-owned `clear_screen`+`RedrawWindow` so no region is left black by the game's DefWindowProc.
+  - Fix (implemented): the worker only posts `C4dllR_MenuRelayout`; GUI-thread `syncChrome` reads the
+    renderer's live mode, attaches the menu only in a normal window, and detaches it in both borderless
+    and exclusive fullscreen. `DDRelayoutCurrentMode` then re-runs `dd_SetDisplayMode` without reloading
+    the ini, so a menu-row change coherently recomputes window geometry, viewport, renderer and mouse
+    without undoing a live F4 transition. The old out-of-band `SetWindowPos` path is gone.
   - NOTE: with `maintas=true`+`boxing=true` (our ddraw.ini) the image is integer-boxed/centered by
     design; "fills the window" then means "boxed to the largest integer multiple, centered". If the
     user wants true stretch-to-fill, that is a separate scaling-mode choice (turn boxing/maintas off).
+- `[x]` **Fullscreen menu flicker / no way back to a window** — FIXED (pending visual confirmation).
+  The Win32 menu is intentionally absent from both fullscreen modes. Wrapper-owned F4 switches either
+  fullscreen kind back to a normal window and remembers the last fullscreen kind for the return trip;
+  Alt+Enter remains cnc-ddraw's configured toggle and Alt+F4 remains close.
+- `[x]` **Window-edge scroll stalls when the pointer crosses the window edge** — FIXED (pending
+  in-game confirmation). The cursor guard keeps cnc-ddraw's transformed/clamped game coordinates while
+  the game owns the foreground, even when the physical pointer is outside the client. Enabling map
+  drag-scroll no longer globally disables native edge-scroll; it suppresses it only during an active
+  LMB drag.
 
 ## Timer — host-event layer (the keystone)
 Ported into the HOST module `features/timerhost.cpp` (installed from `featuremenu_install`, Russobit).
@@ -54,7 +62,8 @@ capture/observe (done) -> turn/day -> gated game-CALL actions.
   `*([btn+8]+4)!=0`. Plugin latches v9<0 once per turn (re-armed when v9>=0) and calls host end_day/
   retreat; timerhost queues a pending flag; timerhost_pump() (called from the featuremenu WndProc detour,
   game thread) does the guarded press with a re-entry latch + SEH. The +0x8C/+0xA0 note was wrong - all
-  presses use +0xB0.
+  presses use +0xB0. The original off[13] callsite bypass is now mirrored for forced END_TURN only,
+  and pending actions are cancelled on positive time, Reset/Set, scenario/turn changes and Force-off.
 
 ## Timer — dialogs (resource ports)
 - `[x]` **Timetable dialog** (legacy **res 5** / sub_100044E0) — DONE: Day/Duration grid (timer.rc
@@ -65,8 +74,8 @@ capture/observe (done) -> turn/day -> gated game-CALL actions.
   current turn's remaining time (baseline = now - minutes, + day budget + clears extra in Force mode).
 - `[ ]` **About dialog** (legacy res 4 / sub_10004A90, cmd +0x16) — version + author SysLinks;
   currently a plain MessageBox (good enough, low priority).
-- `[ ]` **Drag-to-move** the on-screen timer (legacy WndProc mouse: dword_10008048 Alt-held +
-  WM_LBUTTONDOWN -> fractional anchor flt_10008120/8124). Not a dialog. Replaces the removed "Position".
+- `[x]` **Drag-to-move** the on-screen timer — Ctrl+Alt+LMB inside the measured clock rect retains the
+  exact grab offset, uses high-resolution normalized anchors and persists on drop without a first-move jump.
 
 NOTE: idalib decompile RESTORED for timer.mod (fresh full idat .i64); all legacy functions now
 decompile, so the rest is direct transcription.
@@ -81,9 +90,12 @@ decompile, so the rest is direct transcription.
 
 ## Animation speed (see `docs/anim-speed.md`)
 - `[~]` **Battle idle/attack split = global burst** — DONE as a global-clock burst: vftable slot[2]
-  (`showAttackEffect` `0x63203B`) pulses `g_attackPulse`; the `WM_TIMER` pump holds the attack factor
-  ~1.2s then eases down 0.7s to the idle base. Idle is calm BETWEEN attacks, but because it drives the
-  global clock it also speeds idle units DURING the burst window. Not true per-unit isolation.
+  (`showAttackEffect` `0x63203B`) publishes a start event; the signature-gated final-zero branch of
+  the visual `CAnimCounter` (`call 0x638AD9`) publishes the exact end. One last-writer-wins event
+  preserves order even when an instant effect starts and ends inside one 32ms pump tick. The factor stays high only between
+  those events, then returns linearly over 300ms. A 5s watchdog is emergency-only; signature mismatch
+  retains the previous speed-aware timed fallback. Idle is calm BETWEEN attacks, but because this
+  drives the global clock it also speeds idle units DURING the actual attack. Not true per-unit isolation.
 - `[~]` **True per-unit isolation (EXPERIMENTAL, default off)** — speed up ONLY the acting animators,
   leave idle + global clock vanilla. Mechanism (RE this session): each anim object is clock-gated with a
   per-object interval at `+0x34` (66ms idle / 33ms fast) + deadline `+0x38` (set by ctor `0x51E210`); so
@@ -99,10 +111,44 @@ decompile, so the rest is direct transcription.
     candidate set if attacker/target use more than 4 animators.
 
 ## DGL features
-- `[x]` **Map drag-scroll** (faithful) — IMPLEMENTED (pending in-game test). Detours the Russobit iso-view
-  mouse handler sub_48E8A0; left-drag on open terrain pans via sub_541588 (screen->map sub_5418BA,
-  MapGraphics singleton 0x837DA0). Menu: Game -> "Map drag-scroll (left button)", ini dragScroll default
-  off. v1 may need pan-direction/feel tuning. See memory `dgl-map-drag-scroll`.
+- `[~]` **Restart-only widescreen game-resolution selector** — BUILT AND DEPLOYED;
+  in-game confirmation pending. The unified Resolution menu offers 1066x600, 1152x648, 1280x720,
+  1366x768, 1440x810, 1536x864, 1600x900, 1820x1024, 1920x1080 and 2560x1440.
+  Every choice creates a real logical canvas and expands the strategic view horizontally
+  without stretching. The smaller choices support compact windows and streaming; the reviewed
+  minimum height remains the base UI's 600 pixels.
+  Native 800x600 / 1024x768 / 1280x1024 are visible in the same menu and marked with `★`.
+  The original nine-layout D2 2.00-3.01 table changes the logical DirectDraw mode, strategic layout
+  and dimension-dependent allocations only after `ProductVersion`, the row probe and every required
+  signature match; native fallback
+  writes no widescreen game bytes. The menu previews `current -> after restart`, future
+  viewport/scale and output clamping without reloading the live renderer. After a different canvas
+  is successfully saved, a modal explicitly requests a full game restart. Output/window size remains
+  a separate renderer setting, with Auto following the active game canvas. Legacy
+  `DisplayWidth/DisplayHeight` is imported only for the unsupported-executable native fallback;
+  an absent `GameCanvasMode` defaults a supported executable to 1280x720, while explicit mode 0
+  selects the corresponding stock `DisplaySize`.
+- `[x]` **Map drag-scroll** (faithful) — IMPLEMENTED (pending in-game feel test). Detours the Russobit
+  iso-view mouse handler sub_48E8A0; screen->map sub_5418BA gates capture to real map terrain,
+  sub_5414BC snapshots the exact center/sub-tile offset on button-down, and sub_541588 pans from that
+  invariant on the first changed game pixel. MapGraphics singleton: 0x837DA0. Menu: Game -> "Map
+  drag-scroll (left button)", ini dragScroll default on. A no-movement click is preserved, and native
+  edge-scroll remains active except during the drag itself. See memory `dgl-map-drag-scroll`.
+- `[x]` **Widescreen Battle** — ported across the original nine D2 2.00-3.01 address layouts with
+  `ProductVersion`, row-probe and original-byte validation before any patch. Default on, latched when
+  the next battle opens, and unavailable when the selected executable signatures do not match. It
+  activates only when both the logical canvas and original fixed-screen zoom view are at least 990
+  pixels wide; default 1024x768/1280x1024 therefore remain stock, while reviewed Hor+ canvases are
+  wide. The user-facing toggle is intentionally hidden in 1.7 while the existing default/config
+  activation path remains. This widens only the battle layout and shows both unit panels; it does not
+  select or widen the strategic-map resolution. The shared non-wide background correction preserves
+  the original mirror-dependent 0/-150 geometry on native 800x600.
+- `[~]` **Optional map clouds** — BUILT AND DEPLOYED; in-game confirmation pending.
+  This is the real signature-gated allocation/factory/archive-lookup/init/update pipeline, not a
+  renderer boolean or an inert menu item. It uses an existing external `Imgs\IsoClouds.ff`; that
+  asset is validated at startup and is not redistributed. The restart-only menu item aliases the
+  game's native `[Settings] IsoBirds` visibility setting, remains unavailable when the asset or
+  exact executable is unsupported, and applies no cloud patch in that case.
 
 ## Release / CI
 - `[ ]` **Push C4dll-R** — the whole `c4ddraw/` + workflows are uncommitted (user chose local for now).
@@ -111,7 +157,8 @@ decompile, so the rest is direct transcription.
 
 ## Done recently (for context, not a TODO)
 - Animation speed: live battle/map multipliers up to 15x; native hero/AI map speed (`playerSpeed`)
-  + battle speed (`GameSettings`); battle attack-burst (fast hits, calm idle) with 0.7s ease-down.
+  + battle speed (`GameSettings`); exact-end battle attack burst (fast hits, calm idle) with a
+  300ms ease-down after the last visual component completes.
 - Combat Pause (any battle); fidelity fixes (DayTurn clamp, menu tail IDs, Force-mode ACTIVE gate).
 - Timetable per-day duration + the day source (`C4P_Host.get_day` → `CScenarioInfo.currentTurn`).
 - First-run `C4menu.ini` converter; mss32 featuremenu removed (the crashing const-patch); adapter cleanup.
