@@ -31,6 +31,11 @@
 extern const void* DDGetDecoratedSurface(
     const void* source, int width, int height, int pitch, int bpp, int rgb555);
 
+/* featuremenu.cpp diagnostics (gated on the same C4menu.ini [menu] debugLog flag). */
+extern int featuremenu_debug_enabled(void);
+extern void featuremenu_debug_log_line(const char* line);
+extern int horplus_get_decor_layout(int* contentWidth, int* contentHeight, int* wideBattle);
+
 /* Read by the D2-only winapi_hooks patch. Generic cnc-ddraw users retain upstream semantics. */
 volatile LONG g_c4_d2_cursor_ownership;
 
@@ -68,6 +73,127 @@ HWND DDGetPhysicalForegroundWindow(void)
 HWND DDPhysicalWindowFromPoint(POINT point)
 {
     return real_WindowFromPoint(point);
+}
+
+BOOL DDPhysicalPeekMessage(MSG* message, HWND hwnd, UINT first, UINT last, UINT remove)
+{
+    return real_PeekMessageA(message, hwnd, first, last, remove);
+}
+
+/* A plugin canvas update is a presentation update even when the game-owned primary did not change.
+ * Wake the existing renderer semaphore so a paused/idle game still uploads the next timer second. */
+void DDInvalidatePluginFrame(void)
+{
+    if (InterlockedExchangeAdd(&g_ddraw.ref, 0) > 0 && g_ddraw.render.sem)
+    {
+        InterlockedExchange(&g_ddraw.render.surface_updated, TRUE);
+        ReleaseSemaphore(g_ddraw.render.sem, 1, NULL);
+    }
+}
+
+static HANDLE dd_create_live_limiter_timer(void)
+{
+    HANDLE timer = NULL;
+    typedef HANDLE (WINAPI *CreateTimerExWFn)(
+        LPSECURITY_ATTRIBUTES, LPCWSTR, DWORD, DWORD);
+    static CreateTimerExWFn create_timer_ex;
+    static LONG resolved;
+
+    if (InterlockedCompareExchange(&resolved, 1, 0) == 0 &&
+        !IsWine() && IsWindows10Version1803OrGreater())
+    {
+        HMODULE kernel = real_LoadLibraryA("Kernel32.dll");
+        if (kernel)
+            create_timer_ex = (CreateTimerExWFn)real_GetProcAddress(
+                kernel, "CreateWaitableTimerExW");
+    }
+    if (create_timer_ex)
+        timer = create_timer_ex(
+            NULL, NULL,
+            CREATE_WAITABLE_TIMER_MANUAL_RESET |
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+            TIMER_ALL_ACCESS);
+    if (!timer)
+        timer = CreateWaitableTimer(NULL, TRUE, NULL);
+    return timer;
+}
+
+/* Reconfigure cnc-ddraw's GUI-thread game limiter without rebuilding DirectDraw/the renderer.
+ * Handles are retained until dd_Release: disabling a cap only makes the timer dormant, avoiding a
+ * close-vs-wait race with unusual callers of WaitForVerticalBlank. Returns 1 only after an atomic
+ * prepare/commit; the first frame after a change is deliberately immediate (due_time = 0). */
+int DDSetMaxGameTicksLive(int ticks)
+{
+    HANDLE new_ticks = NULL;
+    HANDLE new_flip = NULL;
+    const BOOL custom = ticks > 0 && ticks <= 1000;
+    const BOOL flip = ticks >= 0 || ticks == -2;
+    DWORD ticks_ms = 0;
+    LONGLONG ticks_ns = 0;
+    const DWORD flip_ms = 17;
+    const LONGLONG flip_ns = 166666;
+
+    if ((!custom && ticks != -2 && ticks != -1 && ticks != 0) ||
+        !g_ddraw.ref || !g_ddraw.gui_thread_id ||
+        GetCurrentThreadId() != g_ddraw.gui_thread_id)
+        return 0;
+
+    if (custom)
+    {
+        const double length = 1000.0 / (double)ticks;
+        ticks_ms = (DWORD)(length + 0.5);
+        if (!ticks_ms)
+            ticks_ms = 1;
+        ticks_ns = 10000000LL / ticks;
+        if (!g_ddraw.ticks_limiter.htimer)
+        {
+            new_ticks = dd_create_live_limiter_timer();
+            if (!new_ticks)
+                goto fail;
+        }
+    }
+    if (flip && !g_ddraw.flip_limiter.htimer)
+    {
+        new_flip = dd_create_live_limiter_timer();
+        if (!new_flip)
+            goto fail;
+    }
+
+    /* Disable the published periods first. No caller can begin a new wait using half-old state. */
+    InterlockedExchange((volatile LONG*)&g_ddraw.ticks_limiter.tick_length, 0);
+    InterlockedExchange((volatile LONG*)&g_ddraw.flip_limiter.tick_length, 0);
+    if (g_ddraw.ticks_limiter.htimer)
+        CancelWaitableTimer(g_ddraw.ticks_limiter.htimer);
+    if (g_ddraw.flip_limiter.htimer)
+        CancelWaitableTimer(g_ddraw.flip_limiter.htimer);
+
+    if (new_ticks)
+        g_ddraw.ticks_limiter.htimer = new_ticks;
+    if (new_flip)
+        g_ddraw.flip_limiter.htimer = new_flip;
+    g_ddraw.ticks_limiter.due_time.QuadPart = 0;
+    g_ddraw.flip_limiter.due_time.QuadPart = 0;
+    g_ddraw.ticks_limiter.tick_length_ns = custom ? ticks_ns : 0;
+    g_ddraw.flip_limiter.tick_length_ns = flip ? flip_ns : 0;
+    g_ddraw.ticks_limiter.dds_unlock_limiter_disabled = FALSE;
+    g_ddraw.flip_limiter.dds_unlock_limiter_disabled = FALSE;
+    g_config.maxgameticks = ticks;
+
+    /* Period is the commit marker and is therefore published last. */
+    if (custom)
+        InterlockedExchange((volatile LONG*)&g_ddraw.ticks_limiter.tick_length,
+                            (LONG)ticks_ms);
+    if (flip)
+        InterlockedExchange((volatile LONG*)&g_ddraw.flip_limiter.tick_length,
+                            (LONG)flip_ms);
+    return 1;
+
+fail:
+    if (new_ticks)
+        CloseHandle(new_ticks);
+    if (new_flip)
+        CloseHandle(new_flip);
+    return 0;
 }
 
 static unsigned dd_cursor_mask_shift(DWORD mask)
@@ -653,6 +779,7 @@ static BOOL dd_reload_config(
     BOOL saved_toggle_borderless = g_config.toggle_borderless;
     BOOL saved_toggle_upscaled = g_config.toggle_upscaled;
     BOOL saved_singlecpu = g_config.singlecpu;
+    int saved_maxgameticks = g_config.maxgameticks;
 
     /* Use the old backend/config while returning an exclusive device to the desktop and joining
      * its render thread.  Ordinary shader/viewport reloads keep the existing upstream path. */
@@ -669,6 +796,9 @@ static BOOL dd_reload_config(
     /* singlecpu is startup-latched. A later live renderer reload must not expose its pending
      * next-start value to DLL_THREAD_ATTACH while existing threads retain the startup policy. */
     g_config.singlecpu = saved_singlecpu;
+    /* maxgameticks owns live limiter handles/deadlines. Only DDSetMaxGameTicksLive may change it;
+     * a generic Video reload must not publish an INI value without reconfiguring that state. */
+    g_config.maxgameticks = saved_maxgameticks;
     if (g_config.window_rect.left == -32000)
         g_config.window_rect.left = saved_left;
     if (g_config.window_rect.top == -32000)
@@ -821,6 +951,12 @@ void DDNormalizeLegacyExclusive(void)
 int DDGetGameWidth(void)
 {
     return g_ddraw.ref ? (int)g_ddraw.width : 0;
+}
+
+/* Logical DirectDraw surface height requested by the game, paired with DDGetGameWidth. */
+int DDGetGameHeight(void)
+{
+    return g_ddraw.ref ? (int)g_ddraw.height : 0;
 }
 
 /*
@@ -1278,6 +1414,28 @@ void DDTakeScreenshot(void)
             g_ddraw.primary->pitch,
             g_ddraw.primary->bpp,
             g_config.rgb555);
+        /* Debug breadcrumbs for skewed/discolored screenshot reports: the exact
+         * geometry the encoder sees, plus the decor decision.  A diagonal shear
+         * means pitch!=true stride here; swapped colors mean bpp/rgb555 lies. */
+        if (featuremenu_debug_enabled())
+        {
+            int cw = -1, ch = -1, wide = -1;
+            const int decor = horplus_get_decor_layout(&cw, &ch, &wide);
+            char line[192];
+            _snprintf(line, sizeof(line) - 1,
+                "[shot] primary %lux%lu pitch=%lu bpp=%lu bytes_pp=%lu rgb555=%d "
+                "decor=%d(%dx%d wide=%d) surface=%p scratch=%p",
+                (unsigned long)g_ddraw.primary->width,
+                (unsigned long)g_ddraw.primary->height,
+                (unsigned long)g_ddraw.primary->pitch,
+                (unsigned long)g_ddraw.primary->bpp,
+                (unsigned long)g_ddraw.primary->bytes_pp,
+                (int)g_config.rgb555,
+                decor, cw, ch, wide,
+                g_ddraw.primary->surface, presented.surface);
+            line[sizeof(line) - 1] = '\0';
+            featuremenu_debug_log_line(line);
+        }
         ss_take_screenshot(&presented);
     }
     LeaveCriticalSection(&g_ddraw.cs);

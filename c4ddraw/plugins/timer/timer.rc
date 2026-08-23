@@ -26,13 +26,16 @@ BEGIN
 END
 
 // Set dialog (port of legacy resource 6 / DialogFunc): set the current turn's time to N seconds.
-IDD_SET DIALOGEX 0, 0, 140, 58
+// "Set" applies any value (no budget clamp - restoring the budget is what Reset is for); "Pause"
+// toggles the clock freeze and is enabled only while the timer is active (same rule as Reset).
+IDD_SET DIALOGEX 0, 0, 196, 58
 STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Set time"
 FONT 8, "MS Shell Dlg"
 BEGIN
     LTEXT           "Seconds:", -1, 14, 16, 42, 9
     EDITTEXT        IDC_SET_SEC, 60, 14, 50, 13, ES_NUMBER | WS_BORDER | WS_TABSTOP
-    DEFPUSHBUTTON   "OK", IDOK, 18, 37, 45, 14
-    PUSHBUTTON      "Cancel", IDCANCEL, 75, 37, 45, 14
+    DEFPUSHBUTTON   "Set", IDOK, 14, 37, 50, 14
+    PUSHBUTTON      "Pause", IDC_SET_PAUSE, 72, 37, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 130, 37, 50, 14
 END

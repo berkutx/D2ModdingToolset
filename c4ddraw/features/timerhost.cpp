@@ -25,6 +25,7 @@ extern "C" int featuremenu_battle_animation_active(void);
 // True only after the signature-gated Choose/Result controller lifecycle is installed.
 extern "C" int featuremenu_battle_timer_lifecycle_available(void);
 extern "C" int timerhost_force_auto_battle(void);
+extern "C" int timerhost_get_battle_timer_state(C4P_BattleTimerState* out);
 // Shared diagnostics gate ([menu] debugLog / C4DLL_DEBUG): OFF by default in release.
 extern "C" int featuremenu_debug_enabled(void);
 
@@ -85,6 +86,7 @@ bool isUserPtr(const void* p)
 // are gated during install; unsupported executables remain fail-closed.
 constexpr uintptr_t kLocalNetworkPlayerIdAccessor = 0x403384;
 constexpr int kInvalidMidgardId = 0x003F0000;
+constexpr int kBattleActionAuto = 5;
 const unsigned char kLocalNetworkPlayerIdSignature[10] = {
     0x8B, 0x41, 0x08, 0x8B, 0x40, 0x20, 0x83, 0xC0, 0x08, 0xC3};
 LONG volatile g_localNetworkPlayerIdAccessorAvailable = 0;
@@ -181,8 +183,9 @@ struct State
     LONG volatile battleKindPublished;
     LONG volatile battleStateSeq; // even=stable, odd=game-thread publication in progress
     void* volatile battleViewer; // embedded IBatViewer* for the current battle instance
-    // A timeout request can remain deferred through an in-flight animation / second attack. Once
-    // forceAutoActive flips to 1 it is never cleared by Reset/config/cancel_elapse.
+    // A timeout request can remain deferred through an in-flight animation / second attack.
+    // forceAutoActive is published only after the common submit hook observes BattleAction::Auto;
+    // a callback that returns without that acknowledgement must never take input ownership.
     LONG volatile forceAutoRequested;
     LONG volatile forceAutoActive;
     LONG volatile forceAutoKickPending;
@@ -194,7 +197,7 @@ struct State
     void* g_origBeginTurnOk;
     void* g_origAutoBattleToggle;
     void* g_origBattleSubmit;
-    int lastTurnPlayer;     // last off[6] player byte (debounce: ignore same-player bursts)
+    int lastTurnPlayer;     // full off[6] owner id (debounce: ignore same-owner message bursts)
     int confirmHookInstalled;
     int beginTurnAckHookInstalled;
     int autoBattleToggleHookInstalled;
@@ -353,24 +356,34 @@ int __fastcall hook_scenarioInit(void* self, void* /*edx*/, int a2)
 // mark in-game, then chain to original. __thiscall(this, a2) -> __fastcall trick.
 int __fastcall hook_turnInfo(void* self, void* /*edx*/, int a2)
 {
-    // Current turn player byte, legacy way (sub_10001B90 did v3 = *sub_404E71()). Use the same
-    // verified local-network-player walk as PvP decision parsing so both consumers share one layout.
-    int player = -1;
-    int rawPlayerId = -1;
-    if (readLocalNetworkPlayerId(&rawPlayerId))
-        player = rawPlayerId & 0xFF;
+    // a2 is the broadcast CCmdTurnInfoMsg. Its serialized owner at +0x18 is authoritative on both
+    // host and joiner; the local-player accessor is constant for the lifetime of a client and was
+    // therefore incapable of detecting later turn transfers.
+    int rawOwner = -1;
+    __try {
+        const char* message = reinterpret_cast<const char*>(a2);
+        if (isUserPtr(message) &&
+            *reinterpret_cast<void* const*>(message) == reinterpret_cast<void*>(0x6D4B14))
+            rawOwner = *reinterpret_cast<const int*>(message + 0x18);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        rawOwner = -1;
+    }
+    const bool validOwner = rawOwner != 0 && rawOwner != -1 &&
+                            rawOwner != kInvalidMidgardId;
     // Debounce: sub_48A680 can fire several times per turn-info (a burst). Treat only a real PLAYER
     // CHANGE as a new turn; otherwise the plugin re-banks+reloads the budget and the turn starts at
     // DOUBLE time (joiner's first turn showed ~90s instead of 45s).
-    if (player >= 0 && player != g.lastTurnPlayer) {
-        g.lastTurnPlayer = player;
+    if (validOwner && rawOwner != g.lastTurnPlayer) {
+        g.lastTurnPlayer = rawOwner;
         // A queued press belongs only to the turn in which the timer elapsed. Never let it cross a
         // network turn boundary and fire against the next player's fresh, positive clock.
         clearPendingActions();
+        const int player = rawOwner & 0xFFFF;
         pluginhost_bump_turn(player);
         static LONG n = 0;
         if (InterlockedIncrement(&n) <= 60)
-            tlog("[timer] turn-info off6 player=%d (serial bump)", player);
+            tlog("[timer] turn-info off6 owner=%08X player=%d (serial bump)",
+                 static_cast<unsigned>(rawOwner), player);
     }
     return reinterpret_cast<int(__fastcall*)(void*, void*, int)>(g.g_orig_turnInfo)(self, nullptr, a2);
 }
@@ -480,18 +493,6 @@ bool localPlayerId(int* rawId, int* typeIndex)
     return true;
 }
 
-void setButtonEnabled(void* btn, bool enabled)
-{
-    if (!isUserPtr(btn))
-        return;
-    __try {
-        void* vtable = *reinterpret_cast<void**>(btn);
-        void* method = *reinterpret_cast<void**>(reinterpret_cast<char*>(vtable) + 160);
-        reinterpret_cast<void(__thiscall*)(void*, bool)>(method)(btn, enabled);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-}
-
 void* autoBattleToggle(void* batViewer)
 {
     void* outer = battleInterf(batViewer);
@@ -508,34 +509,20 @@ void* autoBattleToggle(void* batViewer)
     }
 }
 
-void setToggleForced(void* batViewer, bool checkCurrentSide)
+void setToggleForced(void* batViewer, bool forced)
 {
     char* data = nullptr;
     char* data2 = nullptr;
     if (!battleData(batViewer, &data, &data2))
         return;
     __try {
-        if (checkCurrentSide) {
-            const unsigned flagOffset = data2[kAutoSideSelectorOffset]
-                ? kAutoAttackerOffset
-                : kAutoDefenderOffset;
-            data2[flagOffset] = 1;
-        }
+        const unsigned flagOffset = data2[kAutoSideSelectorOffset]
+            ? kAutoAttackerOffset
+            : kAutoDefenderOffset;
+        data2[flagOffset] = forced ? 1 : 0;
         void* toggle = autoBattleToggle(batViewer);
         if (isUserPtr(toggle)) {
-            if (checkCurrentSide)
-                reinterpret_cast<void(__thiscall*)(void*, bool)>(0x5355B3)(toggle, true);
-            void* vtable = *reinterpret_cast<void**>(toggle);
-            void* setEnabled =
-                *reinterpret_cast<void**>(reinterpret_cast<char*>(vtable) + 140);
-            reinterpret_cast<void(__thiscall*)(void*, bool)>(setEnabled)(toggle, false);
-        }
-        if (checkCurrentSide) {
-            // The window-message filter is authoritative; disabling visible action buttons as well
-            // prevents one frame of misleading manual controls before the next message-loop turn.
-            setButtonEnabled(g.btnRetreat, false);
-            setButtonEnabled(g.btnDefend, false);
-            setButtonEnabled(g.btnResolve, false);
+            reinterpret_cast<void(__thiscall*)(void*, bool)>(0x5355B3)(toggle, forced);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
@@ -837,6 +824,12 @@ bool installAutoBattleToggleHook()
 void __fastcall hookBattleSubmit(void* self, void* /*edx*/, const void* battleMsgData,
                                  int action, const void* targetId, const void* attackerId)
 {
+    void* const forcedViewer = g.battleViewer;
+    const LONG forcedInstance = InterlockedExchangeAdd(&g.battleInstance, 0);
+    const bool forcedAutoCandidate = action == kBattleActionAuto &&
+        InterlockedExchangeAdd(&g.forceAutoRequested, 0) != 0 &&
+        InterlockedExchangeAdd(&g.forceAutoKickPending, 0) != 0 &&
+        isUserPtr(forcedViewer);
     if (isUserPtr(g.battleViewer) &&
         InterlockedExchangeAdd(&g.battleTurnActive, 0) == 1) {
         // Close only this choice. Keep the parsed local-side and double-attack continuation fields
@@ -852,6 +845,27 @@ void __fastcall hookBattleSubmit(void* self, void* /*edx*/, const void* battleMs
     reinterpret_cast<void(__thiscall*)(void*, const void*, int,
                                        const void*, const void*)>(
         g.g_origBattleSubmit)(self, battleMsgData, action, targetId, attackerId);
+
+    // The native callback returning is not an acknowledgement: on a joiner it can be a no-op. Only
+    // the exact common submit boundary with BattleAction::Auto proves that the game accepted the
+    // transition. Revalidate the battle generation after the original sender returns so a nested
+    // teardown cannot relatch a stale force request onto the next battle.
+    if (forcedAutoCandidate) {
+        bool confirmed = false;
+        beginBattleStateWrite();
+        if (g.battleViewer == forcedViewer && g.battleInstance == forcedInstance &&
+            g.forceAutoRequested && g.forceAutoKickPending) {
+            InterlockedExchange(&g.forceAutoActive, 1);
+            InterlockedExchange(&g.forceAutoKickPending, 0);
+            confirmed = true;
+        }
+        endBattleStateWrite();
+        if (confirmed) {
+            setToggleForced(forcedViewer, true);
+            tlog("[timer] forced Auto Battle submit acknowledged (viewer=%p instance=%ld)",
+                 forcedViewer, forcedInstance);
+        }
+    }
 }
 
 bool installBattleSubmitHook()
@@ -1125,8 +1139,12 @@ extern "C" void timerhost_after_battle_update(void* batViewer)
     }
     if (g.forceAutoRequested && !g.forceAutoActive)
         timerhost_force_auto_battle(); // re-evaluate the deferred latch on the new full choice
-    if (g.forceAutoActive && batViewer == g.battleViewer)
+    if (g.forceAutoActive && batViewer == g.battleViewer) {
         setToggleForced(batViewer, g.battleTurnActive == 1);
+        if (g.battleTurnActive == 1 && g.battleSelectionOpen &&
+            g.battlePlaybackLocal < 0)
+            InterlockedExchange(&g.forceAutoKickPending, 1);
+    }
 }
 
 extern "C" void timerhost_on_battle_end(void)
@@ -1136,7 +1154,14 @@ extern "C" void timerhost_on_battle_end(void)
 
 extern "C" int timerhost_filter_input(UINT msg, WPARAM /*wParam*/, LPARAM /*lParam*/)
 {
-    if (!g.forceAutoActive)
+    // Block the brief request->UI-thread-dispatch window as well. Waiting for the submit ACK here
+    // lets a manual action race the queued Auto callback and send two choices.
+    if (!g.forceAutoRequested || !g.forceAutoKickPending)
+        return 0;
+    C4P_BattleTimerState state = {};
+    state.struct_size = sizeof(state);
+    if (!timerhost_get_battle_timer_state(&state) || state.battle_kind != 1 ||
+        state.local_active != 1 || state.selection_open != 1 || state.playback_local >= 0)
         return 0;
     switch (msg) {
     case WM_LBUTTONDOWN:
@@ -1155,10 +1180,7 @@ extern "C" int timerhost_filter_input(UINT msg, WPARAM /*wParam*/, LPARAM /*lPar
     case WM_MOUSEHWHEEL:
     case WM_KEYDOWN:
     case WM_KEYUP:
-    case WM_SYSKEYDOWN:
-    case WM_SYSKEYUP:
     case WM_CHAR:
-    case WM_SYSCHAR:
         return 1;
     default:
         return 0;
@@ -1300,21 +1322,16 @@ extern "C" int timerhost_force_auto_battle(void)
         // choice, so it is not an authority for whether that choice is actionable.
         const bool canActivate = state.local_active == 1 && state.selection_open == 1 &&
                                  state.playback_local < 0;
-        bool activatedNow = false;
-        if (!g.forceAutoActive && canActivate &&
-            InterlockedCompareExchange(&g.forceAutoActive, 1, 0) == 0) {
+        bool scheduledNow = false;
+        if (canActivate && !g.forceAutoKickPending) {
             InterlockedExchange(&g.forceAutoKickPending, 1);
-            activatedNow = true;
-        } else if (g.forceAutoActive && state.local_active == 1 &&
-                   state.selection_open == 1 && state.playback_local < 0) {
-            // Once latched, AI also owns any continuation actions it reaches itself.
-            InterlockedExchange(&g.forceAutoKickPending, 1);
+            scheduledNow = true;
         }
         ReleaseSRWLockShared(&g_battleStateLock);
 
-        if (activatedNow) {
-            tlog("[timer] forced Auto Battle activated (instance=%u generation=%u)",
-                 state.battle_instance, state.generation);
+        if (scheduledNow) {
+            tlog("[timer] forced Auto Battle callback scheduled (instance=%u generation=%u)",
+                  state.battle_instance, state.generation);
         }
         if (!wasRequested) {
             tlog("[timer] forced Auto Battle requested (defer=%d selection=%d anim=%d "
@@ -1382,18 +1399,30 @@ extern "C" void timerhost_pump(void)
         // same callback themselves through the game's normal five-millisecond UiEvent.
         C4P_BattleTimerState battleState = {};
         battleState.struct_size = sizeof(battleState);
-        const bool forceKickEligible = g.forceAutoKickPending && g.forceAutoActive &&
+        const bool forceKickEligible = g.forceAutoKickPending && g.forceAutoRequested &&
             timerhost_get_battle_timer_state(&battleState) &&
             battleState.battle_kind == 1 && battleState.local_active == 1 &&
             battleState.selection_open == 1 && battleState.playback_local < 0 &&
             isUserPtr(g.battleViewer);
         if (forceKickEligible) {
             void* const viewer = g.battleViewer;
-            setToggleForced(viewer, true);
-            if (kickNativeAutoBattle(viewer)) {
+            const bool callbackReturned = kickNativeAutoBattle(viewer);
+            const bool submitAcknowledged =
+                InterlockedExchangeAdd(&g.forceAutoActive, 0) != 0 &&
+                InterlockedExchangeAdd(&g.forceAutoKickPending, 0) == 0;
+            if (submitAcknowledged) {
+                tlog("[timer] native Auto Battle callback dispatched and acknowledged "
+                     "(viewer=%p instance=%u)", viewer, battleState.battle_instance);
+            } else {
+                // A callback that returned without crossing hookBattleSubmit is not success. Restore
+                // manual control immediately; otherwise a pure joiner can wait forever with every
+                // key and mouse action swallowed.
                 InterlockedExchange(&g.forceAutoKickPending, 0);
-                tlog("[timer] native Auto Battle callback dispatched (viewer=%p instance=%u)",
-                     viewer, battleState.battle_instance);
+                InterlockedExchange(&g.forceAutoRequested, 0);
+                InterlockedExchange(&g.forceAutoActive, 0);
+                setToggleForced(viewer, false);
+                tlog("[timer] native Auto Battle callback unacknowledged (returned=%d); "
+                     "manual input restored", callbackReturned ? 1 : 0);
             }
         }
 

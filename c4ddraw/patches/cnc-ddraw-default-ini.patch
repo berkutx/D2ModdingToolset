@@ -2,6 +2,14 @@ diff --git a/src/config.c b/src/config.c
 index 18cfacdd..c37086c8 100644
 --- a/src/config.c
 +++ b/src/config.c
+@@ -64,6 +64,6 @@ void cfg_load()
+     /* Compatibility settings */
+ 
+     GET_BOOL(g_config.noactivateapp, "noactivateapp", FALSE);
+-    GET_INT(g_config.maxgameticks, "maxgameticks", 0);
++    GET_INT(g_config.maxgameticks, "maxgameticks", 180);
+     GET_INT(g_config.limiter_type, "limiter_type", LIMIT_AUTO);
+     GET_INT(g_config.minfps, "minfps", 0);
 @@ -182,1771 +182,107 @@ static void cfg_create_ini()
      if (fh)
      {
@@ -248,8 +256,8 @@ index 18cfacdd..c37086c8 100644
 +            "maxfps=144\n"
 +            "; CPU FIX (= DisciplesGL ColdCPU): throttles the game's hot spin-loop. Menu CPU\n"
 +            "; ~95%/core -> ~9%/core. Default 0 does NOT help. 30 = cooler but choppier;\n"
-+            "; raise toward 100 if any animation/scroll feels slow.\n"
-+            "maxgameticks=100\n"
++            "; raise toward 180 if any animation/scroll feels slow.\n"
++            "maxgameticks=180\n"
 +            "\n"
 +            "; --- hotkeys (VK codes; 0x00 disables) --------------------------------------\n"
 +            "; Alt+Enter: window <-> fullscreen\n"

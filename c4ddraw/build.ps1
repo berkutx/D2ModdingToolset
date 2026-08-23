@@ -33,6 +33,7 @@ $patchNull = Join-Path $root "patches\cnc-ddraw-render-null.patch"
 $patchIni = Join-Path $root "patches\cnc-ddraw-default-ini.patch"
 $patchZoom = Join-Path $root "patches\cnc-ddraw-simple-zoom.patch"
 $patchDecorative = Join-Path $root "patches\cnc-ddraw-decorative-background.patch"
+$patchPrintScreen = Join-Path $root "patches\cnc-ddraw-printscreen-compositor.patch"
 $patchSystemOpenGL = Join-Path $root "patches\cnc-ddraw-system-opengl-fallback.patch"
 $patchGdiFilter = Join-Path $root "patches\cnc-ddraw-gdi-filter.patch"
 $patchCursorOwnership = Join-Path $root "patches\cnc-ddraw-d2-cursor-ownership.patch"
@@ -97,7 +98,7 @@ Copy-Item $upstream $build -Recurse -Force
 # the submodule working tree carries a .git gitlink file; drop it so the throwaway git-apply repo below is clean
 Remove-Item (Join-Path $build ".git") -Force -Recurse -ErrorAction SilentlyContinue
 
-Write-Host "[3/6] apply our patches (embed + render_null + defaults + zoom + decorative seam)" -ForegroundColor Cyan
+Write-Host "[3/6] apply our patches (embed + render_null + defaults + zoom + decorative/screenshot seams)" -ForegroundColor Cyan
 # Apply inside a throwaway repo so git apply resolves paths cleanly (it "Skipped patch" when
 # run outside a working tree). autocrlf=false keeps the patch context matching the upstream EOLs.
 # Patches: the minimal C4dll-R integration point (dllmain.c only) + render-null
@@ -119,6 +120,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "git apply (simple zoom) failed (exit $LASTEXITCODE)" }
     & git -c core.autocrlf=false apply --ignore-whitespace "$patchDecorative"
     if ($LASTEXITCODE -ne 0) { throw "git apply (decorative-background seam) failed (exit $LASTEXITCODE)" }
+    & git -c core.autocrlf=false apply --ignore-whitespace "$patchPrintScreen"
+    if ($LASTEXITCODE -ne 0) { throw "git apply (PrintScreen compositor seam) failed (exit $LASTEXITCODE)" }
     & git -c core.autocrlf=false apply --ignore-whitespace "$patchSystemOpenGL"
     if ($LASTEXITCODE -ne 0) { throw "git apply (system OpenGL fallback) failed (exit $LASTEXITCODE)" }
     & git -c core.autocrlf=false apply --ignore-whitespace "$patchGdiFilter"
@@ -143,6 +146,11 @@ foreach ($rendererSource in @("render_ogl.c", "render_d3d9.c", "render_gdi.c")) 
     if (-not (Select-String -Path (Join-Path $build "src\$rendererSource") -Pattern "DDGetDecoratedSurface" -Quiet)) {
         throw "decorative-background patch did not apply: adapter missing from $rendererSource"
     }
+}
+$keyboardSource = Get-Content -LiteralPath (Join-Path $build "src\keyboard.c") -Raw
+if (([regex]::Matches($keyboardSource, '(?m)^\s+DDTakeScreenshot\(\);\s*$')).Count -ne 2 -or
+    $keyboardSource -match 'ss_take_screenshot\s*\(\s*g_ddraw\.primary\s*\)') {
+    throw "PrintScreen compositor patch did not apply: upstream primary-surface capture remains"
 }
 if (-not (Select-String -Path (Join-Path $build "src\opengl_utils.c") -Pattern "system_opengl" -Quiet)) {
     throw "system OpenGL fallback patch did not apply: system loader path missing"

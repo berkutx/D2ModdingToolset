@@ -43,6 +43,7 @@
 #include <limits>
 
 extern "C" int DDGetGameWidth(void);
+extern "C" int DDGetGameHeight(void);
 extern "C" int horplus_get_battle_view_width(void);
 extern "C" void featuremenu_debug_log_line(const char* line);
 
@@ -136,6 +137,8 @@ constexpr BattleLayout kLayouts[] = {
 volatile LONG g_wideAllowed = 1; // original wrapper's first-run default
 volatile LONG g_wideActive = 0;  // latched by the battle-dialog creation hook
 volatile LONG g_wideAvailable = 0;
+volatile LONG g_battleCanvasWidth = 800;
+volatile LONG g_battleCanvasHeight = 600;
 
 uintptr_t g_swapGroupContinue = 0;
 uintptr_t g_imageIndicesOriginal = 0;
@@ -611,21 +614,67 @@ char* __stdcall localStreamReadHook(char* buffer, int maxCount, FILE* stream)
 void __stdcall calculateWideBattle()
 {
     const int canvasWidth = DDGetGameWidth();
+    const int canvasHeight = DDGetGameHeight();
     const int battleViewWidth = horplus_get_battle_view_width();
     const bool active = InterlockedExchangeAdd(&g_wideAvailable, 0) &&
                         InterlockedExchangeAdd(&g_wideAllowed, 0) &&
                         canvasWidth >= 990 &&
                         battleViewWidth >= 990;
     InterlockedExchange(&g_wideActive, active ? 1 : 0);
+    InterlockedExchange(&g_battleCanvasWidth, canvasWidth > 0 ? canvasWidth : 800);
+    InterlockedExchange(&g_battleCanvasHeight, canvasHeight > 0 ? canvasHeight : 600);
 
-    char line[192] = {};
+    char line[224] = {};
+    const int sphereWidth = active ? 990 : 800;
     wsprintfA(line,
-              "[widebattle] latch canvas=%d fixedView=%d available=%d enabled=%d active=%d dialog=%s",
-              canvasWidth, battleViewWidth,
+              "[widebattle] latch canvas=%dx%d fixedView=%d available=%d enabled=%d active=%d "
+              "dialog=%s sphereOffset=%d,%d",
+              canvasWidth, canvasHeight, battleViewWidth,
               InterlockedExchangeAdd(&g_wideAvailable, 0) != 0 ? 1 : 0,
               InterlockedExchangeAdd(&g_wideAllowed, 0) != 0 ? 1 : 0,
-              active ? 1 : 0, active ? "DLG_BATTLE_B" : "DLG_BATTLE_A");
+              active ? 1 : 0, active ? "DLG_BATTLE_B" : "DLG_BATTLE_A",
+              (canvasWidth - sphereWidth) / 2, (canvasHeight - 600) / 2);
     featuremenu_debug_log_line(line);
+}
+
+// Original DisciplesGL "Sphere fix". The game computes the green summon/target marker in the
+// centered battle-dialog coordinate system, but stores it as if that dialog started at canvas 0,0.
+// Adjust by half the difference between the real canvas and the active 800/990 x 600 battle area.
+// These thunks replace `mov eax,[ebp-38h/40h]; mov [eax],edx`, so EDX is the computed coordinate and
+// EAX is the only scratch register the original sequence was allowed to change.
+void __declspec(naked) sphereXHook()
+{
+    __asm {
+        mov eax, dword ptr [g_battleCanvasWidth]
+        sar eax, 1
+        add edx, eax
+        mov eax, dword ptr [g_wideActive]
+        test eax, eax
+        jnz wide
+        mov eax, 800
+        jmp center
+    wide:
+        mov eax, 990
+    center:
+        sar eax, 1
+        sub edx, eax
+        mov eax, [ebp-38h]
+        mov [eax], edx
+        retn
+    }
+}
+
+void __declspec(naked) sphereYHook()
+{
+    __asm {
+        mov eax, dword ptr [g_battleCanvasHeight]
+        sar eax, 1
+        add edx, eax
+        sub edx, 300
+        mov eax, [ebp-40h]
+        mov [eax], edx
+        retn
+    }
 }
 
 void __stdcall centerUnitsHook(DWORD* object)
@@ -1052,6 +1101,8 @@ bool validateSites(const BattleLayout& layout)
     static const BYTE initV3Two[] = {0x81, 0xC1, 0x98, 0x13, 0x00, 0x00};
     static const BYTE dialogOne[] = {0x8B, 0x0D};
     static const BYTE dialogTwo[] = {0x8B, 0x15};
+    static const BYTE sphereX[] = {0x8B, 0x45, 0xC8, 0x89, 0x10};
+    static const BYTE sphereY[] = {0x8B, 0x45, 0xC0, 0x89, 0x10};
 
     uintptr_t ignoredItemTarget = 0;
     const bool common =
@@ -1070,6 +1121,13 @@ bool validateSites(const BattleLayout& layout)
         bytesAre(layout.dialogTwo, dialogTwo, sizeof(dialogTwo)) &&
         absoluteOperandInImage(layout.dialogTwo + 2);
     if (!common)
+        return false;
+
+    // The reported artifact and the release target are exact v3.01a Russobit. Keep this omitted
+    // legacy hook target-specific until equivalent byte sites are independently gated per layout.
+    if (layout.probe == 0x005676DA &&
+        (!bytesAre(0x0065A018, sphereX, sizeof(sphereX)) ||
+         !bytesAre(0x0065A064, sphereY, sizeof(sphereY))))
         return false;
 
     if (layout.abi == BattleAbi::CompactV2) {
@@ -1195,7 +1253,12 @@ bool preparePlans(const BattleLayout& layout)
         !addRelPatch(layout.dialogOne,
                      reinterpret_cast<const void*>(&battleDialogOneHook), 0xE8, 6) ||
         !addRelPatch(layout.dialogTwo,
-                     reinterpret_cast<const void*>(&battleDialogTwoHook), 0xE8, 6))
+                      reinterpret_cast<const void*>(&battleDialogTwoHook), 0xE8, 6))
+        return false;
+
+    if (layout.probe == 0x005676DA &&
+        (!addRelPatch(0x0065A018, reinterpret_cast<const void*>(&sphereXHook), 0xE8, 5) ||
+         !addRelPatch(0x0065A064, reinterpret_cast<const void*>(&sphereYHook), 0xE8, 5)))
         return false;
 
     if (layout.localStreamRead)

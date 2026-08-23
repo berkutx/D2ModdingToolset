@@ -20,7 +20,7 @@ INSTALL
   1. Make a backup of your current C4dll-R.dll (if you have one).
   2. Copy C4dll-R.dll next to Discipl2.exe (replace the existing one).
   3. Copy ddraw.ini next to Discipl2.exe - these are the recommended renderer
-     defaults (windowed with the menu bar, OpenGL, game speed cap 100).
+     defaults (windowed with the menu bar, OpenGL, game speed cap 180).
      Upgrading and already tuned your ddraw.ini? Keep yours.
   4. Copy the Shaders\ folder next to Discipl2.exe. It contains the exact eight
      OpenGL filters shown by the Video menu, including required multipass files.
@@ -41,7 +41,7 @@ INSTALL
 
   Note: without ddraw.ini the renderer generates its tuned first-run config:
   a bordered window with the menu, OpenGL, a normal window following the selected
-  game resolution, and game speed cap 100. The bundled ddraw.ini additionally enables
+  game resolution, and game speed cap 180. The bundled ddraw.ini additionally enables
   resizing and remembers window size/position, so copying it remains the intended setup.
 
 USING IT
@@ -89,7 +89,7 @@ USING IT
     bootstrap. It is not the game resolution, output size or scaling mode; the
     widescreen startup fix adjusts process-local geometry without rewriting it.
   - Widescreen Battle is automatic and ON by default on a recognized original
-    layout; there is no menu switch in 1.7. It selects a fixed 990-wide
+    layout; there is no menu switch in this release. It selects a fixed 990-wide
     battle layout and shows both unit panels when both the logical canvas and
     effective fixed-screen view are at least 990 pixels wide. Thus default
     1024x768/1280x1024 zoom stays 800-wide, while Hor+ is 990-wide; it does not
@@ -102,16 +102,16 @@ USING IT
     second-target selection is a new billed choice. Hold Ctrl+Alt
     and drag the clock with LMB to reposition it. On the exact Russobit/MNS
     layout the countdown starts only after you accept the normal begin-turn
-    summary with OK; time does not run under that dialog. A running Force clock
-    cannot be paused manually, while Set remains available. Other executable
+    summary with OK; time does not run under that dialog. Pause, Reset and Set
+    update a running Force clock immediately. Other executable
     layouts keep the active-turn-edge fallback.
 
 UNINSTALL / REVERT
   - Restore your backed-up C4dll-R.dll and remove Mods\timer.c4p.
 
 This package is independent of the mss32 mod and is versioned separately.
-It is distributed under GPL-3.0; see LICENSE. Matching source for 1.7 is at
-https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.7
+It is distributed under GPL-3.0; see LICENSE. Matching source for 1.8 is at
+https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.8
 
 ================================================================================
  C4dll-R  -  самодостаточный DirectDraw-врапер для Disciples II
@@ -135,7 +135,7 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.7
   1. Сделайте резервную копию текущего C4dll-R.dll (если он есть).
   2. Скопируйте C4dll-R.dll рядом с Discipl2.exe (заменив существующий).
   3. Скопируйте ddraw.ini рядом с Discipl2.exe - это рекомендованные настройки
-     рендерера (окно с меню-баром, OpenGL, кап скорости игры 100).
+     рендерера (окно с меню-баром, OpenGL, кап скорости игры 180).
      Обновляетесь и уже настроили свой ddraw.ini? Оставьте свой.
   4. Скопируйте папку Shaders\ рядом с Discipl2.exe. В ней находятся ровно восемь
      OpenGL-фильтров из меню Video и необходимые файлы multipass.
@@ -157,7 +157,7 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.7
 
   Примечание: без ddraw.ini рендерер при первом запуске создаст свой настроенный
   конфиг: окно с рамкой и меню, OpenGL, обычное окно следует выбранному разрешению
-  игры, кап скорости игры — 100. Комплектный ddraw.ini дополнительно
+  игры, кап скорости игры — 180. Комплектный ddraw.ini дополнительно
   разрешает менять размер окна и запоминает его размер/позицию, поэтому его
   копирование остаётся задуманным вариантом.
 
@@ -206,7 +206,7 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.7
      совместимости. Это не разрешение игры, вывод или режим масштаба; исправление
      широкого запуска меняет process-local геометрию без перезаписи значения.
   - «Широкий бой» включается автоматически и по умолчанию на распознанной
-     исходной раскладке; отдельного пункта меню в 1.7 нет. Он выбирает
+     исходной раскладке; отдельного пункта меню в этом релизе нет. Он выбирает
      фиксированную боевую раскладку шириной 990 и показывает обе панели при
      логическом кадре и эффективном фиксированном виде не уже 990. Поэтому
      штатные 1024x768/1280x1024 с обычным zoom остаются 800-wide, а Hor+ —
@@ -219,12 +219,12 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.7
     цель открывает новый оплачиваемый выбор. Для перемещения часов
     зажмите Ctrl+Alt и перетащите их ЛКМ. На точной Russobit/MNS-раскладке
     отсчёт начинается только после штатного OK в сводке начала хода: под диалогом
-    время не уходит. Уже запущенный Force вручную на паузу не ставится, а Set
-    остаётся доступен. На других exe сохраняется прежний сигнал активного хода.
+    время не уходит. Pause, Reset и Set сразу обновляют запущенный Force-таймер.
+    На других exe сохраняется прежний сигнал активного хода.
 
 УДАЛЕНИЕ / ОТКАТ
   - Верните сохранённый C4dll-R.dll и удалите Mods\timer.c4p.
 
 Пакет независим от мода mss32 и версионируется отдельно. Лицензия — GPL-3.0,
-см. LICENSE. Соответствующие исходники 1.7:
-https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.7
+см. LICENSE. Соответствующие исходники 1.8:
+https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.8

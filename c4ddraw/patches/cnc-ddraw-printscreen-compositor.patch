@@ -1,0 +1,30 @@
+diff --git a/src/keyboard.c b/src/keyboard.c
+index c5db929..f0c0bad 100644
+--- a/src/keyboard.c
++++ b/src/keyboard.c
+@@ -8,6 +8,9 @@
+ #include "mouse.h"
+ #include "screenshot.h"
+ 
++/* C4dll-R bridge: capture the same decorated/plugin-composited frame that is presented. */
++extern void DDTakeScreenshot(void);
++
+ 
+ HHOOK g_keyboard_hook;
+ 
+@@ -93,13 +96,13 @@ LRESULT CALLBACK keyboard_hook_proc(int code, WPARAM wParam, LPARAM lParam)
+         {
+             if (key_released)
+             {
+-                ss_take_screenshot(g_ddraw.primary);
++                DDTakeScreenshot();
+                 return 1;
+             }
+         }
+         else if (key_triggered)
+         {
+-            ss_take_screenshot(g_ddraw.primary);
++            DDTakeScreenshot();
+             return 1;
+         }
+     }

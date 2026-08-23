@@ -18,6 +18,7 @@
 #include "timer_dlg.h"
 #include <cstdarg>
 #include <cstring>
+#include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -54,8 +55,9 @@ int g_anchorY = 0;      // high-resolution form avoids visible percentage-sized 
 REAL g_fontSize = 28.0f;
 
 // ---- runtime clock ----
-int g_paused = 0;       // manual pause OR combat-pause (both freeze the clock)
-int g_combatPausing = 0; // 1 if WE auto-paused for Combat Pause (so we only auto-resume our own pause)
+int g_paused = 0;       // effective freeze: manualPaused || policyPaused
+int g_manualPaused = 0; // user/menu/DayStart pause; never cleared by an automatic policy transition
+int g_policyPaused = 0; // ownership/combat/animation/timeout pause; recomputed by c4p_tick
 int g_running = 0;      // a real turn has started -> the clock counts. Does NOT run at launch / main
                         // menu, only once the turn begins (strategic view reached).
 DWORD g_baseline = 0;   // tick the current count started from
@@ -82,6 +84,7 @@ int* bankAccum(int playerId) // &accum for playerId; claims a free slot the firs
 int g_lastPlayer = -1;  // player whose turn it was last (to bank their remaining on turn change)
 int g_wasActive = 0;    // previous tick's turn_active, to detect the 0->1 (my turn started) edge
 int g_turnAccepted = 0; // Force clock is allowed to run for this local turn (Russobit: only after OK)
+int g_manualSetPending = 0; // preserve a pre-ack Set/Reset across the first accepted-turn edge
 int g_expired = 0;      // Force timeout is clamped/frozen at exactly 00:00
 int g_curDayBudget = 0; // day captured at the current turn-start (for the previous turn's budget)
 uint32_t g_lastSerial = 0; // last processed turn serial; a bump = a real turn change (off[6] turn-info)
@@ -323,6 +326,14 @@ uint32_t hostBeginTurnAckSerial()
         : UINT32_MAX;
 }
 
+int hostServerRole()
+{
+    // Older hosts predate role publication and retain their historical precise-ack behavior. A
+    // current host returns -1 until a multiplayer role is observable, so an unknown startup state
+    // cannot fabricate either an OK acknowledgement or a joiner active edge.
+    return HOST_HAS(server_role) ? g_host->server_role() : 1;
+}
+
 // Per-turn budget (seconds) for a day: day-1 base until the first active Timetable entry, then the
 // duration of the active entry with the largest TableDay <= day.
 int budgetSecForDay(int day)
@@ -336,6 +347,19 @@ int budgetSecForDay(int day)
         }
     }
     return dur < 1 ? 1 : dur;
+}
+
+int budgetMsForDay(int day)
+{
+    const int64_t value = static_cast<int64_t>(budgetSecForDay(day)) * 1000;
+    return value > INT_MAX ? INT_MAX : static_cast<int>(value);
+}
+
+int clampBankMs(int64_t value)
+{
+    if (value <= 0)
+        return 0;
+    return value > INT_MAX ? INT_MAX : static_cast<int>(value);
 }
 
 void readConfig()
@@ -401,48 +425,73 @@ bool loadFont()
 void chk(int off, bool on) { if (g_menu) CheckMenuItem(g_menu, g_base + off, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED)); }
 void ena(int off, bool on) { if (g_menu) EnableMenuItem(g_menu, g_base + off, MF_BYCOMMAND | (on ? MF_ENABLED : MF_GRAYED)); }
 
+struct MenuSnapshot
+{
+    int state;
+    int running;
+    int manualPaused;
+    int dayTurn;
+    int pauseOn;
+    int pauseAnim;
+    int turnDay;
+    int autoBattle;
+    int resetExtra;
+    int alwaysVisible;
+};
+
 void refreshMenu()
 {
+    MenuSnapshot s = {};
+    EnterCriticalSection(&g_lock);
+    s.state = g_state;
+    s.running = g_running;
+    s.manualPaused = g_manualPaused;
+    s.dayTurn = g_dayTurn;
+    s.pauseOn = g_pauseOn;
+    s.pauseAnim = g_pauseAnim;
+    s.turnDay = g_turnDay;
+    s.autoBattle = g_autoBattle;
+    s.resetExtra = g_resetExtra;
+    s.alwaysVisible = g_alwaysVisible;
+    LeaveCriticalSection(&g_lock);
+
     if (!g_menu)
         return;
-    // Force/PvP is a non-stoppable clock: user Pause stays disabled, while automatic animation,
-    // combat and not-my-turn freezes still work internally. Reset becomes available only after this
-    // local turn has passed the precise begin-turn acknowledgement.
-    const bool resettable =
-        (g_state == 1) || (g_state == 2 && g_turnAccepted != 0);
-    chk(kSimpleOn, g_state == 1);
-    chk(kForceOn, g_state == 2);
-    ena(kPause, g_state == 1);
-    chk(kPause, g_paused != 0);
-    ena(kReset, resettable);
+    const bool pauseAvailable = s.state != 0 && s.running != 0;
+    chk(kSimpleOn, s.state == 1);
+    chk(kForceOn, s.state == 2);
+    ena(kPause, pauseAvailable);
+    chk(kPause, s.manualPaused != 0);
+    // Reset is also the documented manual start boundary, so it is valid before the first turn.
+    ena(kReset, s.state != 0);
     // Set is useful before Force mode has detected a live turn and remains safe while paused.
     // Only a completely disabled timer has no editable clock.
-    ena(kSet, g_state != 0);
+    ena(kSet, s.state != 0);
     // On Day Start (b0 Pause / b1 Unpause / b2 Reset)
-    chk(kDayStartPause, (g_dayTurn & 1) != 0);
-    chk(kDayStartUnpause, (g_dayTurn & 2) != 0);
-    chk(kDayStartReset, (g_dayTurn & 4) != 0);
+    chk(kDayStartPause, (s.dayTurn & 1) != 0);
+    chk(kDayStartUnpause, (s.dayTurn & 2) != 0);
+    chk(kDayStartReset, (s.dayTurn & 4) != 0);
     // On Day End (b3 / b4 / b5)
-    chk(kDayEndPause, (g_dayTurn & 8) != 0);
-    chk(kDayEndUnpause, (g_dayTurn & 0x10) != 0);
-    chk(kDayEndReset, (g_dayTurn & 0x20) != 0);
-    chk(kCombatOff, g_pauseOn == 0);
-    chk(kCombatPvP, g_pauseOn == 1);
-    chk(kCombatPvAny, g_pauseOn == 2);
-    chk(kAnimPause, g_pauseAnim != 0);
-    chk(kElapseEndDay, g_turnDay != 0);
+    chk(kDayEndPause, (s.dayTurn & 8) != 0);
+    chk(kDayEndUnpause, (s.dayTurn & 0x10) != 0);
+    chk(kDayEndReset, (s.dayTurn & 0x20) != 0);
+    chk(kCombatOff, s.pauseOn == 0);
+    chk(kCombatPvP, s.pauseOn == 1);
+    chk(kCombatPvAny, s.pauseOn == 2);
+    chk(kAnimPause, s.pauseAnim != 0);
+    chk(kElapseEndDay, s.turnDay != 0);
     ena(kElapseDefend, false);
     chk(kElapseDefend, false);
     ena(kElapseRetreat, false);
     chk(kElapseRetreat, false);
-    ena(kElapseAutoBattle, g_state == 2);
-    chk(kElapseAutoBattle, g_autoBattle != 0);
-    chk(kResetExtra, g_resetExtra != 0);
-    chk(kAlwaysVis, g_alwaysVisible != 0);
+    ena(kElapseAutoBattle, s.state == 2);
+    chk(kElapseAutoBattle, s.autoBattle != 0);
+    chk(kResetExtra, s.resetExtra != 0);
+    chk(kAlwaysVis, s.alwaysVisible != 0);
 }
 
 // ---- pause helpers (freeze/resume the clock by adjusting baseline) ----
-void setPaused(int on)
+void setEffectivePaused(int on)
 {
     if (g_paused == on)
         return;
@@ -453,6 +502,23 @@ void setPaused(int on)
         g_baseline += now - g_pausedAt; // resume: skip the paused span
     }
     g_paused = on;
+}
+
+void syncPauseState()
+{
+    setEffectivePaused((g_manualPaused || g_policyPaused) ? 1 : 0);
+}
+
+void setManualPaused(int on)
+{
+    g_manualPaused = on ? 1 : 0;
+    syncPauseState();
+}
+
+void setPolicyPaused(int on)
+{
+    g_policyPaused = on ? 1 : 0;
+    syncPauseState();
 }
 
 void restart()
@@ -544,11 +610,15 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
             hostCancelElapse();
         g_running = 0;
         g_turnAccepted = 0;
+        g_manualSetPending = 0;
         g_elapseFired = 0;
         g_expired = 0;
         g_paused = 0;
-        g_combatPausing = 0;
+        g_manualPaused = 0;
+        g_policyPaused = 0;
         g_curDayBudget = 1;
+        g_lastPlayer = -1;
+        bankClear();
         g_lastSerial = serial;
         g_lastBeginTurnAck = beginTurnAck;
     } else {
@@ -572,14 +642,14 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
                        localPlayer, g_curDayBudget, budgetSecForDay(g_curDayBudget));
         }
 
-        // On Russobit, the clock edge is the native DLG_BEGIN_TURN BTN_OK callback, not dialog
-        // creation and not clientTakesTurn becoming true underneath the modal. If the callback ran
-        // just before active became observable, its serial remains pending and is consumed here.
-        // Other exe layouts have no validated callback and retain the reliable per-client 0->1 edge.
-        const bool preciseAck = beginTurnAck != UINT32_MAX;
+        // The host owns DLG_BEGIN_TURN and starts only after its exact BTN_OK callback. A pure joiner
+        // never receives that callback, so its verified local clientTakesTurn 0->1 edge is the usable
+        // turn boundary. Unknown role fails closed until one of those two sources is authoritative.
+        const int serverRole = hostServerRole();
+        const bool preciseAck = serverRole == 1 && beginTurnAck != UINT32_MAX;
         const bool acceptedEdge =
             strategicActive && preciseAck && beginTurnAck != g_lastBeginTurnAck;
-        const bool fallbackEdge = strategicActive && !preciseAck && !g_wasActive;
+        const bool fallbackEdge = strategicActive && serverRole == 0 && !g_wasActive;
         if (strategicActive && !g_wasActive)
             g_turnAccepted = 0;
 
@@ -592,13 +662,19 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
             int newPlayer = hostTurnPlayerId();
             if (newPlayer < 0)
                 newPlayer = g_host->get_turn_player();
-            const int firstTurn = !g_running;
+            const int firstTurn = g_lastPlayer < 0;
             g_lastSerial = serial;
             hostCancelElapse();
             g_elapseFired = 0; // re-arm the on-elapse latch (even an out-of-time turn auto-skips)
             g_expired = 0;
-            if (firstTurn) {
+            if (firstTurn)
                 bankClear(); // fresh game
+            if (g_manualSetPending) {
+                // Set/Reset is an explicit replacement of the current bank. Do not immediately bank
+                // or reload over it when the next accepted edge arrives (including after a prior turn).
+                if (dayNow >= 0)
+                    g_curDayBudget = dayNow;
+            } else if (firstTurn) {
                 g_extra = 0;
                 g_baseline = now_ms;
                 g_pausedAt = now_ms;
@@ -613,11 +689,9 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
                     int elapsedPrev =
                         (int)((g_paused ? g_pausedAt : now_ms) - g_baseline);
                     if (elapsedPrev < 0) elapsedPrev = 0;
-                    const int budgetPrev =
-                        budgetSecForDay(g_curDayBudget) * 1000;
-                    int remainingPrev = budgetPrev + g_extra - elapsedPrev;
-                    if (remainingPrev < 0)
-                        remainingPrev = 0;
+                    const int budgetPrev = budgetMsForDay(g_curDayBudget);
+                    const int remainingPrev = clampBankMs(
+                        static_cast<int64_t>(budgetPrev) + g_extra - elapsedPrev);
                     *bankAccum(g_lastPlayer) = g_resetExtra ? 0 : remainingPrev;
                 }
                 if (dayNow >= 0)
@@ -629,14 +703,15 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
                 // Simple (count-up): apply On-Day-End then On-Day-Start DayTurn bits; otherwise keep
                 // counting across turns (legacy resets only when a Reset bit fires).
                 if (g_dayTurn & 0x20) restart();         // DayEnd Reset
-                if (g_dayTurn & 0x08) setPaused(1);      // DayEnd Pause
-                else if (g_dayTurn & 0x10) setPaused(0); // DayEnd Unpause
+                if (g_dayTurn & 0x08) setManualPaused(1);      // DayEnd Pause
+                else if (g_dayTurn & 0x10) setManualPaused(0); // DayEnd Unpause
                 if (g_dayTurn & 0x04) restart();         // DayStart Reset
-                if (g_dayTurn & 0x01) setPaused(1);      // DayStart Pause
-                else if (g_dayTurn & 0x02) setPaused(0); // DayStart Unpause
+                if (g_dayTurn & 0x01) setManualPaused(1);      // DayStart Pause
+                else if (g_dayTurn & 0x02) setManualPaused(0); // DayStart Unpause
             }
             g_running = 1;
             g_lastPlayer = newPlayer;
+            g_manualSetPending = 0;
         }
 
         if (!strategicActive)
@@ -751,14 +826,7 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         lastPauseReason = pauseReason;
     }
     const int pausedBeforePolicy = g_paused;
-    if (wantPause && !g_paused) {
-        setPaused(1);
-        g_combatPausing = 1;
-    } else if (!wantPause && g_combatPausing) {
-        if (g_paused)
-            setPaused(0);
-        g_combatPausing = 0;
-    }
+    setPolicyPaused(wantPause);
     if (g_paused != pausedBeforePolicy) {
         timerTrace("[timer] clock %s (reason=%s strategic=%d battleKind=%d "
                    "battleLocal=%d selection=%d anim=%d playbackLocal=%d "
@@ -771,7 +839,7 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
     // Force timeouts never accrue negative overtime. Freeze the underlying clock at its exact
     // deadline so banking later also observes a zero remainder. The host latches Auto Battle
     // independently; Reset/config/cancel_elapse cannot release an already-forced battle.
-    const int currentDurMs = budgetSecForDay(g_curDayBudget) * 1000;
+    const int currentDurMs = budgetMsForDay(g_curDayBudget);
     const bool localPvpSelection = battleKind == 1 && battleActive == 1 &&
                                    battleState.selection_open == 1;
     const bool localPvpPlayback = battleKind == 1 && playbackLocal == 1 && !g_pauseAnim;
@@ -785,15 +853,14 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         hostForceAutoBattle();
     if (g_state == 2 && g_running && inGame && !g_expired && canExpireNow) {
         const DWORD effectiveNow = g_paused ? g_pausedAt : now_ms;
-        int remaining = currentDurMs + g_extra -
-                        static_cast<int>(effectiveNow - g_baseline);
+        const int64_t allowance64 = static_cast<int64_t>(currentDurMs) + g_extra;
+        const int64_t remaining = allowance64 -
+                                  static_cast<uint32_t>(effectiveNow - g_baseline);
         if (remaining <= 0) {
-            int allowance = currentDurMs + g_extra;
-            if (allowance < 0)
-                allowance = 0;
+            const int allowance = clampBankMs(allowance64);
             g_pausedAt = g_baseline + static_cast<DWORD>(allowance);
+            g_policyPaused = 1;
             g_paused = 1;
-            g_combatPausing = 1;
             g_expired = 1;
             g_elapseFired = 1;
             int autoResult = 0;
@@ -826,9 +893,9 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         if (running) {
             const DWORD effNow = paused ? pausedAt : now_ms; // clock frozen while paused
             const int elapsed = (int)(effNow - baseline);
-            v9 = (state == 2) ? (durMs + extra - elapsed) : elapsed; // Force: budget + extra - elapsed
-            if (state == 2 && v9 < 0)
-                v9 = 0;
+            v9 = state == 2
+                ? clampBankMs(static_cast<int64_t>(durMs) + extra - elapsed)
+                : elapsed; // Force: budget + extra - elapsed
         } else {
             v9 = 0; // not started yet: show 00:00 until the turn is active
         }
@@ -893,9 +960,9 @@ extern "C" int __cdecl c4p_draw(C4P_Canvas* canvas)
     return 1;
 }
 
-// Optional input export. The host forwards physical game-client coordinates while its layered
-// overlay remains click-through. This mirrors timer.mod: Ctrl+Alt+LMB captures the point inside the
-// rendered clock, then the same point stays under the cursor throughout the drag (no initial jump).
+// Optional input export. The host forwards logical game-surface coordinates matching c4p_draw.
+// Ctrl+Alt+LMB captures the point inside the rendered clock, then the same point stays under the
+// cursor throughout the drag (no initial jump), even across presentation scaling/simple zoom.
 extern "C" int __cdecl c4p_mouse(UINT msg, WPARAM, int x, int y)
 {
     if (!g_host)
@@ -1040,34 +1107,55 @@ INT_PTR CALLBACK timetableDlgProc(HWND h, UINT m, WPARAM w, LPARAM)
 
 // Set dialog (legacy resource 6): set the current turn's displayed time to N seconds (legacy DialogFunc
 // uses 1000*value, and the Timetable budget is in seconds too). Simple sets the count-up elapsed; Force
-// sets the count-down remaining within the day's budget and clears extra. Modal on the game UI thread.
+// sets the count-down remaining. Remaining may exceed the day's budget; the difference lives in
+// g_extra instead of a wrapped/future DWORD baseline, so it survives banking safely. The Pause button
+// mirrors the menu and is available whenever an enabled clock is actually running.
+void updateSetDlgPauseBtn(HWND h)
+{
+    EnterCriticalSection(&g_lock);
+    const bool active = g_state != 0 && g_running != 0;
+    const bool paused = g_manualPaused != 0;
+    LeaveCriticalSection(&g_lock);
+    HWND btn = GetDlgItem(h, IDC_SET_PAUSE);
+    EnableWindow(btn, active);
+    SetDlgItemTextA(h, IDC_SET_PAUSE, paused ? "Unpause" : "Pause");
+}
+
 INT_PTR CALLBACK setDlgProc(HWND h, UINT m, WPARAM w, LPARAM)
 {
     switch (m) {
     case WM_INITDIALOG:
         SetDlgItemInt(h, IDC_SET_SEC, 0, FALSE);
+        updateSetDlgPauseBtn(h);
         return TRUE;
     case WM_COMMAND:
         switch (LOWORD(w)) {
         case IDOK: {
-            BOOL ok;
-            int secs = (int)GetDlgItemInt(h, IDC_SET_SEC, &ok, FALSE);
-            if (secs < 0) secs = 0;
+            BOOL ok = FALSE;
+            const UINT seconds = GetDlgItemInt(h, IDC_SET_SEC, &ok, FALSE);
+            if (!ok) {
+                MessageBeep(MB_ICONWARNING);
+                SetFocus(GetDlgItem(h, IDC_SET_SEC));
+                return TRUE;
+            }
+            const int desiredMs = seconds > static_cast<UINT>(INT_MAX / 1000)
+                ? INT_MAX
+                : static_cast<int>(seconds * 1000u);
             const int day = hostDay();
             const DWORD now = GetTickCount();
             EnterCriticalSection(&g_lock);
             if (g_state == 2) {
-                const int budgetMs = budgetSecForDay(day) * 1000;
-                if (secs * 1000 > budgetMs) secs = budgetMs / 1000; // remaining can't exceed the budget
-                g_baseline = now - (DWORD)(budgetMs - secs * 1000); // remaining = secs
-                g_extra = 0;
+                g_curDayBudget = day >= 0 ? day : 1;
+                g_baseline = now;
+                g_extra = desiredMs - budgetMsForDay(g_curDayBudget);
             } else if (g_state == 1) {
-                g_baseline = now - (DWORD)(secs * 1000); // elapsed = secs
+                g_baseline = now - static_cast<DWORD>(desiredMs); // elapsed = requested seconds
             } else {
                 g_baseline = now;
             }
             g_pausedAt = now;
             g_running = 1; // a set time implies the clock is active
+            g_manualSetPending = g_turnAccepted ? 0 : 1;
             g_elapseFired = 0;
             g_expired = 0;
             hostCancelElapse();
@@ -1076,6 +1164,14 @@ INT_PTR CALLBACK setDlgProc(HWND h, UINT m, WPARAM w, LPARAM)
             EndDialog(h, 1);
             return TRUE;
         }
+        case IDC_SET_PAUSE:
+            EnterCriticalSection(&g_lock);
+            if (g_state != 0 && g_running)
+                setManualPaused(g_manualPaused ? 0 : 1);
+            LeaveCriticalSection(&g_lock);
+            if (g_host) g_host->invalidate();
+            updateSetDlgPauseBtn(h);
+            return TRUE;
         case IDCANCEL:
             EndDialog(h, 0);
             return TRUE;
@@ -1151,6 +1247,7 @@ extern "C" void __cdecl c4p_command(int cmd)
         return;
     const int off = cmd - g_base;
     HWND hwnd = g_host->get_hwnd();
+    const int commandDay = off == kReset ? hostDay() : -1;
 
     EnterCriticalSection(&g_lock);
     switch (off) {
@@ -1160,17 +1257,23 @@ extern "C" void __cdecl c4p_command(int cmd)
         g_state = (g_state == target) ? 0 : target;
         if (g_state) restart();
         else { g_elapseFired = 0; g_expired = 0; hostCancelElapse(); }
+        g_manualSetPending = 0;
+        g_manualPaused = 0;
+        g_policyPaused = 0;
         g_paused = 0;
         persist("Enabled", g_state);
         break;
     }
     case kPause:
-        if (g_state == 1) setPaused(g_paused ? 0 : 1);
+        if (g_state != 0 && g_running)
+            setManualPaused(g_manualPaused ? 0 : 1);
         break;
     case kReset:
-        if (g_state == 1 || (g_state == 2 && g_turnAccepted)) {
+        if (g_state != 0) {
             restart();
             g_running = 1;
+            g_curDayBudget = commandDay >= 0 ? commandDay : 1;
+            g_manualSetPending = g_turnAccepted ? 0 : 1;
         }
         break;
     case kDayStartPause:   g_dayTurn = (g_dayTurn & 0x3C) | 1;  persist("DayTurn", g_dayTurn); break;
@@ -1217,4 +1320,27 @@ extern "C" void __cdecl c4p_command(int cmd)
 
     refreshMenu();
     g_host->invalidate();
+}
+
+extern "C" void __cdecl c4p_refresh_menu(void)
+{
+    refreshMenu();
+}
+
+extern "C" int __cdecl c4p_key(UINT msg, WPARAM key, LPARAM lParam)
+{
+    if ((msg != WM_SYSKEYDOWN && msg != WM_KEYDOWN) || (lParam & 0x40000000) ||
+        GetKeyState(VK_MENU) >= 0 || GetKeyState(VK_CONTROL) < 0)
+        return 0;
+    int command = 0;
+    EnterCriticalSection(&g_lock);
+    if (key == 'P' && g_state != 0 && g_running)
+        command = g_base + kPause;
+    else if (key == 'R' && g_state != 0)
+        command = g_base + kReset;
+    LeaveCriticalSection(&g_lock);
+    if (!command)
+        return 0; // disabled plugin shortcuts must remain available to the game
+    c4p_command(command);
+    return 1;
 }

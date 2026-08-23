@@ -29,6 +29,9 @@ extern "C" void DDInvalidateDecorativeFrame(void);
 extern "C" int cursorcapture_replay(
     void* destination, int width, int height, int pitch, int bpp, int rgb555,
     int contentLeft, int contentTop, int contentWidth, int contentHeight);
+extern "C" int pluginhost_overlay_ready(int width, int height);
+extern "C" int pluginhost_blend_overlay(
+    void* destination, int width, int height, int pitch, int bpp, int rgb555);
 
 namespace {
 
@@ -345,10 +348,14 @@ extern "C" const void* DDGetDecoratedSurface(
     int contentWidth = 0;
     int contentHeight = 0;
     int wide = 0;
-    if (!horplus_get_decor_layout(
-            &contentWidth, &contentHeight, &wide) ||
-        contentWidth <= 0 || contentHeight <= 0 ||
-        contentWidth > width || contentHeight > height)
+    bool decorate = horplus_get_decor_layout(
+        &contentWidth, &contentHeight, &wide) != 0;
+    if (decorate &&
+        (contentWidth <= 0 || contentHeight <= 0 ||
+         contentWidth > width || contentHeight > height))
+        decorate = false;
+    const bool overlay = pluginhost_overlay_ready(width, height) != 0;
+    if (!decorate && !overlay)
         return source;
 
     const int bytesPerPixel = bpp / 8;
@@ -360,44 +367,53 @@ extern "C" const void* DDGetDecoratedSurface(
     const SIZE_T size = static_cast<SIZE_T>(pitch) * height;
 
     AcquireSRWLockExclusive(&g_lock);
-    if (!ensureAssetsLocked() || !ensureBuffersLocked(size)) {
+    if (!ensureBuffersLocked(size)) {
         ReleaseSRWLockExclusive(&g_lock);
         return source;
     }
 
-    const int isWide = wide ? 1 : 0;
-    if (g_cacheWidth != width || g_cacheHeight != height ||
-        g_cachePitch != pitch || g_cacheBpp != bpp ||
-        g_cacheRgb555 != (rgb555 ? 1 : 0) || g_cacheWide != isWide) {
-        buildBaseLocked(width, height, pitch, bpp, rgb555 ? 1 : 0,
-                        isWide != 0);
+    if (decorate && !ensureAssetsLocked())
+        decorate = false;
+
+    if (decorate) {
+        const int isWide = wide ? 1 : 0;
+        if (g_cacheWidth != width || g_cacheHeight != height ||
+            g_cachePitch != pitch || g_cacheBpp != bpp ||
+            g_cacheRgb555 != (rgb555 ? 1 : 0) || g_cacheWide != isWide) {
+            buildBaseLocked(width, height, pitch, bpp, rgb555 ? 1 : 0,
+                            isWide != 0);
+        }
+
+        std::memcpy(g_present, g_base, size);
+        const int left = (width - contentWidth) / 2;
+        const int top = (height - contentHeight) / 2;
+        const SIZE_T rowBytes =
+            static_cast<SIZE_T>(contentWidth) * bytesPerPixel;
+        const auto* src = static_cast<const unsigned char*>(source) +
+                          static_cast<SIZE_T>(top) * pitch +
+                          static_cast<SIZE_T>(left) * bytesPerPixel;
+        auto* dst = g_present + static_cast<SIZE_T>(top) * pitch +
+                    static_cast<SIZE_T>(left) * bytesPerPixel;
+        for (int y = 0; y < contentHeight; ++y) {
+            std::memcpy(dst, src, rowBytes);
+            src += pitch;
+            dst += pitch;
+        }
+
+        // The 16-bit primary has no coverage/alpha plane, so copying its margins would also copy
+        // stale black pixels and effects over the frame. cursorcapture publishes only exact native
+        // cursor fragments for replay outside the centered content rectangle.
+        cursorcapture_replay(g_present, width, height, pitch, bpp, rgb555,
+                             left, top, contentWidth, contentHeight);
+    } else {
+        std::memcpy(g_present, source, size);
     }
 
-    std::memcpy(g_present, g_base, size);
-    const int left = (width - contentWidth) / 2;
-    const int top = (height - contentHeight) / 2;
-    const SIZE_T rowBytes =
-        static_cast<SIZE_T>(contentWidth) * bytesPerPixel;
-    const auto* src = static_cast<const unsigned char*>(source) +
-                      static_cast<SIZE_T>(top) * pitch +
-                      static_cast<SIZE_T>(left) * bytesPerPixel;
-    auto* dst = g_present + static_cast<SIZE_T>(top) * pitch +
-                static_cast<SIZE_T>(left) * bytesPerPixel;
-    for (int y = 0; y < contentHeight; ++y) {
-        std::memcpy(dst, src, rowBytes);
-        src += pitch;
-        dst += pitch;
-    }
-
-    // The 16-bit primary has no coverage/alpha plane, so copying its margins would also copy stale
-    // black pixels and effects over the frame.  cursorcapture observes only the exact native
-    // CCursorImpl DrawTexture operations on the game thread and publishes owned colour-keyed
-    // fragments. Replaying just those fragments outside the centered screen preserves the same
-    // context-sensitive/animated D2 cursor across the whole decorated viewport.
-    cursorcapture_replay(g_present, width, height, pitch, bpp, rgb555,
-                         left, top, contentWidth, contentHeight);
-
-    const void* result = g_present;
+    // Plugins are the top presentation layer. Blending here makes the timer part of the selected
+    // game HWND for OBS and part of built-in screenshots, with no manifest-dependent child window.
+    const bool blended = pluginhost_blend_overlay(
+        g_present, width, height, pitch, bpp, rgb555) != 0;
+    const void* result = (decorate || blended) ? g_present : source;
     ReleaseSRWLockExclusive(&g_lock);
     return result;
 }

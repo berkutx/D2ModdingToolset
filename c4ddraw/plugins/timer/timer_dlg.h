@@ -8,6 +8,7 @@
 #define IDD_SET 101
 
 #define IDC_SET_SEC 1100 // Set dialog: seconds to set the current turn to (legacy DialogFunc = 1000*value)
+#define IDC_SET_PAUSE 1101 // Set dialog: toggle pause (enabled only while the clock is active, like Reset)
 
 #define IDC_TT_DUR0 1000 // day-1 base duration (TableDuration_0)
 // rows 1..3 — contiguous so the proc can index by (id - IDC_TT_*1):

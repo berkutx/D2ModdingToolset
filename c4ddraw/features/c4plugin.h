@@ -1,5 +1,5 @@
 /*
- * C4dll-R plugin API v2 (.c4p): BGRA32 overlay DLLs in <game>\mods\, composited over the 8bpp game frame.
+ * C4dll-R plugin API v3 (.c4p): BGRA32 overlay DLLs in <game>\mods\, composited over the game frame.
  * c4p_draw runs only when the plugin marks itself dirty (host->invalidate); the cached overlay is composited every frame.
  * Turn detection is host-driven so plugins stay portable. Only native .c4p plugins are loaded.
  */
@@ -11,14 +11,15 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-#define C4P_ABI_VERSION 2u
+#define C4P_ABI_VERSION 3u
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Overlay surface: BGRA8888 (32bppARGB), top-down, client-sized, STRAIGHT alpha (host premultiplies).
- * Pre-cleared to transparent before each c4p_draw. */
+/* Overlay surface: BGRA8888 (32bppARGB), top-down, logical game-surface sized, STRAIGHT alpha
+ * (host premultiplies). Pre-cleared to transparent before each c4p_draw. The host composites this
+ * into the selected game HWND, so renderer output and window capture see the same pixels. */
 typedef struct C4P_Canvas
 {
     uint32_t struct_size; /* sizeof(C4P_Canvas) */
@@ -63,8 +64,8 @@ typedef struct C4P_Host
     int(__cdecl* get_turn_player)(void);
     int(__cdecl* is_in_game)(void);
 
-    /* Appended after ABI v2, no version bump: callers MUST check that struct_size reaches the
-     * individual member before calling it. is_in_battle: 1 while a battle viewer is on screen. */
+    /* Host callbacks remain append-only across ABI revisions: callers MUST check that struct_size
+     * reaches each optional member. is_in_battle: 1 while a battle viewer is on screen. */
     int(__cdecl* is_in_battle)(void);
 
     /* get_day: current scenario day (CScenarioInfo.currentTurn), or -1 if unavailable. struct_size guard applies. */
@@ -100,13 +101,21 @@ typedef struct C4P_Host
     /* Atomic battle-timer snapshot, appended for C4dll-R 1.7. New plugins should prefer this over
      * separately polling battle_kind/battle_turn_active/is_animating. Returns 1 on success. */
     int(__cdecl* get_battle_timer_state)(C4P_BattleTimerState* out);
+
+    /* Process network role, appended after get_battle_timer_state (struct_size-guarded):
+     * 1 = this process owns the in-process server, 0 = verified pure network client,
+     * -1 = not enough live scenario state to decide yet. The timer uses this to keep the host's
+     * modal begin-turn acknowledgement without disabling the joiner's local active-edge fallback. */
+    int(__cdecl* server_role)(void);
 } C4P_Host;
 
 #if defined(__cplusplus) && defined(_WIN32) && !defined(_WIN64)
 static_assert(sizeof(C4P_BattleTimerState) == 36, "C4P battle snapshot ABI drift");
 static_assert(offsetof(C4P_Host, get_battle_timer_state) == 84,
               "C4P host callback offset drift");
-static_assert(sizeof(C4P_Host) == 88, "C4P host ABI drift");
+static_assert(offsetof(C4P_Host, server_role) == 88,
+              "C4P server-role callback offset drift");
+static_assert(sizeof(C4P_Host) == 92, "C4P host ABI drift");
 #endif
 
 /* Plugin self-report, queried before init. */
@@ -144,9 +153,17 @@ HMENU __cdecl c4p_menu(int base_cmd_id);
 /* Optional: handle a WM_COMMAND in this plugin's block (base_cmd_id .. base_cmd_id+0xFF). Runs on the game UI thread. */
 void __cdecl c4p_command(int cmd);
 
-/* Optional: receive selected game-window input while the overlay remains click-through. Coordinates
- * are physical client pixels, matching C4P_Canvas. Return non-zero to consume the message. */
+/* Optional: receive selected game-window input without a separate interactive overlay HWND.
+ * Coordinates are logical game-surface pixels matching C4P_Canvas, after viewport and presentation
+ * zoom inversion. MOVE/UP may be clamped to an edge while a plugin owns capture. Return non-zero to
+ * consume the message. */
 int __cdecl c4p_mouse(UINT msg, WPARAM wparam, int x, int y);
+
+/* Optional: refresh checks/enabled state immediately before the host opens a plugin menu. */
+void __cdecl c4p_refresh_menu(void);
+
+/* Optional: wrapper-level keyboard shortcut. Return non-zero only when the message was handled. */
+int __cdecl c4p_key(UINT msg, WPARAM key, LPARAM lparam);
 
 #ifdef __cplusplus
 }

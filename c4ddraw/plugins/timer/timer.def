@@ -8,3 +8,5 @@ EXPORTS
     c4p_menu
     c4p_command
     c4p_mouse
+    c4p_refresh_menu
+    c4p_key

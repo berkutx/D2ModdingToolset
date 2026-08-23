@@ -27,6 +27,7 @@ extern "C" int DDReloadConfigForMenu(int outputSizeChanged,
 extern "C" int DDGetActiveRenderer(void);
 extern "C" int DDGetActivePortableFilter(void);
 extern "C" int DDGetRendererSwitchError(void);
+extern "C" int DDSetMaxGameTicksLive(int ticks);
 extern "C" void DDRelayoutCurrentMode(void);
 extern "C" int DDGetDisplayMode(void);
 extern "C" void DDNormalizeLegacyExclusive(void);
@@ -110,12 +111,16 @@ extern "C" int pluginhost_count(void);
 extern "C" const char* pluginhost_name(int i);
 extern "C" void* pluginhost_menu(int i);
 extern "C" int pluginhost_command(unsigned id); // route a plugin-block WM_COMMAND to its c4p_command
-extern "C" int pluginhost_mouse(UINT msg, WPARAM wParam); // physical client input for overlay plugins
+extern "C" int pluginhost_mouse(UINT msg, WPARAM wParam); // logical game-space input for plugins
 extern "C" void pluginhost_menu_loop(int active); // keep overlay pixels below tracked native menus
+extern "C" void pluginhost_refresh_menus(void); // refresh live plugin checks at WM_INITMENUPOPUP
+extern "C" int pluginhost_key(UINT msg, WPARAM wParam, LPARAM lParam); // plugin shortcuts
 
 // Map drag-scroll lives in global scope (defined after the anon namespace); forward-declared here.
 extern bool g_dragScrollActive;
+extern bool g_dragMoved;
 void dragScrollWndMove(int gameX, int gameY);
+void cancelDragScroll();
 
 namespace {
 
@@ -279,13 +284,15 @@ void applyAlwaysActive(bool on)
 // every interval shrinks proportionally -> faster animation, zero game-state writes, race-free, live.
 // Only the game's IAT slot is patched, so cnc-ddraw's own fps-limiter timeGetTime is untouched.
 //
-// factor: 10 = x1.0 (identity) .. 50 = x5.0. Re-anchors on factor change so virtual time stays continuous.
+// factor: 10 = x1.0 (identity) .. 150 = x15.0. Re-anchors on factor change so virtual time stays continuous.
 using TimeGetTimeFn = DWORD(WINAPI*)(void);
 TimeGetTimeFn g_realTimeGetTime = nullptr;
 
 // Two live multipliers (x10 fixed-point); hook picks battle vs map by g_inBattle. 10 = identity (off).
 volatile LONG g_battleFactor = 10;
 volatile LONG g_mapFactor = 10;
+int g_battleBaseFactor = 20; // exact tenths selected by menu or Ctrl+/Ctrl- (10 = vanilla)
+int g_mapBaseFactor = 10;
 volatile LONG g_inBattle = 0;
 // Latest visual event since the last 32ms pump: 1=start, 2=end. A single last-writer-wins value
 // preserves ordering when an instant/x15 effect starts and ends before one timer tick.
@@ -302,22 +309,41 @@ DWORD g_attackWatchdogTick = 0;  // exact-end safety net; never the normal end c
 DWORD g_vcLastFactor = 10;
 DWORD g_vcRealAnchor = 0, g_vcVirtAnchor = 0;
 DWORD g_vcRealNow = 0, g_vcVirtNow = 0;
+SRWLOCK g_vcLock = SRWLOCK_INIT;
+bool g_vcInitialized = false;
 
 DWORD WINAPI timeGetTimeHook(void)
 {
     if (!g_realTimeGetTime)
         return 0;
+    AcquireSRWLockExclusive(&g_vcLock);
     DWORD factor = static_cast<DWORD>(g_inBattle ? g_battleFactor : g_mapFactor);
     if (factor < 1)
         factor = 1;
+    // Sample the real clock only after serializing callers. Reading first allowed two threads to
+    // acquire the lock in the opposite order and briefly publish a backwards virtual timestamp.
+    const DWORD realNow = g_realTimeGetTime();
+    if (!g_vcInitialized) {
+        // Identity on the first call regardless of Windows uptime. The old zero anchor multiplied
+        // uptime in 32 bits and could jump backwards after a few hours/days at large factors.
+        g_vcInitialized = true;
+        g_vcLastFactor = factor;
+        g_vcRealAnchor = g_vcRealNow = realNow;
+        g_vcVirtAnchor = g_vcVirtNow = realNow;
+        ReleaseSRWLockExclusive(&g_vcLock);
+        return realNow;
+    }
     if (g_vcLastFactor != factor) { // factor changed (incl. battle<->map switch) -> re-anchor
         g_vcLastFactor = factor;
         g_vcRealAnchor = g_vcRealNow;
         g_vcVirtAnchor = g_vcVirtNow;
     }
-    g_vcRealNow = g_realTimeGetTime();
-    DWORD result = factor * (g_vcRealNow - g_vcRealAnchor) / 10u + g_vcVirtAnchor;
+    g_vcRealNow = realNow;
+    const DWORD realDelta = g_vcRealNow - g_vcRealAnchor; // wrap-safe timeGetTime delta
+    const DWORD result = static_cast<DWORD>(
+        static_cast<unsigned long long>(realDelta) * factor / 10u + g_vcVirtAnchor);
     g_vcVirtNow = result;
+    ReleaseSRWLockExclusive(&g_vcLock);
     return result;
 }
 
@@ -356,7 +382,10 @@ void* g_batShowOrig = nullptr;
 void* g_batEndOrig = nullptr;
 void* g_batUiStateOrig = reinterpret_cast<void*>(0x639743);
 volatile LONG g_battleChooseInstallState = 0; // 0 pending, 1 installing, 2 installed, -1 unavailable
+volatile LONG g_battleDiscriminatorInstallState = 0;
 bool g_battleHookLayoutVerified = false;
+
+bool executableAddress(const void* address);
 
 extern "C" void timerhost_on_battle_update(void* batViewer, const void* battleMsgData,
                                              const void* unitId, const void* actions);
@@ -517,35 +546,49 @@ __declspec(naked) void batUnitAnimUpdateThunk()
     }
 }
 
-void installBattleDiscriminator()
+void ensureBattleDiscriminator()
 {
-    if (g_ver != VerRussobit)
+    if (g_ver != VerRussobit ||
+        InterlockedExchangeAdd(&g_battleDiscriminatorInstallState, 0) == 2)
+        return;
+    if (InterlockedCompareExchange(&g_battleDiscriminatorInstallState, 1, 0) != 0)
         return;
     auto vt = reinterpret_cast<void**>(0x6F4294);
-    const void* expectedVtable[4] = {
-        reinterpret_cast<void*>(0x645900), reinterpret_cast<void*>(0x630DE3),
-        reinterpret_cast<void*>(0x63203B), reinterpret_cast<void*>(0x631FFC)};
-    const std::uint8_t updateSig[12] = {
-        0x55, 0x8B, 0xEC, 0x6A, 0xFF, 0x68, 0x4F, 0x59, 0x6C, 0x00, 0x64, 0xA1};
-    const std::uint8_t endSig[12] = {
-        0x55, 0x8B, 0xEC, 0x51, 0x89, 0x4D, 0xFC, 0x8B, 0x45, 0xFC, 0x8B, 0x48};
-    if (memcmp(vt, expectedVtable, sizeof(expectedVtable)) != 0 ||
-        memcmp(reinterpret_cast<const void*>(0x630DE3), updateSig, sizeof(updateSig)) != 0 ||
-        memcmp(reinterpret_cast<const void*>(0x631FFC), endSig, sizeof(endSig)) != 0) {
-        mlog("[menu] battle hook signature mismatch; timer battle state stays fail-closed");
+    void* current[4] = {};
+    MEMORY_BASIC_INFORMATION mbi = {};
+    __try {
+        memcpy(current, vt, sizeof(current));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedExchange(&g_battleDiscriminatorInstallState, -1);
         return;
     }
-    g_batDtorOrig = vt[0];
-    g_batShowOrig = vt[2];
-    g_batEndOrig = vt[3];
-    void* thunks[4] = {reinterpret_cast<void*>(&batDtorThunk), vt[1],
+    const HMODULE exe = GetModuleHandleA(nullptr);
+    if (exe != reinterpret_cast<HMODULE>(0x400000) ||
+        !VirtualQuery(vt, &mbi, sizeof(mbi)) || mbi.AllocationBase != exe ||
+        !executableAddress(current[0]) || !executableAddress(current[1]) ||
+        !executableAddress(current[2]) || !executableAddress(current[3])) {
+        mlog("[menu] battle hook layout rejected (vtable=%p targets=%p/%p/%p/%p)",
+             vt, current[0], current[1], current[2], current[3]);
+        InterlockedExchange(&g_battleDiscriminatorInstallState, -1);
+        return;
+    }
+    // Capture and tail-chain whatever currently owns each EXE vtable slot. This deliberately avoids
+    // inspecting or naming another module: whether a compatible third-party hook installed before
+    // or after C4dll, the last writer chains the previous target instead of requiring pristine bytes.
+    g_batDtorOrig = current[0];
+    g_batShowOrig = current[2];
+    g_batEndOrig = current[3];
+    void* thunks[4] = {reinterpret_cast<void*>(&batDtorThunk), current[1],
                        reinterpret_cast<void*>(&batShowThunk), reinterpret_cast<void*>(&batEndThunk)};
     if (writeBytes(0x6F4294, reinterpret_cast<const std::uint8_t*>(thunks), sizeof(thunks))) {
         g_battleHookLayoutVerified = true;
-        mlog("[menu] battle anim discriminator installed; controller lifecycle hook deferred");
+        InterlockedExchange(&g_battleDiscriminatorInstallState, 2);
+        mlog("[menu] battle anim discriminator chained; controller lifecycle hook deferred");
     } else {
+        InterlockedExchange(&g_battleDiscriminatorInstallState, -1);
         InterlockedExchange(&g_battleChooseInstallState, -1);
         mlog("[menu] battle anim discriminator install FAILED");
+        return;
     }
     // per-unit frame-speed hook: CBatUnitAnim vftable 0x6F48CC, slot[1] (update 0x65615E) at 0x6F48D0
     g_batUnitAnimUpdOrig = reinterpret_cast<void**>(0x6F48CC)[1];
@@ -586,6 +629,129 @@ bool executableAddress(const void* address)
     const DWORD protect = mbi.Protect & 0xFF;
     return protect == PAGE_EXECUTE || protect == PAGE_EXECUTE_READ ||
            protect == PAGE_EXECUTE_READWRITE || protect == PAGE_EXECUTE_WRITECOPY;
+}
+
+// --- native in-game status text (the same CStratInterf route used by DisciplesGL) ---
+// The lifecycle sites and printer belong to the validated Discipl2.exe image, never to mss32.
+// Capture the current CStratInterf at its unique construction call and clear it at the matching
+// scalar destructor; tail-jumping the current rel32 targets keeps other call-site hooks chainable.
+volatile LONG g_statusStratInterf = 0;
+void* g_statusCtorChain = nullptr;
+void* g_statusDtorChain = nullptr;
+volatile LONG g_statusTextInstallState = 0; // 0 absent, 2 installed, -1 rejected
+
+__declspec(naked) void statusStratCtorThunk()
+{
+    __asm {
+        mov dword ptr [g_statusStratInterf], ecx
+        jmp dword ptr [g_statusCtorChain]
+    }
+}
+
+__declspec(naked) void statusStratDtorThunk()
+{
+    __asm {
+        mov eax, dword ptr [g_statusStratInterf]
+        cmp ecx, eax
+        jne status_dtor_chain
+        xor eax, eax
+        mov dword ptr [g_statusStratInterf], eax
+    status_dtor_chain:
+        jmp dword ptr [g_statusDtorChain]
+    }
+}
+
+void* rel32CallTarget(uintptr_t site)
+{
+    std::int32_t displacement = 0;
+    memcpy(&displacement, reinterpret_cast<const void*>(site + 1), sizeof(displacement));
+    return reinterpret_cast<void*>(site + 5 + displacement);
+}
+
+void makeRel32Call(uintptr_t site, const void* target, std::uint8_t (&call)[5])
+{
+    call[0] = 0xE8;
+    const std::int32_t displacement = static_cast<std::int32_t>(
+        reinterpret_cast<uintptr_t>(target) - (site + sizeof(call)));
+    memcpy(call + 1, &displacement, sizeof(displacement));
+}
+
+void installStatusTextHooks()
+{
+    if (g_ver != VerRussobit ||
+        InterlockedCompareExchange(&g_statusTextInstallState, 1, 0) != 0)
+        return;
+
+    constexpr uintptr_t kPrint = 0x4900C8;
+    constexpr uintptr_t kCtorContext = 0x405C94;
+    constexpr uintptr_t kCtorCall = 0x405C95;
+    constexpr uintptr_t kDtorContext = 0x48D7A5;
+    constexpr uintptr_t kDtorCall = 0x48D7A8;
+    const std::uint8_t printExpected[27] = {
+        0x6A, 0x01, 0x83, 0xC1, 0x04, 0xFF, 0x74, 0x24, 0x08,
+        0xE8, 0x59, 0x84, 0x10, 0x00, 0x8B, 0xC8, 0x83, 0xC1,
+        0x08, 0xE8, 0x62, 0x4E, 0xF7, 0xFF, 0xC2, 0x04, 0x00};
+    const std::uint8_t ctorSuffix[13] = {
+        0x8B, 0x4E, 0x10, 0x83, 0x4D, 0xFC, 0xFF,
+        0x83, 0xC1, 0x0C, 0x51, 0x8B, 0xC8};
+    const std::uint8_t dtorPrefix[3] = {0x56, 0x8B, 0xF1};
+    const std::uint8_t dtorSuffix[8] = {0xF6, 0x44, 0x24, 0x08, 0x01, 0x74, 0x07, 0x56};
+
+    if (!executableAddress(reinterpret_cast<const void*>(kPrint)) ||
+        memcmp(reinterpret_cast<const void*>(kPrint), printExpected,
+               sizeof(printExpected)) != 0 ||
+        *reinterpret_cast<const std::uint8_t*>(kCtorContext) != 0x56 ||
+        *reinterpret_cast<const std::uint8_t*>(kCtorCall) != 0xE8 ||
+        memcmp(reinterpret_cast<const void*>(kCtorCall + 5), ctorSuffix,
+               sizeof(ctorSuffix)) != 0 ||
+        memcmp(reinterpret_cast<const void*>(kDtorContext), dtorPrefix,
+               sizeof(dtorPrefix)) != 0 ||
+        *reinterpret_cast<const std::uint8_t*>(kDtorCall) != 0xE8 ||
+        memcmp(reinterpret_cast<const void*>(kDtorCall + 5), dtorSuffix,
+               sizeof(dtorSuffix)) != 0) {
+        InterlockedExchange(&g_statusTextInstallState, -1);
+        mlog("[menu] native status-text signatures rejected; on-screen speed notice disabled");
+        return;
+    }
+
+    void* const ctorTarget = rel32CallTarget(kCtorCall);
+    void* const dtorTarget = rel32CallTarget(kDtorCall);
+    if (!executableAddress(ctorTarget) || !executableAddress(dtorTarget) ||
+        ctorTarget == reinterpret_cast<void*>(&statusStratCtorThunk) ||
+        dtorTarget == reinterpret_cast<void*>(&statusStratDtorThunk)) {
+        InterlockedExchange(&g_statusTextInstallState, -1);
+        mlog("[menu] native status-text call chain rejected (ctor=%p dtor=%p)",
+             ctorTarget, dtorTarget);
+        return;
+    }
+
+    std::uint8_t originalCtor[5] = {};
+    std::uint8_t originalDtor[5] = {};
+    std::uint8_t ctorCall[5] = {};
+    std::uint8_t dtorCall[5] = {};
+    memcpy(originalCtor, reinterpret_cast<const void*>(kCtorCall), sizeof(originalCtor));
+    memcpy(originalDtor, reinterpret_cast<const void*>(kDtorCall), sizeof(originalDtor));
+    makeRel32Call(kCtorCall, reinterpret_cast<const void*>(&statusStratCtorThunk), ctorCall);
+    makeRel32Call(kDtorCall, reinterpret_cast<const void*>(&statusStratDtorThunk), dtorCall);
+    g_statusCtorChain = ctorTarget;
+    g_statusDtorChain = dtorTarget;
+
+    if (!writeBytes(kCtorCall, ctorCall, sizeof(ctorCall)) ||
+        !writeBytes(kDtorCall, dtorCall, sizeof(dtorCall))) {
+        // Roll back both sites even if only the second write failed. This runs before EXE entry,
+        // so neither site can execute during the small installation transaction.
+        writeBytes(kCtorCall, originalCtor, sizeof(originalCtor));
+        writeBytes(kDtorCall, originalDtor, sizeof(originalDtor));
+        g_statusCtorChain = nullptr;
+        g_statusDtorChain = nullptr;
+        InterlockedExchange(&g_statusTextInstallState, -1);
+        mlog("[menu] native status-text hook write failed; rolled back");
+        return;
+    }
+
+    InterlockedExchange(&g_statusTextInstallState, 2);
+    mlog("[menu] native status-text lifecycle installed (ctor=%p dtor=%p)",
+         ctorTarget, dtorTarget);
 }
 
 static bool isUserPtr(const void* p);
@@ -700,7 +866,30 @@ extern "C" int featuremenu_battle_timer_lifecycle_available(void)
 // Speed 1..6 -> virtual-clock factor (x1.5/x2/x3/x4/x5/x15, fixed-point /10); 10 = identity (off).
 const int kAnimFactor[6] = {15, 20, 30, 40, 50, 150};
 
-// Map "Speed N" (1..5) to a virtual-clock factor for battle (which=0) or map (which=1). Off = x1.0.
+int animPresetForFactor(int factor)
+{
+    for (int i = 0; i < 6; ++i)
+        if (kAnimFactor[i] == factor)
+            return i + 1;
+    return 0;
+}
+
+void applyAnimFactor(int which, bool enabled, int factor)
+{
+    if (factor < 10)
+        factor = 10;
+    if (factor > 150)
+        factor = 150;
+    if (which == 0) {
+        g_battleBaseFactor = factor;
+        g_battleFactor = enabled ? factor : 10;
+    } else {
+        g_mapBaseFactor = factor;
+        g_mapFactor = enabled ? factor : 10;
+    }
+}
+
+// Map a coarse menu preset to the exact-tenths base used by the live hotkeys. Off = x1.0.
 // Runs on the game UI thread (menu WM_COMMAND).
 void applyAnimSpeed(int which, bool enabled, int speed)
 {
@@ -708,12 +897,10 @@ void applyAnimSpeed(int which, bool enabled, int speed)
         speed = 1;
     if (speed > 6)
         speed = 6;
-    LONG f = enabled ? kAnimFactor[speed - 1] : 10;
-    if (which == 0)
-        g_battleFactor = f;
-    else
-        g_mapFactor = f;
+    applyAnimFactor(which, enabled, kAnimFactor[speed - 1]);
 }
+
+void showAnimationSpeedStatus(bool battleVisible, int factor);
 
 // --- persistence (C4menu.ini next to the exe) ---
 const char* iniFile()
@@ -753,6 +940,8 @@ enum : UINT
     kIdTicks60 = 0xA162,
     kIdTicks100 = 0xA163,
     kIdSingleCpu = 0xA164, // ddraw.ini singlecpu toggle (full restart)
+    // New isolated id: preserve old commands and avoid the derived kIdResBase[] range.
+    kIdTicks180 = 0xA1F6,
     kIdFastAi = 0xA17E, // bounded DisciplesGL-compatible host AI pump (live, experimental)
     kIdHorplusBase = 0xA165, // + index into kHorplusSizes[] (restart)
     kIdHorplusAuto = 0xA16F, // monitor-adaptive stock/Hor+ selection (restart)
@@ -926,8 +1115,13 @@ int shaderForPortableFilter(int filter)
     }
 }
 // -1 = limiter fully off (cnc-ddraw treats 0 as "emulate 60hz flip", not off)
-const int kTicksValues[] = {-1, 30, 60, 100};
-const int kTicksCount = 4;
+const int kTicksValues[] = {-1, 30, 60, 100, 180};
+const UINT kTicksCommandIds[] = {
+    kIdTicks0, kIdTicks30, kIdTicks60, kIdTicks100, kIdTicks180};
+const int kTicksCount = static_cast<int>(sizeof(kTicksValues) / sizeof(kTicksValues[0]));
+static_assert(sizeof(kTicksValues) / sizeof(kTicksValues[0]) ==
+                  sizeof(kTicksCommandIds) / sizeof(kTicksCommandIds[0]),
+              "game-speed values and command ids must stay aligned");
 // Legacy/manual output size compatibility (ddraw.ini width/height). The game UI deliberately does
 // not expose a second resolution concept: 0,0 follows the selected logical canvas, and every game
 // resolution choice restores that link. The scenario editor keeps a direct window-size dialog.
@@ -1084,9 +1278,13 @@ void persist()
     WritePrivateProfileStringA("menu", "battleAnimEnabled", g_battleAnimEnabled ? "1" : "0", f);
     wsprintfA(buf, "%d", g_battleAnimSpeed);
     WritePrivateProfileStringA("menu", "battleAnimSpeed", buf, f);
+    wsprintfA(buf, "%d", g_battleBaseFactor);
+    WritePrivateProfileStringA("menu", "battleAnimFactor", buf, f);
     WritePrivateProfileStringA("menu", "mapAnimEnabled", g_mapAnimEnabled ? "1" : "0", f);
     wsprintfA(buf, "%d", g_mapAnimSpeed);
     WritePrivateProfileStringA("menu", "mapAnimSpeed", buf, f);
+    wsprintfA(buf, "%d", g_mapBaseFactor);
+    WritePrivateProfileStringA("menu", "mapAnimFactor", buf, f);
     WritePrivateProfileStringA("menu", "battleAttackEnabled", g_battleAttackEnabled ? "1" : "0", f);
     wsprintfA(buf, "%d", g_battleAttackSpeed);
     WritePrivateProfileStringA("menu", "battleAttackSpeed", buf, f);
@@ -1141,13 +1339,16 @@ void seedConfigFirstRun()
         "; Keep the game running (no pause) when the window loses focus.  0 = off, 1 = on.\r\n"
         "alwaysActive=%d\r\n"
         "\r\n"
-        "; Live animation-speed multiplier, separate for battle and the strategic map\r\n"
-        "; (timeGetTime virtual clock; safe, no game-memory patch).\r\n"
-        ";   *Enabled : 0 = vanilla, 1 = on.   *Speed : 1..6  ->  1.5x / 2x / 3x / 4x / 5x / 15x.\r\n"
+        "; Live animation-speed multiplier, separate for battle and the strategic map.\r\n"
+        ";   *Enabled : 0 = vanilla, 1 = on.   *Speed keeps the coarse menu preset (1..6).\r\n"
+        ";   *Factor is the exact speed in tenths (10=1.0x .. 150=15.0x) used by Ctrl +/-;\r\n"
+        ";   when present it takes precedence over the coarse preset.\r\n"
         "battleAnimEnabled=%d\r\n"
         "battleAnimSpeed=%d\r\n"
+        "battleAnimFactor=%d\r\n"
         "mapAnimEnabled=%d\r\n"
         "mapAnimSpeed=%d\r\n"
+        "mapAnimFactor=%d\r\n"
         "\r\n"
         "; Attack speed-up: extra burst ONLY while a hit/effect plays (on top of battle speed).\r\n"
         ";   battleAttackEnabled : 0 = off, 1 = on.   battleAttackSpeed : 1..6  ->  1.5x..5x / 15x.\r\n"
@@ -1177,7 +1378,8 @@ void seedConfigFirstRun()
         "; Write C4menu-<pid>.log / C4plugins.log diagnostics next to the exe.\r\n"
         "; 0 = off (default), 1 = on.\r\n"
         "debugLog=0\r\n",
-        aa, battleEn, bSp, mapEn, mSp, autoConfirmHire, fastAi);
+        aa, battleEn, bSp, kAnimFactor[bSp - 1],
+        mapEn, mSp, 10, autoConfirmHire, fastAi);
     if (n <= 0)
         return;
 
@@ -1412,7 +1614,7 @@ void readDdrawState()
                  static_cast<unsigned int>(sizeof(g_aspectRatio)));
     g_singlecpu = readDdrawBool("singlecpu", true);
 
-    const int ticks = readDdrawInt("maxgameticks", 0);
+    const int ticks = readDdrawInt("maxgameticks", 180);
     g_ticksIdx = -1;
     for (int i = 0; i < kTicksCount; ++i)
         if (kTicksValues[i] == ticks) {
@@ -2764,7 +2966,7 @@ void updateBattleBurst(void)
     // stores only the latest event, preserving true order even when both occur inside one 32ms tick.
     const DWORD now = GetTickCount();
     const LONG visualEvent = InterlockedExchange(&g_attackVisualEvent, 0);
-    const int idle = g_battleAnimEnabled ? kAnimFactor[g_battleAnimSpeed - 1] : 10;
+    const int idle = g_battleAnimEnabled ? g_battleBaseFactor : 10;
 
     // Animation Pause is a timer feature, not an attack-speed feature. Consume the exact native
     // start/end events even when the optional burst is disabled. The timer itself reads the
@@ -3731,12 +3933,28 @@ void refreshChecks()
                            kIdLocaleBase + static_cast<UINT>(g_localeCount - 1), selected,
                            MF_BYCOMMAND);
     }
-    const UINT bSel = g_battleAnimEnabled ? (kIdAnim1 + static_cast<UINT>(g_battleAnimSpeed - 1)) : kIdAnimOff;
-    if (g_battleAnimMenu)
-        CheckMenuRadioItem(g_battleAnimMenu, kIdAnimOff, kIdAnim6, bSel, MF_BYCOMMAND);
-    const UINT mSel = g_mapAnimEnabled ? (kIdAnimMap1 + static_cast<UINT>(g_mapAnimSpeed - 1)) : kIdAnimMapOff;
-    if (g_mapAnimMenu)
-        CheckMenuRadioItem(g_mapAnimMenu, kIdAnimMapOff, kIdAnimMap6, mSel, MF_BYCOMMAND);
+    const int battlePreset = g_battleAnimEnabled ? animPresetForFactor(g_battleBaseFactor) : 0;
+    if (g_battleAnimMenu) {
+        const UINT selected = battlePreset
+            ? kIdAnim1 + static_cast<UINT>(battlePreset - 1)
+            : kIdAnimOff;
+        CheckMenuRadioItem(g_battleAnimMenu, kIdAnimOff, kIdAnim6,
+                           selected, MF_BYCOMMAND);
+        // A fine Ctrl+/- value intentionally sits between the coarse menu presets. Leave every
+        // radio item clear instead of claiming that the nearest preset is active.
+        if (g_battleAnimEnabled && !battlePreset)
+            CheckMenuItem(g_battleAnimMenu, kIdAnimOff, MF_BYCOMMAND | MF_UNCHECKED);
+    }
+    const int mapPreset = g_mapAnimEnabled ? animPresetForFactor(g_mapBaseFactor) : 0;
+    if (g_mapAnimMenu) {
+        const UINT selected = mapPreset
+            ? kIdAnimMap1 + static_cast<UINT>(mapPreset - 1)
+            : kIdAnimMapOff;
+        CheckMenuRadioItem(g_mapAnimMenu, kIdAnimMapOff, kIdAnimMap6,
+                           selected, MF_BYCOMMAND);
+        if (g_mapAnimEnabled && !mapPreset)
+            CheckMenuItem(g_mapAnimMenu, kIdAnimMapOff, MF_BYCOMMAND | MF_UNCHECKED);
+    }
     const UINT aSel = g_battleAttackEnabled ? (kIdAtk1 + static_cast<UINT>(g_battleAttackSpeed - 1)) : kIdAtkOff;
     if (g_battleAtkMenu)
         CheckMenuRadioItem(g_battleAtkMenu, kIdAtkOff, kIdAtk6, aSel, MF_BYCOMMAND);
@@ -3866,8 +4084,8 @@ void refreshChecks()
         CheckMenuRadioItem(g_fpsMenu, kIdFpsBase, kIdFpsBase + kFpsCount - 1,
                            kIdFpsBase + static_cast<UINT>(g_fpsIdx), MF_BYCOMMAND);
     if (g_ticksMenu && g_ticksIdx >= 0)
-        CheckMenuRadioItem(g_ticksMenu, kIdTicks0, kIdTicks100,
-                           kIdTicks0 + static_cast<UINT>(g_ticksIdx), MF_BYCOMMAND);
+        CheckMenuRadioItem(g_ticksMenu, kIdTicks0, kIdTicks180,
+                           kTicksCommandIds[g_ticksIdx], MF_BYCOMMAND);
     if (g_perfMenu) {
         CheckMenuItem(g_perfMenu, kIdSingleCpu,
                       MF_BYCOMMAND | (g_singlecpu ? MF_CHECKED : MF_UNCHECKED));
@@ -4061,6 +4279,8 @@ void onMenuCommand(UINT id)
         applyAlwaysActive(g_alwaysActive);
     } else if (id == kIdDragScroll) {
         g_dragScroll = !g_dragScroll; // live: the detour reads this flag (persist() saves it)
+        if (!g_dragScroll)
+            cancelDragScroll();
     } else if (id == kIdWideBattle && widebattle_is_available()) {
         // Hook state is read only while constructing the next battle; never mutate a live dialog.
         widebattle_set_enabled(!widebattle_get_enabled());
@@ -4113,24 +4333,28 @@ void onMenuCommand(UINT id)
         return;
     } else if (id == kIdAnimOff) {
         g_battleAnimEnabled = false;
-        applyAnimSpeed(0, false, g_battleAnimSpeed);
+        applyAnimFactor(0, false, g_battleBaseFactor);
+        showAnimationSpeedStatus(true, 10);
     } else if (id >= kIdAnim1 && id <= kIdAnim6) {
         g_battleAnimEnabled = true;
         g_battleAnimSpeed = static_cast<int>(id - kIdAnim1) + 1;
         applyAnimSpeed(0, true, g_battleAnimSpeed);
+        showAnimationSpeedStatus(true, g_battleBaseFactor);
     } else if (id == kIdAnimMapOff) {
         g_mapAnimEnabled = false;
-        applyAnimSpeed(1, false, g_mapAnimSpeed);
+        applyAnimFactor(1, false, g_mapBaseFactor);
+        showAnimationSpeedStatus(false, 10);
     } else if (id >= kIdAnimMap1 && id <= kIdAnimMap6) {
         g_mapAnimEnabled = true;
         g_mapAnimSpeed = static_cast<int>(id - kIdAnimMap1) + 1;
         applyAnimSpeed(1, true, g_mapAnimSpeed);
+        showAnimationSpeedStatus(false, g_mapBaseFactor);
     } else if (id == kIdAtkOff) {
         g_battleAttackEnabled = false;
         g_attackVisualActive = 0;
         g_attackExpiryTick = 0;
         g_attackWatchdogTick = 0;
-        applyAnimSpeed(0, g_battleAnimEnabled, g_battleAnimSpeed); // hand g_battleFactor back to the base
+        applyAnimFactor(0, g_battleAnimEnabled, g_battleBaseFactor); // hand the clock back to the exact base
     } else if (id >= kIdAtk1 && id <= kIdAtk6) {
         g_battleAttackEnabled = true;
         g_battleAttackSpeed = static_cast<int>(id - kIdAtk1) + 1;
@@ -4207,12 +4431,38 @@ void onMenuCommand(UINT id)
         writeDdrawBool("maintas", g_maintas);
         writeDdrawBool("boxing", g_boxing);
         restartItem = true;
-    } else if (id >= kIdTicks0 && id <= kIdTicks100) {
-        g_ticksIdx = static_cast<int>(id - kIdTicks0);
+    } else if ((id >= kIdTicks0 && id <= kIdTicks100) || id == kIdTicks180) {
+        const int oldTicks = readDdrawInt("maxgameticks", 180);
+        const int oldTicksIdx = g_ticksIdx;
+        int selected = -1;
+        for (int i = 0; i < kTicksCount; ++i) {
+            if (kTicksCommandIds[i] == id) {
+                selected = i;
+                break;
+            }
+        }
+        if (selected < 0)
+            return;
         char b[8];
-        wsprintfA(b, "%d", kTicksValues[g_ticksIdx]);
-        writeDdrawStr("maxgameticks", b);
-        restartItem = true;
+        wsprintfA(b, "%d", kTicksValues[selected]);
+        if (!writeDdrawStr("maxgameticks", b) ||
+            !DDSetMaxGameTicksLive(kTicksValues[selected])) {
+            char old[8];
+            wsprintfA(old, "%d", oldTicks);
+            writeDdrawStr("maxgameticks", old);
+            g_ticksIdx = oldTicksIdx;
+            refreshChecks();
+            MessageBoxW(
+                g_gameHwnd,
+                L(L"Could not apply the game speed cap live. The previous limiter remains active.",
+                  L"Не удалось применить кап скорости игры на лету. Прежний лимитер остался активен."),
+                L(L"Game speed cap", L"Кап скорости игры"),
+                MB_OK | MB_ICONERROR);
+            return;
+        }
+        g_ticksIdx = selected;
+        refreshChecks();
+        return;
     } else if (id == kIdSingleCpu) {
         const bool requested = !g_singlecpu;
         if (!DDWriteConfigString(
@@ -4549,38 +4799,86 @@ bool handleDecorativeCursor(HWND hwnd, UINT msg, LPARAM lParam)
 
 extern "C" void timerhost_pump(void); // perform any queued on-elapse press on the game thread
 extern "C" int timerhost_filter_input(UINT msg, WPARAM wParam, LPARAM lParam);
+extern "C" void timerhost_install(void); // exact EXE timer hooks; deferred past loader lock
+extern "C" int timerhost_battle_kind(void); // dialog-lifecycle signal, available before first action
 
-// DisciplesGL exposed +/- as a live animation-speed control. Preserve our split battle/map model
-// and adjust whichever context is currently visible. Slot 0 is vanilla/off; slots 1..6 are the
-// same 1.5x..15x choices exposed by the menu. Both the main keyboard and numpad are accepted.
+void showAnimationSpeedStatus(bool battleVisible, int factor)
+{
+    if (InterlockedExchangeAdd(&g_statusTextInstallState, 0) != 2)
+        return;
+    void* const strat = reinterpret_cast<void*>(
+        InterlockedExchangeAdd(&g_statusStratInterf, 0));
+    if (!strat)
+        return;
+
+    char text[64] = {};
+    sprintf_s(text, sizeof(text), "%s animation: %d.%dx",
+              battleVisible ? "Battle" : "Map", factor / 10, factor % 10);
+    __try {
+        reinterpret_cast<void(__thiscall*)(void*, char*)>(0x4900C8)(strat, text);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedCompareExchange(
+            &g_statusStratInterf, 0,
+            static_cast<LONG>(reinterpret_cast<uintptr_t>(strat)));
+        mlog("[menu] native status-text object became unavailable; notice skipped");
+    }
+}
+
+// Keep live animation-speed adjustment available without stealing ordinary '+'/'-' input from the
+// game (chat, numeric fields and native hotkeys all use the same WM_KEYDOWN stream). Ctrl+Plus and
+// Ctrl+Minus adjust the visible map/battle context; unmodified symbols always reach Disciples II.
 bool handleAnimSpeedHotkey(WPARAM key)
 {
-    if (g_ver != VerRussobit || GetKeyState(VK_MENU) < 0)
+    if (g_ver != VerRussobit || GetKeyState(VK_MENU) < 0 || GetKeyState(VK_CONTROL) >= 0)
         return false;
     if (key != VK_OEM_PLUS && key != VK_OEM_MINUS &&
         key != VK_ADD && key != VK_SUBTRACT)
         return false;
 
-    bool* enabled = g_inBattle ? &g_battleAnimEnabled : &g_mapAnimEnabled;
-    int* speed = g_inBattle ? &g_battleAnimSpeed : &g_mapAnimSpeed;
-    int slot = *enabled ? *speed : 0;
+    // g_inBattle is action-driven and can still be false on a joiner's first visible battle. The
+    // timer host publishes DLG_BATTLE construction earlier, so use both signals for the UI context.
+    const bool battleVisible = g_inBattle || timerhost_battle_kind() != 0;
+    bool* enabled = battleVisible ? &g_battleAnimEnabled : &g_mapAnimEnabled;
+    int* speed = battleVisible ? &g_battleAnimSpeed : &g_mapAnimSpeed;
+    int* exactFactor = battleVisible ? &g_battleBaseFactor : &g_mapBaseFactor;
+    const int oldFactor = *enabled ? *exactFactor : 10;
+    int factor = oldFactor;
     if (key == VK_OEM_PLUS || key == VK_ADD) {
-        if (slot < 6)
-            ++slot;
-    } else if (slot > 0) {
-        --slot;
+        if (factor < 150)
+            ++factor;
+    } else if (factor > 10) {
+        --factor;
     }
+    if (factor == oldFactor)
+        return false; // do not steal a chord at the x1.0/x15.0 boundaries
 
-    *enabled = slot != 0;
-    if (slot != 0)
-        *speed = slot;
-    if (g_inBattle) {
-        applyAnimSpeed(0, *enabled, *speed);
+    *enabled = factor > 10;
+    *exactFactor = factor;
+    const int preset = animPresetForFactor(factor);
+    if (preset)
+        *speed = preset; // retain the nearest exact coarse preset for older C4dll-R builds
+    if (battleVisible) {
+        applyAnimFactor(0, *enabled, factor);
         updateBattleBurst();
     } else {
-        applyAnimSpeed(1, *enabled, *speed);
+        applyAnimFactor(1, *enabled, factor);
     }
-    persist();
+    // Two multiplayer processes share one INI but keep independent live state. Persist only the
+    // pair changed by this chord so one instance cannot overwrite the other's unrelated settings.
+    const char* f = iniFile();
+    char value[8] = {};
+    WritePrivateProfileStringA("menu",
+        battleVisible ? "battleAnimEnabled" : "mapAnimEnabled", *enabled ? "1" : "0", f);
+    wsprintfA(value, "%d", *speed);
+    WritePrivateProfileStringA("menu",
+        battleVisible ? "battleAnimSpeed" : "mapAnimSpeed", value, f);
+    wsprintfA(value, "%d", factor);
+    WritePrivateProfileStringA("menu",
+        battleVisible ? "battleAnimFactor" : "mapAnimFactor", value, f);
+    mlog("[menu] Ctrl+%s -> %s animation %.1fx (factor=%d)",
+         (key == VK_OEM_PLUS || key == VK_ADD) ? "+" : "-",
+         battleVisible ? "battle" : "map", factor / 10.0, factor);
+    showAnimationSpeedStatus(battleVisible, factor);
     refreshChecks();
     return true;
 }
@@ -4593,8 +4891,16 @@ LRESULT dispatchGameWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     // gameplay input active. Raise that one byte only for the synchronous native hover dispatch and
     // restore the exact previous value even if a third-party game hook faults or unwinds.
     if (msg != WM_MOUSEMOVE ||
-        classifyPhysicalPointer(hwnd) != PhysicalPointerRegion::NativeViewport)
-        return g_origWndProc(hwnd, msg, wParam, lParam);
+        classifyPhysicalPointer(hwnd) != PhysicalPointerRegion::NativeViewport) {
+        const LRESULT result = g_origWndProc(hwnd, msg, wParam, lParam);
+        // A no-move press is deliberately forwarded so the native iso handler can replay it as a
+        // click. If the release landed on another panel/outside the iso view, that handler is not
+        // called; repair the still-live wrapper capture after native dispatch instead of carrying
+        // it until the view is recreated.
+        if (msg == WM_LBUTTONUP && g_dragScrollActive)
+            cancelDragScroll();
+        return result;
+    }
 
     volatile BYTE* activeFlag = nullptr;
     BYTE previous = 0;
@@ -4645,9 +4951,11 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
              msg, hwnd, reinterpret_cast<void*>(wParam), reinterpret_cast<void*>(lParam),
              _ReturnAddress());
     }
-    // The first GUI dispatch is after every imported DLL has completed DllMain. This ordering lets
-    // the timer wrap (rather than be swallowed by) MNS mss32's later IBatViewer::update replacement.
+    // The first GUI dispatch is after every imported DLL has completed DllMain. Install shared EXE
+    // vtable hooks here and tail-chain the target present at runtime, independent of module order.
+    ensureBattleDiscriminator();
     ensureBattleChooseActionHook();
+    timerhost_install();
     if (!g_gameHwnd) {
         g_gameHwnd = hwnd; // remember the game window (drag-scroll SetCapture target)
         // Start our 32ms WM_TIMER on first sight of the window. The on-elapse press is WM_TIMER-driven
@@ -4689,6 +4997,10 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     if (msg == WM_KEYDOWN && handleAnimSpeedHotkey(wParam))
         return 0;
 
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) &&
+        pluginhost_key(msg, wParam, lParam))
+        return 0;
+
     // Legacy C4dll-R used F4 for a one-key normal-window/fullscreen toggle. Keep it wrapper-owned:
     // old ddraw.ini files have no keytogglefullscreen2, and Alt+F4 remains a WM_SYSKEYDOWN.
     if (msg == WM_KEYDOWN && wParam == VK_F4 && !(lParam & 0x40000000)) {
@@ -4698,25 +5010,50 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     // A forced PvP Auto Battle owns game input until teardown. Wrapper-only presentation hotkeys
-    // above remain usable; game mouse clicks and key-down actions cannot reach the battle viewer.
+    // above remain usable; release/cancel lifecycle was already offered once at the renderer
+    // boundary, while game mouse clicks and key-down actions cannot reach the battle viewer.
     if (timerhost_filter_input(msg, wParam, lParam))
         return 0;
+
+    // Win32 capture can be broken by a focus change, modal loop or another window taking capture.
+    // Clear our route before any plugin/game handler sees the lifecycle event; otherwise a missing
+    // button-up can leave every later move consumed until the strategic view is recreated.
+    if (g_dragScrollActive &&
+        (msg == WM_CANCELMODE || msg == WM_KILLFOCUS || msg == WM_NCDESTROY ||
+         (msg == WM_ACTIVATEAPP && !wParam) ||
+         (msg == WM_CAPTURECHANGED && reinterpret_cast<HWND>(lParam) != hwnd))) {
+        cancelDragScroll();
+    }
 
     // The overlay is deliberately WS_EX_TRANSPARENT. Give native plugins first refusal only for
     // mouse/capture messages; timer.c4p uses this for its explicit Ctrl+Alt drag gesture. This must
     // precede map drag so a clock grab never reaches the strategic-map handler.
-    if ((msg == WM_LBUTTONDOWN || msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP ||
-         msg == WM_CANCELMODE || msg == WM_CAPTURECHANGED) &&
+    if ((msg == WM_LBUTTONDOWN || msg == WM_MOUSEMOVE) &&
         pluginhost_mouse(msg, wParam)) {
+        return 0;
+    }
+
+    // SetCapture routes the release to the main HWND even when the pointer has crossed from the
+    // iso field onto a unit panel or outside the window. In that case the game's interface router
+    // may never call isoMouseHook with WM_LBUTTONUP. A real drag consumed its original DOWN, so it
+    // is both necessary and safe to finish it here without forwarding an unmatched native UP.
+    if (g_dragScrollActive && g_dragMoved && msg == WM_LBUTTONUP) {
+        cancelDragScroll();
         return 0;
     }
 
     // fake_WndProc has already transformed lParam into game coordinates before it calls the game's
     // WndProc. A second cnc-ddraw transform here shifts the drag anchor under scaling or letterboxing.
     if (g_dragScrollActive && msg == WM_MOUSEMOVE) {
-        dragScrollWndMove(static_cast<int>(static_cast<short>(LOWORD(lParam))),
-                          static_cast<int>(static_cast<short>(HIWORD(lParam))));
-        return 0;
+        if ((wParam & MK_LBUTTON) == 0) {
+            // Self-heal exactly when the physical gesture has ended even if its WM_LBUTTONUP was
+            // lost during a modal/capture transition. Do not swallow this ordinary hover sample.
+            cancelDragScroll();
+        } else {
+            dragScrollWndMove(static_cast<int>(static_cast<short>(LOWORD(lParam))),
+                              static_cast<int>(static_cast<short>(HIWORD(lParam))));
+            return 0;
+        }
     }
     // Keep the OS pointer visible over the caption + menu bar (non-client), invisible in the client.
     switch (msg) {
@@ -4761,6 +5098,7 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
     } else if (msg == WM_INITMENUPOPUP) {
+        pluginhost_refresh_menus();
         refreshChecks();
     }
     return dispatchGameWndProc(hwnd, msg, wParam, lParam);
@@ -4891,8 +5229,8 @@ void buildMenu()
                 L(L"Super fast (15x, test)", L"Супербыстро (15x, тест)"));
     AppendMenuW(g_battleAnimMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(g_battleAnimMenu, MF_STRING | MF_GRAYED, 0,
-                L(L"Speeds up ALL battle animation. Applies instantly, safe.",
-                  L"Ускоряет ВСЕ анимации боя. Применяется сразу, безопасно."));
+                L(L"Ctrl +/- adjusts the current battle value by 0.1x.",
+                  L"Ctrl +/- меняет текущую скорость боя с шагом 0,1x."));
     AppendMenuW(g_gameMenu, MF_POPUP | mnsDisabled,
                 reinterpret_cast<UINT_PTR>(g_battleAnimMenu),
                 L(L"(MNS/SMNS) Battle speed (whole battle)",
@@ -4925,8 +5263,8 @@ void buildMenu()
                 L(L"Super fast (15x, test)", L"Супербыстро (15x, тест)"));
     AppendMenuW(g_mapAnimMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(g_mapAnimMenu, MF_STRING | MF_GRAYED, 0,
-                L(L"Speeds up map animation (water, flags, effects).",
-                  L"Ускоряет анимации карты (вода, флаги, эффекты)."));
+                L(L"Ctrl +/- adjusts the current map value by 0.1x.",
+                  L"Ctrl +/- меняет текущую скорость карты с шагом 0,1x."));
     AppendMenuW(g_gameMenu, MF_POPUP | mnsDisabled,
                 reinterpret_cast<UINT_PTR>(g_mapAnimMenu),
                 L(L"(MNS/SMNS) Map animation speed",
@@ -5081,13 +5419,15 @@ void buildMenu()
                 L(L"30 (cool CPU, sluggish)", L"30 (холодный CPU, задумчиво)"));
     AppendMenuW(g_ticksMenu, MF_STRING, kIdTicks60, L"60");
     AppendMenuW(g_ticksMenu, MF_STRING, kIdTicks100,
-                L(L"100 (smoothest, default)", L"100 (плавнее всего, по умолчанию)"));
+                L"100");
+    AppendMenuW(g_ticksMenu, MF_STRING, kIdTicks180,
+                L(L"180 (default)", L"180 (по умолчанию)"));
     AppendMenuW(g_ticksMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(g_ticksMenu, MF_STRING | MF_GRAYED, 0,
                 L(L"Game core speed: low values make the game think before every action",
                   L"Скорость ядра игры: низкие значения = пауза перед каждым действием"));
     AppendMenuW(g_perfMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_ticksMenu),
-                L(L"Game speed cap (restart)", L"Кап скорости игры (рестарт)"));
+                L(L"Game speed cap (live)", L"Кап скорости игры (на лету)"));
     AppendMenuW(g_perfMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(g_perfMenu, MF_STRING, kIdSingleCpu,
                 L(L"1 CPU stability (restart)",
@@ -5352,6 +5692,44 @@ extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, 
         return 1;
     }
 
+    // Wrapper-owned keys must be handled at the renderer boundary before the Russobit early return.
+    // Some renderer/compatibility paths consume a message before the native game WndProc detour;
+    // handling it here also prevents double delivery because fake_WndProc stops when we return 1.
+    if (msg == WM_KEYDOWN && handleAnimSpeedHotkey(wParam)) {
+        *result = 0;
+        return 1;
+    }
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) &&
+        pluginhost_key(msg, wParam, lParam)) {
+        *result = 0;
+        return 1;
+    }
+    if (msg == WM_KEYDOWN && wParam == VK_F4 && !(lParam & 0x40000000)) {
+        DDToggleWindowedMode();
+        syncChrome(hwnd);
+        *result = 0;
+        return 1;
+    }
+    if ((msg == WM_LBUTTONUP || msg == WM_CANCELMODE || msg == WM_CAPTURECHANGED) &&
+        pluginhost_mouse(msg, wParam)) {
+        *result = 0;
+        return 1;
+    }
+    if (timerhost_filter_input(msg, wParam, lParam)) {
+        *result = 0;
+        return 1;
+    }
+
+    // Exact Russobit delivery continues through wndProcHook, where DOWN/MOVE are routed once after
+    // the same forced-input filter. Other executable layouts have no such detour, so complete the
+    // plugin pointer route here; release/cancel lifecycle was already delivered above.
+    if (g_ver != VerRussobit &&
+        (msg == WM_LBUTTONDOWN || msg == WM_MOUSEMOVE) &&
+        pluginhost_mouse(msg, wParam)) {
+        *result = 0;
+        return 1;
+    }
+
     if (g_ver == VerRussobit)
         return 0;
 
@@ -5381,18 +5759,6 @@ extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, 
         break;
     }
 
-    if (msg == WM_KEYDOWN && handleAnimSpeedHotkey(wParam)) {
-        *result = 0;
-        return 1;
-    }
-
-    if (msg == WM_KEYDOWN && wParam == VK_F4 && !(lParam & 0x40000000)) {
-        DDToggleWindowedMode();
-        syncChrome(hwnd);
-        *result = 0;
-        return 1;
-    }
-
     if (g_relayoutMsg && msg == g_relayoutMsg) {
         syncChrome(hwnd);
         *result = 0;
@@ -5413,6 +5779,7 @@ extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, 
             return 1;
         }
     } else if (msg == WM_INITMENUPOPUP) {
+        pluginhost_refresh_menus();
         refreshChecks();
     }
 
@@ -5435,12 +5802,25 @@ using SetMapCenterFn = void (__thiscall*)(void* mg, PointI* mapCenter, int offse
 void* g_origIsoMouse = nullptr; // Detours trampoline to the original CStratInterf iso mouse handler
 void* g_origScrollDir = nullptr; // trampoline to the game's directional map scroll (edge-scroll executor)
 int g_scrollDirDiag = 0;         // first-N diagnostic counter for the edge-scroll hook
+DWORD g_edgeScrollRealTick = 0;  // unscaled wall-clock time of the last successful native step
+int g_edgeScrollRealDir = -1;
+bool g_edgeScrollRealTickValid = false;
+constexpr DWORD kEdgeScrollLegacyIntervalMs = 33;
+constexpr DWORD kEdgeScrollJitterToleranceMs = 1;
 bool g_dragScrollActive = false;
 bool g_dragMoved = false;
 PointI g_dragMapCenter{};     // exact center tile returned by the game at button-down
 PointI g_dragPointerAnchor{}; // button-down cursor plus the center's sub-tile screen offset
 PointI g_dragStart{};         // cursor at button-down (click-vs-drag detection)
 constexpr int kDragStartThreshold = 1; // first changed game pixel starts the drag
+
+void cancelDragScroll()
+{
+    g_dragScrollActive = false;
+    g_dragMoved = false;
+    if (g_gameHwnd && GetCapture() == g_gameHwnd)
+        ReleaseCapture();
+}
 
 bool dragThresholdExceeded(int x, int y)
 {
@@ -5497,6 +5877,73 @@ void panMapCenterSmooth(void* mg, PointI* mapCenter, int dx, int dy)
     }
 }
 
+// GetMapCenter may legitimately report an out-of-range center when the viewport presses against a
+// map edge. Feeding that value back into SetMapCenter makes the native routine fail its first bounds
+// check forever, so the held drag cannot recover by reversing direction. Reproduce DisciplesGL's
+// boundary repair exactly: inspect the offset in the two isometric map axes, zero only the component
+// that points beyond an edge, then convert the remaining offset back to screen coordinates and
+// re-anchor the held gesture. Interior moves deliberately keep their original down-time invariant.
+void normalizeDragBoundary(void* mg, int pointerX, int pointerY)
+{
+    PointI mapCenter{}, screenOffset{};
+    reinterpret_cast<GetMapCenterFn>(0x5414BC)(
+        mg, &mapCenter, &screenOffset.x, &screenOffset.y);
+
+    auto* mapGeometry = reinterpret_cast<int*>(*reinterpret_cast<void**>(mg));
+    if (!isUserPtr(mapGeometry))
+        return;
+    const int size = mapGeometry[5];
+    if (size <= 0)
+        return;
+
+    // screen -> isometric map axes (the exact integer transform used by DGL).
+    int mapOffsetX = screenOffset.y * 2 + screenOffset.x;
+    int mapOffsetY = screenOffset.y * 2 - screenOffset.x;
+    bool reset = false;
+
+    if (mapCenter.x < 0 || (mapCenter.x == 0 && mapOffsetX < 0)) {
+        mapCenter.x = 0;
+        mapOffsetX = 0;
+        reset = true;
+    } else if (mapCenter.x >= size ||
+               (mapCenter.x == size - 1 && mapOffsetX > 0)) {
+        mapCenter.x = size - 1;
+        mapOffsetX = 0;
+        reset = true;
+    }
+
+    if (mapCenter.y < 0 || (mapCenter.y == 0 && mapOffsetY < 0)) {
+        mapCenter.y = 0;
+        mapOffsetY = 0;
+        reset = true;
+    } else if (mapCenter.y >= size ||
+               (mapCenter.y == size - 1 && mapOffsetY > 0)) {
+        mapCenter.y = size - 1;
+        mapOffsetY = 0;
+        reset = true;
+    }
+
+    if (!reset)
+        return;
+
+    // isometric map axes -> screen offset. Keep the unclamped axis so diagonal dragging remains
+    // continuous along the edge, while reversing the clamped axis works on the very next sample.
+    screenOffset.x = (mapOffsetX - mapOffsetY) / 2;
+    screenOffset.y = (mapOffsetX + mapOffsetY) / 4;
+    g_dragMapCenter = mapCenter;
+    g_dragPointerAnchor = {
+        pointerX + screenOffset.x,
+        pointerY + screenOffset.y,
+    };
+    panMapCenterSmooth(mg, &g_dragMapCenter, screenOffset.x, screenOffset.y);
+
+    static int logged = 0;
+    if (logged++ < 8) {
+        mlog("[drag] boundary normalized center=%d,%d offset=%d,%d pointer=%d,%d",
+             mapCenter.x, mapCenter.y, screenOffset.x, screenOffset.y, pointerX, pointerY);
+    }
+}
+
 int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
 {
     if (!g_dragScroll)
@@ -5525,8 +5972,9 @@ int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
                 };
                 g_dragScrollActive = true;
                 g_dragMoved = false;
-                // Capture the mouse so WM_MOUSEMOVE keeps reaching this handler while the button is held -
-                // the game stops routing moves to the iso handler during a held button (DGL captured too).
+                // Win32 capture keeps moves reaching our main WndProc when D2 routes the held
+                // pointer away from the iso view. Unlike DGL's internal dialog capture, this must
+                // be paired with explicit focus/capture/panel-release cleanup in wndProcHook.
                 if (g_gameHwnd)
                     SetCapture(g_gameHwnd);
                 return 1; // consume the down so the game does not select yet
@@ -5537,15 +5985,17 @@ int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
                 return 1;
             g_dragMoved = true;
             void* mg = mapGraphicsPtr();
-            if (mg)
+            if (mg) {
                 panMapCenterSmooth(mg, &g_dragMapCenter,
                                    g_dragPointerAnchor.x - pt->x,
                                    g_dragPointerAnchor.y - pt->y);
+                normalizeDragBoundary(mg, pt->x, pt->y);
+            }
             return 1; // consume moves while panning
         } else if (g_dragScrollActive && msgId == WM_LBUTTONUP) {
-            g_dragScrollActive = false;
-            ReleaseCapture();
-            if (!g_dragMoved) {
+            const bool moved = g_dragMoved;
+            cancelDragScroll();
+            if (!moved) {
                 // Plain click: replay the down so it selects/opens. Do NOT then forward the up - the
                 // replayed down can open a dialog (e.g. a city) and tear down the iso view, so forwarding
                 // the up to that stale view derefs a freed child (game sub_5CA3F1, this[3]==NULL) -> crash.
@@ -5555,7 +6005,7 @@ int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
             return callOrigIsoMouse(view, msgId, pt); // a real drag: view intact, forward the up to end it
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        g_dragScrollActive = false;
+        cancelDragScroll();
         return 1; // transient torn-down view mid dialog-transition: swallow, do NOT re-dispatch (re-crashes)
     }
     return callOrigIsoMouse(view, msgId, pt);
@@ -5577,16 +6027,21 @@ void dragScrollWndMove(int gameX, int gameY)
         panMapCenterSmooth(mg, &g_dragMapCenter,
                            g_dragPointerAnchor.x - gameX,
                            g_dragPointerAnchor.y - gameY);
+        normalizeDragBoundary(mg, gameX, gameY);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        cancelDragScroll();
     }
 }
 
 // The game's iso DIRECTIONAL scroll: sub_54249C -> sub_541BC1 -> sub_54301B. Single choke point for
 // window-EDGE scroll (sub_541BC1 reached only through here). Programmatic centering uses sub_541588, so
-// gating this kills edge-scroll without touching click-to-center or our drag-pan. Suppress it during
-// an actual held-button drag and while this game window is inactive. The latter replaces the removed
-// synthetic-center GetCursorPos guard: cursor coordinates always stay real, while background maps
-// still cannot scroll.
+// gating this kills edge-scroll without touching click-to-center or our drag-pan. The native caller
+// has a 33ms gate, but that gate reads the game's virtual clock; map animation x15 therefore turns it
+// into about 2.2ms of wall time and maxgameticks (or an uncapped CPU loop) becomes the real scroll cap.
+// Keep the legacy 33ms ceiling on the unscaled clock here, without sleeping the game/action pump.
+// Suppress scrolling during an actual held-button drag and while this game window is inactive. The
+// latter replaces the removed synthetic-center GetCursorPos guard: cursor coordinates always stay
+// real, while background maps still cannot scroll.
 // __thiscall(self, dir) via __fastcall(ecx=self, edx, dir); installed unconditionally.
 char __fastcall scrollDirHook(void* self, void* /*edx*/, int dir)
 {
@@ -5597,9 +6052,28 @@ char __fastcall scrollDirHook(void* self, void* /*edx*/, int dir)
         mlog("[edge] scrollDir dir=%d dragging=%d inactive=%d", dir,
              g_dragScrollActive ? 1 : 0, inactive ? 1 : 0);
     }
-    if (g_dragScrollActive || inactive)
+    if (g_dragScrollActive || inactive) {
+        g_edgeScrollRealTickValid = false;
+        g_edgeScrollRealDir = -1;
         return 0; // avoid fighting grab-pan and never move a background client's map
-    return reinterpret_cast<char(__fastcall*)(void*, void*, int)>(g_origScrollDir)(self, nullptr, dir);
+    }
+
+    // g_realTimeGetTime is the original WINMM import saved before the game's IAT slot is redirected
+    // to timeGetTimeHook. DWORD subtraction deliberately keeps the 49-day wraparound semantics safe.
+    const DWORD now = g_realTimeGetTime ? g_realTimeGetTime() : GetTickCount();
+    if (g_edgeScrollRealTickValid && dir == g_edgeScrollRealDir &&
+        now - g_edgeScrollRealTick <
+            kEdgeScrollLegacyIntervalMs - kEdgeScrollJitterToleranceMs)
+        return 0;
+
+    const char moved =
+        reinterpret_cast<char(__fastcall*)(void*, void*, int)>(g_origScrollDir)(self, nullptr, dir);
+    if (moved) {
+        g_edgeScrollRealTick = now;
+        g_edgeScrollRealDir = dir;
+        g_edgeScrollRealTickValid = true;
+    }
+    return moved;
 }
 
 void installDragScrollDetour()
@@ -5620,12 +6094,13 @@ void installDragScrollDetour()
     }
 }
 
-extern "C" void timerhost_install(void); // timer keystone (features/timerhost.cpp)
-
 // Entry point called from cnc-ddraw's DllMain (DLL_PROCESS_ATTACH), after hook_init + the embed.
 extern "C" void featuremenu_install(void)
 {
     detectVersion();
+    // The unique CStratInterf construction happens before the first WndProc dispatch, so capture
+    // its lifecycle now, while DLL_PROCESS_ATTACH still precedes the EXE entry point.
+    installStatusTextHooks();
 
     const int cursorCapture = g_ver == VerRussobit ? cursorcapture_install() : 0;
     mlog("[cursor] native dynamic cursor capture %s",
@@ -5695,12 +6170,42 @@ extern "C" void featuremenu_install(void)
         g_battleAnimSpeed = 1;
     if (g_battleAnimSpeed > 6)
         g_battleAnimSpeed = 6;
+    char battleFactorRaw[16] = {};
+    if (GetPrivateProfileStringA("menu", "battleAnimFactor", "", battleFactorRaw,
+                                 sizeof(battleFactorRaw), f) > 0) {
+        g_battleBaseFactor = atoi(battleFactorRaw);
+    } else {
+        g_battleBaseFactor = g_battleAnimEnabled
+            ? kAnimFactor[g_battleAnimSpeed - 1]
+            : 10;
+    }
+    if (g_battleBaseFactor < 10)
+        g_battleBaseFactor = 10;
+    if (g_battleBaseFactor > 150)
+        g_battleBaseFactor = 150;
+    if (g_battleBaseFactor == 10)
+        g_battleAnimEnabled = false;
     g_mapAnimEnabled = GetPrivateProfileIntA("menu", "mapAnimEnabled", 0, f) != 0;
     g_mapAnimSpeed = GetPrivateProfileIntA("menu", "mapAnimSpeed", 5, f);
     if (g_mapAnimSpeed < 1)
         g_mapAnimSpeed = 1;
     if (g_mapAnimSpeed > 6)
         g_mapAnimSpeed = 6;
+    char mapFactorRaw[16] = {};
+    if (GetPrivateProfileStringA("menu", "mapAnimFactor", "", mapFactorRaw,
+                                 sizeof(mapFactorRaw), f) > 0) {
+        g_mapBaseFactor = atoi(mapFactorRaw);
+    } else {
+        g_mapBaseFactor = g_mapAnimEnabled
+            ? kAnimFactor[g_mapAnimSpeed - 1]
+            : 10;
+    }
+    if (g_mapBaseFactor < 10)
+        g_mapBaseFactor = 10;
+    if (g_mapBaseFactor > 150)
+        g_mapBaseFactor = 150;
+    if (g_mapBaseFactor == 10)
+        g_mapAnimEnabled = false;
     g_battleAttackEnabled = GetPrivateProfileIntA("menu", "battleAttackEnabled", 1, f) != 0;
     g_battleAttackSpeed = GetPrivateProfileIntA("menu", "battleAttackSpeed", 5, f);
     if (g_battleAttackSpeed < 1)
@@ -5721,27 +6226,26 @@ extern "C" void featuremenu_install(void)
         ? (atoi(fastAiRaw) != 0 ? 1 : 0)
         : (GetPrivateProfileIntA("Wrapper", "FastAI", 0, discipleIni()) != 0 ? 1 : 0);
     if (g_ver == VerRussobit) {
-        // Apply now (DllMain, before the game's main loop / anim init). The IAT is already populated by
-        // the loader, so the time-scale hook installs cleanly; the battle discriminator patches the
-        // idle vftable.
+        // Apply only loader-safe state here. Shared EXE vtable hooks are deferred to the first GUI
+        // dispatch, after all imported modules have completed process attach.
         applyAlwaysActive(g_alwaysActive);
         installTimeScaleHook();
-        installBattleDiscriminator();
-        timerhost_install(); // capture dialog/battle buttons + combat/animation state
         installDragScrollDetour(); // map grab+drag panning; pass-through when off
         dvoInstall(); // voiced-dialog auto-skip + logger; pass-through when off
         installUnitHireConfirmHook(); // X005TA0285; pass-through unless enabled
         fastai_install(); // exact two-callsite gate; shared predicate is deliberately not detoured
         fastai_set_enabled(fastAiRequested);
-        applyAnimSpeed(0, g_battleAnimEnabled, g_battleAnimSpeed);
-        applyAnimSpeed(1, g_mapAnimEnabled, g_mapAnimSpeed);
+        applyAnimFactor(0, g_battleAnimEnabled, g_battleBaseFactor);
+        applyAnimFactor(1, g_mapAnimEnabled, g_mapBaseFactor);
         installWndProcDetour();
     }
 
     HANDLE thread = CreateThread(nullptr, 0, &menuWorker, nullptr, 0, nullptr);
     if (thread)
         CloseHandle(thread);
-    mlog("[menu] feature menu scheduled (alwaysActive=%d, battleAnim=%d/%d, mapAnim=%d/%d)",
-         g_alwaysActive ? 1 : 0, g_battleAnimEnabled ? 1 : 0, g_battleAnimSpeed,
-         g_mapAnimEnabled ? 1 : 0, g_mapAnimSpeed);
+    mlog("[menu] feature menu scheduled "
+         "(alwaysActive=%d, battleAnim=%d/%.1fx, mapAnim=%d/%.1fx)",
+         g_alwaysActive ? 1 : 0, g_battleAnimEnabled ? 1 : 0,
+         g_battleBaseFactor / 10.0, g_mapAnimEnabled ? 1 : 0,
+         g_mapBaseFactor / 10.0);
 }

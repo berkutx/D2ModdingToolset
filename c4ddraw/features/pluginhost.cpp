@@ -1,6 +1,6 @@
 /*
- * C4dll-R native plugin host: loads mods\*.c4p (BGRA32) plugins. Renderer-agnostic: composites via a transparent,
- * click-through LAYERED window over the game client area (UpdateLayeredWindow).
+ * C4dll-R native plugin host: loads mods\*.c4p (BGRA32) plugins. Renderer-agnostic: publishes a
+ * premultiplied canvas which the presentation compositor blends into the game frame.
  */
 
 #include "c4plugin.h"
@@ -140,6 +140,18 @@ extern "C" uint32_t timerhost_begin_turn_ack_serial(void);
 extern "C" int timerhost_battle_turn_active(void);
 extern "C" int timerhost_force_auto_battle(void);
 extern "C" int timerhost_get_battle_timer_state(C4P_BattleTimerState* out);
+extern "C" BOOL DDGetPhysicalCursorPos(POINT* point);
+extern "C" BOOL DDPhysicalScreenToClient(HWND hwnd, POINT* point);
+extern "C" BOOL DDGetPhysicalClientRect(HWND hwnd, RECT* rect);
+extern "C" int DDGetGameWidth(void);
+extern "C" int DDGetGameHeight(void);
+extern "C" int DDGetScaleMetrics(int* gameWidth, int* gameHeight, int* outputWidth,
+                                   int* outputHeight, int* viewportX, int* viewportY,
+                                   int* viewportWidth, int* viewportHeight);
+extern "C" void DDApplySimpleZoomMouse(int* x, int* y, int gameWidth, int gameHeight);
+extern "C" void DDApplySimpleZoomViewport(
+    int bottomOrigin, int* x, int* y, int* width, int* height);
+extern "C" void DDInvalidatePluginFrame(void);
 
 volatile LONG g_turnSerial = 0; // bumped on every detected turn change (including a skip)
 volatile LONG g_turnPlayer = -1; // current turn player index, -1 if unknown / not in a game (cross-thread)
@@ -209,6 +221,21 @@ int __cdecl host_get_battle_timer_state(C4P_BattleTimerState* out)
 {
     return timerhost_get_battle_timer_state(out);
 }
+int __cdecl host_server_role(void)
+{
+    if (InterlockedCompareExchange(&g_hasServer, 0, 0) != 0)
+        return 1;
+
+    int inGame = 0;
+    if (featuremenu_server_player(&inGame) >= 0) {
+        InterlockedExchange(&g_hasServer, 1);
+        return 1;
+    }
+
+    // off[6] is delivered on both multiplayer participants. Seeing it while the exact server chain
+    // is absent distinguishes a pure joiner from the pre-scenario/unknown state.
+    return InterlockedCompareExchange(&g_inGameOff6, 0, 0) != 0 ? 0 : -1;
+}
 
 C4P_Host g_host = {sizeof(C4P_Host),     host_get_hwnd,        host_invalidate,
                    host_get_config_int,  host_set_config_int,  host_config_path_cb,
@@ -218,7 +245,7 @@ C4P_Host g_host = {sizeof(C4P_Host),     host_get_hwnd,        host_invalidate,
                    host_turn_player_id,  host_retreat,         host_end_day,
                    host_cancel_elapse,   host_begin_turn_ack_serial,
                    host_battle_turn_active, host_force_auto_battle,
-                   host_get_battle_timer_state};
+                   host_get_battle_timer_state, host_server_role};
 
 // plugin records
 using C4pQuery = int(__cdecl*)(C4P_Info*);
@@ -227,7 +254,9 @@ using C4pTick = void(__cdecl*)(uint32_t);
 using C4pDraw = int(__cdecl*)(C4P_Canvas*);
 using C4pMenu = HMENU(__cdecl*)(int);  // optional: build the plugin's config submenu
 using C4pCommand = void(__cdecl*)(int); // optional: handle a menu WM_COMMAND in its id block
-using C4pMouse = int(__cdecl*)(UINT, WPARAM, int, int); // optional: physical client input
+using C4pMouse = int(__cdecl*)(UINT, WPARAM, int, int); // optional: logical game-space input
+using C4pRefreshMenu = void(__cdecl*)(void); // optional: update live menu checks/enabled state
+using C4pKey = int(__cdecl*)(UINT, WPARAM, LPARAM); // optional: wrapper-level keyboard shortcut
 
 struct Plugin
 {
@@ -240,6 +269,8 @@ struct Plugin
     C4pDraw draw;
     C4pCommand command; // new-plugin menu command handler (c4p_command), or null
     C4pMouse mouse; // optional click-through overlay interaction (c4p_mouse), or null
+    C4pRefreshMenu refreshMenu; // optional live menu refresh (c4p_refresh_menu), or null
+    C4pKey key; // optional keyboard handler (c4p_key), or null
 };
 
 Plugin g_plugins[16];
@@ -299,6 +330,8 @@ void loadOne(const char* path, const char* fileName)
     p.menuBase = 0xB000 + g_pluginCount * 0x100;
     p.command = (C4pCommand)GetProcAddress(m, "c4p_command");
     p.mouse = (C4pMouse)GetProcAddress(m, "c4p_mouse");
+    p.refreshMenu = (C4pRefreshMenu)GetProcAddress(m, "c4p_refresh_menu");
+    p.key = (C4pKey)GetProcAddress(m, "c4p_key");
     if (auto buildPluginMenu = (C4pMenu)GetProcAddress(m, "c4p_menu"))
         p.menu = buildPluginMenu(p.menuBase);
     g_plugins[g_pluginCount++] = p;
@@ -327,13 +360,16 @@ void loadFolder(const char* pattern)
     FindClose(h);
 }
 
-// transparent layered overlay window + BGRA32 DIB
-HWND g_overlayWnd = nullptr;
+// BGRA32 plugin canvas. The worker is the sole writer; renderer/screenshot threads take the shared
+// side of g_frameLock while converting the premultiplied pixels into the presented 16/32-bit frame.
+SRWLOCK g_frameLock = SRWLOCK_INIT;
 HDC g_memDC = nullptr;
 HBITMAP g_dibBmp = nullptr;
 HBITMAP g_oldBmp = nullptr;
 uint8_t* g_dib = nullptr; // BGRA32, top-down
 int g_ovW = 0, g_ovH = 0;
+volatile LONG g_frameHasPixels = 0;
+int g_frameLeft = 0, g_frameTop = 0, g_frameRight = 0, g_frameBottom = 0;
 
 // (re)create the DIB surface for w x h; returns true if (re)created
 bool ensureSurface(int w, int h)
@@ -372,28 +408,9 @@ bool ensureSurface(int w, int h)
     return true;
 }
 
-HWND createOverlayWindow(HWND owner)
-{
-    static bool registered = false;
-    if (!registered) {
-        WNDCLASSEXA wc = {};
-        wc.cbSize = sizeof(wc);
-        wc.lpfnWndProc = DefWindowProcA;
-        wc.hInstance = GetModuleHandleA(nullptr);
-        wc.lpszClassName = "C4dllROverlay";
-        RegisterClassExA(&wc);
-        registered = true;
-    }
-    // Layered (per-pixel alpha) + transparent (click-through) + no-activate, OWNED by the game
-    // window so it stays glued just above its owner in z-order, never floats over other apps,
-    // and needs no focus logic.
-    return CreateWindowExA(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
-                           "C4dllROverlay", "", WS_POPUP, 0, 0, 16, 16, owner, nullptr,
-                           GetModuleHandleA(nullptr), nullptr);
-}
-
-// draw every plugin into g_dib (cleared transparent), then premultiply for the layered alpha blend
-void rebuildOverlay(int w, int h)
+// Draw every plugin into g_dib (cleared transparent), then premultiply for source-over blending.
+// Return whether the resulting canvas contains at least one visible pixel.
+bool rebuildOverlay(int w, int h)
 {
     memset(g_dib, 0, (size_t)w * h * 4);
     C4P_Canvas canvas = {sizeof(C4P_Canvas), g_dib, w, h, w * 4};
@@ -412,19 +429,34 @@ void rebuildOverlay(int w, int h)
             }
     }
 
-    // straight alpha -> premultiplied (ULW_ALPHA expects premultiplied)
-    uint8_t* px = g_dib;
-    const int count = w * h;
-    for (int i = 0; i < count; ++i, px += 4) {
-        const unsigned a = px[3];
-        if (a == 0) {
-            px[0] = px[1] = px[2] = 0;
-        } else if (a < 255) {
-            px[0] = (uint8_t)(px[0] * a / 255);
-            px[1] = (uint8_t)(px[1] * a / 255);
-            px[2] = (uint8_t)(px[2] * a / 255);
+    // Straight alpha -> premultiplied for the renderer-native source-over compositor.
+    bool anyPixels = false;
+    int left = w, top = h, right = 0, bottom = 0;
+    for (int y = 0; y < h; ++y) {
+        uint8_t* px = g_dib + static_cast<size_t>(y) * w * 4u;
+        for (int x = 0; x < w; ++x, px += 4) {
+            const unsigned a = px[3];
+            if (a != 0) {
+                anyPixels = true;
+                if (x < left) left = x;
+                if (y < top) top = y;
+                if (x + 1 > right) right = x + 1;
+                if (y + 1 > bottom) bottom = y + 1;
+            }
+            if (a == 0) {
+                px[0] = px[1] = px[2] = 0;
+            } else if (a < 255) {
+                px[0] = (uint8_t)(px[0] * a / 255);
+                px[1] = (uint8_t)(px[1] * a / 255);
+                px[2] = (uint8_t)(px[2] * a / 255);
+            }
         }
     }
+    g_frameLeft = anyPixels ? left : 0;
+    g_frameTop = anyPixels ? top : 0;
+    g_frameRight = anyPixels ? right : 0;
+    g_frameBottom = anyPixels ? bottom : 0;
+    return anyPixels;
 }
 
 DWORD WINAPI overlayWorker(LPVOID)
@@ -450,32 +482,15 @@ DWORD WINAPI overlayWorker(LPVOID)
         plog("[plugins] game window not found; overlay not started");
         return 0;
     }
-    g_overlayWnd = createOverlayWindow(game);
-    if (!g_overlayWnd) {
-        plog("[plugins] overlay window creation failed (err %lu)", GetLastError());
-        return 0;
-    }
-    ShowWindow(g_overlayWnd, SW_SHOWNOACTIVATE);
-    plog("[plugins] overlay window up; compositing %d plugin(s)", g_pluginCount);
+    plog("[plugins] renderer-native canvas up; compositing %d plugin(s)", g_pluginCount);
 
     bool announced = false;
     for (;;) {
-        MSG msg;
-        while (PeekMessageA(&msg, g_overlayWnd, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessageA(&msg);
-        }
-
         game = gameHwnd();
         if (game) {
-            RECT cr{};
-            GetClientRect(game, &cr);
-            POINT tl{0, 0};
-            ClientToScreen(game, &tl);
-            int w = cr.right - cr.left;
-            int h = cr.bottom - cr.top;
+            const int w = DDGetGameWidth();
+            const int h = DDGetGameHeight();
             if (w > 0 && h > 0) {
-                bool sizeChanged = ensureSurface(w, h);
                 const DWORD now = GetTickCount();
                 {
                     // Turn detection (player + serial + in-game) is driven by the off[6] turn-info
@@ -493,28 +508,31 @@ DWORD WINAPI overlayWorker(LPVOID)
                 for (int i = 0; i < g_pluginCount; ++i)
                     if (g_plugins[i].tick)
                         g_plugins[i].tick(now);
+
                 const bool dirty = InterlockedExchange(&g_dirty, 0) != 0;
-                if (g_dib && (sizeChanged || dirty)) {
-                    rebuildOverlay(w, h);
-                    POINT src{0, 0};
-                    POINT dst{tl.x, tl.y};
-                    SIZE sz{w, h};
-                    BLENDFUNCTION bf{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-                    UpdateLayeredWindow(g_overlayWnd, nullptr, &dst, &sz, g_memDC, &src, 0, &bf,
-                                        ULW_ALPHA);
-                    if (!announced) {
-                        plog("[plugins] overlay first paint (%dx%d at %d,%d)", w, h, tl.x, tl.y);
-                        announced = true;
+                if (dirty || w != g_ovW || h != g_ovH) {
+                    bool rebuilt = false;
+                    AcquireSRWLockExclusive(&g_frameLock);
+                    const bool sizeChanged = ensureSurface(w, h);
+                    if (g_dib && (sizeChanged || dirty)) {
+                        InterlockedExchange(&g_frameHasPixels,
+                                            rebuildOverlay(w, h) ? 1 : 0);
+                        rebuilt = true;
+                    } else if (!g_dib) {
+                        InterlockedExchange(&g_frameHasPixels, 0);
+                    }
+                    ReleaseSRWLockExclusive(&g_frameLock);
+
+                    if (rebuilt) {
+                        // Wake the renderer even when the game surface itself is idle. The next
+                        // upload blends this canvas into the exact same frame used by OBS and shots.
+                        DDInvalidatePluginFrame();
+                        if (!announced) {
+                            plog("[plugins] renderer-native first paint (%dx%d)", w, h);
+                            announced = true;
+                        }
                     }
                 }
-
-                // The overlay is an owned popup, so Windows already keeps it directly above the
-                // game and below unrelated applications. Never promote it into the TOPMOST band:
-                // doing that to an owned window can drag its owner (observed on the host instance)
-                // above every other application even after the game loses focus. Native popup menus
-                // also remain above this NOACTIVATE/transparent owned window without z-order churn.
-                SetWindowPos(g_overlayWnd, nullptr, tl.x, tl.y, 0, 0,
-                             SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
             }
         }
         Sleep(33);
@@ -523,8 +541,88 @@ DWORD WINAPI overlayWorker(LPVOID)
 
 } // namespace
 
-// WM_ENTERMENULOOP / WM_EXITMENULOOP arrive on the game thread. The layered overlay belongs to the
-// worker thread, so publish only a lock-free flag here; that thread performs ShowWindow itself.
+extern "C" int pluginhost_overlay_ready(int width, int height)
+{
+    if (InterlockedCompareExchange(&g_frameHasPixels, 0, 0) == 0)
+        return 0;
+    AcquireSRWLockShared(&g_frameLock);
+    const int ready = g_dib && g_ovW == width && g_ovH == height &&
+        InterlockedCompareExchange(&g_frameHasPixels, 0, 0) != 0;
+    ReleaseSRWLockShared(&g_frameLock);
+    return ready;
+}
+
+// Source-over the premultiplied BGRA plugin canvas into a wrapper-owned presentation buffer.
+// This is deliberately after the game/decorative/cursor layers: the timer must be visible in the
+// actual presented frame (OBS, screenshots and every renderer), not in a manifest-gated HWND.
+extern "C" int pluginhost_blend_overlay(
+    void* destination, int width, int height, int pitch, int bpp, int rgb555)
+{
+    if (!destination || width <= 0 || height <= 0 || pitch <= 0 ||
+        (bpp != 16 && bpp != 32) ||
+        InterlockedCompareExchange(&g_frameHasPixels, 0, 0) == 0)
+        return 0;
+
+    int blended = 0;
+    AcquireSRWLockShared(&g_frameLock);
+    if (g_dib && g_ovW == width && g_ovH == height &&
+        InterlockedCompareExchange(&g_frameHasPixels, 0, 0) != 0) {
+        const int bytesPerPixel = bpp / 8;
+        auto* dstBase = static_cast<uint8_t*>(destination);
+        const int left = g_frameLeft;
+        const int top = g_frameTop;
+        const int right = g_frameRight;
+        const int bottom = g_frameBottom;
+        if (left >= 0 && top >= 0 && right > left && bottom > top &&
+            right <= width && bottom <= height) {
+            for (int y = top; y < bottom; ++y) {
+                const uint8_t* src = g_dib +
+                    (static_cast<size_t>(y) * width + left) * 4u;
+                uint8_t* dst = dstBase + static_cast<size_t>(y) * pitch +
+                    static_cast<size_t>(left) * bytesPerPixel;
+                for (int x = left; x < right; ++x, src += 4, dst += bytesPerPixel) {
+                    const unsigned alpha = src[3];
+                    if (!alpha)
+                        continue;
+                    const unsigned inv = 255u - alpha;
+                    if (bpp == 32) {
+                        dst[0] = static_cast<uint8_t>(src[0] + (dst[0] * inv + 127u) / 255u);
+                        dst[1] = static_cast<uint8_t>(src[1] + (dst[1] * inv + 127u) / 255u);
+                        dst[2] = static_cast<uint8_t>(src[2] + (dst[2] * inv + 127u) / 255u);
+                        dst[3] = 0xFF;
+                    } else {
+                        uint16_t packed = 0;
+                        memcpy(&packed, dst, sizeof(packed));
+                        unsigned dr = 0, dg = 0, db = 0;
+                        if (rgb555) {
+                            dr = ((packed >> 10) & 31u) * 255u / 31u;
+                            dg = ((packed >> 5) & 31u) * 255u / 31u;
+                            db = (packed & 31u) * 255u / 31u;
+                        } else {
+                            dr = ((packed >> 11) & 31u) * 255u / 31u;
+                            dg = ((packed >> 5) & 63u) * 255u / 63u;
+                            db = (packed & 31u) * 255u / 31u;
+                        }
+                        const unsigned r = src[2] + (dr * inv + 127u) / 255u;
+                        const unsigned g = src[1] + (dg * inv + 127u) / 255u;
+                        const unsigned b = src[0] + (db * inv + 127u) / 255u;
+                        packed = rgb555
+                            ? static_cast<uint16_t>(((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3))
+                            : static_cast<uint16_t>(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+                        memcpy(dst, &packed, sizeof(packed));
+                    }
+                    blended = 1;
+                }
+            }
+        }
+    }
+    ReleaseSRWLockShared(&g_frameLock);
+    return blended;
+}
+
+// WM_ENTERMENULOOP / WM_EXITMENULOOP arrive on the game thread. A separate layered overlay belonged
+// to the worker thread in older builds. Retain the ABI/flag while the native compositor keeps
+// the canvas in the game frame and therefore naturally below real Win32 menus.
 extern "C" void pluginhost_menu_loop(int active)
 {
     InterlockedExchange(&g_menuLoopActive, active ? 1 : 0);
@@ -591,18 +689,78 @@ extern "C" int pluginhost_command(unsigned id)
     return 0;
 }
 
-// Forward mouse input without making the layered overlay itself interactive. The game WndProc's
-// lParam has already been transformed to logical game coordinates by cnc-ddraw, whereas c4p_draw's
-// canvas is the physical client size, so sample the OS cursor and map it to physical client pixels.
+// Called from the game UI thread at WM_INITMENUPOPUP. Without this callback, a plugin item that was
+// initially grayed can never receive WM_COMMAND and therefore can never update its own state.
+extern "C" void pluginhost_refresh_menus(void)
+{
+    for (int i = 0; i < g_pluginCount; ++i)
+        if (g_plugins[i].refreshMenu)
+            g_plugins[i].refreshMenu();
+}
+
+extern "C" int pluginhost_key(UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    for (int i = 0; i < g_pluginCount; ++i)
+        if (g_plugins[i].key && g_plugins[i].key(msg, wParam, lParam))
+            return 1;
+    return 0;
+}
+
+// Forward mouse input without creating an interactive child window. Sample the physical OS cursor,
+// then map it through cnc-ddraw's viewport and inverse simple zoom into C4P_Canvas game coordinates.
 extern "C" int pluginhost_mouse(UINT msg, WPARAM wParam)
 {
+    // Lifecycle messages must never depend on cursor geometry. In particular, SetCapture can move
+    // to another window while the pointer is outside our viewport; dropping this notification would
+    // leave a plugin's drag latch active and make later map input appear frozen.
+    if (msg == WM_CANCELMODE || msg == WM_CAPTURECHANGED) {
+        int handled = 0;
+        for (int i = 0; i < g_pluginCount; ++i) {
+            Plugin& p = g_plugins[i];
+            if (p.mouse && p.mouse(msg, wParam, 0, 0))
+                handled = 1;
+        }
+        return handled;
+    }
+
     HWND game = gameHwnd();
     POINT pt{};
-    if (!game || !GetCursorPos(&pt) || !ScreenToClient(game, &pt))
+    if (!game || !DDGetPhysicalCursorPos(&pt) || !DDPhysicalScreenToClient(game, &pt))
         return 0;
+
+    // Plugins render in logical game-surface pixels so their canvas is part of the exact frame.
+    // Convert the physical client point through cnc-ddraw's live viewport before hit-testing/drag.
+    int gameWidth = 0, gameHeight = 0;
+    int viewportX = 0, viewportY = 0, viewportWidth = 0, viewportHeight = 0;
+    if (!DDGetScaleMetrics(&gameWidth, &gameHeight, nullptr, nullptr,
+                           &viewportX, &viewportY, &viewportWidth, &viewportHeight) ||
+        gameWidth <= 0 || gameHeight <= 0 || viewportWidth <= 0 || viewportHeight <= 0)
+        return 0;
+    int visibleX = viewportX;
+    int visibleY = viewportY;
+    int visibleWidth = viewportWidth;
+    int visibleHeight = viewportHeight;
+    DDApplySimpleZoomViewport(0, &visibleX, &visibleY, &visibleWidth, &visibleHeight);
+    const bool insideVisibleFrame =
+        visibleWidth > 0 && visibleHeight > 0 &&
+        pt.x >= visibleX && pt.y >= visibleY &&
+        pt.x < visibleX + visibleWidth && pt.y < visibleY + visibleHeight;
+    // A new grab/ordinary hover belongs only to the pixels actually presented. Outside MOVE/UP is
+    // forwarded solely while a plugin can legitimately own the game's Win32 capture.
+    const bool capturedContinuation = GetCapture() == game &&
+        (msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP);
+    if (!insideVisibleFrame && !capturedContinuation)
+        return 0;
+    pt.x = static_cast<LONG>((static_cast<LONGLONG>(pt.x - viewportX) * gameWidth) /
+                             viewportWidth);
+    pt.y = static_cast<LONG>((static_cast<LONGLONG>(pt.y - viewportY) * gameHeight) /
+                             viewportHeight);
+    int logicalX = static_cast<int>(pt.x);
+    int logicalY = static_cast<int>(pt.y);
+    DDApplySimpleZoomMouse(&logicalX, &logicalY, gameWidth, gameHeight);
     for (int i = 0; i < g_pluginCount; ++i) {
         Plugin& p = g_plugins[i];
-        if (p.mouse && p.mouse(msg, wParam, pt.x, pt.y))
+        if (p.mouse && p.mouse(msg, wParam, logicalX, logicalY))
             return 1;
     }
     return 0;
