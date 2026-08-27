@@ -287,6 +287,7 @@ void applyAlwaysActive(bool on)
 // factor: 10 = x1.0 (identity) .. 150 = x15.0. Re-anchors on factor change so virtual time stays continuous.
 using TimeGetTimeFn = DWORD(WINAPI*)(void);
 TimeGetTimeFn g_realTimeGetTime = nullptr;
+volatile LONG g_timeScaleHookInstalled = 0;
 
 // Two live multipliers (x10 fixed-point); hook picks battle vs map by g_inBattle. 10 = identity (off).
 volatile LONG g_battleFactor = 10;
@@ -347,6 +348,39 @@ DWORD WINAPI timeGetTimeHook(void)
     return result;
 }
 
+// D2 recognizes a double-click with its own 250ms comparison at 0x53F237, using the same
+// CMqUIKernel clock that ultimately comes from the timeGetTime IAT slot above. Multiplying only the
+// clock would therefore shrink the real input window to 250/factor (about 17ms at x15). Scale the
+// comparison threshold by the identical factor so mouse input remains on a real 250ms window while
+// every animation consumer continues to see virtual time.
+DWORD __stdcall doubleClickThreshold(void)
+{
+    if (InterlockedExchangeAdd(&g_timeScaleHookInstalled, 0) != 1)
+        return 250;
+
+    const LONG inBattle = InterlockedExchangeAdd(&g_inBattle, 0);
+    LONG factor = InterlockedExchangeAdd(inBattle ? &g_battleFactor : &g_mapFactor, 0);
+    if (factor < 1)
+        factor = 1;
+    return static_cast<DWORD>(250ull * static_cast<unsigned long long>(factor) / 10ull);
+}
+
+// Replaces only `mov ecx,250` in the native double-click predicate. EAX contains the new click
+// timestamp and must survive until the following `sub eax,edi`; preserve EDX as well so the thunk is
+// transparent to the surrounding function.
+__declspec(naked) void doubleClickThresholdThunk()
+{
+    __asm {
+        push eax
+        push edx
+        call doubleClickThreshold
+        mov ecx, eax
+        pop edx
+        pop eax
+        ret
+    }
+}
+
 // Russobit timeGetTime IAT slot 0x6CE420 (Discipl2.exe import, WINMM). At factor 10 it's identity.
 uintptr_t timeGetTimeIatVA()
 {
@@ -361,11 +395,48 @@ void installTimeScaleHook()
     auto slot = reinterpret_cast<void**>(va);
     g_realTimeGetTime = reinterpret_cast<TimeGetTimeFn>(*slot);
     void* hook = reinterpret_cast<void*>(&timeGetTimeHook);
-    if (writeBytes(va, reinterpret_cast<const std::uint8_t*>(&hook), sizeof(hook)))
+    if (writeBytes(va, reinterpret_cast<const std::uint8_t*>(&hook), sizeof(hook))) {
+        InterlockedExchange(&g_timeScaleHookInstalled, 1);
         mlog("[menu] anim time-scale hook installed (IAT %#x, real=%p)", (unsigned)va,
              reinterpret_cast<void*>(g_realTimeGetTime));
-    else
+    } else {
+        // The original pointer was sampled before VirtualProtect/write. Do not leave a failed
+        // installation looking active or prevent a later retry.
+        g_realTimeGetTime = nullptr;
+        InterlockedExchange(&g_timeScaleHookInstalled, 0);
         mlog("[menu] anim time-scale hook FAILED at IAT %#x", (unsigned)va);
+    }
+}
+
+void installDoubleClickTimeFix()
+{
+    if (g_ver != VerRussobit ||
+        InterlockedExchangeAdd(&g_timeScaleHookInstalled, 0) != 1)
+        return;
+
+    constexpr uintptr_t siteVA = 0x53F237;
+    static const std::uint8_t expected[10] = {
+        0xB9, 0xFA, 0x00, 0x00, 0x00, // mov ecx,250
+        0x2B, 0xC7,                   // sub eax,edi
+        0x5E,                         // pop esi
+        0x3B, 0xC8                    // cmp ecx,eax
+    };
+    if (memcmp(reinterpret_cast<const void*>(siteVA), expected, sizeof(expected)) != 0) {
+        mlog("[menu] double-click timing signature mismatch at %#x; fix not installed",
+             static_cast<unsigned>(siteVA));
+        return;
+    }
+
+    std::uint8_t call[5] = {0xE8, 0, 0, 0, 0};
+    const std::int32_t rel = static_cast<std::int32_t>(
+        reinterpret_cast<uintptr_t>(&doubleClickThresholdThunk) - (siteVA + sizeof(call)));
+    memcpy(call + 1, &rel, sizeof(rel));
+    if (writeBytes(siteVA, call, sizeof(call)))
+        mlog("[menu] real-time double-click window installed at %#x",
+             static_cast<unsigned>(siteVA));
+    else
+        mlog("[menu] double-click timing hook installation FAILED at %#x",
+             static_cast<unsigned>(siteVA));
 }
 
 // --- battle vs map discriminator: g_inBattle ---
@@ -6230,6 +6301,7 @@ extern "C" void featuremenu_install(void)
         // dispatch, after all imported modules have completed process attach.
         applyAlwaysActive(g_alwaysActive);
         installTimeScaleHook();
+        installDoubleClickTimeFix(); // keep D2's native 250ms input window under virtual time
         installDragScrollDetour(); // map grab+drag panning; pass-through when off
         dvoInstall(); // voiced-dialog auto-skip + logger; pass-through when off
         installUnitHireConfirmHook(); // X005TA0285; pass-through unless enabled
