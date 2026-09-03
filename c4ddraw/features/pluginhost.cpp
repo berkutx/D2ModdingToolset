@@ -139,6 +139,7 @@ extern "C" int timerhost_cancel_elapse(void);
 extern "C" uint32_t timerhost_begin_turn_ack_serial(void);
 extern "C" int timerhost_battle_turn_active(void);
 extern "C" int timerhost_force_auto_battle(void);
+extern "C" int timerhost_force_auto_battle_v2(uint32_t expectedBattleInstance);
 extern "C" int timerhost_get_battle_timer_state(C4P_BattleTimerState* out);
 extern "C" BOOL DDGetPhysicalCursorPos(POINT* point);
 extern "C" BOOL DDPhysicalScreenToClient(HWND hwnd, POINT* point);
@@ -151,6 +152,9 @@ extern "C" int DDGetScaleMetrics(int* gameWidth, int* gameHeight, int* outputWid
 extern "C" void DDApplySimpleZoomMouse(int* x, int* y, int gameWidth, int gameHeight);
 extern "C" void DDApplySimpleZoomViewport(
     int bottomOrigin, int* x, int* y, int* width, int* height);
+extern "C" int DDGetWindowStretchCrop(
+    int gameWidth, int gameHeight,
+    int* left, int* top, int* cropWidth, int* cropHeight);
 extern "C" void DDInvalidatePluginFrame(void);
 
 volatile LONG g_turnSerial = 0; // bumped on every detected turn change (including a skip)
@@ -217,6 +221,10 @@ uint32_t __cdecl host_begin_turn_ack_serial(void)
 }
 int __cdecl host_battle_turn_active(void) { return timerhost_battle_turn_active(); }
 int __cdecl host_force_auto_battle(void) { return timerhost_force_auto_battle(); }
+int __cdecl host_force_auto_battle_v2(uint32_t expectedBattleInstance)
+{
+    return timerhost_force_auto_battle_v2(expectedBattleInstance);
+}
 int __cdecl host_get_battle_timer_state(C4P_BattleTimerState* out)
 {
     return timerhost_get_battle_timer_state(out);
@@ -237,6 +245,106 @@ int __cdecl host_server_role(void)
     return InterlockedCompareExchange(&g_inGameOff6, 0, 0) != 0 ? 0 : -1;
 }
 
+int __cdecl host_get_game_size(int32_t* width, int32_t* height)
+{
+    if (!width || !height)
+        return 0;
+    int gameWidth = 0;
+    int gameHeight = 0;
+    if (!DDGetScaleMetrics(&gameWidth, &gameHeight, nullptr, nullptr,
+                           nullptr, nullptr, nullptr, nullptr) ||
+        gameWidth <= 0 || gameHeight <= 0) {
+        gameWidth = DDGetGameWidth();
+        gameHeight = DDGetGameHeight();
+    }
+    if (gameWidth <= 0 || gameHeight <= 0)
+        return 0;
+    *width = gameWidth;
+    *height = gameHeight;
+    return 1;
+}
+
+int __cdecl host_get_visible_game_rect(int32_t* left, int32_t* top,
+                                       int32_t* width, int32_t* height,
+                                       int32_t* zoom1000)
+{
+    if (!left || !top || !width || !height || !zoom1000)
+        return 0;
+
+    int gameWidth = 0, gameHeight = 0;
+    int outputWidth = 0, outputHeight = 0;
+    int viewportX = 0, viewportY = 0, viewportWidth = 0, viewportHeight = 0;
+    if (!DDGetScaleMetrics(&gameWidth, &gameHeight, &outputWidth, &outputHeight,
+                           &viewportX, &viewportY, &viewportWidth, &viewportHeight) ||
+        gameWidth <= 0 || gameHeight <= 0 || outputWidth <= 0 || outputHeight <= 0 ||
+        viewportWidth <= 0 || viewportHeight <= 0)
+        return 0;
+
+    int finalX = viewportX;
+    int finalY = viewportY;
+    int finalWidth = viewportWidth;
+    int finalHeight = viewportHeight;
+    DDApplySimpleZoomViewport(0, &finalX, &finalY, &finalWidth, &finalHeight);
+    if (finalWidth <= 0 || finalHeight <= 0)
+        return 0;
+
+    int cropLeft = 0, cropTop = 0;
+    int cropWidth = gameWidth, cropHeight = gameHeight;
+    DDGetWindowStretchCrop(
+        gameWidth, gameHeight,
+        &cropLeft, &cropTop, &cropWidth, &cropHeight);
+    if (cropWidth <= 0 || cropHeight <= 0)
+        return 0;
+
+    const int clipLeft = finalX > 0 ? finalX : 0;
+    const int clipTop = finalY > 0 ? finalY : 0;
+    const int finalRight = finalX + finalWidth;
+    const int finalBottom = finalY + finalHeight;
+    const int clipRight = finalRight < outputWidth ? finalRight : outputWidth;
+    const int clipBottom = finalBottom < outputHeight ? finalBottom : outputHeight;
+    if (clipRight <= clipLeft || clipBottom <= clipTop)
+        return 0;
+
+    // Use an inner (ceil-left/floor-right) source rectangle. Every reported pixel is guaranteed to
+    // survive the final viewport crop, which is more important for overlays than one rounded edge.
+    const int64_t leftNumerator = static_cast<int64_t>(clipLeft - finalX) * cropWidth;
+    const int64_t topNumerator = static_cast<int64_t>(clipTop - finalY) * cropHeight;
+    const int64_t rightNumerator = static_cast<int64_t>(clipRight - finalX) * cropWidth;
+    const int64_t bottomNumerator = static_cast<int64_t>(clipBottom - finalY) * cropHeight;
+    int sourceLeft = cropLeft +
+        static_cast<int>((leftNumerator + finalWidth - 1) / finalWidth);
+    int sourceTop = cropTop +
+        static_cast<int>((topNumerator + finalHeight - 1) / finalHeight);
+    int sourceRight = cropLeft + static_cast<int>(rightNumerator / finalWidth);
+    int sourceBottom = cropTop + static_cast<int>(bottomNumerator / finalHeight);
+    if (sourceLeft < cropLeft) sourceLeft = cropLeft;
+    if (sourceTop < cropTop) sourceTop = cropTop;
+    if (sourceRight > cropLeft + cropWidth) sourceRight = cropLeft + cropWidth;
+    if (sourceBottom > cropTop + cropHeight) sourceBottom = cropTop + cropHeight;
+    if (sourceRight <= sourceLeft || sourceBottom <= sourceTop)
+        return 0;
+
+    *left = sourceLeft;
+    *top = sourceTop;
+    *width = sourceRight - sourceLeft;
+    *height = sourceBottom - sourceTop;
+    if (static_cast<int64_t>(gameWidth) * 3 >=
+        static_cast<int64_t>(gameHeight) * 4) {
+        const int64_t denominator = static_cast<int64_t>(viewportHeight) * cropHeight;
+        *zoom1000 = static_cast<int>(
+            (static_cast<int64_t>(finalHeight) * gameHeight * 1000 + denominator / 2) /
+            denominator);
+    } else {
+        const int64_t denominator = static_cast<int64_t>(viewportWidth) * cropWidth;
+        *zoom1000 = static_cast<int>(
+            (static_cast<int64_t>(finalWidth) * gameWidth * 1000 + denominator / 2) /
+            denominator);
+    }
+    if (*zoom1000 < 1000)
+        *zoom1000 = 1000;
+    return 1;
+}
+
 C4P_Host g_host = {sizeof(C4P_Host),     host_get_hwnd,        host_invalidate,
                    host_get_config_int,  host_set_config_int,  host_config_path_cb,
                    host_get_turn_serial, host_get_turn_player, host_is_in_game,
@@ -245,7 +353,9 @@ C4P_Host g_host = {sizeof(C4P_Host),     host_get_hwnd,        host_invalidate,
                    host_turn_player_id,  host_retreat,         host_end_day,
                    host_cancel_elapse,   host_begin_turn_ack_serial,
                    host_battle_turn_active, host_force_auto_battle,
-                   host_get_battle_timer_state, host_server_role};
+                   host_get_battle_timer_state, host_server_role,
+                   host_get_game_size, host_force_auto_battle_v2,
+                   host_get_visible_game_rect};
 
 // plugin records
 using C4pQuery = int(__cdecl*)(C4P_Info*);
@@ -257,6 +367,8 @@ using C4pCommand = void(__cdecl*)(int); // optional: handle a menu WM_COMMAND in
 using C4pMouse = int(__cdecl*)(UINT, WPARAM, int, int); // optional: logical game-space input
 using C4pRefreshMenu = void(__cdecl*)(void); // optional: update live menu checks/enabled state
 using C4pKey = int(__cdecl*)(UINT, WPARAM, LPARAM); // optional: wrapper-level keyboard shortcut
+using C4pScope = uint32_t(__cdecl*)(void); // optional: C4P_SCOPE_* runtime dispatch policy
+using C4pBattleState = void(__cdecl*)(int); // optional: visible battle-UI lifecycle edge
 
 struct Plugin
 {
@@ -271,11 +383,69 @@ struct Plugin
     C4pMouse mouse; // optional click-through overlay interaction (c4p_mouse), or null
     C4pRefreshMenu refreshMenu; // optional live menu refresh (c4p_refresh_menu), or null
     C4pKey key; // optional keyboard handler (c4p_key), or null
+    uint32_t scope; // C4P_SCOPE_* mask returned by optional c4p_scope
+    C4pBattleState battleState; // optional c4p_battle_state callback
+    volatile LONG battleNotified; // -2 dispatching, -1 unsynced, 0 outside, 1 inside
 };
 
 Plugin g_plugins[16];
 int g_pluginCount = 0;
 HANDLE g_pluginsReady = nullptr; // manual-reset event: signaled by the worker once plugins loaded
+volatile LONG g_battleUiDesired = 0; // event-driven DLG_BATTLE_A/B lifetime, published by timerhost
+volatile LONG g_battleMessage = 0; // registered UI message used to leave game hooks before callbacks
+
+UINT battleStateMessage()
+{
+    LONG value = InterlockedCompareExchange(&g_battleMessage, 0, 0);
+    if (value)
+        return static_cast<UINT>(value);
+    const UINT registered = RegisterWindowMessageA("C4dllR.PluginBattleState.v1");
+    if (!registered)
+        return 0;
+    const LONG previous = InterlockedCompareExchange(
+        &g_battleMessage, static_cast<LONG>(registered), 0);
+    return static_cast<UINT>(previous ? previous : registered);
+}
+
+bool pluginRuntimeActive(Plugin& p)
+{
+    if ((p.scope & C4P_SCOPE_BATTLE) == 0)
+        return true;
+    // Desired=0 suppresses runtime immediately on teardown; notified=1 ensures enter callback
+    // completed on the UI thread before the first scoped runtime callback is allowed.
+    return InterlockedCompareExchange(&g_battleUiDesired, 0, 0) != 0 &&
+           InterlockedCompareExchange(&p.battleNotified, 0, 0) == 1;
+}
+
+bool syncPluginBattleState(Plugin& p)
+{
+    if ((p.scope & C4P_SCOPE_BATTLE) == 0)
+        return false;
+    bool changed = false;
+    for (;;) {
+        const LONG target = InterlockedCompareExchange(&g_battleUiDesired, 0, 0) ? 1 : 0;
+        const LONG current = InterlockedCompareExchange(&p.battleNotified, 0, 0);
+        if (current == target || current == -2)
+            return changed;
+        if (InterlockedCompareExchange(&p.battleNotified, -2, current) != current)
+            continue;
+        if (p.battleState)
+            p.battleState(target != 0 ? 1 : 0);
+        InterlockedExchange(&p.battleNotified, target);
+        plog("[plugins] battle scope '%s' -> %ld", p.name, target);
+        changed = true;
+        if ((InterlockedCompareExchange(&g_battleUiDesired, 0, 0) ? 1 : 0) == target)
+            return changed;
+    }
+}
+
+bool syncBattlePluginStates()
+{
+    bool changed = false;
+    for (int i = 0; i < g_pluginCount; ++i)
+        changed = syncPluginBattleState(g_plugins[i]) || changed;
+    return changed;
+}
 
 // loading
 void loadOne(const char* path, const char* fileName)
@@ -325,6 +495,12 @@ void loadOne(const char* path, const char* fileName)
         FreeLibrary(m);
         return;
     }
+    // Resolve and call lifecycle extensions only after the mandatory ABI/query/init contract has
+    // succeeded. A malformed DLL must not execute optional callbacks during validation.
+    if (auto scope = (C4pScope)GetProcAddress(m, "c4p_scope"))
+        p.scope = scope() & C4P_SCOPE_BATTLE;
+    p.battleState = (C4pBattleState)GetProcAddress(m, "c4p_battle_state");
+    p.battleNotified = p.scope & C4P_SCOPE_BATTLE ? -1 : 0;
     plog("[plugins] loaded '%s' (%s)", p.name, fileName);
     // Optional config submenu (grafted under "Plugins" by featuremenu) + command handler.
     p.menuBase = 0xB000 + g_pluginCount * 0x100;
@@ -332,6 +508,8 @@ void loadOne(const char* path, const char* fileName)
     p.mouse = (C4pMouse)GetProcAddress(m, "c4p_mouse");
     p.refreshMenu = (C4pRefreshMenu)GetProcAddress(m, "c4p_refresh_menu");
     p.key = (C4pKey)GetProcAddress(m, "c4p_key");
+    plog("[plugins] runtime '%s': scope=0x%08lX mouse=%p battleState=%p",
+         p.name, static_cast<unsigned long>(p.scope), p.mouse, p.battleState);
     if (auto buildPluginMenu = (C4pMenu)GetProcAddress(m, "c4p_menu"))
         p.menu = buildPluginMenu(p.menuBase);
     g_plugins[g_pluginCount++] = p;
@@ -416,7 +594,7 @@ bool rebuildOverlay(int w, int h)
     C4P_Canvas canvas = {sizeof(C4P_Canvas), g_dib, w, h, w * 4};
     for (int i = 0; i < g_pluginCount; ++i) {
         Plugin& p = g_plugins[i];
-        if (p.draw)
+        if (p.draw && pluginRuntimeActive(p))
             p.draw(&canvas);
     }
 
@@ -483,6 +661,9 @@ DWORD WINAPI overlayWorker(LPVOID)
         return 0;
     }
     plog("[plugins] renderer-native canvas up; compositing %d plugin(s)", g_pluginCount);
+    const UINT battleMessage = battleStateMessage();
+    if (battleMessage)
+        PostMessageA(game, battleMessage, 0, 0); // initial state sync after plugin publication
 
     bool announced = false;
     for (;;) {
@@ -506,7 +687,7 @@ DWORD WINAPI overlayWorker(LPVOID)
                     }
                 }
                 for (int i = 0; i < g_pluginCount; ++i)
-                    if (g_plugins[i].tick)
+                    if (g_plugins[i].tick && pluginRuntimeActive(g_plugins[i]))
                         g_plugins[i].tick(now);
 
                 const bool dirty = InterlockedExchange(&g_dirty, 0) != 0;
@@ -540,6 +721,13 @@ DWORD WINAPI overlayWorker(LPVOID)
 }
 
 } // namespace
+
+// The timer host uses the same validated MQ_UIManager lookup as plugins when it needs to marshal a
+// native battle command from the overlay worker to the game thread. This is not part of the c4p ABI.
+extern "C" HWND pluginhost_game_hwnd(void)
+{
+    return gameHwnd();
+}
 
 extern "C" int pluginhost_overlay_ready(int width, int height)
 {
@@ -701,7 +889,8 @@ extern "C" void pluginhost_refresh_menus(void)
 extern "C" int pluginhost_key(UINT msg, WPARAM wParam, LPARAM lParam)
 {
     for (int i = 0; i < g_pluginCount; ++i)
-        if (g_plugins[i].key && g_plugins[i].key(msg, wParam, lParam))
+        if (g_plugins[i].key && pluginRuntimeActive(g_plugins[i]) &&
+            g_plugins[i].key(msg, wParam, lParam))
             return 1;
     return 0;
 }
@@ -717,7 +906,7 @@ extern "C" int pluginhost_mouse(UINT msg, WPARAM wParam)
         int handled = 0;
         for (int i = 0; i < g_pluginCount; ++i) {
             Plugin& p = g_plugins[i];
-            if (p.mouse && p.mouse(msg, wParam, 0, 0))
+            if (p.mouse && pluginRuntimeActive(p) && p.mouse(msg, wParam, 0, 0))
                 handled = 1;
         }
         return handled;
@@ -758,12 +947,64 @@ extern "C" int pluginhost_mouse(UINT msg, WPARAM wParam)
     int logicalX = static_cast<int>(pt.x);
     int logicalY = static_cast<int>(pt.y);
     DDApplySimpleZoomMouse(&logicalX, &logicalY, gameWidth, gameHeight);
+    if (msg == WM_LBUTTONDOWN) {
+        plog("[plugins] LMB logical=%d,%d desired=%ld", logicalX, logicalY,
+             InterlockedCompareExchange(&g_battleUiDesired, 0, 0));
+    }
     for (int i = 0; i < g_pluginCount; ++i) {
         Plugin& p = g_plugins[i];
-        if (p.mouse && p.mouse(msg, wParam, logicalX, logicalY))
+        if (!p.mouse)
+            continue;
+        const bool active = pluginRuntimeActive(p);
+        if (msg == WM_LBUTTONDOWN && (p.scope & C4P_SCOPE_BATTLE)) {
+            plog("[plugins] LMB route '%s': active=%d notified=%ld",
+                 p.name, active ? 1 : 0,
+                 InterlockedCompareExchange(&p.battleNotified, 0, 0));
+        }
+        if (!active)
+            continue;
+        const int handled = p.mouse(msg, wParam, logicalX, logicalY);
+        if (msg == WM_LBUTTONDOWN && (p.scope & C4P_SCOPE_BATTLE))
+            plog("[plugins] LMB result '%s': handled=%d", p.name, handled ? 1 : 0);
+        if (handled)
             return 1;
     }
     return 0;
+}
+
+// Called only from battle-UI lifecycle hooks. It publishes the edge and posts a private window
+// message; arbitrary plugin code is never invoked inside the game's constructor/destructor stack.
+extern "C" void pluginhost_queue_battle_state(int active)
+{
+    const LONG target = active ? 1 : 0;
+    if (InterlockedExchange(&g_battleUiDesired, target) == target)
+        return;
+    InterlockedExchange(&g_dirty, 1);
+    DDInvalidatePluginFrame();
+    const UINT message = battleStateMessage();
+    HWND game = gameHwnd();
+    plog("[plugins] battle edge queued -> %ld hwnd=%p message=%u",
+         target, game, static_cast<unsigned>(message));
+    if (message && game)
+        PostMessageA(game, message, 0, 0);
+}
+
+// Safe WndProc boundary used by featuremenu for the private message posted above.
+extern "C" int pluginhost_battle_state_message(UINT message)
+{
+    const UINT expected = battleStateMessage();
+    if (!expected || message != expected)
+        return 0;
+    // The worker publishes g_pluginCount only when loading is complete. An early constructor edge
+    // may reach the WndProc while that array is still being filled; the worker posts a fresh sync
+    // after signalling readiness.
+    if (!g_pluginsReady || WaitForSingleObject(g_pluginsReady, 0) != WAIT_OBJECT_0)
+        return 1;
+    if (syncBattlePluginStates()) {
+        InterlockedExchange(&g_dirty, 1);
+        DDInvalidatePluginFrame();
+    }
+    return 1;
 }
 
 // Block until the worker finished loading plugins (or timeout), so featuremenu's buildMenu reads a

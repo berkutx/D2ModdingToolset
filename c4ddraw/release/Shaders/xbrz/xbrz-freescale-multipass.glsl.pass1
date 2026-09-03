@@ -167,7 +167,19 @@ float get_left_ratio(vec2 center, vec2 origin, vec2 direction, vec2 scale)
 #define eq(a,b)  (a == b)
 #define neq(a,b) (a != b)
 
-#define P(x,y) COMPAT_TEXTURE(PassPrev2Texture, coord + OriginalSize.zw * vec2(x, y)).rgb
+vec2 ClampOriginalCoord(vec2 p)
+{
+  return clamp(p, vec2(0.5) / PassPrev2TextureSize,
+                  (InputSize - vec2(0.5)) / PassPrev2TextureSize);
+}
+
+vec2 ClampInfoCoord(vec2 p)
+{
+  return clamp(p, vec2(0.5) / TextureSize,
+                  (InputSize - vec2(0.5)) / TextureSize);
+}
+
+#define P(x,y) COMPAT_TEXTURE(PassPrev2Texture, ClampOriginalCoord(coord + OriginalSize.zw * vec2(x, y))).rgb
 
 void main()
 {
@@ -176,7 +188,7 @@ void main()
   //                      D|E|F
   //                      -|H|-
 
-  vec2 scale = OutputSize.xy * OriginalSize.zw;
+  vec2 scale = OutputSize.xy / InputSize.xy;
   vec2 pos = fract(vTexCoord * OriginalSize.xy) - vec2(0.5, 0.5);
   vec2 coord = vTexCoord - pos * OriginalSize.zw;
 
@@ -186,7 +198,7 @@ void main()
   vec3 F = P( 1., 0.);
   vec3 H = P( 0., 1.);
 
-  vec4 info = floor(COMPAT_TEXTURE(Source, coord) * 255.0 + 0.5);
+  vec4 info = floor(COMPAT_TEXTURE(Source, ClampInfoCoord(coord)) * 255.0 + 0.5);
 
   // info Mapping: x|y|
   //               w|z|

@@ -1,0 +1,34 @@
+diff --git a/src/winapi_hooks.c b/src/winapi_hooks.c
+index c7deb5d6..e27e2fd7 100644
+--- a/src/winapi_hooks.c
++++ b/src/winapi_hooks.c
+@@ -26,6 +26,7 @@
+ #include "palette.h"
+ 
+ extern volatile LONG g_c4_d2_cursor_ownership;
++extern void DDApplySimpleZoomMouse(int* x, int* y, int game_width, int game_height);
+ static __declspec(thread) BOOL g_c4_synthetic_mouse_pending;
+ static __declspec(thread) DWORD g_c4_synthetic_mouse_lparam;
+ 
+@@ -55,6 +56,10 @@ BOOL WINAPI fake_GetCursorPos(LPPOINT lpPoint)
+             y = (DWORD)(roundf(y * g_ddraw.mouse.unscale_y));
+         }
+ 
++        /* D2 polls GetCursorPos while processing hover. Keep this path in the same post-crop
++         * coordinates as fake_WndProc; otherwise the poll overwrites the correctly mapped lParam. */
++        DDApplySimpleZoomMouse(&x, &y, g_ddraw.width, g_ddraw.height);
++
+         x = min(x, g_ddraw.width - 1);
+         y = min(y, g_ddraw.height - 1);
+ 
+@@ -684,6 +689,10 @@ void HandleMessage(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMa
+                 y = (DWORD)(roundf(y * g_ddraw.mouse.unscale_y));
+             }
+ 
++            /* MSG.pt is an independent cursor-coordinate API. lParam is deliberately left for
++             * fake_WndProc so a DispatchMessage path never applies the inverse zoom twice. */
++            DDApplySimpleZoomMouse(&x, &y, g_ddraw.width, g_ddraw.height);
++
+             lpMsg->pt.x = min(x, g_ddraw.width - 1);
+             lpMsg->pt.y = min(y, g_ddraw.height - 1);
+         }

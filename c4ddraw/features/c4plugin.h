@@ -13,6 +13,10 @@
 
 #define C4P_ABI_VERSION 3u
 
+/* Optional runtime scopes returned by c4p_scope(). Unknown bits are ignored by current hosts. */
+#define C4P_SCOPE_ALWAYS 0u
+#define C4P_SCOPE_BATTLE 0x00000001u
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -93,8 +97,9 @@ typedef struct C4P_Host
     /* PvP timer layer, appended after begin_turn_ack_serial (struct_size-guarded):
      * battle_turn_active: legacy last directed-choice side; it is not a broadcast turn stream.
      *   New timers must use get_battle_timer_state for exact decision/playback billing.
-     * force_auto_battle: idempotently latches native Auto Battle for the current battle instance;
-     *   the latch is released only by battle end/destruction or a scenario reset. */
+     * force_auto_battle: legacy 1.7/1.8 slot. Current hosts redirect it to the safe v2 enqueue,
+     *   but a new plugin must not call this slot because an old 1.8 host invoked a UiEvent callback
+     *   directly and could block all game/chat input while waiting for a local submit. */
     int(__cdecl* battle_turn_active)(void);
     int(__cdecl* force_auto_battle)(void);
 
@@ -107,6 +112,24 @@ typedef struct C4P_Host
      * -1 = not enough live scenario state to decide yet. The timer uses this to keep the host's
      * modal begin-turn acknowledgement without disabling the joiner's local active-edge fallback. */
     int(__cdecl* server_role)(void);
+
+    /* Logical game-surface size used by C4P_Canvas and c4p_mouse coordinates. This is the
+     * pre-presentation resolution, not the physical window/client size. Returns 1 on success. */
+    int(__cdecl* get_game_size)(int32_t* width, int32_t* height);
+
+    /* Safe forced-Auto entry point, appended for C4dll-R after 1.8. The expected instance comes
+     * from get_battle_timer_state and prevents a timed-out fight from arming a replacement viewer.
+     * The host posts one generation-scoped GUI command and invokes TOG_AUTOBATTLE's own functor.
+     * No input is captured. Returns 1 when the request was accepted or already satisfied. */
+    int(__cdecl* force_auto_battle_v2)(uint32_t expected_battle_instance);
+
+    /* Source-space rectangle which is visible after the wrapper's final centered stretch and
+     * Ctrl+Wheel zoom. Presentation overlays can anchor inside this rectangle so the final crop
+     * cannot cut them off. zoom_1000 is the final-viewport enlargement relative to the ordinary
+     * renderer viewport (1000 = no presentation zoom). Returns 1 on success. */
+    int(__cdecl* get_visible_game_rect)(int32_t* left, int32_t* top,
+                                        int32_t* width, int32_t* height,
+                                        int32_t* zoom_1000);
 } C4P_Host;
 
 #if defined(__cplusplus) && defined(_WIN32) && !defined(_WIN64)
@@ -115,7 +138,13 @@ static_assert(offsetof(C4P_Host, get_battle_timer_state) == 84,
               "C4P host callback offset drift");
 static_assert(offsetof(C4P_Host, server_role) == 88,
               "C4P server-role callback offset drift");
-static_assert(sizeof(C4P_Host) == 92, "C4P host ABI drift");
+static_assert(offsetof(C4P_Host, get_game_size) == 92,
+              "C4P game-size callback offset drift");
+static_assert(offsetof(C4P_Host, force_auto_battle_v2) == 96,
+              "C4P safe-auto callback offset drift");
+static_assert(offsetof(C4P_Host, get_visible_game_rect) == 100,
+              "C4P visible-rect callback offset drift");
+static_assert(sizeof(C4P_Host) == 104, "C4P host ABI drift");
 #endif
 
 /* Plugin self-report, queried before init. */
@@ -164,6 +193,15 @@ void __cdecl c4p_refresh_menu(void);
 
 /* Optional: wrapper-level keyboard shortcut. Return non-zero only when the message was handled. */
 int __cdecl c4p_key(UINT msg, WPARAM key, LPARAM lparam);
+
+/* Optional: declare which runtime callbacks the host may suspend. A plugin returning
+ * C4P_SCOPE_BATTLE stays loaded and keeps its menu, but receives no tick/draw/mouse/key callbacks
+ * while the battle UI is absent. Old hosts ignore this export. */
+uint32_t __cdecl c4p_scope(void);
+
+/* Optional companion for C4P_SCOPE_BATTLE. Called once per visible battle-UI edge on the game UI
+ * thread, outside the game's constructor/destructor hook stack. Keep it short and non-blocking. */
+void __cdecl c4p_battle_state(int active);
 
 #ifdef __cplusplus
 }

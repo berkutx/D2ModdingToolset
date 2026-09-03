@@ -4,9 +4,9 @@
 
 WHAT THIS IS
   C4dll-R.dll embeds cnc-ddraw in one drop-in DirectDraw wrapper.
-  Included plugin: Mods\timer.c4p - the reconstructed turn timer. On the exact
-  Russobit/MNS layout it starts after the normal begin-turn OK callback; other
-  executable layouts retain the safe active-turn-edge behavior.
+  Included plugins: Mods\timer.c4p is the reconstructed turn timer;
+  Mods\twitchstat.c4p snapshots all 12 battle slots for Twitch on left click without
+  bundling unit art or a duplicate database.
 
 REQUIREMENTS
   - Disciples II. Renderer, video/performance menu, language and locale work on
@@ -24,8 +24,11 @@ INSTALL
      Upgrading and already tuned your ddraw.ini? Keep yours.
   4. Copy the Shaders\ folder next to Discipl2.exe. It contains the exact eight
      OpenGL filters shown by the Video menu, including required multipass files.
-  5. Copy Mods\timer.c4p into the game's Mods\ folder.
-  6. (Optional) Copy C4plugins.ini next to Discipl2.exe to configure the timer.
+  5. If upgrading from Unit Info, delete the exact old Mods\unitinfo.c4p first.
+     Then copy Mods\timer.c4p and Mods\twitchstat.c4p into the game's Mods\ folder.
+     Always update C4dll-R.dll and timer.c4p together; safe tournament Auto Battle needs both.
+  6. (Optional) Copy C4plugins.ini next to Discipl2.exe to configure both plugins.
+     C4PLUGINS.txt explains every key and which changes apply live or need a restart.
   7. (Optional) Keep an existing Imgs\IsoClouds.ff from a DisciplesGL install
      if you want to use Game > Show map clouds. The archive is not redistributed
      in this package. The required 30393-byte file has SHA-256:
@@ -47,9 +50,14 @@ INSTALL
 USING IT
   - In-game menu (under the title bar): Game / Video / Performance / Plugins.
     Renderer, shader, windowed/fullscreen etc. are in Video / Performance.
-    The menu bar is intentionally hidden in borderless and exclusive
-    fullscreen. F4 switches either fullscreen mode back to a normal window
-    (and returns to the last fullscreen kind); Alt+Enter is also available.
+    The current wrapper has three output modes: normal window, adaptive
+    borderless fullscreen and true exclusive fullscreen. This is not a 1:1
+    copy of the old adapter's fullscreen path. The menu bar is intentionally
+    hidden in both fullscreen modes. F4 switches either one back to a normal
+    window (and returns to the last fullscreen kind); Alt+Enter is also
+    available. Destination menu chrome is staged before the renderer mode-set,
+    so no default-sized intermediate frame is drawn; a redundant relayout is
+    used only if the resulting chrome needs recovery.
   - On a validated widescreen game resolution, the decorative background/frame
     around fixed-size screens is always active and has no menu switch. An obsolete
     decorativeBackground value in C4menu.ini is ignored and removed on startup.
@@ -62,7 +70,9 @@ USING IT
   - Entries labelled (MNS/SMNS) are exact-address gameplay options: Battle animation and Map animation
      (live x1.5..x5 speed-up),
      map drag-scroll (ON by default; exact button-down anchor, movement starts on
-     the first changed game pixel; native edge-scroll remains available),
+     the first changed game pixel; native edge-scroll remains available and follows
+     the game's Fast/Normal/Slow setting live through the resolution-scaled
+     DisciplesGL cadence, while held-button drag remains 1:1),
      plus Battle speed / Map turn speed (engine presets, saved per game) and
      restart-only Show map clouds (the game's native option; requires external IsoClouds.ff).
   - Video > Resolution is one direct list. Auto is first; all 13 manual game
@@ -75,16 +85,35 @@ USING IT
   - Native 1024x768 and 1280x1024 do not stretch fixed 800x600 menus. The game
     centres them and draws its own GrBorder/ShowInterfBorder surround inside the
     game canvas. Hor+ decoration is a separate wrapper-owned compositor.
-  - Video > Scaling controls Fit, Integer and Stretch and shows the actual
+  - Video > Scaling offers Fit and Integer and shows the actual
     output, coefficient, viewport and bars. `1:1` means one game pixel equals one
     output pixel. A normal window cannot be smaller than the logical game canvas;
     stale undersized width/height pairs are repaired to `0x0` (follow the game).
-    Borderless fullscreen always adapts to the desktop.
-  - There is no separate output-resolution item in the game menu. Old or manually
-    edited ddraw.ini width/height values remain supported for compatibility; a
-    game-resolution choice resets them to `0x0` (follow the game). The Scenario
-    Editor may retain its Window size command because it has no game-canvas list.
-    Borderless always uses the desktop.
+    Borderless fullscreen always adapts to the desktop. Normal, borderless and
+    exclusive output use this common base geometry and the same fixed-screen
+    source crop; the output mode changes the target, not the crop.
+  - Video > Fixed window ports DisciplesGL 1.90's centred crop. At its default
+    full-height setting, 1366x768 enlarges the exact 1068x600 crop to the viewport: the
+    fixed 800x600 screen becomes 1024x768 (128% size), side background is cropped,
+    and filtering loses some quality. The menu shows actual size, where 100% means
+    no enlargement; the compatible C4menu.ini stretchWindows=0..100 value remains
+    an internal legacy effect strength. Changes apply live. As in the old adapter,
+    it activates only on
+    fixed/decorated screens; the strategic map remains unzoomed. Ctrl+Wheel
+    remains an additional live zoom.
+  - OpenGL processes a fixed screen in the legacy order: centred active crop,
+    selected filter/upscaler, final viewport. FSR and xBRZ keep both passes;
+    active-crop uniforms and edge clamps prevent the larger POT framebuffer's
+    unwritten right/bottom padding from entering the image. True 1:1 bypasses
+    upscale-only presets, while an actual reduction uses linear sampling.
+  - On native Windows, dragging a normal resizable OpenGL window previews the
+    last texture using its active single-pass filter. Releasing the edge commits the final filter once, not
+    a game restart. D3D9/GDI, an active multipass FSR/xBRZ pipeline, Wine/macOS
+    and child-window cases use the frozen preview and rebuild once on release.
+  - Video > Resolution > Window/output size changes only the renderer target and
+    applies live; it never adds map view. Automatic follows the logical game
+    canvas. A game-resolution choice resets it to Automatic, and borderless still
+    follows the desktop.
   - `fake_mode=1024x768x16` is only an internal virtual 16-bit compatibility
     bootstrap. It is not the game resolution, output size or scaling mode; the
     widescreen startup fix adjusts process-local geometry without rewriting it.
@@ -93,21 +122,45 @@ USING IT
     battle layout and shows both unit panels when both the logical canvas and
     effective fixed-screen view are at least 990 pixels wide. Thus default
     1024x768/1280x1024 zoom stays 800-wide, while Hor+ is 990-wide; it does not
-    select or replace the game resolution.
-  - The turn timer is configured in C4plugins.ini, section [Timer]. The bundled
+    select or replace the game resolution. Windowed, borderless and exclusive
+    modes use the same predicate; output mode and physical output size are not inputs.
+  - Twitch Stat is ON by default. On the exact Russobit/MNS executable with the
+    990-wide battle dialog active, left-click an occupied unit image. One click snapshots
+     all 12 visual slots, logical game resolution, battle/slot bounds and the
+     visible encyclopedia text of each unique displayed unit as the versioned
+     c4dll.battle-roster / battle.snapshot payload. A large portrait uses the game's
+     continuous native 150x85 hit area, including the seam between its two logical slots.
+     The diagnostic preview is OFF by default. The host sends Twitch Stat no draw/tick/input callbacks outside battle.
+     If the player's native right-click encyclopedia is already open, Twitch Stat neither creates a second
+     layout nor consumes the click; it resumes after close. A successful snapshot consumes only that
+     LMB down/up gesture so it cannot also activate a battle command. Toggle it at Plugins >
+    Twitch Stat > Enabled or in C4plugins.ini [TwitchStat]. It has no unit art/database
+    and no mss32.dll import.
+  - The turn timer is configured in C4plugins.ini, section [Timer]; see the included
+    C4PLUGINS.txt for all keys and live/restart behaviour. The bundled
     PvP defaults use a 5-minute Force countdown, pause for battle animations and
     player-vs-player combat, then end the turn without retreat. With Combat Pause
     off, an accepted local choice is always billed; opponent phases are never billed.
+    Outside PvP, billable time can pass zero during combat and reward/artifact dialogs.
+    That signed overtime becomes debt against the same player's next budget. End Day
+    is queued once, but the host does not choose a reward: after battle resolution it
+    waits for the real strategic screen and submits the final networked click once.
+    PvP instead clamps and freezes at 00:00. AutoBattle is ON by default for tournaments:
+    the timer invokes the game's own TOG_AUTOBATTLE callback for that battle instance
+    and side. Until that battle ends, click, hotkey and a manual battle action cannot
+    remove or bypass the latch; chat and unrelated mouse/keyboard input remain usable.
     Local attack playback is billed only when Animation Pause is off. Mandatory
     second-target selection is a new billed choice. Hold Ctrl+Alt
     and drag the clock with LMB to reposition it. On the exact Russobit/MNS
     layout the countdown starts only after you accept the normal begin-turn
     summary with OK; time does not run under that dialog. Pause, Reset and Set
-    update a running Force clock immediately. Other executable
+    update a running Force clock immediately. Every pause makes the timer white;
+    only an explicit user Pause adds "(пауза)". Other executable
     layouts keep the active-turn-edge fallback.
 
 UNINSTALL / REVERT
-  - Restore your backed-up C4dll-R.dll and remove Mods\timer.c4p.
+  - Restore your backed-up C4dll-R.dll and remove Mods\timer.c4p and
+    Mods\twitchstat.c4p (and legacy Mods\unitinfo.c4p, if present).
 
 This package is independent of the mss32 mod and is versioned separately.
 It is distributed under GPL-3.0; see LICENSE. Matching source for 1.8 is at
@@ -119,9 +172,9 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.8
 
 ЧТО ЭТО
   C4dll-R.dll встраивает cnc-ddraw в одну подключаемую DirectDraw-DLL.
-  В комплекте плагин Mods\timer.c4p - воссозданный таймер хода. На точной
-  Russobit/MNS-раскладке он стартует после штатного callback кнопки OK в начале
-  хода; на других exe остаётся безопасный сигнал активного хода.
+  В комплекте два плагина: Mods\timer.c4p — воссозданный таймер хода;
+  Mods\twitchstat.c4p — источник снимка всех 12 боевых слотов для Twitch без
+  собственной базы или картинок.
 
 ТРЕБОВАНИЯ
   - Disciples II. Рендерер, меню видео/производительности, язык и локаль работают
@@ -139,9 +192,13 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.8
      Обновляетесь и уже настроили свой ddraw.ini? Оставьте свой.
   4. Скопируйте папку Shaders\ рядом с Discipl2.exe. В ней находятся ровно восемь
      OpenGL-фильтров из меню Video и необходимые файлы multipass.
-  5. Скопируйте Mods\timer.c4p в папку Mods\ игры.
+  5. При обновлении с Unit Info сначала удалите именно старый Mods\unitinfo.c4p.
+     Затем скопируйте Mods\timer.c4p и Mods\twitchstat.c4p в папку Mods\ игры.
+     C4dll-R.dll и timer.c4p всегда обновляйте вместе: безопасному турнирному
+     автобою нужны обе актуальные части.
   6. (Необязательно) Скопируйте C4plugins.ini рядом с Discipl2.exe для настройки
-     таймера.
+     обоих плагинов. Все ключи и различие между живыми изменениями и рестартом
+     описаны в C4PLUGINS.txt.
   7. (Необязательно) Сохраните имеющийся Imgs\IsoClouds.ff от установки
      DisciplesGL, если хотите использовать «Игра > Показывать облака». Этот архив не
      распространяется в комплекте. SHA-256 нужного файла размером 30393 байта:
@@ -164,9 +221,13 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.8
 КАК ПОЛЬЗОВАТЬСЯ
   - Внутриигровое меню (под заголовком окна): Game / Video / Performance /
     Plugins. Рендерер, шейдер, окно/полный экран - в Video / Performance.
-    В безрамочном и эксклюзивном полном экране меню-бар намеренно скрыт. F4
-    возвращает из обоих режимов в обычное окно (и обратно в последний вид
-    полного экрана); также доступен Alt+Enter.
+    Текущий враппер имеет три режима вывода: обычное окно, адаптивный
+    безрамочный и настоящий эксклюзивный полный экран. Это не копия fullscreen-пути
+    старого адаптера 1:1. В обоих полноэкранных режимах меню-бар намеренно скрыт.
+    F4 возвращает из них в обычное окно (и обратно в последний вид полного экрана);
+    также доступен Alt+Enter. Chrome целевого режима ставится до mode-set рендера,
+    поэтому промежуточный кадр стандартного размера не рисуется; повторный relayout
+    используется только как восстановление при несовпадении итогового chrome.
   - На проверенном широком разрешении декоративный фон/рамка вокруг фиксированных
     экранов всегда активен и не имеет пункта меню. Устаревшее значение
     decorativeBackground в C4menu.ini игнорируется и удаляется при запуске.
@@ -179,7 +240,9 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.8
   - Пункты с пометкой (MNS/SMNS) — точные адресные игровые опции: Battle animation и Map animation
      (живое ускорение x1.5..x5),
      перетаскивание карты (включено по умолчанию; точка нажатия сохраняется без
-     стартового рывка, штатный краевой скролл остаётся), а также Battle speed / Map turn speed (пресеты движка,
+     стартового рывка; штатный краевой скролл остаётся и сразу следует игровой
+     настройке Быстро/Нормально/Медленно через масштабируемый по разрешению такт
+     DisciplesGL 100%/75%/50%, а drag остаётся 1:1), а также Battle speed / Map turn speed (пресеты движка,
      хранятся в сейве), и restart-only «Показывать облака» (штатная опция игры;
      нужен внешний IsoClouds.ff).
   - Видео > Разрешение — один прямой список. Сначала идёт «Авто», затем все 13
@@ -192,16 +255,37 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.8
   - Штатные 1024x768 и 1280x1024 не растягивают фиксированные меню 800x600. Игра
      центрирует их и рисует собственный GrBorder/ShowInterfBorder внутри игрового
      кадра. Декор Hor+ — отдельный композитор враппера.
-  - Видео > Масштаб содержит «Вписать», «Целые» и «Растянуть» и показывает
+  - Видео > Масштаб содержит «Вписать» и «Целые» и показывает
      фактический вывод, коэффициент, viewport и поля. `1:1` означает один игровой
      пиксель на один выходной. Обычное окно не может быть меньше логического кадра;
      старые меньшие width/height исправляются на `0x0` (следовать игре). Безрамочный
-     полный экран всегда адаптируется к рабочему столу.
-  - Отдельного разрешения вывода в игровом меню нет. Старые или вручную заданные
-     ddraw.ini width/height поддерживаются для совместимости; выбор разрешения игры
-     сбрасывает их в `0x0` (следовать игре). Редактор сценариев может сохранять
-     команду «Размер окна», потому что списка игровых кадров у него нет.
-     Безрамочный режим всегда берёт рабочий стол.
+     полный экран всегда адаптируется к рабочему столу. Обычное окно, borderless и
+     exclusive используют эту общую базовую геометрию и один fixed-screen source
+     crop: режим вывода меняет цель, но не сам crop.
+  - Видео > Центральное окно переносит центрированный crop из DisciplesGL 1.90.
+     В максимальном режиме по умолчанию для 1366x768 точный crop 1068x600 увеличивается
+     до viewport: фиксированные 800x600 становятся 1024x768 (128% размера), боковой
+     фон обрезается, фильтрация ожидаемо снижает качество. GUI показывает фактический
+     размер, где 100% означает отсутствие увеличения. Совместимый ключ C4menu.ini
+     stretchWindows=0..100 остаётся внутренней силой старого эффекта. Выбор применяется
+     сразу. Как в старом адаптере, это
+     действует только в фиксированных/декорированных окнах; карта не приближается.
+     Ctrl+колесо остаётся добавочным zoom.
+  - OpenGL обрабатывает фиксированный экран в порядке старого адаптера:
+     центрированный активный crop, выбранный фильтр/upscaler, финальный viewport.
+     FSR и xBRZ сохраняют оба прохода; отдельные размеры активного crop и POT-FBO
+     вместе с edge clamp не дают неинициализированному padding справа/снизу попасть
+     в изображение. Настоящий 1:1 пропускает upscale-only пресет, а реальное
+     уменьшение использует linear sampling.
+  - На обычном Windows край изменяемого OpenGL-окна масштабирует последний кадр
+     активным однопроходным фильтром.
+     После отпускания окончательный фильтр фиксируется одним commit, а не
+     перезапуском игры. D3D9/GDI, активный многопроходный FSR/xBRZ, Wine/macOS и
+     дочерние окна сохраняют замороженный preview и одну пересборку после отпускания.
+  - Видео > Разрешение > Размер окна/вывода меняет только цель рендера и
+     применяется сразу, не добавляя обзор карты. «Автоматически» следует
+     логическому кадру игры. Выбор разрешения игры возвращает этот размер в
+     «Авто», а безрамочный режим по-прежнему берёт рабочий стол.
   - `fake_mode=1024x768x16` — только внутренний виртуальный 16-битный bootstrap
      совместимости. Это не разрешение игры, вывод или режим масштаба; исправление
      широкого запуска меняет process-local геометрию без перезаписи значения.
@@ -210,20 +294,45 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.8
      фиксированную боевую раскладку шириной 990 и показывает обе панели при
      логическом кадре и эффективном фиксированном виде не уже 990. Поэтому
      штатные 1024x768/1280x1024 с обычным zoom остаются 800-wide, а Hor+ —
-     990-wide; само разрешение игры этот режим не выбирает и не заменяет.
-  - Таймер хода настраивается в C4plugins.ini, секция [Timer]. Комплектные PvP-
-    настройки включают принудительный отсчёт 5 минут, паузу на анимациях и в бою
+     990-wide; само разрешение игры этот режим не выбирает и не заменяет. Условие
+     одинаково для окна, borderless и exclusive; режим и физический размер вывода
+     в него не входят.
+  - Twitch Stat включён по умолчанию. На точном exe Russobit/MNS при активном
+    боевом диалоге шириной 990 нажмите ЛКМ по занятому изображению отряда. Один клик собирает
+     все 12 видимых слотов, логическое разрешение, границы боя/портретов и видимый
+     текст энциклопедии каждого уникального отряда в payload c4dll.battle-roster /
+     battle.snapshot. Для большого портрета используется непрерывная штатная hit-area
+     150x85, включая шов между двумя логическими слотами. Диагностическое окно по умолчанию отключено. Вне боя host не
+     вызывает draw/tick/input этого плагина. Если штатная энциклопедия по ПКМ уже открыта, второй layout не
+     создаётся и ЛКМ остаётся игре; после закрытия работа возобновляется. Успешный снимок поглощает
+     только этот жест ЛКМ down/up, чтобы он не активировал боевую команду. Плагин не
+    содержит картинок/базы и не импортирует mss32.dll. Переключатель находится в
+    «Плагины > Twitch Stat > Enabled» и в секции [TwitchStat] файла C4plugins.ini.
+  - Таймер хода настраивается в C4plugins.ini, секция [Timer]; все ключи и режим
+    применения описаны в C4PLUGINS.txt. Комплектные PvP-настройки включают
+    принудительный отсчёт 5 минут, паузу на анимациях и в бою
     игрок-против-игрока, затем завершают ход без retreat. При выключенном Combat Pause
-    принятый локальный выбор всегда расходует банк, чужие фазы — никогда. Собственная
-    анимация учитывается только при выключенном Animation Pause, а обязательная вторая
+    принятый локальный выбор всегда расходует банк, чужие фазы — никогда.
+    Вне PvP учитываемое время может уйти в минус во время боя и диалогов
+    награды/артефактов. Подписанный перерасход становится долгом этого игрока на
+    следующий ход. End Day ставится в очередь один раз, но host не выбирает награду:
+    после разрешения боя он ждёт настоящий стратегический экран и лишь затем один раз
+    отправляет сетевое завершение хода. В PvP часы вместо этого фиксируются на 00:00.
+    AutoBattle по умолчанию включён для турниров и вызывает штатный TOG_AUTOBATTLE
+    именно для текущего экземпляра боя и текущей стороны. До конца боя latch нельзя снять или
+    обойти кликом, горячей клавишей либо ручным боевым действием; чат и несвязанный
+    ввод мыши/клавиатуры остаются доступны.
+    Собственная анимация учитывается только при выключенном Animation Pause, а обязательная вторая
     цель открывает новый оплачиваемый выбор. Для перемещения часов
     зажмите Ctrl+Alt и перетащите их ЛКМ. На точной Russobit/MNS-раскладке
     отсчёт начинается только после штатного OK в сводке начала хода: под диалогом
-    время не уходит. Pause, Reset и Set сразу обновляют запущенный Force-таймер.
+    время не уходит. Pause, Reset и Set сразу обновляют запущенный Force-таймер. При
+    любой паузе часы белые; «(пауза)» появляется только после явной команды игрока.
     На других exe сохраняется прежний сигнал активного хода.
 
 УДАЛЕНИЕ / ОТКАТ
-  - Верните сохранённый C4dll-R.dll и удалите Mods\timer.c4p.
+  - Верните сохранённый C4dll-R.dll и удалите Mods\timer.c4p и
+    Mods\twitchstat.c4p (и старый Mods\unitinfo.c4p, если он остался).
 
 Пакет независим от мода mss32 и версионируется отдельно. Лицензия — GPL-3.0,
 см. LICENSE. Соответствующие исходники 1.8:

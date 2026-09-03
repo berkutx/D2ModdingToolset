@@ -158,12 +158,14 @@ vec3 FsrRcasF(
 
 
 vec4 FsrRcasLoadF(vec2 p) {
-    return COMPAT_TEXTURE(Source,p/OutputSize.xy);
+    // RCAS operates on the active EASU image inside the physical POT FBO.
+    vec2 sourceCoord = clamp(p, vec2(0.5), InputSize - vec2(0.5));
+    return COMPAT_TEXTURE(Source, sourceCoord / TextureSize.xy);
 }
 
 void main()
 {
-    vec2 fragCoord = vTexCoord.xy * OutputSize.xy;
+    vec2 fragCoord = vTexCoord.xy * TextureSize.xy;
     
     // Set up constants
     float con;

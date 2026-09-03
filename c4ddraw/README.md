@@ -16,6 +16,8 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 | `patches/cnc-ddraw-render-null.patch` | The `render_null` headless backend: `dd.c` renderer branch + vcxproj entries + new `inc/render_null.h`, `src/render_null.c` | yes |
 | `patches/cnc-ddraw-default-ini.patch` | The Disciples II tuned `ddraw.ini` template written by `cfg_create_ini` (`config.c`) when no ini exists on first run | yes |
 | `patches/cnc-ddraw-simple-zoom.patch` | Narrow WndProc + OpenGL/D3D9/GDI integration for wrapper-owned Ctrl+Wheel zoom and address-free editor menu routing | yes |
+| `patches/cnc-ddraw-simple-zoom-mouse.patch` | Keeps polled `GetCursorPos` and `MSG.pt` coordinates inverse-mapped with the same fixed-window stretch used by WndProc mouse messages | yes |
+| `patches/cnc-ddraw-live-resize.patch` | Selective native-Windows OpenGL preview while a normal window edge is being dragged; conservative fallback remains for other render paths | yes |
 | `patches/cnc-ddraw-system-opengl-fallback.patch`, `cnc-ddraw-gdi-filter.patch`, `cnc-ddraw-d2-cursor-ownership.patch` | OpenGL/GDI fallbacks and D2-specific single-cursor ownership | yes |
 | `patches/cnc-ddraw-decorative-background.patch`, `cnc-ddraw-printscreen-compositor.patch`, `features/decorative.cpp`, `features/decor/` | Presentation-only frame/plugin compositor; PrintScreen captures that same final frame | yes |
 | `features/featuremenu.cpp`, `cursorcapture.cpp`, `fastai.cpp` | The in-game menu, dynamic cursor capture and bounded Fast AI hooks | yes |
@@ -23,9 +25,10 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 | `features/horplus.cpp` | Signature-gated true Hor+ game-canvas presets reconstructed from the legacy wrapper | yes |
 | `features/clouds.cpp` | Signature-gated loader, archive lookup and update pipeline for an external `Imgs\IsoClouds.ff` | yes |
 | `release/Shaders/` | The eight OpenGL presets exposed by the menu, including their multipass files and retained license headers | yes |
-| `features/rendererbridge.c` | Wrapper-owned adapters to cnc-ddraw internals: live reload, screenshot, coordinate mapping and simple-zoom state/formula | yes |
+| `features/rendererbridge.c` | Wrapper-owned adapters to cnc-ddraw internals: live reload, screenshot, coordinate mapping, fixed-window stretch and simple-zoom state/formulae | yes |
 | `features/localization.cpp` | Locale/encoding bridge modelled after the legacy wrapper; no hard-coded Russian code pages | yes |
 | `features/savelogic.cpp` | Version-independent save/archive hooks | yes |
+| `plugins/timer/`, `plugins/unitinfo/` | Native turn-clock plugin and Twitch Stat battle-snapshot source | yes |
 | `docs/hook-points.md` | Every MNS/SMNS game address/structure C4dll-R attaches to | yes |
 | `forwarder/C4dll-R.cb63.def` | The 483 CB63 export forwards (`Name=CB63.Name @ord`) | yes |
 | `build.ps1` | Reproducible build + deploy/restore | yes |
@@ -60,11 +63,12 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 ./build.ps1 -Restore        # put the baseline C4dll-R.dll + standalone ddraw.dll back
 ```
 
-`build.ps1` copies the pinned `upstream/cnc-ddraw` submodule to `build/`, applies nine focused patches
-(`cnc-ddraw-c4dll-r` integration + `render-null` + `default-ini` + `simple-zoom` +
-`decorative-background` + `printscreen-compositor` + system-OpenGL/GDI fallbacks + D2 cursor ownership), copies in the
+`build.ps1` copies the pinned `upstream/cnc-ddraw` submodule to `build/`, applies eleven focused patches
+(`cnc-ddraw-c4dll-r` integration + `render-null` + `default-ini` + `simple-zoom` + `simple-zoom-mouse` +
+`decorative-background` + `printscreen-compositor` + system-OpenGL/GDI fallbacks + D2 cursor ownership +
+selective OpenGL live resize), copies in the
 wrapper-owned feature sources (renderer bridge, menu, Hor+, Widescreen Battle, cursor capture,
-clouds, plugins/timer, Fast AI, locale, saves and headless mode), embeds the reviewed wide-battle dialog and decorative
+clouds, plugins/timer, plugins/unitinfo, Fast AI, locale, saves and headless mode), embeds the reviewed wide-battle dialog and decorative
 resources as RCDATA,
 generates `C4dll-R.def` (the CB63 forwards plus the two exports), retargets the vcxproj
 (`TargetName` + `.def` + the extra source), stamps the version identity (`-Version <ver>`, default
@@ -72,7 +76,8 @@ generates `C4dll-R.def` (the CB63 forwards plus the two exports), retargets the 
 strips the upstream PreBuildEvent that regenerated `git.h` as UNKNOWN), and runs MSBuild (Release,
 Win32, v143, static CRT).
 MSBuild is located via `vswhere`, so it works both on a dev box and on CI. The CI workflow
-`.github/workflows/c4ddraw.yml` runs the same `build.ps1` and uploads `C4dll-R.dll` + `timer.c4p`.
+`.github/workflows/c4ddraw.yml` runs the same `build.ps1` and uploads `C4dll-R.dll`, `timer.c4p`
+and `twitchstat.c4p`.
 
 ## Releases
 
@@ -85,14 +90,15 @@ git tag c4dll-r-v1.0
 git push origin c4dll-r-v1.0
 ```
 
-`.github/workflows/c4dll-r-release.yml` then builds `C4dll-R.dll` + `Mods/timer.c4p`, packages them
-with `Shaders`, `INSTALL.txt`, a sample `C4plugins.ini`, `ddraw.ini`, `LICENSE` and third-party notices into `C4dll-R-v1.0.zip`, and publishes a GitHub
+`.github/workflows/c4dll-r-release.yml` then builds `C4dll-R.dll` plus `Mods/timer.c4p` and
+`Mods/twitchstat.c4p`, packages them
+with `Shaders`, `INSTALL.txt`, the `C4PLUGINS.txt` key guide, a sample `C4plugins.ini`, `ddraw.ini`, `LICENSE` and third-party notices into `C4dll-R-v1.0.zip`, and publishes a GitHub
 Release with that zip, a `-symbols.zip` (the matching PDBs for crash triage) and the loose
-`C4dll-R.dll` + `timer.c4p` attached. The release version is stamped into the DLL version
+`C4dll-R.dll`, `timer.c4p` and `twitchstat.c4p` attached. The release version is stamped into the DLL version
 resource (`build.ps1 -Version`), so a build is identifiable from file properties. Running the
 workflow manually (workflow_dispatch) publishes a **prerelease** tagged `c4dll-r-dev-<sha>` (or
 your label); versions containing `rc` / `alpha` / `beta` / `dev` are always marked prerelease. The
-package sources live in `c4ddraw/release/` (`INSTALL.txt`, `C4plugins.ini`, `ddraw.ini`,
+package sources live in `c4ddraw/release/` (`INSTALL.txt`, `C4PLUGINS.txt`, `C4plugins.ini`, `ddraw.ini`,
 `Shaders/`, `THIRD_PARTY_NOTICES.txt`, `RELEASE_NOTES.md`); the repository-root GPL-3.0 `LICENSE`
 is copied into the archive by the workflow.
 
@@ -101,6 +107,8 @@ is copied into the archive by the workflow.
 Put `C4dll-R.dll` next to `Discipl2.exe` (replacing the CodeBase copy), keep `CB63.dll` and
 `ddraw.ini` there. If the folder also contains a standalone `ddraw.dll` from another wrapper,
 rename or remove that file; a clean installation normally has none, so otherwise do nothing.
+Before copying `Mods/twitchstat.c4p`, remove the exact legacy `Mods/unitinfo.c4p`; keeping both makes
+plugin de-duplication depend on filesystem enumeration order. Copy `Mods/timer.c4p` normally.
 To A/B test our-vs-stock, swap `C4dll-R.dll` only.
 
 ## Updating cnc-ddraw
@@ -123,8 +131,8 @@ One binary, three layers:
 | C4dll-R layer | `features/rendererbridge.c`, `c4features.cpp`, `featuremenu.cpp`, `cursorcapture.cpp`, `fastai.cpp`, `decorative.cpp`, `horplus.cpp`, `widebattle.cpp`, `clouds.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `localization.cpp`, `savelogic.cpp`, `headless.cpp` | wrapper integration, menu, presentation-only decorative background, true Hor+ game canvas, wide battle, external cloud archive pipeline, plugins, locale conversion, save/archive logic, D2 cursor ownership and headless windowing |
 
 Exports: the 483 CodeBase forwards (`name=CB63.name`) plus `DDReloadConfig` (live settings
-reload) and `DDTakeScreenshot`. `Mods\timer.c4p` is built separately from `plugins/timer/` and is
-NOT inside the DLL.
+reload) and `DDTakeScreenshot`. `Mods\timer.c4p` and `Mods\twitchstat.c4p` are built separately from
+`plugins/timer/` and `plugins/unitinfo/`; neither plugin is inside the DLL.
 
 Why one DLL: the game already imports a library named `C4dll-R` (the CodeBase copy), so a single
 file swap delivers the renderer, the menu and the plugin host, with no separate `ddraw.dll` that
@@ -161,6 +169,17 @@ Lanczos shader, `savesettings=1`) - delete it to compare against the generated o
 (borderless on the first use), and either fullscreen kind back to a normal window. `Alt+Enter`
 retains cnc-ddraw's configured window/fullscreen toggle; `Alt+F4` still closes the game.
 
+This is not a 1:1 copy of the old adapter's fullscreen path. C4dll-R exposes three output modes:
+normal window, adaptive borderless fullscreen, and true exclusive fullscreen. All three enter the
+same renderer geometry: Fit/Integer/custom aspect establishes the base viewport, the same centred
+source crop is then used for an active fixed screen, and `Ctrl+Wheel` remains a separate destination
+zoom. Changing only the output mode therefore does not change the fixed-screen crop or WideBattle.
+
+Mode transitions attach or detach the destination menu chrome before the renderer mode-set, without
+drawing an intermediate frame. The completed transition performs the visible redraw; a second
+`DDRelayoutCurrentMode` is retained only as recovery when the observed chrome does not match the
+resulting mode. Returning to a normal window still restores its saved `WINDOWPLACEMENT`.
+
 ## 1.6: как выбирается режим экрана
 
 Основной путь теперь снова похож на один пункт Resolution старого DisciplesGL: **Видео ->
@@ -177,7 +196,7 @@ retains cnc-ddraw's configured window/fullscreen toggle; `Alt+F4` still closes t
 Ручные штатные и широкие размеры находятся в двух компактных подменю и тоже привязывают обычное
 окно к выбранному кадру; нужен полный перезапуск игры. Только пункт **Дополнительно: изменить только
 окно/вывод для стрима** снова разъединяет размеры: он меняет внешний вывод сразу, но не добавляет
-обзор карты. **Вписать / Целые блоки / Растянуть** определяют лишь геометрию уже выбранной пары.
+обзор карты. **Вписать / Целые блоки** определяют лишь геометрию уже выбранной пары.
 
 ## 1.6: how the screen mode is selected
 
@@ -193,8 +212,8 @@ window, while 3840x2160 selects 2560x1440 instead of dropping to 1920x1080 merel
 
 Manual stock and widescreen sizes live in two compact submenus and also re-link the normal window;
 they require a full game restart. Only **Advanced: change window/stream output only** separates the
-sizes again: it changes the outer output live without adding map view. **Fit / Integer pixel blocks /
-Stretch** only decide how the already selected pair is mapped.
+sizes again: it changes the outer output live without adding map view. **Fit / Integer pixel blocks**
+only decide how the already selected pair is mapped.
 
 ## Resolution pipeline: game resolution -> window/screen -> scaling
 
@@ -284,20 +303,19 @@ overrides an explicit nonzero `DisplaySize`:
 
 `ddraw.ini width=0` and `height=0` makes a normal window/exclusive mode follow the active game
 resolution, while borderless automatically uses the desktop. A fixed output size is an absolute
-number of output pixels and is not rewritten when the game resolution changes. With `adjmouse=true`
-(the shipped value), it may be smaller than the logical canvas: cnc-ddraw filters the finished image
-to the window and maps mouse coordinates back to game pixels. Exclusive fullscreen can additionally
-fall back to a supported display mode, so its requested size is not guaranteed.
+number of output pixels and is not rewritten when the game resolution changes. The menu keeps it at
+least as large as the running logical canvas; stale undersized pairs are normalized to `0,0` so the
+window follows the game again. Exclusive fullscreen can additionally fall back to a supported
+display mode, so its requested size is not guaranteed.
 
 The menu preserves the boundary without exposing two equal-weight choices: selecting a game
 resolution writes restart-latched `Disciple.ini` values, sets next-start output to `0,0`, and does
 not reload the running game's canvas. The scaling lines preview the selected next canvas while still
 identifying live game resolution and output. One **Video -> Resolution** popup contains Automatic,
 compact manual stock/widescreen submenus, and one explicitly **Advanced output** dialog. A custom
-image area from 320x240 through 8192x8192 writes `width`/`height` to the effective
-`ddraw.ini` section and applies it live. The full downscale range uses the shipped `adjmouse=true`;
-if mouse remapping was disabled by hand, the dialog raises its minimum to the running game canvas
-so clicks cannot become desynchronized. Existing hand-edited values remain supported.
+image area from the running game-canvas minimum through 8192x8192 writes `width`/`height` to the
+effective `ddraw.ini` section and applies it live. Existing hand-edited values remain supported;
+undersized legacy values are repaired safely as described above.
 
 The scale is a result, not another resolution setting. For game size `G` and output size `O`:
 
@@ -305,8 +323,9 @@ The scale is a result, not another resolution setting. For game size `G` and out
   `Gw*k x Gh*k`; geometry stays correct and the remainder becomes bars.
 - **Integer** (`boxing`) searches for the largest exact multiplier from 19 down to 1 and uses
   `G*N`; one game pixel then occupies an `N x N` block, i.e. `N^2` output pixels. If the output is
-  smaller than `G`, no positive integer factor exists and the renderer performs filtered reduction.
-- **Stretch** uses independent `kx=Ow/Gw` and `ky=Oh/Gh`; unequal values distort geometry.
+  too small for 2x, it uses centred exact 1x.
+- A hand-edited `maintas=false`, `boxing=false` keeps cnc-ddraw's legacy independent X/Y mapping,
+  but this geometry-distorting compatibility path is intentionally not exposed in the game menu.
 - A custom `aspect_ratio` changes the target geometry; the shader never changes any of these
   coefficients. `Ctrl+Wheel` zoom is applied after this base viewport and is not part of the base
   scale shown by the menu.
@@ -322,7 +341,7 @@ For example, these are different choices even though both may mention 1920x1080:
 - **Manual output size 1920x1080** around native 800x600 gives a 1440x1080 fitted 4:3 viewport at 1.8x,
   or a centered exact 800x600 viewport in Integer mode. It adds no strategic-map content.
 - **Game resolution 1920x1080** makes the game itself lay out a wider 1920x1080 strategic view;
-  Automatic output then follows it, while a fixed output is independently fitted, boxed or stretched.
+  Automatic output then follows it, while a fixed output is independently fitted or boxed.
 
 At Integer 2x, one 800x600 game pixel becomes a 2x2 block and therefore needs at least 1600x1200
 output; 1024x768 needs 2048x1536, and 1280x1024 needs 2560x2048. Game resolution and output must never
@@ -334,7 +353,8 @@ unit panels visible, moves the units/controls/background, and fixes side selecti
 areas. It does not choose the game resolution, output size, scaling or strategic-map view. The
 current port requires both the logical canvas and its effective fixed-screen view to be at least
 990 pixels wide. It is enabled by default and latched when the next battle opens; the current release exposes
-no user-facing WideBattle switch.
+no user-facing WideBattle switch. This predicate is identical in a normal window, borderless and
+exclusive fullscreen: it does not inspect the output mode or output resolution.
 
 Map clouds use the real legacy pipeline rather than a renderer effect: when the executable and
 archive are supported, signature-gated hooks enlarge the owning game object, load and index
@@ -355,18 +375,18 @@ next game start.
 | Key | Shipped | Effect | Applies |
 | --- | --- | --- | --- |
 | `fake_mode` | `1024x768x16` | internal virtual 16-bit compatibility bootstrap, not a game/window resolution or scale; a validated widescreen canvas corrects only the process-local bootstrap geometry without rewriting this value | restart |
-| `renderer` | `opengl` | shaders + best upscaling; `auto` picks D3D9 first (no shader filters); `gdi` = software; if OpenGL fails, cnc-ddraw falls back to GDI on its own | restart |
+| `renderer` | `opengl` | shaders + best upscaling; `auto` picks D3D9 first (no shader filters); `gdi` = software; live switching keeps a safe fallback if the requested backend fails | live, best effort |
 | `windowed` + `fullscreen` | `true` + `false` | windowed with a title bar and the menu; `true`+`true` = borderless fullscreen; `false`+`false` = exclusive fullscreen (legacy `false`+`true` is migrated) | live |
 | `border` | `true` | real title bar, draggable window; the menu bar sits under it | live |
 | `resizable` | `true` | window edges resize; aspect is kept by `maintas` | live |
-| `width`, `height` | `0`, `0` | output target selected by Video -> Resolution -> Window/output; `0,0` follows the active game resolution, while borderless always uses the desktop. With `adjmouse=true`, a smaller window is allowed and the finished canvas is filtered down without changing the logical game view | live, start or manual resize |
+| `width`, `height` | `0`, `0` | output target selected by Video -> Resolution -> Window/output; `0,0` follows the active game resolution, while borderless always uses the desktop. A fixed larger target rescales the finished canvas without changing logical game view | live, start or manual resize |
 | `maintas` | `true` | fit while preserving the selected game resolution's aspect, with letter/pillar-boxing as needed | live |
 | `boxing` | `false` | largest exact integer fit from 19x down to 1x; takes priority over `maintas`. At 2x one game pixel occupies a 2x2 block = 4 output pixels. Below 1x no integer factor exists, so the renderer uses filtered reduction | live |
-| `aspect_ratio` | empty | custom aspect override; the menu shows it as Custom and clears it when Fit / Integer / Stretch is selected | live |
+| `aspect_ratio` | empty | custom aspect override; the menu shows it as Custom and clears it when Fit / Integer is selected | live |
 | `shader` | `lanczos2-sharp` | upscale filter, OpenGL renderer only; the menu offers 8 presets | live |
 | `savesettings` | `1` | cnc-ddraw writes window size/pos/state back on exit | - |
 | `maxgameticks` | `180` | game loop cap in ticks/s; see "The game speed cap" below | live |
-| `maxfps` | `-1` | render FPS cap, -1 = screen refresh; paces the render thread only, never slows the game | restart |
+| `maxfps` | `-1` | render FPS cap, -1 = screen refresh; paces the render thread only, never slows the game | live |
 | `vsync` | `false` | vertical sync; needed only against tearing in exclusive fullscreen (windowed and borderless never tear thanks to DWM composition), costs a little display lag | live |
 | `singlecpu` | `true` | 1 CPU stability mode; enable it if the game randomly crashes/freezes on maps. cnc-ddraw applies it once at startup; Windows 11 24H2+ uses its game-thread policy instead of pinning external audio helpers | restart |
 | `noactivateapp` | `true` | keep renderer output updating while the window is unfocused | restart |
@@ -375,6 +395,13 @@ next game start.
 | `devmode` | `true` | cursor not clipped to the window (original windowed feel); Ctrl+Tab or RAlt+RCtrl release it if anything clips | live |
 | `keytogglefullscreen` ... | see file | cnc-ddraw hotkeys as VK codes, 0x00 disables; C4dll-R's `F4` toggle is wrapper-owned and independent of these keys | - |
 | `resolutions`, `fixchilds` | `0`, `2` | mode-list and child-window handling; fine as is for D2 | - |
+
+On native Windows, dragging a normal resizable OpenGL window now previews the last game texture at
+the changing client size in real time using its active single-pass filter, including one precompiled
+from an initial 1:1 state. Releasing the edge performs one renderer commit for the final
+filter, viewport and mouse mapping; it does not restart the game. D3D9/GDI, an already-active
+multipass FSR/xBRZ pipeline, Wine/macOS and child-window cases keep the conservative frozen preview
+and rebuild once on release. The logical game canvas remains restart-latched.
 
 Parser warning: comments only on their own lines. Everything after `=` including trailing spaces
 is the value, so an inline `; comment` silently breaks the setting.
@@ -422,14 +449,35 @@ The menu is bilingual: `C4menu.ini` `[menu] language` = `auto` (default) / `en` 
 `auto` the menu is Russian when the Windows UI language is Russian or the system codepage is 1251,
 English otherwise. Submenus carry grayed one-line hints explaining each option.
 
-### Simple zoom
+### Stretch fixed windows and simple zoom
+
+**Video -> Stretch fixed windows** ports DisciplesGL 1.90's separate `Stretch windows` control.
+Geometry remains proportional: the wrapper takes a
+centred crop of the finished logical canvas and enlarges it to the viewport. At the default
+full-height setting, 1366x768 uses the exact centred 1068x600 area, so the fixed 800x600
+screen becomes 1024x768 (128% size), some side background is cropped, and the selected filter
+resamples pixels. The menu presents the resulting size: 100% means no enlargement and 128% means
+full height in this example. It still saves the compatible legacy effect strength as `C4menu.ini`
+`stretchWindows=0..100`, but that internal value is no longer shown as though it were image scale.
+Every change applies immediately. As in the old adapter, the base stretch is
+active only while a fixed/decorated menu or battle screen is presented; the strategic map is not
+zoomed or cropped. The centred source crop is the same in windowed, borderless and exclusive modes;
+only the common base viewport maps it to a different output area.
+
+OpenGL follows the legacy render order for every preset: pack the centred active crop first, run the
+selected filter/upscaler, then present it in the final viewport. This includes both FSR passes and
+both xBRZ passes. Their uniforms distinguish the active crop from the larger physical POT texture,
+and shader taps clamp to the active right/bottom edge so unwritten padding cannot bleed into the
+image. A true 1:1 strategic frame bypasses an upscale-only preset; actual reduction uses linear
+sampling.
 
 `Ctrl+Mouse Wheel` reproduces the DisciplesGL 2.0.2 simple zoom in both the game and Scenario
 Editor: wheel up adds 0.1x, wheel down subtracts 0.4x, range 1.0x..8.0x, and the image stays anchored
 at the cursor. It is process-local, not persisted, and works in OpenGL, D3D9/Auto and GDI. Ctrl+Wheel
 is consumed after changing zoom; an ordinary wheel remains a normal `WM_MOUSEWHEEL` and no longer
 generates artificial Up/Down map movement. Mouse hit coordinates follow the zoomed image. It does
-not inspect or call `mss32.dll`.
+not inspect or call `mss32.dll`. Selecting a Stretch fixed windows percentage recentres the image
+and resets this process-local extra zoom.
 
 ### Scenario Editor
 
@@ -444,7 +492,7 @@ the legacy wrapper. The switch uses no executable or `mss32.dll` addresses; the 
 | --- | --- | --- | --- |
 | Menu language | Auto / English / Russian; Auto considers the Windows language/codepage and selected game-text locale | `C4menu.ini` `language` | after restart |
 | Game text locale | selects the Windows locale used for the wrapper's OEM/ANSI text conversion, or disables wrapper recoding | `Disciple.ini` `[Wrapper] Locale` | live |
-| (MNS/SMNS) Map drag-scroll (left button) | enabled by default; hold LMB on the map and drag to pan. The exact button-down point is retained and the first changed game pixel moves the map immediately, without re-anchoring to a tile centre. A down/up without movement still selects (delivered on release). Native window-edge scroll remains available and is suppressed only during an active drag | `C4menu.ini` `dragScroll` | live |
+| (MNS/SMNS) Map drag-scroll (left button) | enabled by default; hold LMB on the map and drag to pan. The exact button-down point is retained and the first changed game pixel moves the map immediately, without re-anchoring to a tile centre. A down/up without movement still selects (delivered on release). Native window-edge scroll remains available and is suppressed only during an active drag. Its existing game Fast / Normal / Slow setting (`ScrollSpeed=0/50/100`) now follows the DisciplesGL 1.90 resolution-scaled model (100% / 75% / 50% distance) live and independently of the map-animation clock; grab-drag itself remains 1:1 | `C4menu.ini` `dragScroll`; native edge speed stays in `Disciple.ini` | live |
 | (MNS/SMNS) Auto-confirm unit hire | skips only “Do you want to hire this unit?” by invoking its normal `BTN_YES` callback during the local player's turn; off by default | `C4menu.ini` `autoConfirmUnitHire` | live |
 | (MNS/SMNS) Battle speed (whole battle): Off / 1.5x / 2x (default) / 3x / 4x / 5x / 15x | multiplies all battle animation timing via a virtual clock (a `timeGetTime` redirect); no game memory is patched | `C4menu.ini` `battleAnimEnabled` + `battleAnimSpeed` | live |
 | (MNS/SMNS) Attack speed-up (burst on each hit): Off / 1.5x .. 5x (default) / 15x | switches the battle clock to the selected factor from the effect-start callback until the engine reports that the final visual component ended, then returns to idle linearly over 300 ms. A signature-gated hook supplies the exact end, with the timed fallback retained if that hook is unavailable | `C4menu.ini` `battleAttackEnabled` + `battleAttackSpeed` | live |
@@ -464,10 +512,11 @@ remains enabled by default and selects the fixed 990x600 two-panel dialog when t
 | Display mode: Windowed / Fullscreen (adaptive borderless) / Fullscreen exclusive (advanced) | borderless automatically uses the desktop size; exclusive performs a real mode change and can fall back to borderless where impossible (RDP). The menu bar is shown only in a normal window. `F4` and `Alt+Enter` reliably return even from real exclusive fullscreen, restore a normal-window client fitted to the monitor work area instead of reusing fullscreen geometry, and save the resulting mode for the next start. On the first fullscreen transition, an automatic canvas shows its next-start result; a manually fixed canvas offers to enable Automatic resolution with the exact reviewed size it would select | `ddraw.ini` `windowed` + `fullscreen`; optional Auto choice also writes `Disciple.ini` | live; canvas choice applies after a full restart |
 | Decorative background around classic screens | on an active widescreen game canvas, fills the area outside a centered fixed-size screen with the DisciplesGL background and Alternative frame. It is enabled by default and included in wrapper screenshots. A stock native canvas has no internal free area, so the item is disabled there; a separately enlarged Window/stream output can still have renderer-owned black bars | `C4menu.ini` `decorativeBackground` | live after a widescreen game-resolution restart |
 | Resolution -> Automatic / Manual stock / Manual widescreen | Automatic selects the largest fitting validated game canvas for the persisted display mode; manual sizes live in two compact submenus. All regular choices re-link normal output to the game canvas. Widescreen shows more map rather than stretching output; unsupported executable layouts gray the unavailable game-view rows | stock `[Disciple] DisplaySize`; widescreen `[Wrapper] GameCanvasMode/Width/Height`; output `width=0`, `height=0` | full restart |
-| Resolution -> Advanced output | opens a numeric width/height dialog in the same popup and deliberately separates output from game view. Automatic follows the selected game resolution; with mouse remapping enabled, a custom 320x240..8192x8192 value is the image area inside the window, excluding frame/title/menu. Borderless still uses the desktop | effective `ddraw.ini` `width` + `height` | live and next start |
-| Scaling: Fit / Integer pixel blocks / Stretch / Custom | maps the logical game canvas into the actual window/desktop. The result line shows the coefficient, viewport and bars; `1:1` means one game pixel equals one output pixel. With mouse remapping active, the window may be smaller than the canvas and the selected shader filters it down | `ddraw.ini` `maintas` + `boxing` + `aspect_ratio` | live |
-| Filter: Lanczos / xBRZ / Bicubic / AMD FSR / xBR lv2 / Bilinear / None / CRT | OpenGL sampling filter for enlargement or reduction; all eight presets and required multipass files ship in `Shaders/`. Lanczos, Bicubic and Bilinear suit fractional downscaling | `ddraw.ini` `shader` | live, OpenGL only |
-| Renderer (restart): OpenGL (recommended) / GDI / Auto | rendering backend; Auto picks D3D9 first, which has no shader filters | `ddraw.ini` `renderer` | restart |
+| Resolution -> Window/output size | opens a numeric width/height dialog in the same popup and deliberately separates output from game view. Automatic follows the selected game resolution; a fixed value changes the image area inside the window, excluding frame/title/menu, without changing map view. The logical game canvas remains the safe minimum; borderless still uses the desktop | effective `ddraw.ini` `width` + `height` | live and next start |
+| Scaling: Fit / Integer pixel blocks; Custom status | maps the logical game canvas into the actual window/desktop. The result line shows the coefficient, viewport and bars; `1:1` means one game pixel equals one output pixel. Fit preserves geometry and Integer uses exact blocks. A hand-edited legacy X/Y stretch remains readable but is not offered in GUI | `ddraw.ini` `maintas` + `boxing` + `aspect_ratio` | live |
+| Fixed window: 100% (no enlargement) .. actual full-height size (128% at 1366x768, default) | centred DisciplesGL 1.90 crop, enlarged to fill the viewport vertically while preserving geometry; crops side decoration and resamples pixels only on fixed/decorated screens, never the strategic map, and the status row shows selected vs active state | `C4menu.ini` `stretchWindows` (legacy 0..100 effect strength) | live |
+| Filter: Lanczos / xBRZ / Bicubic / AMD FSR / xBR lv2 / Bilinear / None / CRT | OpenGL sampling filter for enlargement or reduction; the centred fixed-screen crop enters the selected preset before the final viewport, including crop-aware multipass FSR/xBRZ. All eight presets and required pass files ship in `Shaders/`. Lanczos, Bicubic and Bilinear suit fractional downscaling | `ddraw.ini` `shader` | live, OpenGL only |
+| Renderer: OpenGL (recommended) / GDI / Auto | rendering backend; Auto picks D3D9 first, which has no shader filters. The wrapper switches live and retains a safe active backend if the requested one fails | `ddraw.ini` `renderer` | live, best effort |
 | VSync | fixes tearing in exclusive fullscreen at the cost of a little display lag; windowed and borderless never tear (DWM composition), so keep it off there | `ddraw.ini` `vsync` | live |
 | Take screenshot (PrintScreen) | saves a screenshot via the renderer | - | - |
 
@@ -482,23 +531,56 @@ to follow the desktop.
 
 | Item | What it does | Saved to | Applies |
 | --- | --- | --- | --- |
-| Frame cap (restart): Monitor refresh rate / 30 / 60 / 144 | render FPS only, never slows game logic | `ddraw.ini` `maxfps` | restart |
+| Frame cap (live): Monitor refresh rate / 30 / 60 / 144 | render FPS only, never slows game logic | `ddraw.ini` `maxfps` | live |
 | Game speed cap (live): Uncapped / 30 / 60 / 100 / 180 (default) | the game loop cap, see the section above | `ddraw.ini` `maxgameticks` | live |
 | 1 CPU stability (restart) | helps prevent random crashes/freezes on maps; ON by default. On Windows 10/Wine it pins the process to logical CPU 0; Windows 11 24H2+ pins only game-owned threads and leaves external audio helpers alone | `ddraw.ini` `singlecpu` | full restart |
 
 ### Plugins
 
 Loads only native `Mods\*.c4p` plugins and grafts each plugin directly under **Plugins**. The bundled
-Timer is configured via `C4plugins.ini`; its countdown uses `TableDuration_0`. Hold **Ctrl+Alt** and
+**Twitch Stat** plugin is enabled by default. On the exact Russobit/MNS executable, while the
+990-wide battle dialog is active, a left click on an occupied unit image snapshots all twelve visual
+slots, logical game resolution, battle/slot bounds and the visible encyclopedia text of every unique
+displayed unit into the versioned `c4dll.battle-roster` / `battle.snapshot` transport payload. The
+game's native `150x85` hit area is authoritative for a large portrait, so its central slot seam is
+clickable as part of the same unit. The
+diagnostic preview is disabled by default (`Preview=0`). The host suspends the plugin's draw/tick/input
+callbacks outside the lifetime of the battle UI. It contains no unit art or duplicate database and
+imports no `mss32.dll` API. If the player already has the native RMB encyclopedia open, Twitch Stat
+does not construct its hidden layout or consume the click; it resumes after that window closes. Outside
+the validated context it also leaves normal clicks untouched. A successful snapshot consumes that one
+LMB down/up gesture so it cannot also activate a battle command. Toggle it through
+**Plugins > Twitch Stat > Enabled** or `[TwitchStat] Enabled=0|1` in `C4plugins.ini`.
+
+The bundled Timer is configured via `C4plugins.ini`; its countdown uses `TableDuration_0`. Hold **Ctrl+Alt** and
 drag the clock with LMB to reposition it. On the exact Russobit/MNS layout, Force mode starts only
 after the player accepts the native beginning-of-turn summary with **OK**; the visible dialog does
 not consume time. Pause, Reset and Set update the running clock immediately. Other builds keep the
 prior active-turn edge because no unverified callback address is used. The plugin overlay stays below an
 open native menu and same-process dialogs, so the timer cannot cover menu commands.
+Every effective pause draws the timer in white. Only the explicit user **Pause** command appends
+`(пауза)`; combat, animation, ownership and timeout pauses do not add the label. Outside PvP, a
+billable Force timeout keeps a signed countdown through combat and reward/artifact dialogs, and the
+negative remainder is banked as debt against that player's next turn. End Day is queued once. After
+a resolved battle the host presses the ordinary battle Close once, never chooses a reward, waits for
+the actual strategic UI and the native `CPhaseGame` object lock to become ready, then submits the
+enabled topmost `END_TURN` exactly once. A defender timeout closes that client's local battle screen
+but never ends the attacker's strategic turn. If the defender exhausts the clock outside their own
+strategic turn, that spent interval is closed at zero and the next accepted local turn opens one
+fresh Timetable base budget; a defensive Set/Reset can no longer preserve `00:00` across that day
+boundary. The timeout lock is re-applied for every new PvP battle instance before that turn, and
+timer Reset/Set/mode/action toggles cannot cancel an already reached PvP timeout.
+`AutoBattle=1` is the tournament default. PvP instead clamps and freezes at exactly `00:00` during a
+verified local billable phase. The timer posts a generation-scoped command to the game UI thread,
+checks the native `TOG_AUTOBATTLE` control and invokes that control's own functor. Its latch is bound
+to the current battle instance and side: a click, hotkey or manual battle action cannot remove or
+bypass it until that battle ends. Chat and unrelated mouse/keyboard input remain usable. The old
+direct UiEvent callback and global input filter are not used. Plugin-menu changes apply live and
+persist; manual `C4plugins.ini` edits are loaded on the next full game start.
 
 The default sword shown over a decorative frame uses the same live X/Y viewport scale as the
 game-rendered cursor. It therefore keeps the same size and proportions when crossing between the
-game screen and an extended frame, including a deliberately stretched output.
+game screen and an extended frame, including a hand-edited legacy X/Y output mapping.
 
 ## Save handling (all game versions)
 
@@ -576,6 +658,8 @@ C4dll-R.
 | `patches/cnc-ddraw-render-null.patch` | Headless-бэкенд `render_null`: ветка рендерера в `dd.c` + записи vcxproj + новые `inc/render_null.h`, `src/render_null.c` | да |
 | `patches/cnc-ddraw-default-ini.patch` | Настроенный под Disciples II шаблон `ddraw.ini`, который `cfg_create_ini` (`config.c`) пишет при первом запуске, если файла нет | да |
 | `patches/cnc-ddraw-simple-zoom.patch` | Узкая интеграция WndProc и OpenGL/D3D9/GDI для `Ctrl+колесо` и адресно-независимой маршрутизации меню редактора | да |
+| `patches/cnc-ddraw-simple-zoom-mouse.patch` | Синхронизирует опрашиваемые координаты `GetCursorPos` и `MSG.pt` с обратным преобразованием растянутого фиксированного окна в WndProc | да |
+| `patches/cnc-ddraw-live-resize.patch` | Выборочный realtime-preview OpenGL на Windows во время перетягивания края обычного окна; для остальных путей остаётся безопасный fallback | да |
 | `patches/cnc-ddraw-system-opengl-fallback.patch`, `cnc-ddraw-gdi-filter.patch`, `cnc-ddraw-d2-cursor-ownership.patch` | Fallback для OpenGL/GDI и единое владение курсором D2 | да |
 | `patches/cnc-ddraw-decorative-background.patch`, `cnc-ddraw-printscreen-compositor.patch`, `features/decorative.cpp`, `features/decor/` | Рамка/плагины в итоговом кадре; PrintScreen снимает тот же кадр | да |
 | `features/featuremenu.cpp`, `cursorcapture.cpp`, `fastai.cpp` | Внутриигровое меню, захват динамического курсора и ограниченный Fast AI | да |
@@ -583,9 +667,10 @@ C4dll-R.
 | `features/horplus.cpp` | Защищённые сигнатурами пресеты настоящего Hor+ кадра игры, восстановленные по старому враперу | да |
 | `features/clouds.cpp` | Защищённые сигнатурами загрузка, поиск ресурсов и обновление внешнего `Imgs\IsoClouds.ff` | да |
 | `release/Shaders/` | Восемь OpenGL-пресетов из меню, включая multipass-файлы и сохранённые заголовки лицензий | да |
-| `features/rendererbridge.c` | Собственные адаптеры врапера к внутренностям cnc-ddraw: live reload, скриншот, перевод координат, состояние и формула simple zoom | да |
+| `features/rendererbridge.c` | Собственные адаптеры врапера к внутренностям cnc-ddraw: live reload, скриншот, перевод координат, растяжение фиксированных окон и simple zoom | да |
 | `features/localization.cpp` | Мост локали/кодировок по образцу старого врапера, без жёстких русских кодовых страниц | да |
 | `features/savelogic.cpp` | Независимые от версии хуки сейвов/архива | да |
+| `plugins/timer/`, `plugins/unitinfo/` | Нативный таймер хода и источник боевых снимков Twitch Stat | да |
 | `docs/hook-points.md` | Все адреса/структуры MNS/SMNS, к которым цепляется C4dll-R | да |
 | `forwarder/C4dll-R.cb63.def` | 483 форварда экспортов CB63 (`Name=CB63.Name @ord`) | да |
 | `build.ps1` | Воспроизводимая сборка + deploy/restore | да |
@@ -619,9 +704,10 @@ C4dll-R.
 ./build.ps1 -Restore        # вернуть baseline C4dll-R.dll + отдельный ddraw.dll
 ```
 
-`build.ps1` копирует запиненный submodule `upstream/cnc-ddraw` в `build/`, накладывает девять
-тематических патчей (`cnc-ddraw-c4dll-r` + `render-null` + `default-ini` + `simple-zoom` +
-`decorative-background` + `printscreen-compositor` + fallback OpenGL/GDI + владение курсором D2) и копирует
+`build.ps1` копирует запиненный submodule `upstream/cnc-ddraw` в `build/`, накладывает одиннадцать
+тематических патчей (`cnc-ddraw-c4dll-r` + `render-null` + `default-ini` + `simple-zoom` + `simple-zoom-mouse` +
+`decorative-background` + `printscreen-compositor` + fallback OpenGL/GDI + владение курсором D2 +
+выборочный live resize OpenGL) и копирует
 собственные исходники features (renderer bridge, меню, Hor+, широкий бой, захват курсора,
 облака, плагины/таймер, Fast AI, локаль, сейвы и headless), встраивает проверенный диалог широкого боя и декоративные
 ресурсы как RCDATA,
@@ -631,7 +717,8 @@ C4dll-R.
 PreBuildEvent, который перегенерировал `git.h` в UNKNOWN) и запускает MSBuild (Release, Win32,
 v143, статический CRT). MSBuild ищется
 через `vswhere`, поэтому работает и на машине разработчика, и на CI. Workflow
-`.github/workflows/c4ddraw.yml` запускает тот же `build.ps1` и выгружает `C4dll-R.dll` + `timer.c4p`.
+`.github/workflows/c4ddraw.yml` запускает тот же `build.ps1` и выгружает `C4dll-R.dll`,
+`timer.c4p` и `twitchstat.c4p`.
 
 ## Релизы
 
@@ -644,22 +731,25 @@ git tag c4dll-r-v1.0
 git push origin c4dll-r-v1.0
 ```
 
-`.github/workflows/c4dll-r-release.yml` соберёт `C4dll-R.dll` + `Mods/timer.c4p`, упакует их с
-`Shaders`, `INSTALL.txt`, примером `C4plugins.ini`, `ddraw.ini`, `LICENSE` и notices в `C4dll-R-v1.0.zip` и опубликует GitHub Release с этим
+`.github/workflows/c4dll-r-release.yml` соберёт `C4dll-R.dll`, `Mods/timer.c4p` и
+`Mods/twitchstat.c4p`, упакует их с
+`Shaders`, `INSTALL.txt`, инструкцией `C4PLUGINS.txt`, примером `C4plugins.ini`, `ddraw.ini`, `LICENSE` и notices в `C4dll-R-v1.0.zip` и опубликует GitHub Release с этим
 архивом, `-symbols.zip` (соответствующие PDB для разбора крашей) и отдельными файлами
-`C4dll-R.dll` + `timer.c4p`. Версия релиза зашивается в ресурс версии DLL (`build.ps1 -Version`),
+`C4dll-R.dll`, `timer.c4p` и `twitchstat.c4p`. Версия релиза зашивается в ресурс версии DLL (`build.ps1 -Version`),
 так что сборка опознаётся по свойствам файла. Ручной запуск workflow (workflow_dispatch) публикует
 **пре-релиз** с тегом `c4dll-r-dev-<sha>` (или вашей меткой); версии, содержащие `rc` / `alpha` /
 `beta` / `dev`, всегда помечаются пре-релизом. Исходники пакета — в `c4ddraw/release/`
-(`INSTALL.txt`, `C4plugins.ini`, `ddraw.ini`, `Shaders/`, `THIRD_PARTY_NOTICES.txt`,
+(`INSTALL.txt`, `C4PLUGINS.txt`, `C4plugins.ini`, `ddraw.ini`, `Shaders/`, `THIRD_PARTY_NOTICES.txt`,
 `RELEASE_NOTES.md`); корневой GPL-3.0 `LICENSE` workflow копирует в архив.
 
 ## Ручная установка
 
 Положите `C4dll-R.dll` рядом с `Discipl2.exe` (заменив копию CodeBase), оставьте `CB63.dll` и
 `ddraw.ini`. Если в папке есть отдельный `ddraw.dll` от другого врапера, переименуйте или удалите
-его; в чистой установке такого файла обычно нет, и тогда ничего делать не нужно. Для сравнения
-наш/сток меняйте только `C4dll-R.dll`.
+его; в чистой установке такого файла обычно нет, и тогда ничего делать не нужно.
+Перед копированием `Mods/twitchstat.c4p` удалите именно старый `Mods/unitinfo.c4p`: если оставить оба,
+результат дедупликации будет зависеть от порядка файловой системы. `Mods/timer.c4p` копируется обычно.
+Для сравнения наш/сток меняйте только `C4dll-R.dll`.
 
 ## Обновление cnc-ddraw
 
@@ -681,8 +771,8 @@ git push origin c4dll-r-v1.0
 | Слой C4dll-R | `features/rendererbridge.c`, `c4features.cpp`, `featuremenu.cpp`, `cursorcapture.cpp`, `fastai.cpp`, `decorative.cpp`, `horplus.cpp`, `widebattle.cpp`, `clouds.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `localization.cpp`, `savelogic.cpp`, `headless.cpp` | интеграция врапера, меню, декоративный фон только на этапе вывода, настоящий Hor+ кадр, широкий бой, pipeline внешнего архива облаков, плагины, локаль, сейвы/архив, владение курсором D2 и headless-окна |
 
 Экспорты: 483 форварда CodeBase (`name=CB63.name`) плюс `DDReloadConfig` (живое перечтение
-настроек) и `DDTakeScreenshot`. `Mods\timer.c4p` собирается отдельно из `plugins/timer/` и внутрь
-DLL НЕ входит.
+настроек) и `DDTakeScreenshot`. `Mods\timer.c4p` и `Mods\twitchstat.c4p` собираются отдельно из
+`plugins/timer/` и `plugins/unitinfo/`; внутрь DLL плагины НЕ входят.
 
 Почему одна DLL: игра уже импортирует библиотеку с именем `C4dll-R` (копию CodeBase), поэтому
 замена одного файла даёт рендерер, меню и хост плагинов сразу, без отдельного `ddraw.dll`,
@@ -720,6 +810,19 @@ Lanczos, `savesettings=1`) - удалите его, если хотите сра
 экрана (при первом нажатии — безрамочный), а из любого полного экрана возвращает обычное окно.
 `Alt+Enter` остаётся настроенным переключателем окно/полный экран cnc-ddraw; `Alt+F4` по-прежнему
 закрывает игру.
+
+Полноэкранный путь не является копией старого адаптера 1:1. В C4dll-R три режима вывода: обычное
+окно, адаптивный безрамочный полный экран и настоящий эксклюзивный полный экран. Во всех трёх
+используется общая геометрия рендера: «Вписать»/«Целые»/свой aspect задают базовый viewport, затем
+для активного фиксированного экрана выбирается один и тот же центральный source crop, а
+`Ctrl+колесо` остаётся отдельным увеличением destination. Смена только режима вывода поэтому не
+меняет фиксированный crop и не включает/выключает WideBattle.
+
+При переходе меню-бар заранее прикрепляется или снимается для целевого режима без промежуточной
+отрисовки. Видимый redraw выполняется уже после mode-set рендера; повторный
+`DDRelayoutCurrentMode` остаётся только восстановлением при несовпадении фактического chrome с
+итоговым режимом. При возврате в обычное окно сохранённый `WINDOWPLACEMENT` по-прежнему
+восстанавливается.
 
 ## Цепочка разрешения: разрешение игры -> окно/экран -> масштабирование
 
@@ -806,19 +909,17 @@ fallback. Произвольный старый размер не использ
 
 `ddraw.ini width=0` и `height=0` заставляет обычное окно/эксклюзивный режим следовать активному
 разрешению игры, а borderless автоматически берёт рабочий стол. Фиксированный размер вывода —
-абсолютное число выходных пикселей, которое не переписывается при смене разрешения игры. При
-`adjmouse=true` (значение в комплекте) он может быть меньше логического кадра: cnc-ddraw фильтрует
-готовое изображение до окна и пересчитывает мышь обратно в игровые координаты. Эксклюзивный режим
-может подобрать другой поддерживаемый видеорежим, поэтому точный запрошенный размер не гарантирован.
+абсолютное число выходных пикселей, которое не переписывается при смене разрешения игры. Меню не
+даёт ему стать меньше текущего логического кадра; старые меньшие пары нормализуются в `0,0`, чтобы
+окно снова следовало игре. Эксклюзивный режим может подобрать другой поддерживаемый видеорежим,
+поэтому точный запрошенный размер не гарантирован.
 
 Меню сохраняет границу, но не показывает два равноправных «разрешения»: игровой выбор пишет
 restart-настройки `Disciple.ini`, ставит выводу следующего запуска `0,0` и не перезагружает живой
 игровой кадр. Один popup **Видео -> Разрешение** содержит Авто, компактные ручные подменю штатных и
-широких режимов и один явно дополнительный диалог вывода. Произвольная область изображения от
-320x240 до 8192x8192 пишет `width`/`height` в эффективную секцию `ddraw.ini` и применяется сразу.
-Полный диапазон уменьшения использует комплектное `adjmouse=true`; если пересчёт мыши был вручную
-выключен, диалог поднимает минимум до текущего игрового кадра, чтобы клики не рассинхронизировались.
-Старые значения, заданные вручную, продолжают работать.
+широких режимов и один явно дополнительный диалог вывода. Область от размера текущего игрового
+кадра до 8192x8192 пишет `width`/`height` в эффективную секцию `ddraw.ini` и применяется сразу.
+Старые значения, заданные вручную, продолжают читаться; слишком маленькие безопасно исправляются.
 
 Коэффициент — результат расчёта, а не ещё одно разрешение. Для размера игры `G` и вывода `O`:
 
@@ -827,8 +928,8 @@ restart-настройки `Disciple.ini`, ставит выводу следу�
 - **Целые блоки** (`boxing`) ищет наибольший точный множитель от 19 до 1 и берёт `G*N`; один
   пиксель игры занимает блок `N x N`, то есть `N^2` пикселей вывода. Если вывод меньше `G`,
   положительного целого множителя нет и рендерер выполняет фильтрованное уменьшение.
-- **Растянуть** использует независимые `kx=Ow/Gw` и `ky=Oh/Gh`; при разных значениях геометрия
-  искажена.
+- Заданные вручную `maintas=false`, `boxing=false` сохраняют совместимость со старым независимым
+  масштабом X/Y cnc-ddraw, но этот искажающий геометрию вариант намеренно не показан в меню игры.
 - Свой `aspect_ratio` меняет целевую геометрию; шейдер ни один из этих коэффициентов не меняет.
   Увеличение `Ctrl+колесо` применяется уже после базового viewport и не входит в показываемый
   меню базовый коэффициент.
@@ -857,7 +958,8 @@ WideBattle старого враппера сверен по его встрое
 выбирает разрешение игры, размер вывода, масштабирование или обзор стратегической карты. Текущий порт
 требует ширину не менее 990 и у логического кадра, и у эффективного фиксированного вида. Режим
 включён по умолчанию и фиксируется при открытии следующего боя; пользовательского переключателя в
-текущем меню нет.
+текущем меню нет. Условие одинаково для обычного окна, borderless и exclusive: режим вывода и его
+физическое разрешение в проверке не участвуют.
 
 Облака карты используют настоящий legacy-pipeline, а не эффект рендерера: при поддерживаемых exe и
 архиве защищённые сигнатурами хуки расширяют объект-владелец, загружают и индексируют
@@ -878,18 +980,18 @@ SHA-256 проверенного файла:
 | Ключ | В комплекте | Эффект | Применение |
 | --- | --- | --- | --- |
 | `fake_mode` | `1024x768x16` | внутренний виртуальный 16-битный bootstrap совместимости, а не разрешение игры/окна или масштаб; проверенный широкий кадр исправляет только process-local геометрию bootstrap без перезаписи значения | рестарт |
-| `renderer` | `opengl` | шейдеры + лучший апскейл; `auto` сначала берёт D3D9 (без шейдерных фильтров); `gdi` = софтверный; если OpenGL не поднялся, cnc-ddraw сам откатится на GDI | рестарт |
+| `renderer` | `opengl` | шейдеры + лучший апскейл; `auto` сначала берёт D3D9 (без шейдерных фильтров); `gdi` = софтверный; при живом переключении остаётся безопасный fallback, если выбранный backend не поднялся | сразу, best effort |
 | `windowed` + `fullscreen` | `true` + `false` | окно с заголовком и меню; `true`+`true` = borderless на весь экран; `false`+`false` = эксклюзивный фулскрин (старое `false`+`true` мигрирует автоматически) | сразу |
 | `border` | `true` | настоящий заголовок окна (окно можно таскать); меню-бар под ним | сразу |
 | `resizable` | `true` | окно тянется за края; пропорции держит `maintas` | сразу |
-| `width`, `height` | `0`, `0` | цель вывода из Видео -> Разрешение -> Окно/вывод; `0,0` следует активному разрешению игры, а borderless всегда использует рабочий стол. При `adjmouse=true` окно может быть меньше кадра игры: готовая картинка фильтруется вниз, логический обзор не меняется | сразу, запуск или ручной resize |
+| `width`, `height` | `0`, `0` | цель вывода из Видео -> Разрешение -> Окно/вывод; `0,0` следует активному разрешению игры, а borderless всегда использует рабочий стол. Фиксированный размер не меняет логический обзор и не может быть меньше текущего игрового кадра | сразу, запуск или ручной resize |
 | `maintas` | `true` | вписать с сохранением пропорций выбранного разрешения игры и полями при необходимости | сразу |
 | `boxing` | `false` | наибольшее точное целочисленное вписывание от 19x до 1x; имеет приоритет над `maintas`. При 2x один пиксель игры занимает блок 2x2 = 4 пикселя вывода. Ниже 1x целого множителя нет, поэтому рендерер использует фильтрованное уменьшение | сразу |
-| `aspect_ratio` | пусто | свой override пропорций; меню показывает его как Custom и очищает при выборе «Вписать / Целые / Растянуть» | сразу |
+| `aspect_ratio` | пусто | свой override пропорций; меню показывает его как Custom и очищает при выборе «Вписать / Целые» | сразу |
 | `shader` | `lanczos2-sharp` | фильтр апскейла, только для OpenGL; в меню 8 пресетов | сразу |
 | `savesettings` | `1` | cnc-ddraw сам сохраняет размер/позицию/состояние окна при выходе | - |
 | `maxgameticks` | `180` | кап игрового цикла, тиков/с; см. раздел «Кап скорости игры» | сразу |
-| `maxfps` | `-1` | кап FPS рендера, -1 = частота монитора; крутит только поток рендера, игру не замедляет | рестарт |
+| `maxfps` | `-1` | кап FPS рендера, -1 = частота монитора; крутит только поток рендера, игру не замедляет | сразу |
 | `vsync` | `false` | вертикальная синхронизация; нужна только от разрывов в эксклюзивном фулскрине (в окне и безрамочном режиме разрывов не бывает благодаря композиции DWM), стоит немного задержки вывода | сразу |
 | `singlecpu` | `true` | режим стабильности 1 CPU; включите, если игра случайно вылетает/зависает на любых картах. cnc-ddraw применяет его один раз при запуске; Windows 11 24H2+ использует свою политику игровых потоков и не прижимает внешние аудиопотоки | рестарт |
 | `noactivateapp` | `true` | продолжать обновлять изображение без фокуса окна | рестарт |
@@ -898,6 +1000,14 @@ SHA-256 проверенного файла:
 | `devmode` | `true` | курсор не запирается в окне (родное оконное поведение); если что-то заперло: Ctrl+Tab или RAlt+RCtrl | сразу |
 | `keytogglefullscreen` ... | см. файл | горячие клавиши cnc-ddraw VK-кодами, 0x00 отключает; переключатель C4dll-R по `F4` от этих ключей не зависит | - |
 | `resolutions`, `fixchilds` | `0`, `2` | список видеорежимов и обработка дочерних окон; для D2 менять не нужно | - |
+
+На обычном Windows при перетягивании края изменяемого OpenGL-окна последний игровой кадр теперь
+масштабируется вслед за размером в реальном времени активным однопроходным фильтром, включая
+заранее собранный из исходного 1:1. После отпускания выполняется один commit окончательного фильтра,
+viewport и мыши — игра не перезапускается. D3D9/GDI, уже активный многопроходный FSR/xBRZ,
+Wine/macOS и окна с дочерним HWND сохраняют консервативное поведение: кадр замирает и рендерер один
+раз пересобирается при отпускании. Логический игровой кадр по-прежнему меняется только после
+перезапуска.
 
 Предупреждение о парсере: комментарии только отдельной строкой. Всё после `=`, включая хвостовые
 пробелы, считается значением, поэтому инлайновый `; комментарий` молча ломает настройку.
@@ -945,14 +1055,36 @@ override его не отменит. Автосохранение состоян
 русская локаль текста игры; иначе английское. Выбор доступен в **Игра > Язык меню** и применяется
 после перезапуска игры. В подменю есть серые строки-подсказки, объясняющие каждую опцию.
 
-### Простое увеличение
+### Растяжение центральных окон и простое увеличение
+
+**Видео -> Растянуть центральное окно** переносит отдельную функцию `Stretch windows` из
+DisciplesGL 1.90. Геометрия сохраняется: враппер берёт
+центр готового логического кадра и увеличивает его до viewport. При максимальном режиме по
+умолчанию для 1366x768 используется точная центральная область 1068x600: фиксированное окно
+800x600 становится 1024x768 (128% размера), заполняет высоту, часть бокового фона обрезается,
+а фильтр пересчитывает пиксели с ожидаемой потерей качества. Подменю показывает фактический
+размер: 100% означает отсутствие увеличения, а 128% в этом примере — заполнение высоты. Для
+совместимости в `C4menu.ini` по-прежнему сохраняется внутренний `stretchWindows=0..100` — сила
+старого эффекта, но GUI больше не выдаёт её за масштаб изображения. Каждый выбор применяется
+сразу. Как в старом адаптере, базовое
+растяжение включается только в фиксированном/декорированном меню или боевом окне; стратегическая
+карта не приближается и не обрезается. Центральный source crop одинаков в оконном, безрамочном и
+эксклюзивном режимах; меняется только его отображение общей геометрией базового viewport.
+
+OpenGL для каждого пресета сохраняет порядок старого адаптера: сначала центрированный активный
+crop упаковывается в FBO, затем выполняется выбранный фильтр/upscaler, после чего результат выводится
+в финальный viewport. Это относится и к обоим проходам FSR, и к обоим проходам xBRZ. Шейдеры отдельно
+получают размер активного crop и физической POT-текстуры, а выборки прижимаются к активному правому и
+нижнему краю — неинициализированный padding не попадает в изображение. На настоящем стратегическом
+1:1 upscale-only пресет пропускается; при уменьшении используется linear sampling.
 
 `Ctrl+колесо мыши` повторяет simple zoom из DisciplesGL 2.0.2 и в игре, и в редакторе сценариев:
 колесо вверх добавляет 0,1x, вниз убавляет 0,4x, диапазон 1,0x..8,0x, изображение остаётся
 привязанным к позиции курсора. Масштаб действует до завершения процесса, не сохраняется и работает
 в OpenGL, D3D9/Auto и GDI. `Ctrl+колесо` поглощается после изменения масштаба; обычное колесо
 остаётся обычным `WM_MOUSEWHEEL` и больше не создаёт искусственное движение карты вверх/вниз.
-Координаты клика следуют увеличенному изображению. `mss32.dll` не проверяется и не вызывается.
+Координаты клика следуют увеличенному изображению. Выбор процента растяжения возвращает центр и
+сбрасывает это дополнительное увеличение текущего процесса. `mss32.dll` не проверяется и не вызывается.
 
 ### Редактор сценариев
 
@@ -966,7 +1098,7 @@ override его не отменит. Автосохранение состоян
 | Пункт | Что делает | Куда пишет | Применение |
 | --- | --- | --- | --- |
 | Язык меню | `Авто` / `English` / `Русский`; автоматический режим учитывает язык Windows, CP1251 и выбранную локаль текста игры | `C4menu.ini` `language` | после перезапуска |
-| (MNS/SMNS) Перетаскивание карты | включено по умолчанию; запоминается точная точка нажатия, и уже первый изменившийся игровой пиксель сразу двигает карту без перепривязки к центру тайла. Нажатие/отпускание без движения по-прежнему выбирает объект (клик доставляется при отпускании). Штатный скролл у края окна подавляется только на время активного перетаскивания | `C4menu.ini` `dragScroll` | сразу |
+| (MNS/SMNS) Перетаскивание карты | включено по умолчанию; запоминается точная точка нажатия, и уже первый изменившийся игровой пиксель сразу двигает карту без перепривязки к центру тайла. Нажатие/отпускание без движения по-прежнему выбирает объект (клик доставляется при отпускании). Штатный скролл у края окна подавляется только на время активного перетаскивания. Его существующая игровая настройка Быстро / Нормально / Медленно (`ScrollSpeed=0/50/100`) теперь сразу использует масштабируемую по разрешению модель DisciplesGL 1.90 (100% / 75% / 50% дистанции) и не зависит от виртуальных часов анимации; drag остаётся строго 1:1 | `C4menu.ini` `dragScroll`; скорость края остаётся в `Disciple.ini` | сразу |
 | (MNS/SMNS) Автоподтверждение найма воинов | пропускает только вопрос «Хотите нанять этого воина?» штатным callback `BTN_YES` в активный ход локального игрока; по умолчанию выключено | `C4menu.ini` `autoConfirmUnitHire` | сразу |
 | (MNS/SMNS) Скорость боя (весь бой): Выкл / 1.5x / 2x (по умолчанию) / 3x / 4x / 5x / 15x | умножает тайминг всех боевых анимаций через виртуальные часы (редирект `timeGetTime`); память игры не патчится | `C4menu.ini` `battleAnimEnabled` + `battleAnimSpeed` | сразу |
 | (MNS/SMNS) Ускорение атак (рывок на каждый удар): Выкл / 1.5x .. 5x (по умолчанию) / 15x | включает выбранный фактор по callback начала эффекта и держит его до сообщения движка об окончании последней визуальной части, затем линейно возвращает idle за 300 мс. Точное окончание даёт hook с проверкой сигнатуры; для неизвестной раскладки exe сохраняется старый временной fallback | `C4menu.ini` `battleAttackEnabled` + `battleAttackSpeed` | сразу |
@@ -986,10 +1118,11 @@ override его не отменит. Автосохранение состоян
 | Режим экрана: Оконный / Полный экран (адаптивный без рамки) / Эксклюзивный полный экран (дополнительно) | безрамочный режим автоматически берёт размер рабочего стола; эксклюзивный делает настоящую смену видеорежима и может откатиться в безрамочный (например, в RDP). Меню-бар показывается только в обычном окне; `F4` и `Alt+Enter` надёжно возвращают даже из настоящего эксклюзивного режима, восстанавливают вписанную в рабочую область клиентскую часть обычного окна вместо повторного использования полноэкранной геометрии и сохраняют итоговый режим для следующего запуска. При первом переходе автоматический кадр показывает результат следующего старта, а для закреплённого вручную кадра предлагается включить Auto с точным рассчитанным размером | `ddraw.ini` `windowed` + `fullscreen`; при согласии на Auto также `Disciple.ini` | сразу; выбор кадра применяется после полного перезапуска |
 | Декоративный фон вокруг классических экранов | при активном широком разрешении игры заполняет место вокруг центрированного фиксированного экрана фоном DisciplesGL и рамкой Alternative. Включён по умолчанию и попадает во встроенные скриншоты. В штатном кадре внутреннего свободного места нет, поэтому пункт серый; отдельное увеличение «окна/стрима» всё ещё может оставить чёрные поля самого рендерера | `C4menu.ini` `decorativeBackground` | сразу после перезапуска в широком разрешении игры |
 | Разрешение -> Авто / Вручную штатное / Вручную широкое | Авто выбирает самый крупный помещающийся проверенный игровой кадр для сохранённого режима экрана; ручные размеры находятся в двух компактных подменю. Любой обычный выбор снова привязывает вывод окна к игровому кадру. Широкий режим добавляет обзор карты, а не растягивает вывод | штатный `[Disciple] DisplaySize`; широкий `[Wrapper] GameCanvasMode/Width/Height`; вывод `width=0`, `height=0` | полный перезапуск |
-| Разрешение -> Доп. вывод | открывает числовой диалог ширины/высоты и намеренно отделяет вывод от игрового обзора. «Автоматически» следует выбранному разрешению игры; при включённом пересчёте мыши произвольное значение 320x240..8192x8192 задаёт область изображения внутри окна без рамки, заголовка и меню. Borderless всё равно использует рабочий стол | эффективная секция `ddraw.ini`, `width` + `height` | сразу и при следующем запуске |
-| Масштаб: Вписать / Целые блоки пикселей / Растянуть / Custom | укладывает логический кадр игры в фактическое окно/рабочий стол. Строка результата показывает коэффициент, viewport и поля; `1:1` означает один игровой пиксель на один выходной. При пересчёте мыши окно может быть меньше кадра, тогда выбранный шейдер фильтрует изображение вниз | `ddraw.ini` `maintas` + `boxing` + `aspect_ratio` | сразу |
-| Фильтр: Lanczos / xBRZ / Bicubic / AMD FSR / xBR lv2 / Bilinear / Без фильтра / CRT | OpenGL-фильтр увеличения или уменьшения; все восемь пресетов и необходимые multipass-файлы входят в `Shaders/`. Для дробного downscale подходят Lanczos, Bicubic и Bilinear | `ddraw.ini` `shader` | сразу, только OpenGL |
-| Рендерер (рестарт): OpenGL (рекомендуется) / GDI / Auto | бэкенд рендера; Auto сначала берёт D3D9, у которого нет шейдерных фильтров | `ddraw.ini` `renderer` | рестарт |
+| Разрешение -> Размер окна/вывода | открывает числовой диалог ширины/высоты и намеренно отделяет вывод от игрового обзора. «Автоматически» следует выбранному разрешению игры; фиксированное значение меняет область изображения внутри окна без рамки, заголовка и меню, но не обзор карты. Безопасным минимумом остаётся логический кадр игры; Borderless всё равно использует рабочий стол | эффективная секция `ddraw.ini`, `width` + `height` | сразу и при следующем запуске |
+| Масштаб: Вписать / Целые блоки пикселей; статус Custom | укладывает логический кадр игры в фактическое окно/рабочий стол. Строка результата показывает коэффициент, viewport и поля; `1:1` означает один игровой пиксель на один выходной. «Вписать» сохраняет геометрию, «Целые» даёт точные блоки. Старый ручной X/Y stretch читается, но в GUI не предлагается | `ddraw.ini` `maintas` + `boxing` + `aspect_ratio` | сразу |
+| Центральное окно: 100% (без увеличения) .. фактический размер на всю высоту (128% при 1366x768, по умолчанию) | центрированный crop DisciplesGL 1.90 увеличивается по вертикали до viewport без искажения геометрии; только в фиксированных/декорированных окнах боковой декор обрезается и пиксели пересчитываются, стратегическая карта не затрагивается, а строка состояния различает выбранное и активное состояние | `C4menu.ini` `stretchWindows` (внутренняя сила эффекта 0..100) | сразу |
+| Фильтр: Lanczos / xBRZ / Bicubic / AMD FSR / xBR lv2 / Bilinear / Без фильтра / CRT | OpenGL-фильтр увеличения или уменьшения; центрированный crop фиксированного экрана поступает в выбранный пресет до финального viewport, включая crop-aware multipass FSR/xBRZ. Все восемь пресетов и необходимые pass-файлы входят в `Shaders/`. Для дробного downscale подходят Lanczos, Bicubic и Bilinear | `ddraw.ini` `shader` | сразу, только OpenGL |
+| Рендерер: OpenGL (рекомендуется) / GDI / Auto | бэкенд рендера; Auto сначала берёт D3D9, у которого нет шейдерных фильтров. Враппер переключает его сразу и сохраняет рабочий резервный backend, если выбранный не запустился | `ddraw.ini` `renderer` | сразу, best effort |
 | VSync | лечит разрывы в эксклюзивном фулскрине ценой небольшой задержки вывода; в окне и безрамочном режиме разрывов нет и так (композиция DWM), там держите выключенным | `ddraw.ini` `vsync` | сразу |
 | Сделать скриншот (PrintScreen) | скриншот средствами рендерера | - | - |
 
@@ -1003,24 +1136,59 @@ override его не отменит. Автосохранение состоян
 
 | Пункт | Что делает | Куда пишет | Применение |
 | --- | --- | --- | --- |
-| Кап FPS (рестарт): Частота монитора / 30 / 60 / 144 | только FPS рендера, логику игры не замедляет | `ddraw.ini` `maxfps` | рестарт |
+| Кап FPS (сразу): Частота монитора / 30 / 60 / 144 | только FPS рендера, логику игры не замедляет | `ddraw.ini` `maxfps` | сразу |
 | Кап скорости игры (на лету): Без капа / 30 / 60 / 100 / 180 (по умолчанию) | кап игрового цикла, см. раздел выше | `ddraw.ini` `maxgameticks` | сразу |
 | 1 CPU: стабильность (рестарт) | помогает от случайных вылетов/зависаний на картах; включено по умолчанию. На Windows 10/Wine весь процесс прижимается к логическому CPU 0; Windows 11 24H2+ прижимает только игровые потоки, не затрагивая внешние аудиопотоки | `ddraw.ini` `singlecpu` | полный рестарт |
 
 ### Плагины
 
 Загружаются только нативные плагины `Mods\*.c4p`; меню каждого сразу появляется в разделе
-**Плагины**. Комплектный Timer настраивается через `C4plugins.ini`, длина отсчёта —
+**Плагины**. **Twitch Stat** включён по умолчанию. На точном exe Russobit/MNS, пока активен
+боевой диалог шириной 990, ЛКМ по занятому изображению отряда создаёт `battle.snapshot`: все 12
+видимых слотов, логическое разрешение, границы боя/портретов и видимые тексты энциклопедии каждого
+уникального отряда. Это transport payload `c4dll.battle-roster`; диагностическое окно по умолчанию
+отключено (`Preview=0`). Для большого портрета используется штатная непрерывная hit-area `150x85`,
+поэтому центральный шов между двумя логическими слотами тоже считается кликом по этому отряду. Вне
+времени жизни боевого UI host вообще не вызывает у плагина draw/tick/input. В плагине нет картинок,
+второй базы или импорта `mss32.dll`. Пока игрок сам
+смотрит штатную энциклопедию по ПКМ, скрытый layout не создаётся и ЛКМ не поглощается; после закрытия
+работа автоматически возобновляется. Вне проверенного контекста обычный клик тоже остаётся игре.
+Успешный снимок поглощает только этот жест ЛКМ down/up, чтобы тот же клик не активировал боевую команду.
+Управление:
+**Плагины > Twitch Stat > Enabled** или `[TwitchStat] Enabled=0|1` в `C4plugins.ini`.
+
+Комплектный Timer настраивается через `C4plugins.ini`, длина отсчёта —
 `TableDuration_0`. Для перемещения часов зажмите **Ctrl+Alt** и перетащите их ЛКМ. На точной
 раскладке Russobit/MNS режим Force начинает отсчёт только после штатной кнопки **OK** в сводке
 начала хода: пока диалог открыт, время не уходит. Pause, Reset и Set сразу обновляют запущенные часы.
 На других exe остаётся прежний сигнал активного хода — непроверенные адреса не применяются.
 При открытом штатном меню слой плагинов остаётся под ним, а диалоги того же процесса — выше:
 таймер больше не перекрывает пункты меню.
+При любой фактической паузе часы становятся белыми. Только явная команда игрока **Pause** добавляет
+`(пауза)`; паузы из-за боя, анимации, владения ходом и тайм-аута идут без надписи. Вне PvP
+учитываемый Force-тайм-аут продолжает подписанный отсчёт через бой и диалоги награды/артефактов;
+отрицательный остаток сохраняется как долг этого игрока на следующий ход. End Day ставится в
+очередь один раз. После разрешения боя host один раз нажимает обычный Close, никогда не выбирает
+награду, ждёт настоящий стратегический интерфейс и освобождение штатного object lock в
+`CPhaseGame`, затем ровно один раз нажимает верхнюю активную `END_TURN`. Тайм-аут защитника
+закрывает локальный экран боя этого клиента, но никогда не завершает стратегический ход атакующего.
+Если защитник израсходовал часы вне своего стратегического хода, этот интервал закрывается ровно
+на нуле, а следующий подтверждённый собственный ход получает новый базовый банк из Timetable:
+защитный Set/Reset больше не переносит `00:00` через границу дня. До этого хода timeout-latch
+применяется заново к каждому новому экземпляру PvP-боя, а Reset/Set и переключатели режима или
+timeout-действий не могут отменить уже наступивший PvP-тайм-аут.
+`AutoBattle=1` — турнирное значение по умолчанию. В PvP часы вместо этого фиксируются ровно на
+`00:00` только в подтверждённой локальной оплачиваемой фазе. Таймер отправляет на GUI-поток команду,
+привязанную к поколению выбора, отмечает штатный `TOG_AUTOBATTLE` и вызывает его собственный functor.
+Latch привязан к экземпляру боя и стороне: до конца этого боя его нельзя снять или обойти кликом,
+горячей клавишей либо ручным боевым действием. Чат и несвязанный ввод мыши/клавиатуры работают.
+Старый прямой вызов UiEvent callback и глобальный фильтр ввода не используются. Изменения из меню
+плагинов применяются и сохраняются сразу, ручные правки `C4plugins.ini` читаются при следующем
+полном запуске игры.
 
 Стандартный меч над декоративной рамкой использует тот же текущий масштаб viewport по X/Y, что и
 рисуемый игрой курсор. Поэтому на границе игрового экрана и расширенной рамки сохраняются одинаковые
-размер и пропорции, в том числе при намеренно растянутом выводе.
+размер и пропорции, в том числе при заданном вручную старом X/Y-маппинге вывода.
 
 ## Работа с сейвами (все версии игры)
 

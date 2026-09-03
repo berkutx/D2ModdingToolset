@@ -174,7 +174,7 @@ index 18cfacdd..c37086c8 100644
 +            "maintas=true\n"
 +            "; Integer mode: at 2x one game pixel becomes a 2x2 block = 4 output pixels\n"
 +            "boxing=false\n"
-+            "; custom aspect override; the menu clears it when Fit / Integer / Stretch is selected\n"
++            "; custom aspect override; the menu clears it when Fit / Integer is selected\n"
 +            "aspect_ratio=\n"
 +            "; scale mouse to the window; required for correct filtered downscaling\n"
 +            "adjmouse=true\n"

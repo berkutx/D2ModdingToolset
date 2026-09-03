@@ -64,12 +64,14 @@ identified by the validated PE size (2895872); all zoom/editor message routing i
 | vftable | `0x6F48CC` slot[1] (patch at `0x6F48D0`) | per-unit frame-speed; orig `CBatUnitAnim::update` = `0x65615E` (experimental) |
 | native | `GameSettings.battleSpeed` / `playerSpeed`(+0x168) / `opponentSpeed` | map/battle speed (no hook; written via the CMidgard chain) |
 
-## Map drag-scroll (`features/featuremenu.cpp`)
+## Map scrolling (`features/featuremenu.cpp`)
 
 | Kind | Address | Purpose |
 | --- | --- | --- |
 | Detour | `0x48E8A0` | iso-view mouse handler — grab+drag map pan |
-| Detour | `0x54249C` | edge-scroll — suppress while dragging |
+| Detour | `0x54249C` | edge-scroll executor — suppress during drag/inactive focus and enforce the unscaled 16ms cadence without replaying idle time as a large step |
+| patched call | `0x541C2D` | exact DisciplesGL v3.01a offset site — replace native `32/16` with a logical-canvas-scaled x/y step |
+| patched call | `0x54241E` | replace `MapGraphics::getScrollSpeed` call: capture native `0/50/100` as 100%/75%/50% distance and return the common 16ms cadence; installed all-or-nothing with `0x541C2D` after the executor detour succeeds |
 | call | `0x5414BC` | capture the exact map center and its sub-tile screen offset on LMB down |
 | call | `0x541588` | pan from that saved center using `button-down anchor - current cursor` |
 | call | `0x5418BA` | native screen-to-map hit test; prevents drag capture over non-map UI |
@@ -128,14 +130,16 @@ the corresponding address in every selected row, plus the distinct V2/V3 object 
 | Detour | `0x5C93D6` | dialog-create — capture dialog/battle buttons |
 | Detour | `0x48A680` | turn-info (player/serial) |
 | Detour | `0x4BA8BB` | Russobit `CBeginTurnInterf` `DLG_BEGIN_TURN/BTN_OK` callback — publish the precise clock-start acknowledgement only after the native handler completes |
-| ref | `0x6CEB5C` | scenario-init (day source) |
+| vtable slot | `0x6CEB5C` | `CMidClient` destructor — clear scenario-owned captures and re-arm the first turn-info edge |
 | ref | `0x6E3294` | button-dtor (button lifetime) |
 
 The `0x4BA8BB` detour is independently signature-gated (`8B 41 20 8B 08 E9 1E EF 01 00`).
 When unavailable, the host reports `UINT32_MAX` and Timer keeps the previous per-client
 `turn_active` edge on other executable layouts. In Force mode the Russobit clock stays frozen while
 `DLG_BEGIN_TURN` is visible and resets its baseline only after the player uses the ordinary OK
-functor; no dialog visibility polling or synthetic click is involved.
+functor. Load Game does not construct that dialog, so a turn-info edge also arms a no-click resume
+path: two consecutive 32-ms GUI ticks must observe the real enabled `END_TURN` control as topmost
+before the host publishes the same acknowledgement serial.
 
 ## Dialog-VO auto-skip (`features/featuremenu.cpp`, `dvo*`)
 

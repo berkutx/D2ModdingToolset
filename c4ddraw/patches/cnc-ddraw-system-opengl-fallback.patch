@@ -15,15 +15,19 @@ index 0a07eb6..ab8dc70 100644
  
      if (g_oglu_hmodule)
      {
-@@ -130,10 +134,33 @@ BOOL oglu_load_dll()
+@@ -130,10 +134,36 @@ BOOL oglu_load_dll()
          glVertex2f = (PFNGLVERTEX2FPROC)real_GetProcAddress(g_oglu_hmodule, "glVertex2f");
++        /* glGetIntegerv is an OpenGL 1.1 core export on Windows.  Asking only
++         * wglGetProcAddress for it can legitimately return NULL. */
++        glGetIntegerv = (PFNGLGETINTEGERVPROC)real_GetProcAddress(g_oglu_hmodule, "glGetIntegerv");
      }
  
 -    return xwglCreateContext && xwglDeleteContext && xwglGetProcAddress && xwglMakeCurrent && glViewport &&
 +    ready = xwglCreateContext && xwglDeleteContext && xwglGetProcAddress && xwglMakeCurrent && glViewport &&
          glBindTexture && glGenTextures && glTexParameteri && glDeleteTextures && glTexImage2D &&
          glDrawElements && glTexSubImage2D && glGetError && glGetString && glGetTexImage && glPixelStorei &&
-         glEnable && glClear && glBegin && glEnd && glTexCoord2f && glVertex2f;
+-        glEnable && glClear && glBegin && glEnd && glTexCoord2f && glVertex2f;
++        glEnable && glClear && glBegin && glEnd && glTexCoord2f && glVertex2f && glGetIntegerv;
 +
 +    /* Old wrapper/Mesa installations can leave either an unloadable application-local shim or a
 +     * DLL that loads but does not expose cnc-ddraw's required WGL/GL entry points.  Windows stops
@@ -50,3 +54,11 @@ index 0a07eb6..ab8dc70 100644
  }
  
  void oglu_init()
+@@ -195,7 +225,6 @@ void oglu_init()
+     wglGetExtensionsStringARB = (PFNWGLGETEXTENSIONSSTRINGARBPROC)xwglGetProcAddress("wglGetExtensionsStringARB");
+ 
+     glTexBuffer = (PFNGLTEXBUFFERPROC)xwglGetProcAddress("glTexBuffer");
+-    glGetIntegerv = (PFNGLGETINTEGERVPROC)xwglGetProcAddress("glGetIntegerv");
+     glGetStringi = (PFNGLGETSTRINGIPROC)xwglGetProcAddress("glGetStringi");
+ 
+     char* glversion = (char*)glGetString(GL_VERSION);

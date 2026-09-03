@@ -1,2 +1,2 @@
-# Unified-diff syntax uses a single space on blank context lines.
-c4ddraw/patches/*.patch whitespace=-blank-at-eol
+# Unified-diff syntax uses a single space on blank context lines, including at EOF.
+c4ddraw/patches/*.patch whitespace=-blank-at-eol,-blank-at-eof

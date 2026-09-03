@@ -5,6 +5,14 @@ name: mss32
 
 on:
   push:
+    # The wrapper development branch and tag namespace are independent of the mod.
+    # Paths alone do not filter tag pushes; preserve other mod tag builds explicitly.
+    branches:
+      - "**"
+      - "!feature/c4dll-bundle"
+    tags:
+      - "**"
+      - "!c4dll-r-*"
     paths:
       - "mss32/**"
       - ".github/workflows/mss32.yml"

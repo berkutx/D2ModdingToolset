@@ -41,8 +41,8 @@ int g_dayTurn = 10;     // bitmask: b0/1/2 = On Day Start Pause/Unpause/Reset; b
 int g_pauseOn = 1;      // Combat Pause: 0 = Off, 1 = PvP, 2 = PvAny
 int g_pauseAnim = 1;    // Animation Pause
 int g_turnDay = 1;      // On Elapse -> End Day
-int g_autoBattle = 1;   // On Elapse -> forced native Auto Battle (PvP)
-int g_elapseFired = 0;  // latch: on-elapse action fired this turn (re-armed when clock is positive)
+int g_autoBattle = 1;   // On Elapse -> native Auto Battle in PvP (tournament default)
+int g_elapseFired = 0;  // latch: on-elapse action fired once for the current turn
 int g_resetExtra = 0;   // Reset Extra Time
 int g_alwaysVisible = 1;
 int g_durBase = 300;    // TableDuration_0 (seconds): per-turn budget in Force mode (day-1 base)
@@ -57,12 +57,13 @@ REAL g_fontSize = 28.0f;
 // ---- runtime clock ----
 int g_paused = 0;       // effective freeze: manualPaused || policyPaused
 int g_manualPaused = 0; // user/menu/DayStart pause; never cleared by an automatic policy transition
+int g_userPaused = 0;   // explicit Pause command; controls only the on-screen "(pause)" marker
 int g_policyPaused = 0; // ownership/combat/animation/timeout pause; recomputed by c4p_tick
 int g_running = 0;      // a real turn has started -> the clock counts. Does NOT run at launch / main
                         // menu, only once the turn begins (strategic view reached).
 DWORD g_baseline = 0;   // tick the current count started from
 DWORD g_pausedAt = 0;   // tick we paused at (clock frozen here while paused)
-int g_extra = 0;        // current player's carried extra time (ms), added to the Force budget
+int g_extra = 0;        // current player's signed bank (ms), added to the Force budget
 // Per-player Force time bank {playerId, accumMs}, searched by id (not indexed): the id is the turn-info
 // player byte and need not be a small index. id == -1 marks a free slot (so player id 0 is valid).
 // 8 slots is ample (<=4 players + neutral/NPC).
@@ -85,7 +86,17 @@ int g_lastPlayer = -1;  // player whose turn it was last (to bank their remainin
 int g_wasActive = 0;    // previous tick's turn_active, to detect the 0->1 (my turn started) edge
 int g_turnAccepted = 0; // Force clock is allowed to run for this local turn (Russobit: only after OK)
 int g_manualSetPending = 0; // preserve a pre-ack Set/Reset across the first accepted-turn edge
-int g_expired = 0;      // Force timeout is clamped/frozen at exactly 00:00
+int g_expired = 0;      // PvP-only latch: Force timeout is clamped/frozen at exactly 00:00
+int g_pvpClampPending = 0; // reached PvP 00:00; safe Auto enqueue has not been accepted yet
+uint32_t g_pvpClampInstance = UINT32_MAX; // never carry a retry into a replacement battle viewer
+uint32_t g_pvpHandledInstance = UINT32_MAX; // last battle snapshot whose safe Auto request was accepted
+uint32_t g_pvpHandledGeneration = UINT32_MAX; // generation pairs with instance; native rejection rearms next choice
+int g_offTurnPvpExhausted = 0; // defender hit PvP zero outside their strategic turn; next own turn gets a fresh bank
+int g_offTurnPvpPlayer = -1;
+int g_offTurnPvpDay = -1;
+int g_postBattleBilling = 0; // PvE reward/close transition still belongs to the accepted local turn
+int g_observedBattleKind = 0;
+uint32_t g_observedBattleInstance = 0;
 int g_curDayBudget = 0; // day captured at the current turn-start (for the previous turn's budget)
 uint32_t g_lastSerial = 0; // last processed turn serial; a bump = a real turn change (off[6] turn-info)
 uint32_t g_lastBeginTurnAck = UINT32_MAX; // UINT32_MAX = host/exe has no precise acknowledgement hook
@@ -115,7 +126,10 @@ DWORD g_shadowColor = 0xFF660000;
 bool g_visible = false;
 unsigned g_sig = 0;
 int g_hitLeft = 0, g_hitTop = 0, g_hitWidth = 0, g_hitHeight = 0;
-int g_canvasWidth = 0, g_canvasHeight = 0;
+int g_layoutLeft = 0, g_layoutTop = 0;
+int g_canvasWidth = 0, g_canvasHeight = 0; // current visible source-space layout extent
+int g_visibleLeft = 0, g_visibleTop = 0, g_visibleWidth = 0, g_visibleHeight = 0;
+int g_presentationZoom1000 = 1000;
 int g_dragging = 0, g_dragDx = 0, g_dragDy = 0;
 
 // ---- time formatting + colours (faithful to timer.mod DrawFrame) ----
@@ -141,12 +155,19 @@ void formatTime(int v9, wchar_t* out)
 // last 20s; white at 00:00 in count-up. No green spare-time branch in v1 (needs carried extra time).
 void pickColors(int v9, int state, int paused, DWORD* text, DWORD* shadow)
 {
+    // One presentation rule for every effective pause source: manual, combat, animation,
+    // ownership/turn boundary, unknown battle state, and timeout.
+    if (paused) {
+        *text = 0xFFFFFFFF;
+        *shadow = 0xFF333333;
+        return;
+    }
     if (state == 2) {
-        const bool blink = !paused && ((v9 < 0) || (v9 < 20000 && (v9 % 1000) > 500));
+        const bool blink = (v9 < 0) || (v9 < 20000 && (v9 % 1000) > 500);
         *text = blink ? 0xFFFF3300 : 0xFFCC9900;
         *shadow = 0xFF660000;
     } else {
-        if (paused || v9 / 1000 == 0) {
+        if (v9 / 1000 == 0) {
             *text = 0xFFFFFFFF;
             *shadow = 0xFF333333;
         } else {
@@ -218,6 +239,37 @@ bool hostHas(size_t memberEnd)
 #define HOST_HAS(member) \
     (hostHas(offsetof(C4P_Host, member) + sizeof(g_host->member)) && g_host->member)
 
+bool hostVisibleGameRect(int* left, int* top, int* width, int* height, int* zoom1000)
+{
+    if (!left || !top || !width || !height || !zoom1000)
+        return false;
+    if (HOST_HAS(get_visible_game_rect)) {
+        int32_t l = 0, t = 0, w = 0, h = 0, z = 1000;
+        if (g_host->get_visible_game_rect(&l, &t, &w, &h, &z) &&
+            l >= 0 && t >= 0 && w > 0 && h > 0 && z >= 1000) {
+            *left = l;
+            *top = t;
+            *width = w;
+            *height = h;
+            *zoom1000 = z;
+            return true;
+        }
+    }
+
+    if (HOST_HAS(get_game_size)) {
+        int32_t w = 0, h = 0;
+        if (g_host->get_game_size(&w, &h) && w > 0 && h > 0) {
+            *left = 0;
+            *top = 0;
+            *width = w;
+            *height = h;
+            *zoom1000 = 1000;
+            return true;
+        }
+    }
+    return false;
+}
+
 // Host battle state for Combat Pause. struct_size-guarded so an older host (no is_in_battle) returns 0.
 int hostInBattle()
 {
@@ -256,6 +308,19 @@ void hostEndDay()
 {
     if (HOST_HAS(end_day))
         g_host->end_day();
+}
+bool hostSupportsForceAutoBattle()
+{
+    return HOST_HAS(force_auto_battle_v2);
+}
+int hostForceAutoBattle(uint32_t expectedBattleInstance)
+{
+    // Never fall back to the legacy 1.7/1.8 slot: those hosts called a native UiEvent callback as
+    // an ordinary function and could capture all input indefinitely. The appended v2 slot is the
+    // explicit compatibility boundary for the GUI-thread TOG_AUTOBATTLE implementation.
+    return hostSupportsForceAutoBattle()
+        ? g_host->force_auto_battle_v2(expectedBattleInstance)
+        : 0;
 }
 void hostCancelElapse()
 {
@@ -308,11 +373,6 @@ int hostTurnPlayerId()
     return HOST_HAS(turn_player_id) ? g_host->turn_player_id() : -1;
 }
 
-int hostForceAutoBattle()
-{
-    return HOST_HAS(force_auto_battle) ? g_host->force_auto_battle() : 0;
-}
-
 // Russobit publishes a monotonic edge only after DLG_BEGIN_TURN's normal BTN_OK callback has
 // completed. Other executable layouts return UINT32_MAX and retain the active-turn-edge behavior.
 uint32_t hostBeginTurnAckSerial()
@@ -355,10 +415,10 @@ int budgetMsForDay(int day)
     return value > INT_MAX ? INT_MAX : static_cast<int>(value);
 }
 
-int clampBankMs(int64_t value)
+int clampSignedMs(int64_t value)
 {
-    if (value <= 0)
-        return 0;
+    if (value < INT_MIN)
+        return INT_MIN;
     return value > INT_MAX ? INT_MAX : static_cast<int>(value);
 }
 
@@ -372,8 +432,9 @@ void readConfig()
     if (g_pauseOn < 0 || g_pauseOn > 2) g_pauseOn = 1;
     g_pauseAnim = g_host->get_config_int(iniSection(), "PauseAnimation", 1) ? 1 : 0;
     g_turnDay = g_host->get_config_int(iniSection(), "TurnDay", 1) ? 1 : 0;
-    // Legacy Retreat is intentionally ignored; it is not migrated into the new action.
     g_autoBattle = g_host->get_config_int(iniSection(), "AutoBattle", 1) ? 1 : 0;
+    // Legacy Retreat remains intentionally unsupported. Auto Battle uses the host's v2 native-UI
+    // request and never calls the old timer-event callback or filters player/chat input.
     g_resetExtra = g_host->get_config_int(iniSection(), "ResetExtraTime", 0) ? 1 : 0;
     g_alwaysVisible = g_host->get_config_int(iniSection(), "AlwaysVisible", 1) ? 1 : 0;
     g_durBase = g_host->get_config_int(iniSection(), "TableDuration_0", 300);
@@ -480,22 +541,21 @@ void refreshMenu()
     chk(kCombatPvAny, s.pauseOn == 2);
     chk(kAnimPause, s.pauseAnim != 0);
     chk(kElapseEndDay, s.turnDay != 0);
+    ena(kElapseAutoBattle, s.state == 2 && hostSupportsForceAutoBattle());
+    chk(kElapseAutoBattle, s.autoBattle != 0);
     ena(kElapseDefend, false);
     chk(kElapseDefend, false);
     ena(kElapseRetreat, false);
     chk(kElapseRetreat, false);
-    ena(kElapseAutoBattle, s.state == 2);
-    chk(kElapseAutoBattle, s.autoBattle != 0);
     chk(kResetExtra, s.resetExtra != 0);
     chk(kAlwaysVis, s.alwaysVisible != 0);
 }
 
 // ---- pause helpers (freeze/resume the clock by adjusting baseline) ----
-void setEffectivePaused(int on)
+void setEffectivePaused(int on, DWORD now)
 {
     if (g_paused == on)
         return;
-    const DWORD now = GetTickCount();
     if (on) {
         g_pausedAt = now; // freeze
     } else {
@@ -504,30 +564,40 @@ void setEffectivePaused(int on)
     g_paused = on;
 }
 
-void syncPauseState()
+void syncPauseState(DWORD now)
 {
-    setEffectivePaused((g_manualPaused || g_policyPaused) ? 1 : 0);
+    setEffectivePaused((g_manualPaused || g_policyPaused) ? 1 : 0, now);
 }
 
-void setManualPaused(int on)
+void setManualPaused(int on, bool userInitiated, DWORD now)
 {
     g_manualPaused = on ? 1 : 0;
-    syncPauseState();
+    g_userPaused = (on && userInitiated) ? 1 : 0;
+    syncPauseState(now);
 }
 
-void setPolicyPaused(int on)
+void setPolicyPaused(int on, DWORD now)
 {
     g_policyPaused = on ? 1 : 0;
-    syncPauseState();
+    syncPauseState(now);
 }
 
-void restart()
+bool pvpTimeoutLocked()
 {
-    g_baseline = GetTickCount();
+    return g_expired || g_pvpClampPending || g_offTurnPvpExhausted;
+}
+
+void restart(DWORD now)
+{
+    g_baseline = now;
     g_pausedAt = g_baseline;
     g_extra = 0;
     g_elapseFired = 0;
     g_expired = 0;
+    g_pvpClampPending = 0;
+    g_pvpClampInstance = UINT32_MAX;
+    g_pvpHandledInstance = UINT32_MAX;
+    g_pvpHandledGeneration = UINT32_MAX;
     hostCancelElapse();
 }
 
@@ -570,6 +640,16 @@ extern "C" int __cdecl c4p_init(const C4P_Host* host)
     g_lastBeginTurnAck = hostBeginTurnAckSerial();
     g_turnAccepted = 0;
     g_expired = 0;
+    g_pvpClampPending = 0;
+    g_pvpClampInstance = UINT32_MAX;
+    g_pvpHandledInstance = UINT32_MAX;
+    g_pvpHandledGeneration = UINT32_MAX;
+    g_offTurnPvpExhausted = 0;
+    g_offTurnPvpPlayer = -1;
+    g_offTurnPvpDay = -1;
+    g_postBattleBilling = 0;
+    g_observedBattleKind = 0;
+    g_observedBattleInstance = 0;
     if (!loadFont()) {
         c4p_shutdown();
         return 0;
@@ -581,7 +661,12 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
 {
     if (!g_host)
         return;
+    (void)now_ms; // resampled after taking g_lock; an older queued timestamp can underflow DWORD math
 
+    int visibleLeft = 0, visibleTop = 0, visibleWidth = 0, visibleHeight = 0;
+    int presentationZoom1000 = 1000;
+    hostVisibleGameRect(&visibleLeft, &visibleTop, &visibleWidth, &visibleHeight,
+                        &presentationZoom1000);
     const int inGame = g_host->is_in_game();
     const int dayNow = hostDay(); // read outside the lock; -1 (unknown) falls back to the day-1 base
     const int strategicActive = inGame ? hostTurnActive() : 0;
@@ -599,9 +684,14 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
     const int animationActive = battleState.animation_active;
     const int playbackLocal = battleState.playback_local;
     const uint32_t beginTurnAck = hostBeginTurnAckSerial();
-    int state, durMs, alwaysVis, paused, running, extra;
+    int state, durMs, alwaysVis, paused, userPaused, running, extra, expired;
+    int pvpClampPending, offTurnPvpExhausted;
     DWORD baseline, pausedAt;
     EnterCriticalSection(&g_lock);
+    // The host timestamp was captured before plugin callbacks and before this lock. A concurrent
+    // menu Set/Reset can therefore publish a newer baseline while this worker waits. Use one sample
+    // taken under the lock for every transition, timeout calculation and rendered snapshot.
+    const DWORD tickNow = GetTickCount();
     const uint32_t serial = g_host->get_turn_serial();
     if (!inGame) {
         // Main menu / between games: timer does NOT run. Keep g_lastSerial synced so the first real
@@ -613,8 +703,19 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         g_manualSetPending = 0;
         g_elapseFired = 0;
         g_expired = 0;
+        g_pvpClampPending = 0;
+        g_pvpClampInstance = UINT32_MAX;
+        g_pvpHandledInstance = UINT32_MAX;
+        g_pvpHandledGeneration = UINT32_MAX;
+        g_offTurnPvpExhausted = 0;
+        g_offTurnPvpPlayer = -1;
+        g_offTurnPvpDay = -1;
+        g_postBattleBilling = 0;
+        g_observedBattleKind = 0;
+        g_observedBattleInstance = battleState.battle_instance;
         g_paused = 0;
         g_manualPaused = 0;
+        g_userPaused = 0;
         g_policyPaused = 0;
         g_curDayBudget = 1;
         g_lastPlayer = -1;
@@ -622,17 +723,29 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         g_lastSerial = serial;
         g_lastBeginTurnAck = beginTurnAck;
     } else {
+        // Battle teardown precedes reward/artifact UI. Keep that interval attached to the already
+        // accepted local turn even if clientTakesTurn briefly drops to zero. A network turn-info
+        // edge is the authoritative end; it prevents this grace state from charging an opponent.
+        if (g_observedBattleKind == 2 && battleKind == 0 &&
+            battleState.battle_instance != g_observedBattleInstance) {
+            g_postBattleBilling = 1;
+            timerTrace("[timer] PvE post-battle billing entered (instance=%u->%u)",
+                       g_observedBattleInstance, battleState.battle_instance);
+        }
+        if (!strategicActive && serial != g_lastSerial)
+            g_postBattleBilling = 0;
+
         // A defender can be attacked before their first strategic turn. Create their one personal
         // Timetable budget on the first verified local PvP unit, without fabricating a strategic
         // turn edge. The next real strategic turn will bank this remainder and add its normal budget.
-        if (g_state == 2 && battleKind == 1 &&
+        if (g_state == 2 && strategicActive == 0 && battleKind == 1 &&
             (battleActive == 1 || playbackLocal == 1) && !g_running) {
             bankClear();
             const int localPlayer = hostTurnPlayerId();
             g_extra = localPlayer >= 0 ? *bankAccum(localPlayer) : 0;
             g_lastPlayer = localPlayer;
-            g_baseline = now_ms;
-            g_pausedAt = now_ms;
+            g_baseline = tickNow;
+            g_pausedAt = tickNow;
             g_curDayBudget = dayNow >= 0 ? dayNow : 1;
             g_running = 1;
             g_expired = 0;
@@ -647,10 +760,16 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         // turn boundary. Unknown role fails closed until one of those two sources is authoritative.
         const int serverRole = hostServerRole();
         const bool preciseAck = serverRole == 1 && beginTurnAck != UINT32_MAX;
+        const bool preserveNonPvpTurn = g_state == 2 && g_turnAccepted &&
+            (battleKind == 2 || g_postBattleBilling);
         const bool acceptedEdge =
             strategicActive && preciseAck && beginTurnAck != g_lastBeginTurnAck;
-        const bool fallbackEdge = strategicActive && serverRole == 0 && !g_wasActive;
-        if (strategicActive && !g_wasActive)
+        // A joiner can load directly into an already-active local turn before server_role becomes
+        // known. Do not make its only acceptance opportunity depend on observing a one-tick 0->1
+        // edge: once the role is verified, one unaccepted active turn is itself the stable edge.
+        const bool fallbackEdge = strategicActive && serverRole == 0 && !g_turnAccepted &&
+                                  !preserveNonPvpTurn;
+        if (strategicActive && !g_wasActive && !preserveNonPvpTurn)
             g_turnAccepted = 0;
 
         if (acceptedEdge || fallbackEdge) {
@@ -663,60 +782,131 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
             if (newPlayer < 0)
                 newPlayer = g_host->get_turn_player();
             const int firstTurn = g_lastPlayer < 0;
+            const int previousPlayer = g_lastPlayer;
+            const int previousDay = g_curDayBudget;
+            const int previousExtra = g_extra;
+            const int manualSetPending = g_manualSetPending;
+            const bool freshBankAfterOffTurnPvp = g_offTurnPvpExhausted != 0;
+            const int exhaustedPlayer = g_offTurnPvpPlayer;
+            const int exhaustedDay = g_offTurnPvpDay;
+            int elapsedPrevious = -1;
+            int bankedPrevious = INT_MIN;
+            const char* bankReason = "simple";
             g_lastSerial = serial;
             hostCancelElapse();
             g_elapseFired = 0; // re-arm the on-elapse latch (even an out-of-time turn auto-skips)
-            g_expired = 0;
+            g_postBattleBilling = 0;
             if (firstTurn)
                 bankClear(); // fresh game
-            if (g_manualSetPending) {
+            if (freshBankAfterOffTurnPvp && g_state == 2) {
+                // A PvP defender spends the old day's local allowance, not the base grant of their
+                // next accepted strategic turn. Do not let a Set/Reset made during the defender
+                // interval preserve the frozen 00:00 baseline across that boundary. Explicitly
+                // close the exhausted bank at zero and open the new day with one clean base budget.
+                if (previousPlayer >= 0)
+                    *bankAccum(previousPlayer) = 0;
+                if (newPlayer >= 0)
+                    *bankAccum(newPlayer) = 0;
+                if (dayNow >= 0)
+                    g_curDayBudget = dayNow;
+                else if (g_curDayBudget < 1)
+                    g_curDayBudget = 1;
+                g_extra = 0;
+                g_baseline = tickNow;
+                g_pausedAt = tickNow;
+                elapsedPrevious = 0;
+                bankedPrevious = 0;
+                bankReason = "fresh-after-off-turn-pvp";
+            } else if (g_manualSetPending) {
                 // Set/Reset is an explicit replacement of the current bank. Do not immediately bank
                 // or reload over it when the next accepted edge arrives (including after a prior turn).
                 if (dayNow >= 0)
                     g_curDayBudget = dayNow;
+                bankReason = "manual-pre-ack";
             } else if (firstTurn) {
                 g_extra = 0;
-                g_baseline = now_ms;
-                g_pausedAt = now_ms;
+                g_baseline = tickNow;
+                g_pausedAt = tickNow;
                 g_curDayBudget = dayNow >= 0 ? dayNow : 1;
+                bankedPrevious = 0;
+                bankReason = "first-turn";
             } else if (g_state == 2) {
-                // Force: bank the PREVIOUS player's remaining (budget + extra - elapsed), then load
-                // the NEW player's bank and start a fresh budget. ResetExtraTime drops the carry.
+                // Force: bank the PREVIOUS player's signed remainder (budget + bank - elapsed),
+                // then load the NEW player's bank and start a fresh budget. Negative overtime is a
+                // debt and must survive ResetExtraTime; that option drops only unused positive time.
                 if (g_lastPlayer >= 0) {
                     // FROZEN clock: the not-my-turn pause set g_pausedAt without advancing
-                    // g_baseline, and this runs BEFORE the resume below. Clamp >=0 so a Set-future
-                    // baseline or GetTickCount wrap cannot inflate carried time.
-                    int elapsedPrev =
-                        (int)((g_paused ? g_pausedAt : now_ms) - g_baseline);
-                    if (elapsedPrev < 0) elapsedPrev = 0;
+                    // g_baseline, and this runs BEFORE the resume below. DWORD subtraction keeps
+                    // one normal GetTickCount wrap correct (turns cannot span the full 49.7 days).
+                    const uint32_t elapsedPrev =
+                        (g_paused ? g_pausedAt : tickNow) - g_baseline;
                     const int budgetPrev = budgetMsForDay(g_curDayBudget);
-                    const int remainingPrev = clampBankMs(
+                    const int remainingPrev = clampSignedMs(
                         static_cast<int64_t>(budgetPrev) + g_extra - elapsedPrev);
-                    *bankAccum(g_lastPlayer) = g_resetExtra ? 0 : remainingPrev;
+                    elapsedPrevious = elapsedPrev > static_cast<uint32_t>(INT_MAX)
+                        ? INT_MAX
+                        : static_cast<int>(elapsedPrev);
+                    bankedPrevious = (g_resetExtra && remainingPrev > 0) ? 0 : remainingPrev;
+                    *bankAccum(g_lastPlayer) = bankedPrevious;
                 }
                 if (dayNow >= 0)
                     g_curDayBudget = dayNow; // retain last-known day if get_day == -1
                 g_extra = (newPlayer >= 0) ? *bankAccum(newPlayer) : 0;
-                g_baseline = now_ms;
-                g_pausedAt = now_ms;
+                g_baseline = tickNow;
+                g_pausedAt = tickNow;
+                bankReason = "normal-rollover";
             } else if (g_state == 1) {
                 // Simple (count-up): apply On-Day-End then On-Day-Start DayTurn bits; otherwise keep
                 // counting across turns (legacy resets only when a Reset bit fires).
-                if (g_dayTurn & 0x20) restart();         // DayEnd Reset
-                if (g_dayTurn & 0x08) setManualPaused(1);      // DayEnd Pause
-                else if (g_dayTurn & 0x10) setManualPaused(0); // DayEnd Unpause
-                if (g_dayTurn & 0x04) restart();         // DayStart Reset
-                if (g_dayTurn & 0x01) setManualPaused(1);      // DayStart Pause
-                else if (g_dayTurn & 0x02) setManualPaused(0); // DayStart Unpause
+                if (g_dayTurn & 0x20) restart(tickNow);         // DayEnd Reset
+                if (g_dayTurn & 0x08) setManualPaused(1, false, tickNow);      // DayEnd Pause
+                else if (g_dayTurn & 0x10) setManualPaused(0, false, tickNow); // DayEnd Unpause
+                if (g_dayTurn & 0x04) restart(tickNow);         // DayStart Reset
+                if (g_dayTurn & 0x01) setManualPaused(1, false, tickNow);      // DayStart Pause
+                else if (g_dayTurn & 0x02) setManualPaused(0, false, tickNow); // DayStart Unpause
             }
+            if (g_state == 2) {
+                const int startBudget = budgetMsForDay(g_curDayBudget);
+                const uint32_t elapsedStartRaw =
+                    (g_paused ? g_pausedAt : tickNow) - g_baseline;
+                const int startElapsed = elapsedStartRaw > static_cast<uint32_t>(INT_MAX)
+                    ? INT_MAX
+                    : static_cast<int>(elapsedStartRaw);
+                const int startRemaining = clampSignedMs(
+                    static_cast<int64_t>(startBudget) + g_extra - elapsedStartRaw);
+                timerTrace("[timer] Force bank opened reason=%s serial=%u player=%d->%d "
+                           "day=%d->%d budget=%d manualPending=%d offTurnPvp=%d/%d/%d "
+                           "previousExtra=%d elapsedPrevious=%d bankedPrevious=%d "
+                           "startExtra=%d startElapsed=%d startRemaining=%d",
+                           bankReason, serial, previousPlayer, newPlayer,
+                           previousDay, g_curDayBudget, startBudget, manualSetPending,
+                           freshBankAfterOffTurnPvp ? 1 : 0, exhaustedPlayer, exhaustedDay,
+                           previousExtra, elapsedPrevious, bankedPrevious,
+                           g_extra, startElapsed, startRemaining);
+            }
+            // These latches belong to the closed PvP/defender epoch. Clear them only after the
+            // bank transition has consumed their provenance; clearing earlier recreated 00:00 via
+            // manualSetPending without leaving enough diagnostics to identify it.
+            g_expired = 0;
+            g_pvpClampPending = 0;
+            g_pvpClampInstance = UINT32_MAX;
+            g_pvpHandledInstance = UINT32_MAX;
+            g_pvpHandledGeneration = UINT32_MAX;
+            g_offTurnPvpExhausted = 0;
+            g_offTurnPvpPlayer = -1;
+            g_offTurnPvpDay = -1;
             g_running = 1;
             g_lastPlayer = newPlayer;
             g_manualSetPending = 0;
         }
 
-        if (!strategicActive)
+        const bool keepAcceptedNonPvpTurn = g_state == 2 && g_turnAccepted &&
+            (battleKind == 2 || g_postBattleBilling);
+        if (!strategicActive && !keepAcceptedNonPvpTurn)
             g_turnAccepted = 0;
     }
+    g_observedBattleKind = battleKind;
+    g_observedBattleInstance = battleState.battle_instance;
     g_wasActive = strategicActive;
 
     // Strategic ownership starts/banks budgets. In PvP there are two verified billable phases:
@@ -725,9 +915,11 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
     // only when Animation Pause is OFF, preserving that option for long slow-motion attacks.
     int wantPause = 0;
     const char* pauseReason = g_running ? "running" : "not-started";
-    if (g_running && g_expired) {
+    if (g_running && (g_expired || g_pvpClampPending || g_offTurnPvpExhausted)) {
         wantPause = 1;
-        pauseReason = "expired";
+        pauseReason = g_pvpClampPending
+            ? "pvp-auto-pending"
+            : (g_offTurnPvpExhausted ? "off-turn-pvp-exhausted" : "expired");
     } else if (g_running && g_state == 2 && battleKind == 1) {
         if (g_pauseOn == 1 || g_pauseOn == 2) {
             wantPause = 1; // explicit Combat Pause overrides local decision-time counting
@@ -756,7 +948,10 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
                 : "battle-selection-closed";
         }
     } else if (g_running && inGame &&
-               (!strategicActive || (g_state == 2 && !g_turnAccepted))) {
+               ((!strategicActive &&
+                 !(g_state == 2 && g_turnAccepted &&
+                   (battleKind == 2 || g_postBattleBilling))) ||
+                (g_state == 2 && !g_turnAccepted))) {
         wantPause = 1; // ordinary strategic boundary / begin-turn acknowledgement
         pauseReason = !strategicActive ? "not-local-strategic-turn" : "turn-not-acknowledged";
     } else if (g_running && g_state == 2) {
@@ -826,7 +1021,7 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         lastPauseReason = pauseReason;
     }
     const int pausedBeforePolicy = g_paused;
-    setPolicyPaused(wantPause);
+    setPolicyPaused(wantPause, tickNow);
     if (g_paused != pausedBeforePolicy) {
         timerTrace("[timer] clock %s (reason=%s strategic=%d battleKind=%d "
                    "battleLocal=%d selection=%d anim=%d playbackLocal=%d "
@@ -836,41 +1031,98 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
                    animationActive, playbackLocal, g_pauseOn, g_pauseAnim);
     }
 
-    // Force timeouts never accrue negative overtime. Freeze the underlying clock at its exact
-    // deadline so banking later also observes a zero remainder. The host latches Auto Battle
-    // independently; Reset/config/cancel_elapse cannot release an already-forced battle.
+    // A non-PvP timeout enters overtime: queue End Day once, but leave the clock running through
+    // combat and its reward dialogs so the final signed debt is banked when ownership really ends.
+    // PvP is different: only a verified local selection/playback can expire, and that battle is
+    // frozen at exactly zero before native Auto Battle is requested for its precise instance.
     const int currentDurMs = budgetMsForDay(g_curDayBudget);
     const bool localPvpSelection = battleKind == 1 && battleActive == 1 &&
                                    battleState.selection_open == 1;
     const bool localPvpPlayback = battleKind == 1 && playbackLocal == 1 && !g_pauseAnim;
     const bool billablePvpPhase = localPvpSelection || localPvpPlayback;
-    const bool canExpireNow = battleKind == 0 ||
-                              (battleKind == 1 ? billablePvpPhase : battleActive >= 0);
-    // The host latch is battle-scoped while the personal bank remains at zero until the next
-    // strategic increment. Reassert idempotently if this client is attacked in another PvP battle
-    // before that increment; an already-forced current battle is unaffected by config changes.
-    if (g_expired && billablePvpPhase && g_autoBattle)
-        hostForceAutoBattle();
-    if (g_state == 2 && g_running && inGame && !g_expired && canExpireNow) {
-        const DWORD effectiveNow = g_paused ? g_pausedAt : now_ms;
+    if (g_state == 2 && g_running && inGame) {
+        const DWORD effectiveNow = g_paused ? g_pausedAt : tickNow;
         const int64_t allowance64 = static_cast<int64_t>(currentDurMs) + g_extra;
         const int64_t remaining = allowance64 -
                                   static_cast<uint32_t>(effectiveNow - g_baseline);
-        if (remaining <= 0) {
-            const int allowance = clampBankMs(allowance64);
-            g_pausedAt = g_baseline + static_cast<DWORD>(allowance);
+        const bool autoSupported = hostSupportsForceAutoBattle();
+        // v2 returning 1 means that the host accepted the asynchronous request, not that the native
+        // toggle ultimately applied it. A native rejection is re-armed by the next coherent battle
+        // generation, while the exact same snapshot remains one-shot and cannot spam the GUI queue.
+        const bool generationRequired = g_autoBattle && autoSupported;
+        const bool pvpSnapshotHandled = g_expired &&
+            g_pvpHandledInstance == battleState.battle_instance &&
+            (!generationRequired ||
+             g_pvpHandledGeneration == battleState.generation);
+        if (battleKind == 1 && billablePvpPhase &&
+            !pvpSnapshotHandled && remaining <= 0) {
+            // Normalize a pre-existing negative bank to an exact zero remainder. Positive
+            // allowances fit in DWORD because both budget and bank are saturated signed ints.
+            const bool firstPvpClamp = !g_pvpClampPending ||
+                g_pvpClampInstance != battleState.battle_instance;
+            if (firstPvpClamp) {
+                if (allowance64 <= 0) {
+                    g_extra = -currentDurMs;
+                    g_pausedAt = g_baseline;
+                } else {
+                    g_pausedAt = g_baseline + static_cast<DWORD>(allowance64);
+                }
+                g_pvpClampPending = 1;
+                g_pvpClampInstance = battleState.battle_instance;
+                if (strategicActive == 0) {
+                    // Sticky until the next accepted local strategic turn. Set/Reset may alter a
+                    // defensive clock, but may not turn its spent 00:00 into the next day's bank.
+                    if (!g_offTurnPvpExhausted) {
+                        g_offTurnPvpPlayer = hostTurnPlayerId();
+                        g_offTurnPvpDay = dayNow >= 0 ? dayNow : g_curDayBudget;
+                    }
+                    g_offTurnPvpExhausted = 1;
+                    g_manualSetPending = 0;
+                    timerTrace("[timer] off-turn PvP bank exhausted; fresh strategic bank pending "
+                               "(player=%d day=%d instance=%u)",
+                               g_offTurnPvpPlayer, g_offTurnPvpDay,
+                               battleState.battle_instance);
+                }
+            }
             g_policyPaused = 1;
             g_paused = 1;
-            g_expired = 1;
+            const int endDayQueued = !g_elapseFired && g_turnDay;
             g_elapseFired = 1;
-            int autoResult = 0;
-            if (battleKind == 1 && g_autoBattle)
-                autoResult = hostForceAutoBattle();
+            int autoQueued = 0;
+            if (g_autoBattle && autoSupported &&
+                g_pvpClampInstance == battleState.battle_instance)
+                autoQueued = hostForceAutoBattle(g_pvpClampInstance);
+
+            // The pending clamp is deliberately not the final expiry latch. Until the host accepts
+            // the exact-instance request, retry only coherent local snapshots and display 00:00;
+            // once accepted, timerhost's semantic submit gate protects the interval before the
+            // native toggle callback and its toggle/hotkey guard protects the latched side after it.
+            if (!g_autoBattle || !autoSupported || autoQueued) {
+                g_expired = 1;
+                g_pvpClampPending = 0;
+                g_pvpHandledInstance = battleState.battle_instance;
+                g_pvpHandledGeneration = battleState.generation;
+                g_pvpClampInstance = UINT32_MAX;
+            }
+            if (endDayQueued)
+                hostEndDay();
+            if (firstPvpClamp || g_expired || endDayQueued) {
+                timerTrace("[timer] PvP timeout clamped at 00:00 "
+                           "(local=%d instance=%u generation=%u auto=%d/%d pending=%d "
+                           "handled=%u/%u "
+                           "offTurnEpoch=%d endDayQueued=%d)",
+                           battleActive, battleState.battle_instance, battleState.generation,
+                           g_autoBattle, autoQueued, g_pvpClampPending,
+                           g_pvpHandledInstance, g_pvpHandledGeneration,
+                           g_offTurnPvpExhausted, endDayQueued);
+            }
+        } else if (battleKind != 1 && !g_elapseFired && remaining <= 0) {
+            g_elapseFired = 1;
             if (g_turnDay)
                 hostEndDay();
-            timerTrace("[timer] timeout clamped at 00:00 (pvp=%d local=%d auto=%d/%d endDay=%d)",
-                       battleKind == 1 ? 1 : 0, battleActive, g_autoBattle,
-                       autoResult, g_turnDay);
+            timerTrace("[timer] non-PvP timeout entered signed overtime "
+                       "(battleKind=%d local=%d endDay=%d)",
+                       battleKind, battleActive, g_turnDay);
         }
     }
 
@@ -878,10 +1130,14 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
     durMs = currentDurMs; // captured-day budget (matches the bank; no mid-turn jump)
     alwaysVis = g_alwaysVisible;
     paused = g_paused;
+    userPaused = g_userPaused;
     running = g_running;
     baseline = g_baseline;
     pausedAt = g_pausedAt;
     extra = g_extra;
+    expired = g_expired;
+    pvpClampPending = g_pvpClampPending;
+    offTurnPvpExhausted = g_offTurnPvpExhausted;
     LeaveCriticalSection(&g_lock);
 
     // Visible = enabled AND (always-visible OR in a game). Counting = only after a real turn started.
@@ -891,15 +1147,20 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
     if (visible) {
         int v9;
         if (running) {
-            const DWORD effNow = paused ? pausedAt : now_ms; // clock frozen while paused
-            const int elapsed = (int)(effNow - baseline);
+            const DWORD effNow = paused ? pausedAt : tickNow; // one coherent locked clock sample
+            const uint32_t elapsed = effNow - baseline;
             v9 = state == 2
-                ? clampBankMs(static_cast<int64_t>(durMs) + extra - elapsed)
-                : elapsed; // Force: budget + extra - elapsed
+                ? ((expired || pvpClampPending || offTurnPvpExhausted) ? 0
+                           : clampSignedMs(static_cast<int64_t>(durMs) + extra - elapsed))
+                : (elapsed > static_cast<uint32_t>(INT_MAX)
+                       ? INT_MAX
+                       : static_cast<int>(elapsed)); // Force: budget + signed bank - elapsed
         } else {
             v9 = 0; // not started yet: show 00:00 until the turn is active
         }
         formatTime(v9, text);
+        if (paused && userPaused)
+            lstrcatW(text, L" (\u043f\u0430\u0443\u0437\u0430)");
         pickColors(v9, state, paused, &tc, &sc);
     }
 
@@ -908,12 +1169,24 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         sig = sig * 131 + (unsigned)*p;
     sig = sig * 131 + tc;
     sig = sig * 131 + sc;
+    sig = sig * 131 + static_cast<unsigned>(visibleLeft);
+    sig = sig * 131 + static_cast<unsigned>(visibleTop);
+    sig = sig * 131 + static_cast<unsigned>(visibleWidth);
+    sig = sig * 131 + static_cast<unsigned>(visibleHeight);
+    sig = sig * 131 + static_cast<unsigned>(presentationZoom1000);
     if (sig != g_sig) {
         g_sig = sig;
         lstrcpynW(g_text, text, 64);
         g_textColor = tc;
         g_shadowColor = sc;
         g_visible = visible;
+        EnterCriticalSection(&g_lock);
+        g_visibleLeft = visibleLeft;
+        g_visibleTop = visibleTop;
+        g_visibleWidth = visibleWidth;
+        g_visibleHeight = visibleHeight;
+        g_presentationZoom1000 = presentationZoom1000;
+        LeaveCriticalSection(&g_lock);
         g_host->invalidate();
     }
 }
@@ -925,7 +1198,24 @@ extern "C" int __cdecl c4p_draw(C4P_Canvas* canvas)
     EnterCriticalSection(&g_lock);
     const int anchorX = g_anchorX;
     const int anchorY = g_anchorY;
+    int visibleLeft = g_visibleLeft;
+    int visibleTop = g_visibleTop;
+    int visibleWidth = g_visibleWidth;
+    int visibleHeight = g_visibleHeight;
+    int presentationZoom1000 = g_presentationZoom1000;
     LeaveCriticalSection(&g_lock);
+    if (visibleLeft < 0 || visibleTop < 0 || visibleWidth <= 0 || visibleHeight <= 0 ||
+        visibleLeft + visibleWidth > canvas->width ||
+        visibleTop + visibleHeight > canvas->height) {
+        visibleLeft = 0;
+        visibleTop = 0;
+        visibleWidth = canvas->width;
+        visibleHeight = canvas->height;
+        presentationZoom1000 = 1000;
+    }
+    if (presentationZoom1000 < 1000)
+        presentationZoom1000 = 1000;
+    const REAL inverseZoom = 1000.0f / static_cast<REAL>(presentationZoom1000);
     Bitmap bmp(canvas->width, canvas->height, canvas->stride, PixelFormat32bppARGB,
                (BYTE*)canvas->pixels);
     Graphics g(&bmp);
@@ -936,26 +1226,36 @@ extern "C" int __cdecl c4p_draw(C4P_Canvas* canvas)
     g.MeasureString(g_text, -1, g_font, layout, fmt, &bounds);
     // Use one integer extent for both drawing and drag normalization. Mixing the fractional GDI+
     // measure with a rounded hit rectangle produces a visible sub-pixel re-anchor on first move.
-    const int textWidth = (int)(bounds.Width + 0.999f);
-    const int textHeight = (int)(bounds.Height + 0.999f);
-    const REAL x = (canvas->width - textWidth) * (anchorX / 10000.0f);
-    const REAL y = (canvas->height - textHeight) * (anchorY / 10000.0f);
+    const int textWidth = (int)(bounds.Width * inverseZoom + 0.999f);
+    const int textHeight = (int)(bounds.Height * inverseZoom + 0.999f);
+    const int freeWidth = visibleWidth > textWidth ? visibleWidth - textWidth : 0;
+    const int freeHeight = visibleHeight > textHeight ? visibleHeight - textHeight : 0;
+    const REAL x = visibleLeft + freeWidth * (anchorX / 10000.0f);
+    const REAL y = visibleTop + freeHeight * (anchorY / 10000.0f);
     EnterCriticalSection(&g_lock);
-    g_canvasWidth = canvas->width;
-    g_canvasHeight = canvas->height;
+    g_layoutLeft = visibleLeft;
+    g_layoutTop = visibleTop;
+    g_canvasWidth = visibleWidth;
+    g_canvasHeight = visibleHeight;
     g_hitLeft = (int)x;
     g_hitTop = (int)y;
     g_hitWidth = textWidth;
     g_hitHeight = textHeight;
     LeaveCriticalSection(&g_lock);
-    const REAL w = (REAL)canvas->width, h = (REAL)canvas->height;
+    // The final viewport enlarges this source layer. Draw the clock by the inverse factor so its
+    // apparent size and shadow stay stable while its anchor follows the actually visible crop.
+    g.ScaleTransform(inverseZoom, inverseZoom);
+    const REAL drawX = x / inverseZoom;
+    const REAL drawY = y / inverseZoom;
+    const REAL w = (REAL)canvas->width / inverseZoom;
+    const REAL h = (REAL)canvas->height / inverseZoom;
     Color shadowCol(g_shadowColor);
     SolidBrush shadowBrush(shadowCol);
-    RectF shadowRect(x + 1.0f, y + 2.0f, w, h);
+    RectF shadowRect(drawX + 1.0f, drawY + 2.0f, w, h);
     g.DrawString(g_text, -1, g_font, shadowRect, fmt, &shadowBrush);
     Color textCol(g_textColor);
     SolidBrush textBrush(textCol);
-    RectF textRect(x, y, w, h);
+    RectF textRect(drawX, drawY, w, h);
     g.DrawString(g_text, -1, g_font, textRect, fmt, &textBrush);
     return 1;
 }
@@ -997,10 +1297,18 @@ extern "C" int __cdecl c4p_mouse(UINT msg, WPARAM, int x, int y)
         const int freeY = g_canvasHeight > g_hitHeight ? g_canvasHeight - g_hitHeight : 0;
         int left = x - g_dragDx;
         int top = y - g_dragDy;
-        if (left < 0) left = 0; else if (left > freeX) left = freeX;
-        if (top < 0) top = 0; else if (top > freeY) top = freeY;
-        g_anchorX = freeX ? (left * 10000 + freeX / 2) / freeX : 0;
-        g_anchorY = freeY ? (top * 10000 + freeY / 2) / freeY : 0;
+        const int maxLeft = g_layoutLeft + freeX;
+        const int maxTop = g_layoutTop + freeY;
+        if (left < g_layoutLeft) left = g_layoutLeft;
+        else if (left > maxLeft) left = maxLeft;
+        if (top < g_layoutTop) top = g_layoutTop;
+        else if (top > maxTop) top = maxTop;
+        g_anchorX = freeX
+            ? ((left - g_layoutLeft) * 10000 + freeX / 2) / freeX
+            : 0;
+        g_anchorY = freeY
+            ? ((top - g_layoutTop) * 10000 + freeY / 2) / freeY
+            : 0;
         g_hitLeft = left;
         g_hitTop = top;
         anchorX = g_anchorX;
@@ -1142,12 +1450,31 @@ INT_PTR CALLBACK setDlgProc(HWND h, UINT m, WPARAM w, LPARAM)
                 ? INT_MAX
                 : static_cast<int>(seconds * 1000u);
             const int day = hostDay();
-            const DWORD now = GetTickCount();
+            const int strategicAtSet = hostTurnActive();
+            const int localPlayerAtSet = hostTurnPlayerId();
             EnterCriticalSection(&g_lock);
+            const DWORD now = GetTickCount();
+            if (pvpTimeoutLocked()) {
+                timerTrace("[timer] Set ignored while PvP timeout is locked "
+                           "(strategic=%d expired=%d pending=%d offTurnEpoch=%d)",
+                           strategicAtSet, g_expired, g_pvpClampPending,
+                           g_offTurnPvpExhausted);
+                LeaveCriticalSection(&g_lock);
+                MessageBeep(MB_ICONWARNING);
+                return TRUE;
+            }
             if (g_state == 2) {
                 g_curDayBudget = day >= 0 ? day : 1;
                 g_baseline = now;
                 g_extra = desiredMs - budgetMsForDay(g_curDayBudget);
+                // Set before this client's first own turn still belongs to its off-turn defensive
+                // interval. Bind that provenance so the accepted edge banks the remainder before
+                // adding the ordinary new-day budget instead of treating it as a fresh game.
+                if (!g_turnAccepted && strategicAtSet == 0 &&
+                    g_lastPlayer < 0 && localPlayerAtSet >= 0) {
+                    bankClear();
+                    g_lastPlayer = localPlayerAtSet;
+                }
             } else if (g_state == 1) {
                 g_baseline = now - static_cast<DWORD>(desiredMs); // elapsed = requested seconds
             } else {
@@ -1155,10 +1482,21 @@ INT_PTR CALLBACK setDlgProc(HWND h, UINT m, WPARAM w, LPARAM)
             }
             g_pausedAt = now;
             g_running = 1; // a set time implies the clock is active
-            g_manualSetPending = g_turnAccepted ? 0 : 1;
+            // Only a local strategic pre-ack Set belongs to the upcoming accepted turn. A Set on
+            // somebody else's turn edits the current defensive interval and must still receive the
+            // ordinary next-turn budget.
+            g_manualSetPending = (!g_turnAccepted && strategicAtSet != 0) ? 1 : 0;
             g_elapseFired = 0;
             g_expired = 0;
+            g_pvpClampPending = 0;
+            g_pvpClampInstance = UINT32_MAX;
+            g_pvpHandledInstance = UINT32_MAX;
+            g_pvpHandledGeneration = UINT32_MAX;
             hostCancelElapse();
+            timerTrace("[timer] Set applied remaining=%dms day=%d strategic=%d "
+                       "accepted=%d manualPending=%d intervalPlayer=%d",
+                       desiredMs, g_curDayBudget, strategicAtSet,
+                       g_turnAccepted, g_manualSetPending, g_lastPlayer);
             LeaveCriticalSection(&g_lock);
             if (g_host) g_host->invalidate();
             EndDialog(h, 1);
@@ -1167,7 +1505,7 @@ INT_PTR CALLBACK setDlgProc(HWND h, UINT m, WPARAM w, LPARAM)
         case IDC_SET_PAUSE:
             EnterCriticalSection(&g_lock);
             if (g_state != 0 && g_running)
-                setManualPaused(g_manualPaused ? 0 : 1);
+                setManualPaused(g_manualPaused ? 0 : 1, true, GetTickCount());
             LeaveCriticalSection(&g_lock);
             if (g_host) g_host->invalidate();
             updateSetDlgPauseBtn(h);
@@ -1217,10 +1555,15 @@ extern "C" HMENU __cdecl c4p_menu(int base_cmd_id)
     AppendMenuA(force, MF_SEPARATOR, 0, nullptr);
     HMENU elapse = CreatePopupMenu();
     AppendMenuA(elapse, MF_STRING, b + kElapseEndDay, "&End Day");
+    AppendMenuA(elapse,
+                MF_STRING | (hostSupportsForceAutoBattle() ? 0 : MF_GRAYED),
+                b + kElapseAutoBattle,
+                hostSupportsForceAutoBattle()
+                    ? "&Auto Battle"
+                    : "Auto Battle (update C4dll-R.dll)");
+    AppendMenuA(elapse, MF_SEPARATOR, 0, nullptr);
     AppendMenuA(elapse, MF_STRING | MF_GRAYED, b + kElapseDefend, "&Defend");
     AppendMenuA(elapse, MF_STRING | MF_GRAYED, b + kElapseRetreat, "&Retreat");
-    AppendMenuA(elapse, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(elapse, MF_STRING, b + kElapseAutoBattle, "&Auto Battle");
     AppendMenuA(force, MF_POPUP, (UINT_PTR)elapse, "On &Elapse");
     AppendMenuA(force, MF_SEPARATOR, 0, nullptr);
     AppendMenuA(force, MF_STRING, b + kResetExtra, "&Reset Extra Time");
@@ -1248,32 +1591,67 @@ extern "C" void __cdecl c4p_command(int cmd)
     const int off = cmd - g_base;
     HWND hwnd = g_host->get_hwnd();
     const int commandDay = off == kReset ? hostDay() : -1;
+    const int commandStrategic = off == kReset ? hostTurnActive() : -1;
+    const int commandPlayer = off == kReset ? hostTurnPlayerId() : -1;
+    int rejectedLockedCommand = 0;
 
     EnterCriticalSection(&g_lock);
+    const DWORD commandNow = GetTickCount();
     switch (off) {
     case kSimpleOn:
     case kForceOn: {
+        if (pvpTimeoutLocked()) {
+            timerTrace("[timer] mode toggle ignored while PvP timeout is locked");
+            rejectedLockedCommand = 1;
+            break;
+        }
         const int target = (off == kForceOn) ? 2 : 1;
         g_state = (g_state == target) ? 0 : target;
-        if (g_state) restart();
+        if (g_state) restart(commandNow);
         else { g_elapseFired = 0; g_expired = 0; hostCancelElapse(); }
         g_manualSetPending = 0;
         g_manualPaused = 0;
+        g_userPaused = 0;
         g_policyPaused = 0;
         g_paused = 0;
+        g_pvpClampPending = 0;
+        g_pvpClampInstance = UINT32_MAX;
+        g_pvpHandledInstance = UINT32_MAX;
+        g_pvpHandledGeneration = UINT32_MAX;
+        g_offTurnPvpExhausted = 0;
+        g_offTurnPvpPlayer = -1;
+        g_offTurnPvpDay = -1;
+        g_postBattleBilling = 0;
         persist("Enabled", g_state);
         break;
     }
     case kPause:
         if (g_state != 0 && g_running)
-            setManualPaused(g_manualPaused ? 0 : 1);
+            setManualPaused(g_manualPaused ? 0 : 1, true, commandNow);
         break;
     case kReset:
         if (g_state != 0) {
-            restart();
+            if (pvpTimeoutLocked()) {
+                timerTrace("[timer] Reset ignored while PvP timeout is locked "
+                           "(strategic=%d expired=%d pending=%d offTurnEpoch=%d)",
+                           commandStrategic, g_expired, g_pvpClampPending,
+                           g_offTurnPvpExhausted);
+                rejectedLockedCommand = 1;
+                break;
+            }
+            restart(commandNow);
             g_running = 1;
             g_curDayBudget = commandDay >= 0 ? commandDay : 1;
-            g_manualSetPending = g_turnAccepted ? 0 : 1;
+            if (!g_turnAccepted && commandStrategic == 0 &&
+                g_lastPlayer < 0 && commandPlayer >= 0) {
+                bankClear();
+                g_lastPlayer = commandPlayer;
+            }
+            g_manualSetPending = (!g_turnAccepted && commandStrategic != 0) ? 1 : 0;
+            timerTrace("[timer] Reset applied day=%d strategic=%d accepted=%d "
+                       "manualPending=%d intervalPlayer=%d",
+                       g_curDayBudget, commandStrategic,
+                       g_turnAccepted, g_manualSetPending, g_lastPlayer);
         }
         break;
     case kDayStartPause:   g_dayTurn = (g_dayTurn & 0x3C) | 1;  persist("DayTurn", g_dayTurn); break;
@@ -1287,13 +1665,23 @@ extern "C" void __cdecl c4p_command(int cmd)
     case kCombatPvAny:     g_pauseOn = off - kCombatOff;        persist("PauseOn", g_pauseOn); break;
     case kAnimPause:       g_pauseAnim = !g_pauseAnim;          persist("PauseAnimation", g_pauseAnim); break;
     case kElapseEndDay:
+        if (pvpTimeoutLocked()) {
+            timerTrace("[timer] End Day option ignored while PvP timeout is locked");
+            rejectedLockedCommand = 1;
+            break;
+        }
         g_turnDay = !g_turnDay;
         if (!g_turnDay) { g_elapseFired = 0; hostCancelElapse(); }
         persist("TurnDay", g_turnDay);
         break;
     case kElapseAutoBattle:
-        g_autoBattle = !g_autoBattle;
-        persist("AutoBattle", g_autoBattle);
+        if (pvpTimeoutLocked()) {
+            timerTrace("[timer] Auto Battle option ignored while PvP timeout is locked");
+            rejectedLockedCommand = 1;
+        } else if (hostSupportsForceAutoBattle()) {
+            g_autoBattle = !g_autoBattle;
+            persist("AutoBattle", g_autoBattle);
+        }
         break;
     case kElapseDefend:
     case kElapseRetreat:
@@ -1304,6 +1692,8 @@ extern "C" void __cdecl c4p_command(int cmd)
         break;
     }
     LeaveCriticalSection(&g_lock);
+    if (rejectedLockedCommand)
+        MessageBeep(MB_ICONWARNING);
 
     // Dialogs / message boxes (UI thread, outside the lock).
     if (off == kTimetable) {

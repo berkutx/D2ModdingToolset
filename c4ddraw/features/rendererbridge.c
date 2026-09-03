@@ -81,7 +81,8 @@ BOOL DDPhysicalPeekMessage(MSG* message, HWND hwnd, UINT first, UINT last, UINT 
 }
 
 /* A plugin canvas update is a presentation update even when the game-owned primary did not change.
- * Wake the existing renderer semaphore so a paused/idle game still uploads the next timer second. */
+ * Wake the existing renderer semaphore so a paused/idle game still uploads the next timer second.
+ * Deliberately do not publish pending Hor+ layout here: no matching game pixels were published. */
 void DDInvalidatePluginFrame(void)
 {
     if (InterlockedExchangeAdd(&g_ddraw.ref, 0) > 0 && g_ddraw.render.sem)
@@ -619,6 +620,8 @@ void DDSetGameCanvasMetrics(int width, int height, int inject_resolution)
  * change. Force OpenGL/D3D9 to upload the corresponding raw/decorated frame. */
 void DDInvalidateDecorativeFrame(void)
 {
+    /* Recompose/wake only. Publishing pending layout here could pair a classifier result with the
+     * previous primary pixels; actual primary Blt/Flip/DC/Unlock owns that publication. */
     if (!g_ddraw.ref)
         return;
 
@@ -628,23 +631,186 @@ void DDInvalidateDecorativeFrame(void)
 }
 
 /*
- * DisciplesGL 2.0.2 "simple zoom" state. Keep this in the wrapper-owned bridge rather than an
- * upstream cnc-ddraw patch: wndproc/render backends only call the narrow integration functions below.
+ * Two presentation-only zoom stages share the existing final-viewport integration:
  *
- * Fixed point makes the UI thread writes and renderer-thread reads atomic on 32-bit Windows.
+ *  1. DisciplesGL 1.90 "Stretch windows" is a centered, caller-persisted 0..100 percent. At 100%
+ *     it crops a wide canvas to its 600-pixel-high, 800x600-equivalent view and enlarges that crop
+ *     back to the output. Zero disables this base stage.
+ *  2. DisciplesGL 2.0.2 Ctrl+Wheel remains a process-local 1.0x..8.0x extra zoom around the cursor.
+ *
+ * Keep this state in the wrapper-owned bridge rather than an upstream cnc-ddraw patch:
+ * wndproc/render backends only call the narrow integration functions below. Fixed point makes the
+ * UI thread writes and renderer-thread reads atomic on 32-bit Windows.
  */
-static volatile LONG g_simple_zoom_1000 = 1000; /* 1.0 .. 8.0 */
+static volatile LONG g_window_stretch_percent = 100; /* 0 (off) .. 100 */
+static volatile LONG g_simple_zoom_1000 = 1000; /* extra zoom: 1.0 .. 8.0 */
 static volatile LONG g_simple_anchor_x_100000 = 50000; /* point inside the rendered viewport */
 static volatile LONG g_simple_anchor_y_100000 = 50000;
 
-/* Menu-side status only: a zoomed viewport is no longer a true 1:1 presentation. */
-int DDGetSimpleZoom1000(void)
+static int dd_window_stretch_layout_active(void)
+{
+    int content_width = 0;
+    int content_height = 0;
+    int wide_battle = 0;
+
+    /*
+     * v1.90 IsZoomed required borders.active: "Stretch windows" enlarged fixed-size dialogs but
+     * never the strategic map. The decorative compositor owns the equivalent address-gated,
+     * per-surface signal in C4dll-R. Ctrl+Wheel is deliberately not gated and is composed below as
+     * the independent extra stage.
+     */
+    return horplus_get_decor_layout(
+        &content_width, &content_height, &wide_battle) != 0;
+}
+
+/* Exact integer source crop from DisciplesGL 1.90 Config::CalcZoomed. The original truncates each
+ * positive reduction through DWORD independently; at 1366x768 this makes 100% exactly 1068x600. */
+int DDCalcWindowStretchCrop(
+    int game_width, int game_height, int percent,
+    int* left, int* top, int* crop_width, int* crop_height)
+{
+    int width = game_width;
+    int height = game_height;
+
+    if (percent < 0)
+        percent = 0;
+    else if (percent > 100)
+        percent = 100;
+
+    if (percent > 0 && game_width > 0 && game_height > 0)
+    {
+        const float aspect = (float)game_width / (float)game_height;
+        if (aspect >= 4.0f / 3.0f)
+        {
+            const float fixed_width = 600.0f * aspect;
+            width = game_width - (int)(DWORD)(
+                ((float)game_width - fixed_width) * (float)percent * 0.01f);
+            height = game_height - (int)(DWORD)(
+                ((float)game_height - 600.0f) * (float)percent * 0.01f);
+        }
+        else
+        {
+            const float fixed_height = 800.0f / aspect;
+            width = game_width - (int)(DWORD)(
+                ((float)game_width - 800.0f) * (float)percent * 0.01f);
+            height = game_height - (int)(DWORD)(
+                ((float)game_height - fixed_height) * (float)percent * 0.01f);
+        }
+    }
+
+    if (game_width <= 0 || game_height <= 0)
+    {
+        width = game_width;
+        height = game_height;
+    }
+    else
+    {
+        if (width < 1)
+            width = 1;
+        else if (width > game_width)
+            width = game_width;
+        if (height < 1)
+            height = 1;
+        else if (height > game_height)
+            height = game_height;
+    }
+
+    if (left)
+        *left = game_width > width ? (game_width - width) >> 1 : 0;
+    if (top)
+        *top = game_height > height ? (game_height - height) >> 1 : 0;
+    if (crop_width)
+        *crop_width = width;
+    if (crop_height)
+        *crop_height = height;
+
+    return game_width > 0 && game_height > 0 &&
+        (width != game_width || height != game_height);
+}
+
+/* The renderer consumes only the published surface layout, so scene classification and crop are
+ * paired with the pixels which caused the primary-surface notification. */
+int DDGetWindowStretchCrop(
+    int game_width, int game_height,
+    int* left, int* top, int* crop_width, int* crop_height)
+{
+    const LONG percent = InterlockedExchangeAdd(&g_window_stretch_percent, 0);
+
+    if (percent > 0 && dd_window_stretch_layout_active())
+        return DDCalcWindowStretchCrop(
+            game_width, game_height, (int)percent,
+            left, top, crop_width, crop_height);
+
+    if (left)
+        *left = 0;
+    if (top)
+        *top = 0;
+    if (crop_width)
+        *crop_width = game_width;
+    if (crop_height)
+        *crop_height = game_height;
+    return 0;
+}
+
+static double dd_window_stretch_zoom(int game_width, int game_height)
+{
+    int crop_width = game_width;
+    int crop_height = game_height;
+
+    if (!DDGetWindowStretchCrop(
+            game_width, game_height, NULL, NULL, &crop_width, &crop_height))
+        return 1.0;
+
+    if ((double)game_width / (double)game_height >= 4.0 / 3.0)
+        return crop_height > 0 ? (double)game_height / crop_height : 1.0;
+
+    return crop_width > 0 ? (double)game_width / crop_width : 1.0;
+}
+
+/* The caller owns persistence; changing the preset also restores a deterministic centered view. */
+void DDSetWindowStretchPercent(int percent)
+{
+    if (percent < 0)
+        percent = 0;
+    else if (percent > 100)
+        percent = 100;
+
+    InterlockedExchange(&g_window_stretch_percent, percent);
+    InterlockedExchange(&g_simple_zoom_1000, 1000);
+    InterlockedExchange(&g_simple_anchor_x_100000, 50000);
+    InterlockedExchange(&g_simple_anchor_y_100000, 50000);
+
+    InterlockedExchange(&g_ddraw.render.clear_screen, TRUE);
+    if (g_ddraw.render.sem)
+        ReleaseSemaphore(g_ddraw.render.sem, 1, NULL);
+}
+
+int DDGetWindowStretchPercent(void)
+{
+    return (int)InterlockedExchangeAdd(&g_window_stretch_percent, 0);
+}
+
+int DDIsWindowStretchActive(void)
+{
+    return DDGetWindowStretchCrop(
+        g_ddraw.width, g_ddraw.height, NULL, NULL, NULL, NULL);
+}
+
+int DDGetSimpleZoomExtra1000(void)
 {
     return (int)InterlockedExchangeAdd(&g_simple_zoom_1000, 0);
 }
 
+/* Menu-side status: any base or extra zoom means the final presentation is no longer true 1:1. */
+int DDGetSimpleZoom1000(void)
+{
+    const double base = dd_window_stretch_zoom(g_ddraw.width, g_ddraw.height);
+    const double extra = (double)DDGetSimpleZoomExtra1000() / 1000.0;
+    return (int)(base * extra * 1000.0 + 0.5);
+}
+
 /*
- * Exact wheel policy from DisciplesGL 2.0.2:
+ * Exact extra-zoom wheel policy from DisciplesGL 2.0.2:
  *   Ctrl+wheel up   : +0.1
  *   Ctrl+wheel down : -0.4
  *   clamp           : 1.0 .. 8.0
@@ -701,23 +867,39 @@ int DDHandleSimpleZoom(HWND hwnd, WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
-/* Apply the inverse of DDApplySimpleZoomViewport to game-space mouse coordinates. */
+/* Undo the extra destination zoom, then map the normal output into the exact source crop. */
 void DDApplySimpleZoomMouse(int* x, int* y, int game_width, int game_height)
 {
     const LONG zoom_i = InterlockedExchangeAdd(&g_simple_zoom_1000, 0);
-    if (!x || !y || zoom_i == 1000 || game_width <= 0 || game_height <= 0)
+    int crop_left = 0;
+    int crop_top = 0;
+    int crop_width = game_width;
+    int crop_height = game_height;
+
+    if (!x || !y || game_width <= 0 || game_height <= 0)
+        return;
+
+    DDGetWindowStretchCrop(
+        game_width, game_height,
+        &crop_left, &crop_top, &crop_width, &crop_height);
+    if (zoom_i == 1000 && crop_width == game_width && crop_height == game_height)
         return;
 
     {
-        const double zoom = (double)zoom_i / 1000.0;
+        const double extra_zoom = (double)zoom_i / 1000.0;
         const double anchor_x =
             (double)InterlockedExchangeAdd(&g_simple_anchor_x_100000, 0) / 100000.0;
         const double anchor_y =
             (double)InterlockedExchangeAdd(&g_simple_anchor_y_100000, 0) / 100000.0;
         const double game_anchor_x = anchor_x * (double)game_width;
         const double game_anchor_y = anchor_y * (double)game_height;
-        *x = (int)(game_anchor_x + ((double)*x - game_anchor_x) / zoom);
-        *y = (int)(game_anchor_y + ((double)*y - game_anchor_y) / zoom);
+        double logical_x = game_anchor_x + ((double)*x - game_anchor_x) / extra_zoom;
+        double logical_y = game_anchor_y + ((double)*y - game_anchor_y) / extra_zoom;
+
+        logical_x = (double)crop_left + logical_x * (double)crop_width / game_width;
+        logical_y = (double)crop_top + logical_y * (double)crop_height / game_height;
+        *x = (int)logical_x;
+        *y = (int)logical_y;
         if (*x < 0) *x = 0;
         if (*x >= game_width) *x = game_width - 1;
         if (*y < 0) *y = 0;
@@ -725,18 +907,16 @@ void DDApplySimpleZoomMouse(int* x, int* y, int game_width, int game_height)
     }
 }
 
-/*
- * Expand the final destination rectangle around the cursor anchor. This is algebraically equivalent
- * to the original wrapper's final-quad transform and works for OpenGL, Direct3D 9 and GDI alike.
- * OpenGL viewports use a bottom-left origin; Direct3D/GDI use top-left.
- */
+/* Expand only the v2.0.2 Ctrl+Wheel destination rectangle. The v1.90 Stretch windows stage is an
+ * integer source crop, applied by the renderer before interpolation. */
 void DDApplySimpleZoomViewport(int bottom_origin, int* x, int* y, int* width, int* height)
 {
     const LONG zoom_i = InterlockedExchangeAdd(&g_simple_zoom_1000, 0);
+
     if (!x || !y || !width || !height || zoom_i == 1000 || *width <= 0 || *height <= 0)
         return;
 
-    const double zoom = (double)zoom_i / 1000.0;
+    const double extra_zoom = (double)zoom_i / 1000.0;
     const double anchor_x =
         (double)InterlockedExchangeAdd(&g_simple_anchor_x_100000, 0) / 100000.0;
     double anchor_y =
@@ -748,10 +928,12 @@ void DDApplySimpleZoomViewport(int bottom_origin, int* x, int* y, int* width, in
     const int base_y = *y;
     const int base_w = *width;
     const int base_h = *height;
-    *x = base_x + (int)(anchor_x * base_w * (1.0 - zoom));
-    *y = base_y + (int)(anchor_y * base_h * (1.0 - zoom));
-    *width = (int)(base_w * zoom);
-    *height = (int)(base_h * zoom);
+    const double output_anchor_x = (double)base_x + anchor_x * (double)base_w;
+    const double output_anchor_y = (double)base_y + anchor_y * (double)base_h;
+    *x = (int)(output_anchor_x + ((double)base_x - output_anchor_x) * extra_zoom);
+    *y = (int)(output_anchor_y + ((double)base_y - output_anchor_y) * extra_zoom);
+    *width = (int)((double)base_w * extra_zoom);
+    *height = (int)((double)base_h * extra_zoom);
 }
 
 static BOOL dd_reload_config(

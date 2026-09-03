@@ -42,6 +42,13 @@ extern "C" int DDGetOutputConfig(int* width, int* height,
                                    int* persistsNextStart);
 extern "C" void DDSetOutputConfigMemory(int width, int height);
 extern "C" int DDGetSimpleZoom1000(void);
+extern "C" int DDGetSimpleZoomExtra1000(void);
+extern "C" int DDGetWindowStretchPercent(void);
+extern "C" int DDIsWindowStretchActive(void);
+extern "C" int DDCalcWindowStretchCrop(
+    int gameWidth, int gameHeight, int percent,
+    int* left, int* top, int* cropWidth, int* cropHeight);
+extern "C" void DDSetWindowStretchPercent(int percent);
 extern "C" void DDApplySimpleZoomMouse(int* x, int* y,
                                          int gameWidth, int gameHeight);
 extern "C" int DDReadConfigString(const char* key, const char* defaultValue,
@@ -89,6 +96,7 @@ extern "C" int horplus_get_primary_adaptive(int* outputWidth,
 extern "C" int horplus_get_decor_layout(int* contentWidth,
                                            int* contentHeight,
                                            int* wideBattle);
+extern "C" void horplus_set_window_stretch_percent(int percent);
 
 // Presentation-only DisciplesGL Alternative wallpaper/frame for fixed 4:3 screens.
 extern "C" int decorative_get_enabled(void);
@@ -115,6 +123,8 @@ extern "C" int pluginhost_mouse(UINT msg, WPARAM wParam); // logical game-space 
 extern "C" void pluginhost_menu_loop(int active); // keep overlay pixels below tracked native menus
 extern "C" void pluginhost_refresh_menus(void); // refresh live plugin checks at WM_INITMENUPOPUP
 extern "C" int pluginhost_key(UINT msg, WPARAM wParam, LPARAM lParam); // plugin shortcuts
+extern "C" int pluginhost_battle_state_message(UINT msg); // queued battle-scope lifecycle edge
+extern "C" int timerhost_auto_battle_message(UINT msg); // queued native TOG_AUTOBATTLE command
 
 // Map drag-scroll lives in global scope (defined after the anon namespace); forward-declared here.
 extern bool g_dragScrollActive;
@@ -992,6 +1002,10 @@ enum : UINT
     kIdAnim6 = 0xA116, // 15x (test/exaggerate)
     kIdEditorScenarios = 0xA120, // Disciple.ini [Disciple] ScenEditDatabase=0
     kIdEditorCampaigns = 0xA121, // Disciple.ini [Disciple] ScenEditDatabase=1
+    // DisciplesGL 1.90 Stretch windows: Off + 10..100%, applied live and centred.
+    kIdWindowStretchBase = 0xA122, // + 0..10 (percentage = index * 10)
+    kIdWindowStretchInfo = 0xA12D,
+    kIdWindowStretchHelp = 0xA12E,
     // cnc-ddraw (ddraw.ini) settings
     kIdRendOpenGL = 0xA130,
     kIdRendGdi = 0xA131,
@@ -1001,7 +1015,6 @@ enum : UINT
     kIdMaintas = 0xA150,
     kIdVsync = 0xA151,
     kIdBoxing = 0xA152,
-    kIdScaleStretch = 0xA153,
     kIdScaleCustom = 0xA154, // disabled radio: non-empty ddraw.ini aspect_ratio
     kIdScaleGeometry = 0xA155, // disabled live-metrics line
     kIdScaleResult = 0xA156, // disabled live-metrics line
@@ -1059,7 +1072,7 @@ enum : UINT
     kIdDisplaySize2 = 0xA1F2,
     kIdDisplaySizeState = 0xA1F3, // disabled current -> after-restart line
     kIdDisplaySizeHelp = 0xA1F4, // disabled game-canvas/output boundary
-    kIdOutputSizeCustom = 0xA1F5, // editor-only persisted ddraw.ini window-size dialog
+    kIdOutputSizeCustom = 0xA1F5, // persisted live ddraw.ini window/output-size dialog
     kIdClouds = 0xA1F8, // restart-latched optional IsoClouds.ff pipeline
     kIdCloudsInfo = 0xA1F9, // disabled active -> requested / asset-status line
     kIdLocaleNone = 0xA200, // disable wrapper OEM/ANSI recoding
@@ -1312,17 +1325,20 @@ int g_battleSpeed = 2;  // native GameSettings.battleSpeed (1..4)
 int g_mapSpeed = 1;     // native GameSettings.playerSpeed/opponentSpeed (1..3)
 int g_modeIdx = 0;      // persisted / next-start index into kModes
 int g_liveModeIdx = -1; // actual cnc-ddraw mode after F4 / Alt+Enter
+int g_windowStretchPercent = 100; // legacy centred fixed-window crop, 0=off, default=100
 HMENU g_bar = nullptr;
 UINT g_relayoutMsg = 0; // registered msg: marshal menu/fullscreen chrome sync onto the GUI thread
 HMENU g_gameMenu = nullptr, g_videoMenu = nullptr, g_perfMenu = nullptr; // top-level bar menus
 HMENU g_battleAnimMenu = nullptr, g_mapAnimMenu = nullptr, g_battleAtkMenu = nullptr;
 HMENU g_rendMenu = nullptr, g_shaderMenu = nullptr;
 HMENU g_ticksMenu = nullptr, g_resMenu = nullptr, g_fpsMenu = nullptr, g_scaleMenu = nullptr;
+HMENU g_windowStretchMenu = nullptr;
 HMENU g_displaySizeMenu = nullptr;
 HMENU g_battleMenu = nullptr, g_mapMenu = nullptr, g_modeMenu = nullptr;
 HMENU g_menuLanguageMenu = nullptr, g_localeMenu = nullptr;
 HMENU g_editorModeMenu = nullptr;
 int g_resolutionMenuPosition = -1; // position of the one Video -> Resolution popup
+int g_windowStretchMenuPosition = -1; // position of the live legacy Stretch windows popup
 volatile LONG g_ncCursorMode = 2; // 0=the native D2 software cursor, 2=Windows menu/non-client arrow
 volatile LONG g_cursorCaptureInstalled = 0;
 bool g_menuLoopActive = false; // native popup menus need the OS cursor across the whole window
@@ -1333,6 +1349,37 @@ WndProcFn g_origWndProc = nullptr;
 HWND g_gameHwnd = nullptr; // game window (drag-scroll SetCapture target); set in wndProcHook
 const UINT_PTR kPressTimerId = 0xC4D7; // our WM_TIMER source: on-elapse END_TURN press fires ONLY on
                                        // WM_TIMER (idle-gated), like legacy SetTimer(hWnd,0,0x20,0)
+HWND g_pressTimerHwnd = nullptr; // tracked independently: renderer bridge may set g_gameHwnd first
+volatile LONG g_pressTimerArmFailureLogged = 0;
+
+bool ensurePressTimer(HWND hwnd)
+{
+    if (!hwnd)
+        return false;
+    if (g_pressTimerHwnd == hwnd)
+        return true;
+    if (g_pressTimerHwnd)
+        KillTimer(g_pressTimerHwnd, kPressTimerId);
+    g_pressTimerHwnd = nullptr;
+    if (!SetTimer(hwnd, kPressTimerId, 32, nullptr)) {
+        if (InterlockedCompareExchange(&g_pressTimerArmFailureLogged, 1, 0) == 0)
+            mlog("[timer] SetTimer(%p, %#Ix) failed error=%lu", hwnd,
+                 kPressTimerId, GetLastError());
+        return false;
+    }
+    InterlockedExchange(&g_pressTimerArmFailureLogged, 0);
+    g_pressTimerHwnd = hwnd;
+    mlog("[timer] idle pump armed hwnd=%p id=%#Ix", hwnd, kPressTimerId);
+    return true;
+}
+
+void releasePressTimer(HWND hwnd)
+{
+    if (g_pressTimerHwnd != hwnd)
+        return;
+    KillTimer(hwnd, kPressTimerId);
+    g_pressTimerHwnd = nullptr;
+}
 
 uintptr_t gameWndProcVA()
 {
@@ -1367,6 +1414,8 @@ void persist()
     WritePrivateProfileStringA("menu", "autoConfirmUnitHire",
                                g_autoConfirmUnitHire ? "1" : "0", f);
     WritePrivateProfileStringA("menu", "fastAI", fastai_get_enabled() ? "1" : "0", f);
+    wsprintfA(buf, "%d", g_windowStretchPercent);
+    WritePrivateProfileStringA("menu", "stretchWindows", buf, f);
 }
 
 // First run: if C4menu.ini is absent, generate a commented one (converting any old mss32menu.ini).
@@ -1441,6 +1490,10 @@ void seedConfigFirstRun()
         "; Auto-confirm \"Do you want to hire this unit?\" through the normal BTN_YES action.\r\n"
         "; Applies only during the local player's active turn. Default: 1 on validated MNS, else 0.\r\n"
         "autoConfirmUnitHire=%d\r\n"
+        "\r\n"
+        "; DisciplesGL 1.90 Stretch windows: centred live crop of fixed screens.\r\n"
+        "; 0 = off; 10..100 = strength. 100 fills the vertical canvas and is the default.\r\n"
+        "stretchWindows=100\r\n"
         "\r\n"
         "; Experimental Fast AI: accelerates only the local host's hidden AI message pump.\r\n"
         "; It does not change AI decisions, but can expose native game races/crashes. Default off.\r\n"
@@ -1643,6 +1696,8 @@ int applyDdrawLive(bool outputSizeChanged,
 }
 
 void syncChrome(HWND hwnd); // defined after buildMenu(); always called on the window's GUI thread
+bool stageChromeForTargetMode(HWND hwnd, int targetMode); // no repaint before renderer transition
+int toggleWindowModeWithChrome(HWND hwnd); // stage target chrome before cnc-ddraw rebuilds the mode
 
 // Take a screenshot via the renderer (timestamped PNG in .\Screenshots\).
 void takeScreenshot()
@@ -3383,29 +3438,37 @@ void refreshAdaptiveCanvasItem()
 
 void refreshOutputSizeItem()
 {
-    // The game menu has one resolution concept. The separate renderer output-size control remains
-    // available only in the scenario editor, which has no game-canvas selector of its own.
-    if (!g_displaySizeMenu || g_ver != VerEditor)
+    if (!g_displaySizeMenu)
         return;
 
     wchar_t label[192] = {};
     if (g_requestedOutputW == 0 && g_requestedOutputH == 0) {
-        swprintf_s(
+        lstrcpynW(
             label,
-            L(L"Window size: Automatic...",
-              L"Размер окна: автоматически..."));
+            g_ver == VerEditor
+                ? L(L"Window size (live): Automatic...",
+                    L"Размер окна (сразу): автоматически...")
+                : L(L"Window/output (live): Automatic; follows game resolution...",
+                    L"Окно/вывод (сразу): автоматически; следует разрешению игры..."),
+            static_cast<int>(sizeof(label) / sizeof(label[0])));
     } else if (g_requestedOutputW > 0 && g_requestedOutputH > 0) {
         swprintf_s(
             label,
-            L(L"Window size: %d x %d (%s)...",
-              L"Размер окна: %d x %d (%s)..."),
+            g_ver == VerEditor
+                ? L(L"Window size (live): %d x %d (%s)...",
+                    L"Размер окна (сразу): %d x %d (%s)...")
+                : L(L"Window/output (live): %d x %d (%s); game view unchanged...",
+                    L"Окно/вывод (сразу): %d x %d (%s); обзор не меняется..."),
             g_requestedOutputW, g_requestedOutputH,
             gameAspectLabel(g_requestedOutputW, g_requestedOutputH));
     } else {
         swprintf_s(
             label,
-            L(L"Window size: invalid saved value (%d x %d)...",
-              L"Размер окна: ошибочное значение (%d x %d)..."),
+            g_ver == VerEditor
+                ? L(L"Window size: invalid saved value (%d x %d)...",
+                    L"Размер окна: ошибочное значение (%d x %d)...")
+                : L(L"Window/output: invalid saved value (%d x %d)...",
+                    L"Окно/вывод: ошибочное значение (%d x %d)..."),
             g_requestedOutputW, g_requestedOutputH);
     }
     ModifyMenuW(g_displaySizeMenu, kIdOutputSizeCustom,
@@ -3890,6 +3953,180 @@ void refreshScaleInfo()
                 kIdScaleFilterInfo, line);
 }
 
+double windowStretchScaleForPercent(int gameWidth, int gameHeight, int effectPercent)
+{
+    int cropWidth = gameWidth;
+    int cropHeight = gameHeight;
+    if (gameWidth <= 0 || gameHeight <= 0)
+        return 1.0;
+
+    DDCalcWindowStretchCrop(
+        gameWidth, gameHeight, effectPercent,
+        nullptr, nullptr, &cropWidth, &cropHeight);
+
+    const double aspect = static_cast<double>(gameWidth) / gameHeight;
+    if (aspect >= 4.0 / 3.0)
+        return cropHeight > 0 ? static_cast<double>(gameHeight) / cropHeight : 1.0;
+
+    return cropWidth > 0 ? static_cast<double>(gameWidth) / cropWidth : 1.0;
+}
+
+int windowStretchSizePercent(int gameWidth, int gameHeight, int effectPercent)
+{
+    return static_cast<int>(
+        windowStretchScaleForPercent(gameWidth, gameHeight, effectPercent) * 100.0 + 0.5);
+}
+
+void refreshWindowStretchInfo()
+{
+    if (!g_windowStretchMenu)
+        return;
+
+    g_windowStretchPercent = DDGetWindowStretchPercent();
+    if (g_windowStretchPercent < 0)
+        g_windowStretchPercent = 0;
+    if (g_windowStretchPercent > 100)
+        g_windowStretchPercent = 100;
+
+    CheckMenuRadioItem(
+        g_windowStretchMenu, kIdWindowStretchBase,
+        kIdWindowStretchBase + 10,
+        kIdWindowStretchBase + static_cast<UINT>(g_windowStretchPercent / 10),
+        MF_BYCOMMAND);
+
+    int gameW = 0, gameH = 0, outW = 0, outH = 0;
+    int viewW = 0, viewH = 0;
+    DDGetScaleMetrics(&gameW, &gameH, &outW, &outH,
+                      nullptr, nullptr, &viewW, &viewH);
+
+    // DisciplesGL stores 0..100 as the strength of its crop, not as the displayed size.
+    // Keep that compatible value in C4menu.ini, but expose the resulting 100%..N% size so
+    // "100%" once again means no enlargement to a player. At 1366x768, legacy 100 becomes 128%.
+    const int selectedSizePercent =
+        windowStretchSizePercent(gameW, gameH, g_windowStretchPercent);
+    const int maximumSizePercent =
+        windowStretchSizePercent(gameW, gameH, 100);
+    const bool canEnlarge = maximumSizePercent > 100;
+    for (int i = 0; i <= 10; ++i) {
+        const int sizePercent = windowStretchSizePercent(gameW, gameH, i * 10);
+        wchar_t option[128] = {};
+        if (i == 0) {
+            lstrcpynW(option,
+                      L(L"100% - no enlargement", L"100% - без увеличения"),
+                      static_cast<int>(sizeof(option) / sizeof(option[0])));
+        } else if (i == 10 && canEnlarge) {
+            swprintf_s(option,
+                       L(L"%d%% - fill height (default)",
+                         L"%d%% - на всю высоту (по умолчанию)"),
+                       sizePercent);
+        } else if (i == 10) {
+            lstrcpynW(option,
+                      L(L"100% - already full height (default)",
+                        L"100% - уже на всю высоту (по умолчанию)"),
+                      static_cast<int>(sizeof(option) / sizeof(option[0])));
+        } else {
+            swprintf_s(option, L"%d%%", sizePercent);
+        }
+
+        MENUITEMINFOW optionInfo{};
+        optionInfo.cbSize = sizeof(optionInfo);
+        optionInfo.fMask = MIIM_STRING;
+        optionInfo.dwTypeData = option;
+        SetMenuItemInfoW(g_windowStretchMenu,
+                         kIdWindowStretchBase + static_cast<UINT>(i),
+                         FALSE, &optionInfo);
+        EnableMenuItem(g_windowStretchMenu,
+                       kIdWindowStretchBase + static_cast<UINT>(i),
+                       MF_BYCOMMAND | (i == 0 || canEnlarge ? MF_ENABLED : MF_GRAYED));
+    }
+
+    int cropW = gameW;
+    int cropH = gameH;
+    DDCalcWindowStretchCrop(
+        gameW, gameH, g_windowStretchPercent,
+        nullptr, nullptr, &cropW, &cropH);
+
+    const int effectiveZoom = DDGetSimpleZoom1000();
+    const int extraZoom = DDGetSimpleZoomExtra1000();
+    const bool stretchActive = DDIsWindowStretchActive() != 0;
+    wchar_t line[384] = {};
+    if (g_windowStretchPercent == 0) {
+        swprintf_s(
+            line,
+            L(L"100%% (live): no enlargement; full game canvas %dx%d is shown.",
+              L"100%% (сразу): без увеличения, показан полный игровой кадр %dx%d."),
+            gameW, gameH);
+    } else if (stretchActive && (cropW < gameW || cropH < gameH)) {
+        swprintf_s(
+            line,
+            L(L"Active size %d%% (live): centred %dx%d -> viewport %dx%d; effective %.3gx.",
+              L"Размер %d%% активен (сразу): центр %dx%d -> viewport %dx%d; итог %.3gx."),
+            selectedSizePercent, cropW, cropH, viewW, viewH,
+            effectiveZoom / 1000.0);
+    } else if (!stretchActive) {
+        swprintf_s(
+            line,
+            L(L"Selected size %d%% (live); waiting for a fixed screen. The strategic map stays unzoomed.",
+              L"Выбран размер %d%% (сразу); ожидается фиксированное окно. Карта не приближается."),
+            selectedSizePercent);
+    } else {
+        swprintf_s(
+            line,
+            L(L"Selected size %d%% (live), but %dx%d has no fixed-window border to crop.",
+              L"Выбран размер %d%% (сразу), но в %dx%d нет полей фиксированного окна для обрезки."),
+            selectedSizePercent, gameW, gameH);
+    }
+    ModifyMenuW(g_windowStretchMenu, kIdWindowStretchInfo,
+                MF_BYCOMMAND | MF_STRING | MF_GRAYED,
+                kIdWindowStretchInfo, line);
+
+    lstrcpynW(
+        line,
+        extraZoom != 1000
+            ? L(L"Ctrl+Wheel zoom is also active; selecting a size resets it and recentres.",
+                L"Также активно Ctrl+колесо; выбор размера сбросит его и вернёт центр.")
+            : stretchActive && (cropW < gameW || cropH < gameH)
+            ? L(L"Fills vertically, crops side background and resamples pixels (quality loss is expected).",
+                L"Заполняет по вертикали, обрезает боковой фон и пересчитывает пиксели (потеря качества ожидаема).")
+            : L(L"It activates automatically on fixed menus/battles; the map view is never cropped.",
+                L"Автоматически включается в фиксированных меню/боях; обзор карты не обрезается."),
+        static_cast<int>(sizeof(line) / sizeof(line[0])));
+    ModifyMenuW(g_windowStretchMenu, kIdWindowStretchHelp,
+                MF_BYCOMMAND | MF_STRING | MF_GRAYED,
+                kIdWindowStretchHelp, line);
+
+    if (g_videoMenu && g_windowStretchMenuPosition >= 0) {
+        wchar_t parent[160] = {};
+        if (g_windowStretchPercent == 0)
+            lstrcpynW(parent,
+                      L(L"Fixed window: 100% (no enlargement, live)",
+                        L"Центральное окно: 100% (без увеличения, сразу)"),
+                      static_cast<int>(sizeof(parent) / sizeof(parent[0])));
+        else if (g_windowStretchPercent == 100 && canEnlarge)
+            swprintf_s(parent,
+                       L(L"Fixed window: %d%%, fill height (live)",
+                         L"Центральное окно: %d%%, на всю высоту (сразу)"),
+                       selectedSizePercent);
+        else if (!canEnlarge)
+            lstrcpynW(parent,
+                      L(L"Fixed window: 100% (already full height, live)",
+                        L"Центральное окно: 100% (уже на всю высоту, сразу)"),
+                      static_cast<int>(sizeof(parent) / sizeof(parent[0])));
+        else
+            swprintf_s(parent,
+                       L(L"Fixed window: %d%% (live)",
+                         L"Центральное окно: %d%% (сразу)"),
+                       selectedSizePercent);
+        MENUITEMINFOW info{};
+        info.cbSize = sizeof(info);
+        info.fMask = MIIM_STRING;
+        info.dwTypeData = parent;
+        SetMenuItemInfoW(g_videoMenu,
+                         static_cast<UINT>(g_windowStretchMenuPosition),
+                         TRUE, &info);
+    }
+}
+
 void refreshCloudItem()
 {
     if (!g_gameMenu)
@@ -4038,8 +4275,8 @@ void refreshChecks()
     // Video
     // ModifyMenuW refreshes the dynamic Custom/info strings, so do it before applying checks.
     refreshScaleInfo();
-    if (g_ver == VerEditor)
-        refreshOutputSizeItem();
+    refreshWindowStretchInfo();
+    refreshOutputSizeItem();
     refreshAdaptiveCanvasItem();
     if (g_displaySizeMenu && g_ver != VerEditor) {
         const bool canvasMenuAvailable =
@@ -4142,11 +4379,17 @@ void refreshChecks()
                     kIdRendererActive, label);
     }
     if (g_scaleMenu) {
-        const UINT scale = g_boxing         ? kIdBoxing
+        CheckMenuItem(g_scaleMenu, kIdMaintas, MF_BYCOMMAND | MF_UNCHECKED);
+        CheckMenuItem(g_scaleMenu, kIdBoxing, MF_BYCOMMAND | MF_UNCHECKED);
+        CheckMenuItem(g_scaleMenu, kIdScaleCustom, MF_BYCOMMAND | MF_UNCHECKED);
+        const UINT scale = g_boxing          ? kIdBoxing
                            : g_aspectRatio[0] ? kIdScaleCustom
-                           : g_maintas      ? kIdMaintas
-                                             : kIdScaleStretch;
-        CheckMenuRadioItem(g_scaleMenu, kIdMaintas, kIdScaleCustom, scale, MF_BYCOMMAND);
+                           : g_maintas       ? kIdMaintas
+                                             : 0;
+        // A hand-edited independent-X/Y legacy mode intentionally has no GUI radio entry.
+        if (scale)
+            CheckMenuRadioItem(g_scaleMenu, kIdMaintas, kIdScaleCustom, scale,
+                               MF_BYCOMMAND);
     }
     if (g_videoMenu)
         CheckMenuItem(g_videoMenu, kIdVsync, MF_BYCOMMAND | (g_vsync ? MF_CHECKED : MF_UNCHECKED));
@@ -4209,7 +4452,8 @@ void onMenuCommand(UINT id)
         return;
     }
 
-    bool restartItem = false;
+    // These choices re-create only the presentation backend; the game process keeps running.
+    bool reloadRenderer = false;
     bool outputSizeChanged = false;
     bool displayModeChanged = false;
     bool rendererChanged = false;
@@ -4384,6 +4628,15 @@ void onMenuCommand(UINT id)
                 L"Fast AI", MB_YESNO | MB_ICONWARNING) != IDYES)
             return;
         fastai_set_enabled(requested ? 1 : 0);
+    } else if (id >= kIdWindowStretchBase &&
+               id <= kIdWindowStretchBase + 10) {
+        g_windowStretchPercent =
+            static_cast<int>(id - kIdWindowStretchBase) * 10;
+        horplus_set_window_stretch_percent(g_windowStretchPercent);
+        DDSetWindowStretchPercent(g_windowStretchPercent);
+        persist();
+        refreshChecks();
+        return;
     } else if (id >= kIdMenuLanguageAuto && id <= kIdMenuLanguageRu) {
         g_menuLanguage = static_cast<int>(id - kIdMenuLanguageAuto);
         persist();
@@ -4449,7 +4702,7 @@ void onMenuCommand(UINT id)
             return;
         }
         rendererChanged = true;
-        restartItem = true;
+        reloadRenderer = true;
     } else if (id >= kIdShaderBase && id < kIdShaderBase + static_cast<UINT>(kShaderCount)) {
         const int index = static_cast<int>(id - kIdShaderBase);
         const int portableFilter = portableFilterForShader(index);
@@ -4471,7 +4724,7 @@ void onMenuCommand(UINT id)
             if (writeDdrawStr("d3d9_filter", value))
                 g_d3dFilter = portableFilter;
         }
-        restartItem = true;
+        reloadRenderer = true;
     } else if (id == kIdMaintas) {
         // Fit: native game aspect, fractional scale and letter/pillar-boxing as needed.
         g_maintas = true;
@@ -4480,11 +4733,11 @@ void onMenuCommand(UINT id)
         writeDdrawStr("aspect_ratio", "");
         writeDdrawBool("maintas", g_maintas);
         writeDdrawBool("boxing", g_boxing);
-        restartItem = true;
+        reloadRenderer = true;
     } else if (id == kIdVsync) {
         g_vsync = !g_vsync;
         writeDdrawBool("vsync", g_vsync);
-        restartItem = true;
+        reloadRenderer = true;
     } else if (id == kIdBoxing) {
         // Integer fit: boxing owns the viewport and therefore maintas must not pretend to be active.
         g_maintas = false;
@@ -4493,15 +4746,7 @@ void onMenuCommand(UINT id)
         writeDdrawStr("aspect_ratio", "");
         writeDdrawBool("maintas", g_maintas);
         writeDdrawBool("boxing", g_boxing);
-        restartItem = true;
-    } else if (id == kIdScaleStretch) {
-        g_maintas = false;
-        g_boxing = false;
-        g_aspectRatio[0] = 0;
-        writeDdrawStr("aspect_ratio", "");
-        writeDdrawBool("maintas", g_maintas);
-        writeDdrawBool("boxing", g_boxing);
-        restartItem = true;
+        reloadRenderer = true;
     } else if ((id >= kIdTicks0 && id <= kIdTicks100) || id == kIdTicks180) {
         const int oldTicks = readDdrawInt("maxgameticks", 180);
         const int oldTicksIdx = g_ticksIdx;
@@ -4551,7 +4796,7 @@ void onMenuCommand(UINT id)
         // Do not reload g_config here. cnc-ddraw applies this policy once during startup; a live
         // cfg reload would let new and existing Windows 11 threads observe different policies.
         return;
-    } else if (id == kIdOutputSizeCustom && g_ver == VerEditor) {
+    } else if (id == kIdOutputSizeCustom) {
         int width = g_requestedOutputW;
         int height = g_requestedOutputH;
         if (!chooseOutputSize(g_gameHwnd, &width, &height))
@@ -4565,11 +4810,11 @@ void onMenuCommand(UINT id)
             MessageBoxW(
                 g_gameHwnd,
                 rollbackComplete
-                    ? L(L"Could not save width and height to the active ddraw.ini section. The window size was not changed.",
-                        L"Не удалось сохранить width и height в активную секцию ddraw.ini. Размер окна не изменён.")
+                    ? L(L"Could not save width and height to the active ddraw.ini section. The window/output size was not changed.",
+                        L"Не удалось сохранить width и height в активную секцию ddraw.ini. Размер окна/вывода не изменён.")
                     : L(L"Saving width and height failed, and the previous pair could not be fully restored. Check ddraw.ini before restarting the game.",
                         L"Сохранение width и height завершилось ошибкой, и прежнюю пару не удалось полностью восстановить. Проверьте ddraw.ini перед перезапуском игры."),
-                L(L"Window size", L"Размер окна"),
+                L(L"Window/output size", L"Размер окна/вывода"),
                 MB_OK | MB_ICONERROR);
             return;
         }
@@ -4601,13 +4846,13 @@ void onMenuCommand(UINT id)
         wsprintfA(b, "%d", kRes[g_resIdx].h);
         writeDdrawStr("height", b);
         outputSizeChanged = true;
-        restartItem = true;
+        reloadRenderer = true;
     } else if (id >= kIdFpsBase && id < kIdFpsBase + static_cast<UINT>(kFpsCount)) {
         g_fpsIdx = static_cast<int>(id - kIdFpsBase);
         char b[12];
         wsprintfA(b, "%d", kFpsValues[g_fpsIdx]);
         writeDdrawStr("maxfps", b);
-        restartItem = true;
+        reloadRenderer = true;
     } else if (id >= kIdModeWindowed && id <= kIdModeExclusive) {
         g_modeIdx = static_cast<int>(id - kIdModeWindowed);
         writeDdrawStr("windowed", kModes[g_modeIdx].windowed);
@@ -4617,7 +4862,7 @@ void onMenuCommand(UINT id)
         else if (g_modeIdx == 2)
             writeDdrawBool("toggle_borderless", false);
         displayModeChanged = true;
-        restartItem = true;
+        reloadRenderer = true;
     } else if (id == kIdScreenshot) {
         takeScreenshot(); // action: nothing to persist or re-check
         return;
@@ -4635,9 +4880,13 @@ void onMenuCommand(UINT id)
         return;
     }
     refreshChecks();
-    if (restartItem) {
+    if (reloadRenderer) {
         // We are the renderer: re-apply live without losing a manual resize or a hotkey-selected
         // mode. Explicit Output size and Display mode choices each replace only their own state.
+        // A display-mode reload must see its final menu state on its first dd_SetDisplayMode pass;
+        // otherwise syncChrome has to tear the freshly created renderer down a second time.
+        if (displayModeChanged && g_gameHwnd)
+            stageChromeForTargetMode(g_gameHwnd, g_modeIdx);
         const int liveResult =
             applyDdrawLive(outputSizeChanged, displayModeChanged, rendererChanged);
         if (g_gameHwnd)
@@ -5027,14 +5276,23 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     ensureBattleDiscriminator();
     ensureBattleChooseActionHook();
     timerhost_install();
-    if (!g_gameHwnd) {
-        g_gameHwnd = hwnd; // remember the game window (drag-scroll SetCapture target)
-        // Start our 32ms WM_TIMER on first sight of the window. The on-elapse press is WM_TIMER-driven
-        // ONLY: the OS dispatches WM_TIMER when the queue is idle, so END_TURN waits until the hero has
-        // finished moving (pressing mid-move fires onClick but the game rejects the turn-end). Legacy
-        // timer.mod did this via SetTimer(hWnd,0,0x20,0) + its WM_TIMER handler.
-        SetTimer(hwnd, kPressTimerId, 32, nullptr);
+    if (msg == WM_NCDESTROY) {
+        if (g_gameHwnd == hwnd) {
+            releasePressTimer(hwnd);
+            g_gameHwnd = nullptr;
+        }
+    } else {
+        // renderer_message runs before this detour and may already have assigned g_gameHwnd. Timer
+        // ownership therefore has its own HWND state and is retried until SetTimer succeeds.
+        if (!g_gameHwnd)
+            g_gameHwnd = hwnd; // remember the canonical game window
+        if (g_gameHwnd == hwnd)
+            ensurePressTimer(g_gameHwnd);
     }
+    if (pluginhost_battle_state_message(msg))
+        return 0;
+    if (timerhost_auto_battle_message(msg))
+        return 0;
     // Our private 32ms timer (idle WM_TIMER): refresh the cached scenario day on the GAME thread, then
     // run the queued auto-end-turn/retreat press. Gate on OUR id and CONSUME it (return 0) so the game's
     // own timers don't drive the pump and our id never leaks into the game's WndProc timer dispatch.
@@ -5075,14 +5333,14 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     // Legacy C4dll-R used F4 for a one-key normal-window/fullscreen toggle. Keep it wrapper-owned:
     // old ddraw.ini files have no keytogglefullscreen2, and Alt+F4 remains a WM_SYSKEYDOWN.
     if (msg == WM_KEYDOWN && wParam == VK_F4 && !(lParam & 0x40000000)) {
-        DDToggleWindowedMode();
+        toggleWindowModeWithChrome(hwnd);
         syncChrome(hwnd);
         return 0;
     }
 
-    // A forced PvP Auto Battle owns game input until teardown. Wrapper-only presentation hotkeys
-    // above remain usable; release/cancel lifecycle was already offered once at the renderer
-    // boundary, while game mouse clicks and key-down actions cannot reach the battle viewer.
+    // Retained as a safety seam for timer-host compatibility, but deliberately fail-open: forced
+    // Auto Battle must never own mouse, keyboard or WM_CHAR input. Its native toggle command is
+    // generation-scoped and runs independently on the GUI thread.
     if (timerhost_filter_input(msg, wParam, lParam))
         return 0;
 
@@ -5367,7 +5625,7 @@ void buildMenu()
                   L"(MNS/SMNS) Скорость передвижения на карте (опция игры)"));
     }
 
-    // ===== "Video" - look (all live except Renderer) =====
+    // ===== "Video" - presentation choices are live; logical game resolution is restart-only =====
     g_videoMenu = CreatePopupMenu();
     g_modeMenu = CreatePopupMenu();
     for (int i = 0; i < kModeCount; ++i)
@@ -5408,6 +5666,10 @@ void buildMenu()
                         g_ru ? kHorplusSizes[i].ru : kHorplusSizes[i].en);
         AppendMenuW(g_displaySizeMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(g_displaySizeMenu, MF_STRING | MF_GRAYED, kIdDisplaySizeState, L"...");
+        AppendMenuW(g_displaySizeMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(g_displaySizeMenu, MF_STRING, kIdOutputSizeCustom,
+                    L(L"Window/output size (live)...",
+                      L"Размер окна/вывода (сразу)..."));
     } else {
         // The editor has no selectable game canvas; keep only its direct window-size control.
         AppendMenuW(g_displaySizeMenu, MF_STRING, kIdOutputSizeCustom,
@@ -5420,26 +5682,56 @@ void buildMenu()
                     ? L(L"Resolution / window size...",
                         L"Разрешение / размер окна...")
                     : L(L"Resolution...", L"Разрешение..."));
-    // Old and hand-edited game width/height values remain compatible, but the game UI deliberately
-    // exposes a single resolution choice. Every explicit game choice relinks output to that canvas.
+    // Keep one compact output dialog rather than a second preset list. It scales only the finished
+    // canvas, applies live, and every explicit game-resolution choice can still re-link it to Auto.
     g_resMenu = nullptr;
     g_scaleMenu = CreatePopupMenu();
     AppendMenuW(g_scaleMenu, MF_STRING, kIdMaintas,
-                L(L"Fit - preserve the selected game aspect",
-                  L"Вписать - сохранить выбранные пропорции игры"));
+                L(L"Fit (live) - preserve the selected game aspect",
+                  L"Вписать (сразу) - сохранить выбранные пропорции игры"));
     AppendMenuW(g_scaleMenu, MF_STRING, kIdBoxing,
-                L(L"Integer pixel blocks - 2x means 2x2 = 4 output pixels",
-                  L"Целые блоки пикселей - 2x значит 2x2 = 4 пикселя вывода"));
-    AppendMenuW(g_scaleMenu, MF_STRING, kIdScaleStretch,
-                L(L"Stretch - fill output (distorts geometry)",
-                  L"Растянуть - заполнить вывод (искажает геометрию)"));
+                L(L"Integer pixel blocks (live) - 2x means 2x2 = 4 output pixels",
+                  L"Целые блоки пикселей (сразу) - 2x значит 2x2 = 4 пикселя вывода"));
     AppendMenuW(g_scaleMenu, MF_STRING | MF_GRAYED, kIdScaleCustom, L"...");
     AppendMenuW(g_scaleMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(g_scaleMenu, MF_STRING | MF_GRAYED, kIdScaleGeometry, L"...");
     AppendMenuW(g_scaleMenu, MF_STRING | MF_GRAYED, kIdScaleResult, L"...");
     AppendMenuW(g_scaleMenu, MF_STRING | MF_GRAYED, kIdScaleFilterInfo, L"...");
     AppendMenuW(g_videoMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_scaleMenu),
-                L(L"Scaling", L"Масштаб"));
+                L(L"Output scaling (live)", L"Масштаб вывода (сразу)"));
+
+    // DisciplesGL 1.90's "Stretch windows" control preserves geometry: a centred part of the
+    // finished game canvas is enlarged to the viewport. The rarely useful independent-X/Y output
+    // stretch remains compatible with hand-edited ddraw.ini files, but is intentionally not in GUI.
+    if (horplus_is_available()) {
+        g_windowStretchMenu = CreatePopupMenu();
+        AppendMenuW(g_windowStretchMenu, MF_STRING, kIdWindowStretchBase,
+                    L(L"100% - no enlargement", L"100% - без увеличения"));
+        AppendMenuW(g_windowStretchMenu, MF_SEPARATOR, 0, nullptr);
+        for (int i = 1; i <= 10; ++i) {
+            wchar_t label[64] = {};
+            if (i == 10)
+                lstrcpynW(label, L(L"Fill height (default)",
+                                    L"На всю высоту (по умолчанию)"),
+                          static_cast<int>(sizeof(label) / sizeof(label[0])));
+            else
+                lstrcpynW(label, L"...",
+                          static_cast<int>(sizeof(label) / sizeof(label[0])));
+            AppendMenuW(g_windowStretchMenu, MF_STRING,
+                        kIdWindowStretchBase + static_cast<UINT>(i), label);
+        }
+        AppendMenuW(g_windowStretchMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(g_windowStretchMenu, MF_STRING | MF_GRAYED,
+                    kIdWindowStretchInfo, L"...");
+        AppendMenuW(g_windowStretchMenu, MF_STRING | MF_GRAYED,
+                    kIdWindowStretchHelp, L"...");
+        g_windowStretchMenuPosition = GetMenuItemCount(g_videoMenu);
+        AppendMenuW(g_videoMenu, MF_POPUP,
+                    reinterpret_cast<UINT_PTR>(g_windowStretchMenu),
+                    L(L"Fixed window size (live)",
+                      L"Размер центрального окна (сразу)"));
+    }
+
     g_shaderMenu = CreatePopupMenu();
     for (int i = 0; i < kShaderCount; ++i)
         AppendMenuW(g_shaderMenu, MF_STRING, kIdShaderBase + i,
@@ -5482,7 +5774,7 @@ void buildMenu()
                 L(L"Render only - does not slow the game itself",
                   L"Только рендер - саму игру не замедляет"));
     AppendMenuW(g_perfMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_fpsMenu),
-                L(L"Frame cap (restart)", L"Кап FPS (рестарт)"));
+                L(L"Frame cap (live)", L"Кап FPS (сразу)"));
     g_ticksMenu = CreatePopupMenu();
     AppendMenuW(g_ticksMenu, MF_STRING, kIdTicks0,
                 L(L"Uncapped (high CPU)", L"Без капа (грузит CPU)"));
@@ -5553,6 +5845,7 @@ HWND g_keyboardObserverHwnd = nullptr;
 LRESULT CALLBACK keyboardHookObserver(int code, WPARAM wParam, LPARAM lParam)
 {
     const int before = DDGetDisplayMode();
+    int after = before;
     LRESULT result = 0;
 
     // In exclusive mode F4 can reach the game WndProc yet still toggle too late: chrome briefly
@@ -5560,12 +5853,12 @@ LRESULT CALLBACK keyboardHookObserver(int code, WPARAM wParam, LPARAM lParam)
     // Handle it at cnc-ddraw's WH_KEYBOARD point, just like Alt+Enter, and consume the initial press
     // so exactly one normalized transition owns both mode and normal-window geometry.
     if (DDIsWindowModeToggleHotkey(code, wParam, lParam)) {
-        DDToggleWindowedMode();
+        after = toggleWindowModeWithChrome(g_keyboardObserverHwnd);
         result = 1;
     } else {
         result = g_origKeyboardHook(code, wParam, lParam);
+        after = DDGetDisplayMode();
     }
-    const int after = DDGetDisplayMode();
 
     // The WH_KEYBOARD path consumes Alt+Enter/F4 (and any configured secondary hotkey), so no
     // dependable WndProc key message follows. Marshal one private message after its synchronous
@@ -5596,6 +5889,57 @@ void installKeyboardObserver(HWND hwnd)
     }
 }
 
+/*
+ * cnc-ddraw's util_toggle_fullscreen() already performs the complete renderer/display rebuild via
+ * dd_SetDisplayMode().  Stage the menu for the destination mode before that rebuild so its client
+ * and viewport calculations see the final non-client geometry.  syncChrome() then only verifies
+ * the result; DDRelayoutCurrentMode remains the recovery path when SetMenu failed or an external
+ * transition left unexpected chrome behind.
+ *
+ * Do not call DrawMenuBar here.  Drawing the destination chrome while the source mode is still
+ * visible is precisely the intermediate frame which used to flash.  The completed mode-set sends
+ * SWP_FRAMECHANGED, and syncChrome() requests the final non-client repaint afterwards.
+ */
+bool stageChromeForTargetMode(HWND hwnd, int targetMode)
+{
+    if (targetMode < 0 || !hwnd || !g_bar)
+        return false;
+
+    const bool targetWantsMenu = targetMode == 0;
+    const bool hasOurMenu = GetMenu(hwnd) == g_bar;
+    if (targetWantsMenu == hasOurMenu)
+        return false;
+
+    if (!targetWantsMenu)
+        setWrapperCursorVisible(false);
+    return SetMenu(hwnd, targetWantsMenu ? g_bar : nullptr) != FALSE;
+}
+
+int toggleWindowModeWithChrome(HWND hwnd)
+{
+    const int before = DDGetDisplayMode();
+    if (before < 0) {
+        DDToggleWindowedMode();
+        return DDGetDisplayMode();
+    }
+
+    // Both fullscreen variants have no menu; either one toggles back to a normal window.
+    const int targetMode = before == 0 ? 1 : 0;
+    const bool staged = stageChromeForTargetMode(hwnd, targetMode);
+
+    DDToggleWindowedMode();
+    const int after = DDGetDisplayMode();
+
+    // A guarded/failed toggle must not leave the pre-staged destination chrome on the source mode.
+    if (staged && after == before) {
+        stageChromeForTargetMode(hwnd, before);
+        DrawMenuBar(hwnd);
+        reevaluateWrapperCursor(hwnd);
+    }
+
+    return after;
+}
+
 void syncChrome(HWND hwnd)
 {
     // Install only after cnc-ddraw has created its GUI-thread WH_KEYBOARD hook. Its callback address
@@ -5624,10 +5968,12 @@ void syncChrome(HWND hwnd)
     g_liveModeIdx = liveMode;
     refreshChecks();
 
-    if (changed) {
+    if (changed || liveModeChanged)
         DrawMenuBar(hwnd);
+    if (changed) {
         // Recompute the client area and mouse viewport without cfg_load(): re-reading ddraw.ini here
-        // would immediately undo the hotkey transition. The observed final mode is persisted below.
+        // would immediately undo the hotkey transition. A wrapper-owned hotkey normally pre-stages
+        // chrome and skips this fallback; external/unexpected menu state still needs a real relayout.
         DDRelayoutCurrentMode();
         mlog("[menu] chrome %s (mode=%d)", wantMenu ? "attached" : "detached", liveMode);
     }
@@ -5750,6 +6096,15 @@ extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, 
     if (!g_gameHwnd)
         g_gameHwnd = hwnd;
 
+    if (pluginhost_battle_state_message(msg)) {
+        *result = 0;
+        return 1;
+    }
+    if (timerhost_auto_battle_message(msg)) {
+        *result = 0;
+        return 1;
+    }
+
     // The renderer observes focus changes before the validated MNS game-WndProc detour, and may
     // consume some of them. Keep this before the Russobit early return so client/menu cursor mode is
     // reconciled immediately. The exact hook repeats it safely when delivery continues.
@@ -5776,7 +6131,7 @@ extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, 
         return 1;
     }
     if (msg == WM_KEYDOWN && wParam == VK_F4 && !(lParam & 0x40000000)) {
-        DDToggleWindowedMode();
+        toggleWindowModeWithChrome(hwnd);
         syncChrome(hwnd);
         *result = 0;
         return 1;
@@ -5792,7 +6147,7 @@ extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, 
     }
 
     // Exact Russobit delivery continues through wndProcHook, where DOWN/MOVE are routed once after
-    // the same forced-input filter. Other executable layouts have no such detour, so complete the
+    // the same fail-open timer safety seam. Other executable layouts have no such detour, so complete the
     // plugin pointer route here; release/cancel lifecycle was already delivered above.
     if (g_ver != VerRussobit &&
         (msg == WM_LBUTTONDOWN || msg == WM_MOUSEMOVE) &&
@@ -5874,10 +6229,14 @@ void* g_origIsoMouse = nullptr; // Detours trampoline to the original CStratInte
 void* g_origScrollDir = nullptr; // trampoline to the game's directional map scroll (edge-scroll executor)
 int g_scrollDirDiag = 0;         // first-N diagnostic counter for the edge-scroll hook
 DWORD g_edgeScrollRealTick = 0;  // unscaled wall-clock time of the last successful native step
-int g_edgeScrollRealDir = -1;
 bool g_edgeScrollRealTickValid = false;
-constexpr DWORD kEdgeScrollLegacyIntervalMs = 33;
-constexpr DWORD kEdgeScrollJitterToleranceMs = 1;
+volatile LONG g_edgeScrollNativeDelay = 0; // Disciple.ini ScrollSpeed: 0/50/100
+volatile LONG g_edgeScrollStepX = 32;
+volatile LONG g_edgeScrollStepY = 16;
+volatile LONG g_edgeScrollDglPatchesInstalled = 0;
+constexpr DWORD kEdgeScrollCadenceHz = 60;
+constexpr DWORD kEdgeScrollCadenceMs = 1000 / kEdgeScrollCadenceHz; // DGL integer formula: 16ms
+constexpr DWORD kEdgeScrollFallbackIntervalMs = 33; // fail-safe if the exact call site is unknown
 bool g_dragScrollActive = false;
 bool g_dragMoved = false;
 PointI g_dragMapCenter{};     // exact center tile returned by the game at button-down
@@ -5917,6 +6276,137 @@ void* mapGraphicsPtr()
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return nullptr;
     }
+}
+
+// Exact replacement for the call to MapGraphics::getScrollSpeed at 0x54241E. The native values
+// 0/50/100 are retained as DGL's 100%/75%/50% distance factors, while the returned deadline is the
+// wrapper's canonical 60Hz cadence for every setting. This keeps the step independent of monitor
+// refresh/maxfps; an intentionally sub-60 maxgameticks cap can still reduce input polling, like the
+// rest of the game. Map-animation time scaling is neutralized by scrollDirHook's matching unscaled
+// wall-clock gate below.
+DWORD __fastcall edgeScrollIntervalHook(void* mapHolder, void* /*edx*/)
+{
+    LONG nativeDelay = 0;
+    __try {
+        if (isUserPtr(mapHolder)) {
+            char* map = *reinterpret_cast<char**>(mapHolder);
+            if (isUserPtr(map))
+                nativeDelay = *reinterpret_cast<int*>(map + 0x40);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        nativeDelay = 0;
+    }
+    if (nativeDelay < 0)
+        nativeDelay = 0;
+    if (nativeDelay > 100)
+        nativeDelay = 100;
+    InterlockedExchange(&g_edgeScrollNativeDelay, nativeDelay);
+    return kEdgeScrollCadenceMs;
+}
+
+// The DGL v3.01a offset hook replaces `mov edi,[eax]; push 16; push 32` at 0x541C2D. Its stack
+// contract is important: after the thunk returns, the generated x/y values occupy exactly the two
+// argument slots that the original pushes created; EAX is restored for the following mov ebx,[eax+4].
+void __fastcall fillEdgeScrollOffset(PointI* offset)
+{
+    offset->x = InterlockedExchangeAdd(&g_edgeScrollStepX, 0);
+    offset->y = InterlockedExchangeAdd(&g_edgeScrollStepY, 0);
+}
+
+__declspec(naked) void edgeScrollOffsetThunk()
+{
+    __asm {
+        pop ecx
+        push eax
+        push eax
+        push ecx
+        push eax
+        lea ecx, [esp+0x8]
+        call fillEdgeScrollOffset
+        pop eax
+        mov edi, [eax]
+        ret
+    }
+}
+
+void getDglEdgeScrollStep(int* stepX, int* stepY)
+{
+    int width = 0, height = 0;
+    if (!DDGetScaleMetrics(&width, &height, nullptr, nullptr,
+                           nullptr, nullptr, nullptr, nullptr) ||
+        width <= 0 || height <= 0) {
+        width = 800;
+        height = 600;
+    }
+
+    const double diagonal = std::sqrt(static_cast<double>(width) * width +
+                                      static_cast<double>(height) * height);
+    DWORD multi = static_cast<DWORD>(diagonal * 600.0 /
+                                     (static_cast<double>(kEdgeScrollCadenceHz) * 800.0));
+    if (!multi)
+        multi = 1;
+
+    LONG nativeDelay = InterlockedExchangeAdd(&g_edgeScrollNativeDelay, 0);
+    if (nativeDelay < 0)
+        nativeDelay = 0;
+    if (nativeDelay > 100)
+        nativeDelay = 100;
+    const double factor = 1.0 - 0.005 * nativeDelay;
+    int y = static_cast<int>(std::floor(multi * factor + 0.5));
+    int x = static_cast<int>(std::floor(multi * factor * 2.0 + 0.5));
+    if (y < 1)
+        y = 1;
+    if (x < 1)
+        x = 1;
+    *stepX = x;
+    *stepY = y;
+}
+
+bool installEdgeScrollDglPatches()
+{
+    constexpr uintptr_t offsetSiteVA = 0x541C2D;
+    constexpr uintptr_t timingSiteVA = 0x54241E;
+    static const std::uint8_t offsetExpected[6] = {
+        0x8B, 0x38, 0x6A, 0x10, 0x6A, 0x20 // mov edi,[eax]; push 16; push 32
+    };
+    static const std::uint8_t timingExpected[5] = {
+        0xE8, 0x93, 0xF0, 0xFF, 0xFF // call MapGraphics::getScrollSpeed (0x5414B6)
+    };
+    if (memcmp(reinterpret_cast<const void*>(offsetSiteVA), offsetExpected,
+               sizeof(offsetExpected)) != 0 ||
+        memcmp(reinterpret_cast<const void*>(timingSiteVA), timingExpected,
+               sizeof(timingExpected)) != 0) {
+        mlog("[edge] DGL signatures mismatch at %#x/%#x; keeping 33ms fail-safe",
+             static_cast<unsigned>(offsetSiteVA), static_cast<unsigned>(timingSiteVA));
+        return false;
+    }
+
+    std::uint8_t offsetCall[6] = {0xE8, 0, 0, 0, 0, 0x90};
+    std::int32_t rel = static_cast<std::int32_t>(
+        reinterpret_cast<uintptr_t>(&edgeScrollOffsetThunk) -
+        (offsetSiteVA + 5));
+    memcpy(offsetCall + 1, &rel, sizeof(rel));
+    std::uint8_t timingCall[5] = {0xE8, 0, 0, 0, 0};
+    rel = static_cast<std::int32_t>(
+        reinterpret_cast<uintptr_t>(&edgeScrollIntervalHook) -
+        (timingSiteVA + sizeof(timingCall)));
+    memcpy(timingCall + 1, &rel, sizeof(rel));
+
+    if (!writeBytes(offsetSiteVA, offsetCall, sizeof(offsetCall))) {
+        mlog("[edge] DGL offset patch FAILED at %#x", static_cast<unsigned>(offsetSiteVA));
+        return false;
+    }
+    if (!writeBytes(timingSiteVA, timingCall, sizeof(timingCall))) {
+        // Keep the two call sites all-or-nothing: a dynamic step with the native 0/50/100ms delay
+        // would multiply the menu speed factor twice. The original bytes are already validated.
+        writeBytes(offsetSiteVA, offsetExpected, sizeof(offsetExpected));
+        mlog("[edge] DGL timing patch FAILED at %#x; offset patch rolled back",
+             static_cast<unsigned>(timingSiteVA));
+        return false;
+    }
+    InterlockedExchange(&g_edgeScrollDglPatchesInstalled, 1);
+    mlog("[edge] DGL cadence+offset patches installed (60Hz, live native 0/50/100)");
+    return true;
 }
 
 // Pan from the exact center+offset snapshot captured on button-down. The game's center-on-tile
@@ -6107,9 +6597,11 @@ void dragScrollWndMove(int gameX, int gameY)
 // The game's iso DIRECTIONAL scroll: sub_54249C -> sub_541BC1 -> sub_54301B. Single choke point for
 // window-EDGE scroll (sub_541BC1 reached only through here). Programmatic centering uses sub_541588, so
 // gating this kills edge-scroll without touching click-to-center or our drag-pan. The native caller
-// has a 33ms gate, but that gate reads the game's virtual clock; map animation x15 therefore turns it
-// into about 2.2ms of wall time and maxgameticks (or an uncapped CPU loop) becomes the real scroll cap.
-// Keep the legacy 33ms ceiling on the unscaled clock here, without sleeping the game/action pump.
+// reads the game's virtual clock; map animation x15 can therefore make its deadline pass too early.
+// The exact DGL call sites above provide a 60Hz cadence and a resolution-scaled step. Mirror that
+// cadence on the unscaled clock here. If either exact patch is unavailable, retain v1.8's 33ms
+// fail-safe instead of combining half of the new timing model with the native one. The fixed step
+// deliberately does not replay time spent away from an edge as one large move on re-entry.
 // Suppress scrolling during an actual held-button drag and while this game window is inactive. The
 // latter replaces the removed synthetic-center GetCursorPos guard: cursor coordinates always stay
 // real, while background maps still cannot scroll.
@@ -6125,23 +6617,36 @@ char __fastcall scrollDirHook(void* self, void* /*edx*/, int dir)
     }
     if (g_dragScrollActive || inactive) {
         g_edgeScrollRealTickValid = false;
-        g_edgeScrollRealDir = -1;
         return 0; // avoid fighting grab-pan and never move a background client's map
     }
 
     // g_realTimeGetTime is the original WINMM import saved before the game's IAT slot is redirected
     // to timeGetTimeHook. DWORD subtraction deliberately keeps the 49-day wraparound semantics safe.
     const DWORD now = g_realTimeGetTime ? g_realTimeGetTime() : GetTickCount();
-    if (g_edgeScrollRealTickValid && dir == g_edgeScrollRealDir &&
-        now - g_edgeScrollRealTick <
-            kEdgeScrollLegacyIntervalMs - kEdgeScrollJitterToleranceMs)
+    const bool dglPatched =
+        InterlockedExchangeAdd(&g_edgeScrollDglPatchesInstalled, 0) == 1;
+    const DWORD interval = dglPatched
+        ? kEdgeScrollCadenceMs
+        : kEdgeScrollFallbackIntervalMs;
+    const DWORD elapsed = g_edgeScrollRealTickValid
+        ? now - g_edgeScrollRealTick
+        : interval;
+    // The native deadline is shared by every direction; changing edge/corner must not bypass it.
+    if (g_edgeScrollRealTickValid && elapsed < interval)
         return 0;
+
+    if (dglPatched) {
+        int stepX = 0, stepY = 0;
+        getDglEdgeScrollStep(&stepX, &stepY);
+        InterlockedExchange(&g_edgeScrollStepX, stepX);
+        InterlockedExchange(&g_edgeScrollStepY, stepY);
+    }
 
     const char moved =
         reinterpret_cast<char(__fastcall*)(void*, void*, int)>(g_origScrollDir)(self, nullptr, dir);
+    // Match the native caller: a blocked boundary does not advance its last-success deadline.
     if (moved) {
         g_edgeScrollRealTick = now;
-        g_edgeScrollRealDir = dir;
         g_edgeScrollRealTickValid = true;
     }
     return moved;
@@ -6160,8 +6665,10 @@ void installDragScrollDetour()
         g_origScrollDir = reinterpret_cast<void*>(0x54249C);
         mlog("[menu] drag-scroll/edge-scroll detours FAILED (0x48E8A0/0x54249C)");
     } else {
-        mlog("[menu] drag-scroll + edge-scroll detours installed (0x48E8A0 iso, 0x54249C edge; default %s)",
-             g_dragScroll ? "on" : "off");
+        const bool dglScroll = installEdgeScrollDglPatches();
+        mlog("[menu] drag-scroll + edge-scroll detours installed (0x48E8A0 iso, 0x54249C edge; drag default %s; edge %s)",
+             g_dragScroll ? "on" : "off",
+             dglScroll ? "DGL cadence/step" : "v1.8 fail-safe");
     }
 }
 
@@ -6196,10 +6703,43 @@ extern "C" void featuremenu_install(void)
     // size which would make the finished game image smaller than its own native pixel grid.
     normalizeUndersizedOutput();
 
+    // Migrate the old adapter's EnableZoom/ZoomFactor only when this build has no menu-owned value
+    // yet. Copy both paths because exeDirFile() intentionally reuses one scratch buffer.
+    char stretchMenuPath[MAX_PATH] = {};
+    lstrcpynA(stretchMenuPath, iniFile(), sizeof(stretchMenuPath));
+    char stretchValue[16] = {};
+    const bool stretchStored =
+        GetPrivateProfileStringA("menu", "stretchWindows", "", stretchValue,
+                                 sizeof(stretchValue), stretchMenuPath) > 0;
+    int requestedWindowStretch = 100;
+    if (stretchStored) {
+        requestedWindowStretch = atoi(stretchValue);
+    } else {
+        char gameSettingsPath[MAX_PATH] = {};
+        lstrcpynA(gameSettingsPath, discipleIni(), sizeof(gameSettingsPath));
+        const bool enabled =
+            GetPrivateProfileIntA("Disciple", "EnableZoom", 1, gameSettingsPath) != 0;
+        int legacyFactor =
+            GetPrivateProfileIntA("Wrapper", "ZoomFactor", 100, gameSettingsPath);
+        if (legacyFactor <= 0 || legacyFactor > 100)
+            legacyFactor = 100;
+        requestedWindowStretch = enabled ? legacyFactor : 0;
+    }
+    if (requestedWindowStretch < 0)
+        requestedWindowStretch = 0;
+    if (requestedWindowStretch > 100)
+        requestedWindowStretch = 100;
+    requestedWindowStretch = ((requestedWindowStretch + 5) / 10) * 10;
+
     // First run: generate a commented C4menu.ini (converting any old mss32menu.ini). This seed step
     // itself does not touch the game's own Disciple.ini / settings.lua; the explicit native-canvas
     // migration above is the sole startup exception.
     seedConfigFirstRun();
+    if (!stretchStored) {
+        char value[8] = {};
+        wsprintfA(value, "%d", requestedWindowStretch);
+        WritePrivateProfileStringA("menu", "stretchWindows", value, stretchMenuPath);
+    }
 
     const char* f = iniFile();
     // Menu language: [menu] language = auto|en|ru. auto = Russian when the Windows UI language is
@@ -6217,6 +6757,12 @@ extern "C" void featuremenu_install(void)
         g_ru = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_RUSSIAN || GetACP() == 1251 ||
                PRIMARYLANGID(LANGIDFROMLCID(localization_get_locale())) == LANG_RUSSIAN;
     }
+
+    g_windowStretchPercent = requestedWindowStretch;
+    // The bridge stores the percentage atomically and derives the exact old centred crop lazily
+    // once DirectDraw has created the logical canvas. This is presentation-only and needs no restart.
+    horplus_set_window_stretch_percent(g_windowStretchPercent);
+    DDSetWindowStretchPercent(g_windowStretchPercent);
 
     // menuWorker posts this periodically; the GUI thread alone attaches/detaches the menu and
     // relayouts the renderer (generic builds/ScenEdit via fake_WndProc, MNS/SMNS via wndProcHook).

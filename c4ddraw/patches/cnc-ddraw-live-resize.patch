@@ -1,0 +1,550 @@
+warning: in the working copy of 'inc/dd.h', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'inc/render_ogl.h', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/dd.c', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/render_ogl.c', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/wndproc.c', LF will be replaced by CRLF the next time Git touches it
+diff --git a/inc/dd.h b/inc/dd.h
+index fe175f7..0015cd4 100644
+--- a/inc/dd.h
++++ b/inc/dd.h
+@@ -22,6 +22,7 @@ HRESULT dd_GetVerticalBlankStatus(LPBOOL lpbIsInVB);
+ HRESULT dd_RestoreDisplayMode();
+ HRESULT dd_SetCooperativeLevel(HWND hwnd, DWORD dwFlags);
+ HRESULT dd_SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwFlags);
++void dd_CalcViewport(int render_width, int render_height, int* x, int* y, int* width, int* height);
+ HRESULT dd_WaitForVerticalBlank(DWORD dwFlags, HANDLE hEvent);
+ HRESULT dd_GetAvailableVidMem(LPDDSCAPS lpDDCaps, LPDWORD lpdwTotal, LPDWORD lpdwFree);
+ HRESULT dd_TestCooperativeLevel();
+@@ -124,6 +125,10 @@ typedef struct CNCDDRAW
+         DEVMODE mode;
+         struct { int width; int height; int x; int y; } viewport;
+ 
++        /* UI-thread producer / presentation-thread consumer during interactive resize. */
++        volatile LONG live_resize_active;
++        volatile LONG live_resize_size;
++
+         LONG palette_updated;
+         LONG surface_updated;
+         LONG clear_screen;
+diff --git a/inc/render_ogl.h b/inc/render_ogl.h
+index bc4d39f..15049a7 100644
+--- a/inc/render_ogl.h
++++ b/inc/render_ogl.h
+@@ -39,6 +39,7 @@ typedef struct OGLRENDERER
+     GLuint main_vao;
+     GLint shader1_frame_count_uni_loc;
+     GLint shader2_frame_count_uni_loc;
++    GLint shader1_output_size_uni_loc;
+     GLuint frame_buffer_id[FBO_COUNT];
+     GLuint frame_buffer_tex_id[FBO_COUNT];
+     GLint shader1_tex_coord_attr_loc;
+@@ -50,10 +51,19 @@ typedef struct OGLRENDERER
+     BOOL use_opengl;
+     BOOL filter_bilinear;
+     BOOL shader2_upscale;
++    volatile LONG live_resize_ready;
++    LONG live_resize_size;
++    int live_viewport_x;
++    int live_viewport_y;
++    int live_viewport_width;
++    int live_viewport_height;
++    GLint max_viewport_width;
++    GLint max_viewport_height;
+ } OGLRENDERER;
+ 
+ DWORD WINAPI ogl_render_main(void);
+ BOOL ogl_create();
+ BOOL ogl_release();
++BOOL ogl_live_resize_supported();
+ 
+ #endif
+diff --git a/src/dd.c b/src/dd.c
+index 51d401b..2679335 100644
+--- a/src/dd.c
++++ b/src/dd.c
+@@ -655,8 +655,68 @@ HRESULT dd_RestoreDisplayMode()
+     return DD_OK;
+ }
+ 
++void dd_CalcViewport(int render_width, int render_height, int* x, int* y, int* width, int* height)
++{
++    *x = 0;
++    *y = 0;
++    *width = render_width;
++    *height = render_height;
++
++    if (g_config.boxing)
++    {
++        for (int i = 20; i-- > 1;)
++        {
++            if (g_ddraw.width * i <= render_width && g_ddraw.height * i <= render_height)
++            {
++                *width = i * g_ddraw.width;
++                *height = i * g_ddraw.height;
++                break;
++            }
++        }
++
++        *y = render_height / 2 - *height / 2;
++        *x = render_width / 2 - *width / 2;
++    }
++    else if (g_config.maintas)
++    {
++        double dst_ar;
++        double src_ar = (double)render_height / render_width;
++
++        if (g_config.aspect_ratio[0])
++        {
++            char* e = &g_config.aspect_ratio[0];
++
++            DWORD cx = strtoul(e, &e, 0);
++            DWORD cy = strtoul(e + 1, &e, 0);
++
++            dst_ar = (double)cy / cx;
++        }
++        else
++        {
++            dst_ar = (double)g_ddraw.height / g_ddraw.width;
++        }
++
++        *width = render_width;
++        *height = (int)round(dst_ar * *width);
++
++        if (src_ar < dst_ar)
++        {
++            *width = (int)round(((double)*width / *height) * render_height);
++            *height = render_height;
++        }
++
++        *width = min(*width, render_width);
++        *height = min(*height, render_height);
++
++        *y = render_height / 2 - *height / 2;
++        *x = render_width / 2 - *width / 2;
++    }
++}
++
+ HRESULT dd_SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwFlags)
+ {
++    InterlockedExchange(&g_ddraw.render.live_resize_active, FALSE);
++
+     if (!dwWidth)
+         dwWidth = g_ddraw.width ? g_ddraw.width : 800;
+ 
+@@ -922,62 +982,13 @@ HRESULT dd_SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwFl
+         }
+     }
+ 
+-    g_ddraw.render.viewport.width = g_ddraw.render.width;
+-    g_ddraw.render.viewport.height = g_ddraw.render.height;
+-    g_ddraw.render.viewport.x = 0;
+-    g_ddraw.render.viewport.y = 0;
+-
+-    if (g_config.boxing)
+-    {
+-        for (int i = 20; i-- > 1;)
+-        {
+-            if (g_ddraw.width * i <= g_ddraw.render.width && g_ddraw.height * i <= g_ddraw.render.height)
+-            {
+-                g_ddraw.render.viewport.width = i * g_ddraw.width;
+-                g_ddraw.render.viewport.height = i * g_ddraw.height;
+-                break;
+-            }
+-        }
+-
+-        g_ddraw.render.viewport.y = g_ddraw.render.height / 2 - g_ddraw.render.viewport.height / 2;
+-        g_ddraw.render.viewport.x = g_ddraw.render.width / 2 - g_ddraw.render.viewport.width / 2;
+-    }
+-    else if (g_config.maintas)
+-    {
+-        double dst_ar;
+-        double src_ar = (double)g_ddraw.render.height / g_ddraw.render.width;;
+-
+-        if (g_config.aspect_ratio[0])
+-        {
+-            char* e = &g_config.aspect_ratio[0];
+-
+-            DWORD cx = strtoul(e, &e, 0);
+-            DWORD cy = strtoul(e + 1, &e, 0);
+-
+-            dst_ar = (double)cy / cx;
+-        }
+-        else
+-        {
+-            dst_ar = (double)g_ddraw.height / g_ddraw.width;
+-        }
+-
+-        g_ddraw.render.viewport.width = g_ddraw.render.width;
+-        g_ddraw.render.viewport.height = (int)round(dst_ar * g_ddraw.render.viewport.width);
+-
+-        if (src_ar < dst_ar)
+-        {
+-            g_ddraw.render.viewport.width =
+-                (int)round(((double)g_ddraw.render.viewport.width / g_ddraw.render.viewport.height) * g_ddraw.render.height);
+-
+-            g_ddraw.render.viewport.height = g_ddraw.render.height;
+-        }
+-
+-        g_ddraw.render.viewport.width = min(g_ddraw.render.viewport.width, g_ddraw.render.width);
+-        g_ddraw.render.viewport.height = min(g_ddraw.render.viewport.height, g_ddraw.render.height);
+-
+-        g_ddraw.render.viewport.y = g_ddraw.render.height / 2 - g_ddraw.render.viewport.height / 2;
+-        g_ddraw.render.viewport.x = g_ddraw.render.width / 2 - g_ddraw.render.viewport.width / 2;
+-    }
++    dd_CalcViewport(
++        g_ddraw.render.width,
++        g_ddraw.render.height,
++        &g_ddraw.render.viewport.x,
++        &g_ddraw.render.viewport.y,
++        &g_ddraw.render.viewport.width,
++        &g_ddraw.render.viewport.height);
+ 
+     g_ddraw.render.scale_w = ((float)g_ddraw.render.viewport.width / g_ddraw.width);
+     g_ddraw.render.scale_h = ((float)g_ddraw.render.viewport.height / g_ddraw.height);
+diff --git a/src/render_ogl.c b/src/render_ogl.c
+index 1287183..d180ab1 100644
+--- a/src/render_ogl.c
++++ b/src/render_ogl.c
+@@ -22,6 +22,7 @@ static void ogl_init_main_program();
+ static void ogl_init_shader1_program();
+ static void ogl_init_shader2_program();
+ static void ogl_render();
++static BOOL ogl_update_live_resize();
+ static BOOL ogl_release_resources();
+ static BOOL ogl_texture_upload_test();
+ static BOOL ogl_shader_test();
+@@ -29,6 +30,21 @@ static void ogl_check_error(const char* stmt);
+ 
+ static OGLRENDERER g_ogl;
+ 
++BOOL ogl_live_resize_supported()
++{
++    return
++        g_ddraw.renderer == ogl_render_main &&
++        g_ddraw.render.thread != NULL &&
++        g_config.windowed &&
++        !g_config.fullscreen &&
++        g_config.resizable &&
++        !g_config.vhack &&
++        !g_ddraw.child_window_exists &&
++        !IsWine() &&
++        !IsMacOS() &&
++        InterlockedCompareExchange(&g_ogl.live_resize_ready, 0, 0);
++}
++
+ extern void DDApplySimpleZoomViewport(
+     int bottom_origin, int* x, int* y, int* width, int* height);
+ 
+@@ -46,6 +62,15 @@ static void ogl_set_output_viewport()
+         width = g_ddraw.width;
+         height = g_ddraw.height;
+     }
++    else if (
++        InterlockedCompareExchange(&g_ddraw.render.live_resize_active, 0, 0) &&
++        g_ogl.live_resize_size != -1)
++    {
++        x = g_ogl.live_viewport_x;
++        y = g_ogl.live_viewport_y;
++        width = g_ogl.live_viewport_width;
++        height = g_ogl.live_viewport_height;
++    }
+     else
+     {
+         x = g_ddraw.render.viewport.x;
+@@ -55,6 +80,22 @@ static void ogl_set_output_viewport()
+     }
+ 
+     DDApplySimpleZoomViewport(TRUE, &x, &y, &width, &height);
++
++    if (g_ogl.max_viewport_width > 0 &&
++        g_ogl.max_viewport_height > 0 &&
++        (width > g_ogl.max_viewport_width || height > g_ogl.max_viewport_height))
++    {
++        TRACE(
++            "OpenGL viewport %dx%d exceeds GL_MAX_VIEWPORT_DIMS %dx%d after simple zoom; falling back to GDI\n",
++            width,
++            height,
++            g_ogl.max_viewport_width,
++            g_ogl.max_viewport_height);
++        InterlockedExchange(&g_ogl.live_resize_ready, FALSE);
++        g_ogl.use_opengl = FALSE;
++        return;
++    }
++
+     glViewport(x, y, width, height);
+ }
+ 
+@@ -127,6 +168,9 @@ BOOL ogl_create()
+ DWORD WINAPI ogl_render_main(void)
+ {
+     Sleep(250);
++    InterlockedExchange(&g_ogl.live_resize_ready, FALSE);
++    g_ogl.live_resize_size = -1;
++    g_ogl.shader1_output_size_uni_loc = -1;
+     g_ogl.got_error = g_ogl.use_opengl = FALSE;
+     GLenum err = GL_NO_ERROR;
+     BOOL made_current = FALSE;
+@@ -158,6 +202,18 @@ DWORD WINAPI ogl_render_main(void)
+         GL_CHECK(ogl_init_shader1_program());
+         GL_CHECK(ogl_init_shader2_program());
+ 
++        GLint max_viewport_dims[2] = { 0 };
++        if (glGetIntegerv)
++        {
++            glGetIntegerv(GL_MAX_VIEWPORT_DIMS, max_viewport_dims);
++        }
++        else
++        {
++            TRACE("OpenGL glGetIntegerv unavailable; live resize disabled\n");
++        }
++        g_ogl.max_viewport_width = max_viewport_dims[0];
++        g_ogl.max_viewport_height = max_viewport_dims[1];
++
+         g_ogl.got_error = g_ogl.got_error || (err = glGetError()) != GL_NO_ERROR;
+         GL_CHECK(g_ogl.got_error = g_ogl.got_error || !ogl_texture_upload_test());
+         GL_CHECK(g_ogl.got_error = g_ogl.got_error || !ogl_shader_test());
+@@ -165,8 +221,19 @@ DWORD WINAPI ogl_render_main(void)
+ 
+         g_ogl.use_opengl = (g_ogl.main_program || g_ddraw.bpp == 16 || g_ddraw.bpp == 32) && !g_ogl.got_error;
+ 
++        InterlockedExchange(
++            &g_ogl.live_resize_ready,
++            g_ogl.use_opengl &&
++                g_oglu_got_version3 &&
++                g_ogl.main_program &&
++                !g_ogl.shader2_program &&
++                g_ogl.max_viewport_width > 0 &&
++                g_ogl.max_viewport_height > 0);
++
+         GL_CHECK(ogl_render());
+ 
++        InterlockedExchange(&g_ogl.live_resize_ready, FALSE);
++
+         GL_CHECK(ogl_release_resources());
+ 
+         while (glGetError() != GL_NO_ERROR);
+@@ -724,15 +791,15 @@ static void ogl_init_shader1_program()
+     output_size[0] = (float)g_ddraw.render.viewport.width;
+     output_size[1] = (float)g_ddraw.render.viewport.height;
+ 
+-    GLint loc = glGetUniformLocation(g_ogl.shader1_program, "OutputSize");
+-    if (loc == -1)
+-        loc = glGetUniformLocation(g_ogl.shader1_program, "rubyOutputSize");
++    g_ogl.shader1_output_size_uni_loc = glGetUniformLocation(g_ogl.shader1_program, "OutputSize");
++    if (g_ogl.shader1_output_size_uni_loc == -1)
++        g_ogl.shader1_output_size_uni_loc = glGetUniformLocation(g_ogl.shader1_program, "rubyOutputSize");
+ 
+-    if (loc != -1) 
+-        glUniform2fv(loc, 1, output_size);
++    if (g_ogl.shader1_output_size_uni_loc != -1)
++        glUniform2fv(g_ogl.shader1_output_size_uni_loc, 1, output_size);
+ 
+ 
+-    loc = glGetUniformLocation(g_ogl.shader1_program, "TextureSize");
++    GLint loc = glGetUniformLocation(g_ogl.shader1_program, "TextureSize");
+     if (loc == -1)
+         loc = glGetUniformLocation(g_ogl.shader1_program, "rubyTextureSize");
+ 
+@@ -1004,6 +1071,56 @@ static void ogl_init_shader2_program()
+         glUniformMatrix4fv(loc, 1, GL_FALSE, mvp_matrix);
+ }
+ 
++static BOOL ogl_update_live_resize()
++{
++    if (!InterlockedCompareExchange(&g_ddraw.render.live_resize_active, 0, 0) ||
++        !InterlockedCompareExchange(&g_ogl.live_resize_ready, 0, 0))
++    {
++        g_ogl.live_resize_size = -1;
++        return FALSE;
++    }
++
++    LONG size = InterlockedCompareExchange(&g_ddraw.render.live_resize_size, 0, 0);
++
++    if (size == g_ogl.live_resize_size)
++        return FALSE;
++
++    int output_width = LOWORD(size);
++    int output_height = HIWORD(size);
++
++    if (output_width < (int)g_ddraw.width ||
++        output_height < (int)g_ddraw.height ||
++        output_width > g_ogl.max_viewport_width ||
++        output_height > g_ogl.max_viewport_height)
++    {
++        InterlockedExchange(&g_ogl.live_resize_ready, FALSE);
++        return FALSE;
++    }
++
++    dd_CalcViewport(
++        output_width,
++        output_height,
++        &g_ogl.live_viewport_x,
++        &g_ogl.live_viewport_y,
++        &g_ogl.live_viewport_width,
++        &g_ogl.live_viewport_height);
++
++    g_ogl.live_resize_size = size;
++
++    if (g_ogl.shader1_program && g_ogl.shader1_output_size_uni_loc != -1)
++    {
++        float output_size[2] = {
++            (float)g_ogl.live_viewport_width,
++            (float)g_ogl.live_viewport_height,
++        };
++
++        glUseProgram(g_ogl.shader1_program);
++        glUniform2fv(g_ogl.shader1_output_size_uni_loc, 1, output_size);
++    }
++
++    return TRUE;
++}
++
+ static void ogl_render()
+ {
+     BOOL needs_update = FALSE;
+@@ -1141,6 +1258,7 @@ static void ogl_render()
+                 if (err != GL_NO_ERROR && err != GL_INVALID_FRAMEBUFFER_OPERATION)
+                 {
+                     g_ogl.use_opengl = FALSE;
++                    InterlockedExchange(&g_ogl.live_resize_ready, FALSE);
+ 
+                     TRACE("OpenGL error %08x (ogl_render())\n", err);
+                     ogl_check_error("ogl_render()");
+@@ -1183,7 +1301,19 @@ static void ogl_render()
+ 
+         LeaveCriticalSection(&g_ddraw.cs);
+ 
+-        if (g_ddraw.render.viewport.x != 0 || g_ddraw.render.viewport.y != 0)
++        BOOL live_resize_changed = ogl_update_live_resize();
++        BOOL live_resize_has_borders =
++            InterlockedCompareExchange(&g_ddraw.render.live_resize_active, 0, 0) &&
++            g_ogl.live_resize_size != -1 &&
++            (g_ogl.live_viewport_x != 0 ||
++                g_ogl.live_viewport_y != 0 ||
++                g_ogl.live_viewport_width != LOWORD(g_ogl.live_resize_size) ||
++                g_ogl.live_viewport_height != HIWORD(g_ogl.live_resize_size));
++
++        if (live_resize_changed ||
++            live_resize_has_borders ||
++            g_ddraw.render.viewport.x != 0 ||
++            g_ddraw.render.viewport.y != 0)
+         {
+             glClear(GL_COLOR_BUFFER_BIT);
+         }
+@@ -1379,6 +1509,7 @@ static void ogl_render()
+         else if (g_oglu_got_version3 && g_ogl.main_program)
+         {
+             ogl_set_output_viewport();
++            glUseProgram(g_ogl.main_program);
+             glBindVertexArray(g_ogl.main_vao);
+             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, 0);
+             glBindVertexArray(0);
+diff --git a/src/wndproc.c b/src/wndproc.c
+index 857a55d..7f904b6 100644
+--- a/src/wndproc.c
++++ b/src/wndproc.c
+@@ -8,6 +8,7 @@ extern volatile LONG g_c4_d2_cursor_ownership;
+ #include "hook.h"
+ #include "mouse.h"
+ #include "render_d3d9.h"
++#include "render_ogl.h"
+ #include "config.h"
+ #include "screenshot.h"
+ #include "winapi_hooks.h"
+@@ -44,6 +45,8 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
+ #endif
+ 
+     static BOOL in_size_move = FALSE;
++    static BOOL live_size_move = FALSE;
++    static BOOL size_move_changed = FALSE;
+     static int redraw_count = 0;
+ 
+     {
+@@ -320,6 +323,9 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
+         if (g_config.windowed)
+         {
+             in_size_move = TRUE;
++            live_size_move = FALSE;
++            size_move_changed = FALSE;
++            InterlockedExchange(&g_ddraw.render.live_resize_active, FALSE);
+         }
+         break;
+     }
+@@ -327,9 +333,25 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
+     {
+         if (g_config.windowed)
+         {
++            BOOL commit_live_resize = live_size_move && size_move_changed;
++
++            if (commit_live_resize)
++            {
++                RECT clientrc = { 0 };
++
++                if (GetClientRect(hWnd, &clientrc) && clientrc.right > 0 && clientrc.bottom > 0)
++                {
++                    g_config.window_rect.right = clientrc.right;
++                    g_config.window_rect.bottom = clientrc.bottom;
++                }
++            }
++
+             in_size_move = FALSE;
++            live_size_move = FALSE;
++            size_move_changed = FALSE;
++            InterlockedExchange(&g_ddraw.render.live_resize_active, FALSE);
+ 
+-            if (!g_ddraw.render.thread)
++            if (commit_live_resize || !g_ddraw.render.thread)
+                 dd_SetDisplayMode(0, 0, 0, 0);
+         }
+         break;
+@@ -342,7 +364,25 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
+         {
+             if (in_size_move)
+             {
+-                if (g_ddraw.render.thread)
++                if (live_size_move && !ogl_live_resize_supported())
++                {
++                    InterlockedExchange(&g_ddraw.render.live_resize_active, FALSE);
++                    live_size_move = FALSE;
++                }
++
++                if (!live_size_move && ogl_live_resize_supported())
++                {
++                    LONG initial_size = MAKELONG(
++                        (WORD)g_ddraw.render.width,
++                        (WORD)g_ddraw.render.height);
++
++                    InterlockedExchange(&g_ddraw.render.live_resize_size, initial_size);
++                    InterlockedExchange(&g_ddraw.render.live_resize_active, TRUE);
++                    live_size_move = TRUE;
++                    ReleaseSemaphore(g_ddraw.render.sem, 1, NULL);
++                }
++
++                if (g_ddraw.render.thread && !live_size_move)
+                 {
+                     EnterCriticalSection(&g_ddraw.cs);
+                     g_ddraw.render.run = FALSE;
+@@ -505,10 +545,22 @@ LRESULT CALLBACK fake_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam
+                     g_ddraw.render.thread = NULL;
+                 }
+ 
+-                if (in_size_move && !g_ddraw.render.thread)
++                if (in_size_move && (live_size_move || !g_ddraw.render.thread))
+                 {
+                     g_config.window_rect.right = width;
+                     g_config.window_rect.bottom = height;
++
++                    if (live_size_move && width && height)
++                    {
++                        LONG size = MAKELONG(width, height);
++                        LONG old_size = InterlockedExchange(&g_ddraw.render.live_resize_size, size);
++
++                        if (old_size != size)
++                        {
++                            size_move_changed = TRUE;
++                            ReleaseSemaphore(g_ddraw.render.sem, 1, NULL);
++                        }
++                    }
+                 }
+                 else if (!in_size_move && g_ddraw.render.thread && !g_config.fullscreen && IsLinux())
+                 {

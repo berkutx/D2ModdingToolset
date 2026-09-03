@@ -165,7 +165,13 @@ float get_left_ratio(vec2 center, vec2 origin, vec2 direction, vec2 scale)
 #define eq(a,b)  (a == b)
 #define neq(a,b) (a != b)
 
-#define P(x,y) COMPAT_TEXTURE(Source, coord + SourceSize.zw * vec2(x, y)).rgb
+vec2 ClampSourceCoord(vec2 p)
+{
+  return clamp(p, vec2(0.5) / TextureSize,
+                  (InputSize - vec2(0.5)) / TextureSize);
+}
+
+#define P(x,y) COMPAT_TEXTURE(Source, ClampSourceCoord(coord + SourceSize.zw * vec2(x, y))).rgb
 
 void main()
 {

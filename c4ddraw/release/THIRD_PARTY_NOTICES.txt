@@ -66,9 +66,9 @@ SOFTWARE.
 ------------------------------------
 
 The Widescreen Battle hook behavior, DLG_BATTLE_B layout, true Hor+ canvas
-sizing/strategic-layout formulae, optional IsoClouds.ff package/cloud-layout
-hook behavior, and decorative-background compositor are derived from
-DisciplesGL:
+sizing/strategic-layout formulae, fixed-screen Stretch-windows formula and
+simple-zoom policy, optional IsoClouds.ff package/cloud-layout hook behavior,
+and decorative-background compositor are derived from DisciplesGL:
 https://github.com/HSerg/DisciplesGL
 
 The bundled back.png, alt.png and alt_widest.png decorative resources come

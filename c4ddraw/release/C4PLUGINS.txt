@@ -1,0 +1,209 @@
+================================================================================
+ C4plugins.ini guide / Инструкция по C4plugins.ini
+================================================================================
+
+QUICK START (EN)
+
+1. Put C4plugins.ini next to Discipl2.exe, not in Mods\.
+2. Put timer.c4p and twitchstat.c4p in Mods\.
+3. Missing keys are safe: the defaults printed in the bundled C4plugins.ini are used.
+4. Update C4dll-R.dll and Mods\timer.c4p as a pair. With an older host DLL the tournament-safe
+   Auto Battle API is unavailable and the plugin shows that menu item disabled.
+
+WHEN A RESTART IS NEEDED
+
+- Changes made through Plugins > Timer or Plugins > Twitch Stat apply immediately and are saved
+  to C4plugins.ini. No restart is needed.
+- Ctrl+Alt+left-drag of the timer applies immediately and saves its position. No restart is needed.
+- Manual edits made in a text editor are read when the plugin is loaded. Fully exit and restart the
+  game after such edits. Preview is config-only, so changing it also needs a restart.
+
+[TwitchStat]
+
+Enabled=1
+  1 enables Twitch Stat; 0 disables it. This can also be changed live in Plugins > Twitch Stat.
+
+Preview=0
+  Diagnostic JSON preview window. Keep it 0 for normal play: the preview can take keyboard focus.
+
+[Timer]
+
+Enabled=2
+  0 = disabled; 1 = Simple count-up; 2 = Force countdown.
+
+DayTurn=10
+  Simple-mode day-boundary bit mask. Add the required values:
+  1 start pause, 2 start unpause, 4 start reset,
+  8 end pause, 16 end unpause, 32 end reset.
+  Default 10 means start unpause + end pause.
+
+PauseOn=1
+  Combat Pause: 0 = off; 1 = pause during PvP; 2 = pause during every battle.
+
+PauseAnimation=1
+  1 pauses during local battle animation; 0 bills that playback time.
+
+  Every effective pause source draws the clock in white: an explicit user Pause, combat policy,
+  animation policy, turn ownership and the PvP timeout latch. Only an explicit Pause command adds
+  "(пауза)" to the clock; automatic pauses stay white without that label.
+
+TurnDay=1
+  On a non-PvP timeout, queue End Day once but keep signed overtime running through combat and
+  reward/artifact dialogs according to the selected pause policy. The host never chooses a reward:
+  after the battle resolves it closes the battle once, waits for the real strategic screen and the
+  native CPhaseGame object lock to clear, then submits the enabled topmost END_TURN exactly once.
+  A PvP timeout queues the same post-battle End Day only when the expired client owns the current
+  strategic turn.
+
+AutoBattle=1
+  Tournament default. PvP never enters negative overtime: at zero during a verified local choice
+  or billable local playback, the clock is clamped and frozen at 00:00. The timer switches the
+  current battle's native Auto Battle toggle on at the next valid open choice. Its host latch is
+  bound to that battle instance and side and cannot be removed by clicking the toggle, its hotkey,
+  or submitting another manual battle action until the battle ends. Chat and unrelated mouse and
+  keyboard input remain usable. A defender timeout may close that client's resolved battle screen,
+  but never ends the attacker's strategic turn. Exhausting a defender clock outside the player's
+  strategic turn cannot carry 00:00 into their next accepted turn: that new day opens one fresh
+  TableDuration budget. Set/Reset or timeout-option changes cannot unlock an already reached PvP
+  timeout. A new battle instance before the next turn receives the same native Auto lock; after a
+  native activation rejection, the next local choice generation retries once without re-queuing the
+  same coherent snapshot. Set 0 to leave Auto Battle manual before a timeout. This option has no
+  effect outside PvP.
+
+ResetExtraTime=0
+  0 banks the signed personal remainder. Positive unused time is credit; negative PvE overtime is
+  debt and reduces that player's next budget. 1 discards only positive unused time; debt is kept.
+
+TableDuration_0=300
+  Base Force budget in seconds. Minimum is 1.
+
+TableActive_1=0 / TableDay_1=0 / TableDuration_1=300
+TableActive_2=0 / TableDay_2=0 / TableDuration_2=300
+TableActive_3=0 / TableDay_3=0 / TableDuration_3=300
+  Optional timetable overrides. An active row applies from its day onward. The Timetable dialog in
+  Plugins > Timer edits these values live.
+
+AlwaysVisible=1
+  1 always shows the clock; 0 shows it only after a turn has started.
+
+AnchorX / AnchorY
+  Legacy whole-percent position (0 left/top, 50 centre, 100 right/bottom).
+
+AnchorX10000 / AnchorY10000
+  Precise 0..10000 position written by Ctrl+Alt+left-drag. If present, these override AnchorX/Y.
+
+FontSize=28
+  Timer font height, clamped to 6..200 pixels.
+
+Defend and Retreat are not timer timeout actions in this build.
+
+TROUBLESHOOTING
+
+- Confirm that C4plugins.ini is beside Discipl2.exe and the .c4p files are in Mods\.
+- Confirm that Plugins > Timer / Twitch Stat appear in the game menu.
+- For diagnostic logs, set [menu] debugLog=1 in C4menu.ini, reproduce once, then inspect
+  C4menu-<process-id>.log and C4plugins.log beside Discipl2.exe. Turn logging off afterward.
+
+--------------------------------------------------------------------------------
+
+БЫСТРЫЙ СТАРТ (RU)
+
+1. Положите C4plugins.ini рядом с Discipl2.exe, а не в Mods\.
+2. Положите timer.c4p и twitchstat.c4p в Mods\.
+3. Отсутствующие ключи безопасны: используются значения по умолчанию из комплектного примера.
+4. Обновляйте C4dll-R.dll и Mods\timer.c4p вместе. Со старым host DLL безопасный турнирный API
+   Auto Battle недоступен, и соответствующий пункт меню плагина будет заблокирован.
+
+КОГДА НУЖЕН ПЕРЕЗАПУСК
+
+- Изменения через Plugins > Timer и Plugins > Twitch Stat применяются сразу и сохраняются в
+  C4plugins.ini. Перезапуск не нужен.
+- Положение таймера через Ctrl+Alt+перетаскивание ЛКМ меняется и сохраняется сразу.
+- Ручные правки файла в текстовом редакторе читаются при загрузке плагина. После них полностью
+  закройте и снова запустите игру. Preview меняется только через файл, поэтому тоже требует рестарта.
+
+[TwitchStat]
+
+Enabled=1
+  1 включает Twitch Stat, 0 выключает. Можно менять вживую через Plugins > Twitch Stat.
+
+Preview=0
+  Диагностическое окно JSON. Для обычной игры оставьте 0: окно может забрать фокус клавиатуры.
+
+[Timer]
+
+Enabled=2
+  0 = выключен; 1 = простой секундомер; 2 = принудительный обратный отсчёт.
+
+DayTurn=10
+  Битовая маска границ дня для Simple: сложите нужные значения:
+  1 пауза в начале, 2 продолжить в начале, 4 сброс в начале,
+  8 пауза в конце, 16 продолжить в конце, 32 сброс в конце.
+  По умолчанию 10 = продолжить в начале + пауза в конце.
+
+PauseOn=1
+  Пауза в бою: 0 = нет; 1 = только PvP; 2 = любой бой.
+
+PauseAnimation=1
+  1 ставит время на паузу во время своей боевой анимации; 0 учитывает время показа.
+
+  При любой фактической паузе часы становятся белыми: ручная пауза, политика боя/анимации,
+  отсутствие владения ходом и фиксация тайм-аута PvP. Надпись «(пауза)» добавляется только после
+  явной команды игрока Pause; автоматические паузы остаются белыми без этой надписи.
+
+TurnDay=1
+  При тайм-ауте вне PvP один раз поставить завершение хода в очередь, но продолжать подписанный
+  отсчёт в минус через бой и диалоги награды/артефактов с учётом выбранной политики пауз. Host не
+  выбирает награду: после завершения боя он один раз закрывает боевое окно, ждёт настоящий возврат
+  на стратегический экран и освобождение штатного object lock в CPhaseGame, затем ровно один раз
+  нажимает активную верхнюю кнопку END_TURN. Тайм-аут PvP ставит такое же завершение хода после боя
+  только тогда, когда истёкшее время принадлежит владельцу текущего стратегического хода.
+
+AutoBattle=1
+  Турнирное значение по умолчанию. В PvP таймер не уходит в минус: при нуле во время подтверждённого
+  локального выбора или учитываемого локального показа он фиксируется на 00:00. Таймер включает
+  штатный переключатель Auto Battle текущего боя при следующем корректном выборе. Host-latch
+  привязан к экземпляру боя и стороне: до конца этого боя его нельзя снять кликом, горячей клавишей
+  или отправкой другого ручного боевого действия. Чат и несвязанный ввод мыши/клавиатуры работают.
+  Тайм-аут защитника может закрыть разрешённый экран боя на его клиенте, но никогда не завершает
+  стратегический ход атакующего. Если защитник исчерпал часы вне своего хода, 00:00 не переносится
+  в его следующий подтверждённый ход: новый день открывает один свежий бюджет TableDuration.
+  Reset/Set и изменение timeout-пунктов не снимают уже наступивший PvP-тайм-аут. Новый экземпляр
+  боя до следующего хода получает тот же штатный Auto-latch; после нативного отказа следующая
+  локальная фаза выбора делает ровно одну новую попытку, не ставя один snapshot в очередь повторно.
+  Значение 0 оставляет автобой ручным, если установить его до тайм-аута. Вне PvP ключ не действует.
+
+ResetExtraTime=0
+  0 сохраняет подписанный личный остаток: плюс — запас, минус после PvE — долг, уменьшающий следующий
+  бюджет этого игрока. 1 отбрасывает только положительный запас; отрицательный долг сохраняется.
+
+TableDuration_0=300
+  Базовый лимит Force в секундах. Минимум 1.
+
+TableActive_1=0 / TableDay_1=0 / TableDuration_1=300
+TableActive_2=0 / TableDay_2=0 / TableDuration_2=300
+TableActive_3=0 / TableDay_3=0 / TableDuration_3=300
+  Необязательные ступени расписания. Активная строка действует начиная с указанного дня. Диалог
+  Timetable в Plugins > Timer меняет эти значения вживую.
+
+AlwaysVisible=1
+  1 всегда показывает часы; 0 показывает их только после начала хода.
+
+AnchorX / AnchorY
+  Старое положение в целых процентах (0 слева/сверху, 50 центр, 100 справа/снизу).
+
+AnchorX10000 / AnchorY10000
+  Точное положение 0..10000, которое пишет Ctrl+Alt+перетаскивание ЛКМ. Эти ключи при наличии
+  имеют приоритет над AnchorX/Y.
+
+FontSize=28
+  Высота шрифта таймера: 6..200 пикселей.
+
+Defend и Retreat в этой сборке не являются действиями таймера по истечении времени.
+
+ДИАГНОСТИКА
+
+- Проверьте, что C4plugins.ini лежит рядом с Discipl2.exe, а файлы .c4p — в Mods\.
+- Проверьте наличие Plugins > Timer / Twitch Stat в меню игры.
+- Для логов задайте [menu] debugLog=1 в C4menu.ini, один раз воспроизведите проблему и посмотрите
+  C4menu-<id-процесса>.log и C4plugins.log рядом с Discipl2.exe. Затем выключите логирование.

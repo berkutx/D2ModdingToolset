@@ -15,6 +15,7 @@
 // so turn-starts are detected even on a pure client (MP joiner) with no server.
 extern "C" void pluginhost_bump_turn(int player);
 extern "C" void pluginhost_turn_reset(void);
+extern "C" void pluginhost_queue_battle_state(int active);
 // Client-valid scenario-day source (featuremenu.cpp); logged per turn edge to verify the per-day budget.
 extern "C" int featuremenu_current_day(void);
 // "Is it my turn" = CPhaseGameData.clientTakesTurn (sub-dialog-immune); -1 if unavailable -> fallback.
@@ -26,6 +27,7 @@ extern "C" int featuremenu_battle_animation_active(void);
 extern "C" int featuremenu_battle_timer_lifecycle_available(void);
 extern "C" int timerhost_force_auto_battle(void);
 extern "C" int timerhost_get_battle_timer_state(C4P_BattleTimerState* out);
+extern "C" HWND pluginhost_game_hwnd(void);
 // Shared diagnostics gate ([menu] debugLog / C4DLL_DEBUG): OFF by default in release.
 extern "C" int featuremenu_debug_enabled(void);
 
@@ -163,8 +165,12 @@ struct State
     LONG volatile anyCombat;  // any battle present
     LONG volatile pendingEndDay;       // queued by plugin on elapse; consumed on game thread (pump)
     LONG volatile pendingEndDayBattle; // End Day must wait for BTN_CLOSE, then strategic UI
+    LONG volatile pendingEndDayLocalOrigin; // 1 attacker/current turn, 0 defender, -1 unknown
     LONG volatile battleClosePressed;  // BTN_CLOSE is one-shot for the resolved battle
     LONG volatile strategicReadyTicks; // require a stable restored strategic topmost UI
+    LONG volatile endDayLockWaitLogged; // one diagnostic edge while native CPhaseGame gate is busy
+    LONG volatile postBattleTransition; // battle UI ended; reward/result UI may still cover strategy
+    LONG volatile postBattleReadyTicks; // stable strategic proof used to retire that transition
     LONG volatile inAction;       // local re-entry guard around the game-thread press
     // Original timer.mod's separate one-shot off[13] flag: consumed only by the END_TURN
     // confirmation-query callsite, so an automatic timeout never opens X005TA0000.
@@ -172,6 +178,11 @@ struct State
     // DLG_BEGIN_TURN's real BTN_OK callback increments this only after the game has accepted the
     // acknowledgement. The plugin uses the edge, rather than dialog visibility, as its clock start.
     LONG volatile beginTurnAckSerial;
+    // Load Game restores an already-usable turn without constructing DLG_BEGIN_TURN. The network
+    // turn-info edge arms a second, UI-proven acknowledgement path; it is consumed only after the
+    // real strategic END_TURN control is enabled and topmost for two idle GUI ticks.
+    LONG volatile beginTurnReadyPending;
+    LONG volatile beginTurnReadyTicks;
     // Published at the accepted CTaskBattle ChooseAction controller boundary. -1 is deliberately
     // fail-closed: the timer freezes instead of charging the wrong client on an unknown layout.
     LONG volatile battleTurnActive;
@@ -183,15 +194,24 @@ struct State
     LONG volatile battleKindPublished;
     LONG volatile battleStateSeq; // even=stable, odd=game-thread publication in progress
     void* volatile battleViewer; // embedded IBatViewer* for the current battle instance
-    // A timeout request can remain deferred through an in-flight animation / second attack.
-    // forceAutoActive is published only after the common submit hook observes BattleAction::Auto;
-    // a callback that returns without that acknowledgement must never take input ownership.
+    // Forced Auto Battle is a deferred native UI command. The plugin worker only sets requested;
+    // the game thread consumes it once for a specific battle-instance/state generation.
     LONG volatile forceAutoRequested;
-    LONG volatile forceAutoActive;
-    LONG volatile forceAutoKickPending;
+    LONG volatile forceAutoMessagePosted;
+    LONG volatile forceAutoDispatching;
+    LONG volatile forceAutoLastInstance;
+    LONG volatile forceAutoLastGeneration;
+    LONG volatile forceAutoUiAvailable;
+    // Once the native toggle accepted a timeout, protect that exact battle side until teardown.
+    // This guard is deliberately narrower than the released input filter: it owns only the native
+    // TOG_AUTOBATTLE callback, so chat and every unrelated mouse/key command remain available.
+    LONG volatile forceAutoLatched;
+    LONG volatile forceAutoLatchedInstance;
+    LONG volatile forceAutoLatchedSideOffset;
+    void* volatile forceAutoLatchedViewer;
     void* g_orig_dlgCreate;
     void* g_orig_btnDtor;
-    void* g_orig_scenInit;
+    void* g_orig_midClientDtor;
     void* g_orig_turnInfo;
     void* g_origConfirmQuery;
     void* g_origBeginTurnOk;
@@ -200,7 +220,7 @@ struct State
     int lastTurnPlayer;     // full off[6] owner id (debounce: ignore same-owner message bursts)
     int confirmHookInstalled;
     int beginTurnAckHookInstalled;
-    int autoBattleToggleHookInstalled;
+    int autoBattleToggleGuardInstalled;
     int battleSubmitHookInstalled;
     int installed;
 } g;
@@ -225,18 +245,33 @@ void clearPendingActions()
 {
     InterlockedExchange(&g.pendingEndDay, 0);
     InterlockedExchange(&g.pendingEndDayBattle, 0);
+    InterlockedExchange(&g.pendingEndDayLocalOrigin, -1);
     InterlockedExchange(&g.battleClosePressed, 0);
     InterlockedExchange(&g.strategicReadyTicks, 0);
+    InterlockedExchange(&g.endDayLockWaitLogged, 0);
     InterlockedExchange(&g.suppressEndTurnConfirm, 0);
 }
 
-void clearForcedBattle(const char* why)
+void clearPostBattleTransition()
+{
+    InterlockedExchange(&g.postBattleTransition, 0);
+    InterlockedExchange(&g.postBattleReadyTicks, 0);
+}
+
+void clearForcedAutoLatch()
+{
+    // Publish inactive first so a concurrent read can never match partially-cleared identity data.
+    InterlockedExchange(&g.forceAutoLatched, 0);
+    InterlockedExchangePointer(
+        reinterpret_cast<void* volatile*>(&g.forceAutoLatchedViewer), nullptr);
+    InterlockedExchange(&g.forceAutoLatchedInstance, -1);
+    InterlockedExchange(&g.forceAutoLatchedSideOffset, -1);
+}
+
+void clearBattleState()
 {
     beginBattleStateWrite();
     InterlockedIncrement(&g.battleInstance);
-    const LONG wasForced = InterlockedExchange(&g.forceAutoRequested, 0);
-    InterlockedExchange(&g.forceAutoActive, 0);
-    InterlockedExchange(&g.forceAutoKickPending, 0);
     InterlockedExchange(&g.battleContinuation, 0);
     InterlockedExchange(&g.battleSelectionOpen, 0);
     InterlockedExchange(&g.battleSelectionPending, 0);
@@ -245,9 +280,12 @@ void clearForcedBattle(const char* why)
     InterlockedExchange(&g.battleKindPublished, 0);
     InterlockedExchangePointer(
         reinterpret_cast<void* volatile*>(&g.battleViewer), nullptr);
+    InterlockedExchange(&g.forceAutoRequested, 0);
+    InterlockedExchange(&g.forceAutoMessagePosted, 0);
+    InterlockedExchange(&g.forceAutoLastInstance, -1);
+    InterlockedExchange(&g.forceAutoLastGeneration, -1);
+    clearForcedAutoLatch();
     endBattleStateWrite();
-    if (wasForced)
-        tlog("[timer] forced Auto Battle released (%s)", why ? why : "battle reset");
 }
 
 // off[9] dialog/button-create capture. int __stdcall sub_5C93D6(iface, btnName, dlgName, a4, a5).
@@ -307,6 +345,7 @@ int __stdcall hook_dlgCreate(int ifaceObj, char* btnName, const char* dlgName, i
                 }
                 endBattleStateWrite();
             }
+            pluginhost_queue_battle_state(1);
         }
     }
     return obj;
@@ -331,6 +370,7 @@ int __fastcall hook_btnDestroy(void* self, void* /*edx*/, int a2)
         g.animFlag = 0;
         g.pvpFlag = 0;
         g.anyCombat = 0; // combat exit -> clear pause inputs
+        pluginhost_queue_battle_state(0);
     } else if (self == g.btnClose)
         g.btnClose = nullptr;
     else if (self == g.btnResolve)
@@ -338,17 +378,21 @@ int __fastcall hook_btnDestroy(void* self, void* /*edx*/, int a2)
     return reinterpret_cast<int(__thiscall*)(void*, int)>(g.g_orig_btnDtor)(self, a2);
 }
 
-// off[5] CMidClient::vftable[0] scenario-init: drop all captures (new scenario / between games).
-int __fastcall hook_scenarioInit(void* self, void* /*edx*/, int a2)
+// off[5] CMidClient::vftable[0] destructor: drop all captures (scenario teardown / between games).
+int __fastcall hook_midClientDestroy(void* self, void* /*edx*/, int a2)
 {
     g.endTurn = g.capBack = g.diploBack = g.briefCont = nullptr;
     g.btnRetreat = g.btnDefend = g.btnClose = g.btnResolve = nullptr;
     g.animFlag = g.pvpFlag = g.anyCombat = 0;
     clearPendingActions();
-    clearForcedBattle("scenario reset");
+    clearPostBattleTransition();
+    clearBattleState();
+    InterlockedExchange(&g.beginTurnReadyPending, 0);
+    InterlockedExchange(&g.beginTurnReadyTicks, 0);
+    pluginhost_queue_battle_state(0);
     pluginhost_turn_reset();   // game/scenario change -> clear off[6] in-game flag
     g.lastTurnPlayer = -1;     // re-arm player debounce for the new game's first turn
-    return reinterpret_cast<int(__thiscall*)(void*, int)>(g.g_orig_scenInit)(self, a2);
+    return reinterpret_cast<int(__thiscall*)(void*, int)>(g.g_orig_midClientDtor)(self, a2);
 }
 
 // off[6] turn-info handler (sub_48A680 @0x48A680 = CCmdTurnInfoMsg processor). A NETWORK message,
@@ -375,9 +419,15 @@ int __fastcall hook_turnInfo(void* self, void* /*edx*/, int a2)
     // DOUBLE time (joiner's first turn showed ~90s instead of 45s).
     if (validOwner && rawOwner != g.lastTurnPlayer) {
         g.lastTurnPlayer = rawOwner;
+        // Publish this arm before the turn serial: the plugin worker must never observe a fresh
+        // turn boundary before its GUI-side readiness fallback is prepared. Normal turns consume
+        // it in hookBeginTurnOk; loaded saves have no such callback and consume it in the pump.
+        InterlockedExchange(&g.beginTurnReadyTicks, 0);
+        InterlockedExchange(&g.beginTurnReadyPending, 1);
         // A queued press belongs only to the turn in which the timer elapsed. Never let it cross a
         // network turn boundary and fire against the next player's fresh, positive clock.
         clearPendingActions();
+        clearPostBattleTransition();
         const int player = rawOwner & 0xFFFF;
         pluginhost_bump_turn(player);
         static LONG n = 0;
@@ -397,6 +447,70 @@ bool btnEnabled(void* btn)
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+}
+
+struct PhaseGameLockSnapshot
+{
+    bool available;
+    bool locked;
+    uint32_t pendingLocalUpdates;
+    uint32_t pendingNetworkUpdates;
+    unsigned char specialState;
+};
+
+PhaseGameLockSnapshot phaseGameLockSnapshot()
+{
+    PhaseGameLockSnapshot result = {};
+    __try {
+        // Same validated Russobit ownership chain as featuremenu_my_turn(). `phase` points at the
+        // embedded CPhase base at CPhaseGame+8; CPhaseGame::data is therefore phase+8. The native
+        // END_TURN callback uses this exact CPhaseGame and calls CheckObjectLock(0x4078B7) before it
+        // is allowed to construct/send a command. Waiting on the same runtime gate avoids guessing
+        // a fixed delay after combat and also honours a mod's legitimate detour of that EXE entry.
+        char* mid = reinterpret_cast<char*(__cdecl*)()>(0x401D35)();
+        if (!isUserPtr(mid))
+            return result;
+        char* midData = *reinterpret_cast<char**>(mid + 8);
+        if (!isUserPtr(midData))
+            return result;
+        char* client = *reinterpret_cast<char**>(midData + 40);
+        if (!isUserPtr(client))
+            return result;
+        char* clientData = *reinterpret_cast<char**>(client + 12);
+        if (!isUserPtr(clientData))
+            return result;
+        char* phase = *reinterpret_cast<char**>(clientData);
+        if (!isUserPtr(phase))
+            return result;
+        char* phaseGame = phase - 8;
+        char* phaseGameData = *reinterpret_cast<char**>(phase + 8);
+        if (!isUserPtr(phaseGame) || !isUserPtr(phaseGameData) ||
+            *reinterpret_cast<char**>(phaseGame + 16) != phaseGameData ||
+            *reinterpret_cast<char**>(phaseGameData + 36) != client)
+            return result;
+        char* objectLock = *reinterpret_cast<char**>(phaseGameData + 64);
+        if (!isUserPtr(objectLock))
+            return result;
+
+        MEMORY_BASIC_INFORMATION info = {};
+        void* const checkObjectLock = reinterpret_cast<void*>(0x4078B7);
+        if (!VirtualQuery(checkObjectLock, &info, sizeof(info)) || info.State != MEM_COMMIT ||
+            (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)))
+            return result;
+        const DWORD protection = info.Protect & 0xFF;
+        if (protection != PAGE_EXECUTE && protection != PAGE_EXECUTE_READ &&
+            protection != PAGE_EXECUTE_READWRITE && protection != PAGE_EXECUTE_WRITECOPY)
+            return result;
+
+        result.pendingLocalUpdates = *reinterpret_cast<uint32_t*>(objectLock + 20);
+        result.pendingNetworkUpdates = *reinterpret_cast<uint32_t*>(objectLock + 24);
+        result.specialState = *reinterpret_cast<unsigned char*>(objectLock + 28);
+        result.locked = reinterpret_cast<bool(__thiscall*)(void*)>(checkObjectLock)(phaseGame);
+        result.available = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        result = {};
+    }
+    return result;
 }
 
 bool interfaceOnTop(void* interf)
@@ -436,9 +550,6 @@ constexpr unsigned kViewerDataOffset = 28;
 constexpr unsigned kViewerData2Offset = 32;
 constexpr unsigned kBothPlayersHumanOffset = 5368;
 constexpr unsigned kAnimationReadyOffset = 5344;
-constexpr unsigned kAutoAttackerOffset = 56;
-constexpr unsigned kAutoDefenderOffset = 57;
-constexpr unsigned kAutoSideSelectorOffset = 58;
 
 void* battleInterf(void* batViewer)
 {
@@ -463,6 +574,451 @@ bool battleData(void* batViewer, char** data, char** data2)
         *data2 = nullptr;
         return false;
     }
+}
+
+// Native Auto Battle UI path for the verified common Discipl2.exe. It is intentionally independent
+// of the replaceable mss32.dll mod core: every address and layout below belongs to the game EXE.
+// The helpers are signature-gated during install; no fixed UiEvent callback is invoked directly.
+// In particular, 0x6355EF is a UiEvent callback which is valid only after the game has created and
+// stored its five-millisecond timer event.
+constexpr uintptr_t kGetBattleDialog = 0x56CEA4;
+constexpr uintptr_t kFindToggleButton = 0x50BB1F;
+constexpr uintptr_t kSetToggleChecked = 0x5355B3;
+constexpr uintptr_t kAutoBattleToggleCallback = 0x635509;
+constexpr unsigned kToggleSetEnabledVtableOffset = 0x8C;
+constexpr unsigned kToggleCallOnClickedVtableOffset = 0x94;
+constexpr unsigned kAutoBattleSideAOffset = 56;
+constexpr unsigned kAutoBattleSideBOffset = 57;
+constexpr unsigned kAutoBattleCurrentSideOffset = 58;
+
+const unsigned char kGetBattleDialogSignature[] = {
+    0x8B, 0x41, 0x14, 0x8B, 0x40, 0x3C, 0xC3};
+const unsigned char kFindToggleButtonSignature[] = {
+    0xFF, 0x74, 0x24, 0x08, 0xFF, 0x74, 0x24, 0x08, 0xE8, 0xA2, 0x04, 0x00, 0x00,
+    0xC2, 0x08, 0x00};
+const unsigned char kSetToggleCheckedSignature[] = {
+    0x8B, 0x41, 0x08, 0x8A, 0x54, 0x24, 0x04, 0x88, 0x50, 0x04, 0xE8, 0x95, 0xFF,
+    0xFF, 0xFF, 0xC2, 0x04, 0x00};
+const unsigned char kAutoBattleToggleCallbackSignature[] = {
+    0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0x89, 0x4D, 0xF4, 0x8B,
+    0x45, 0xF4, 0x8B, 0x48, 0x20, 0x33, 0xD2, 0x8A, 0x51, 0x3A};
+
+bool validateBytes(uintptr_t address, const unsigned char* signature, size_t size)
+{
+    __try {
+        return memcmp(reinterpret_cast<const void*>(address), signature, size) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool validateNativeAutoBattleUi()
+{
+    return validateBytes(kGetBattleDialog, kGetBattleDialogSignature,
+                         sizeof(kGetBattleDialogSignature)) &&
+           validateBytes(kFindToggleButton, kFindToggleButtonSignature,
+                         sizeof(kFindToggleButtonSignature)) &&
+           validateBytes(kSetToggleChecked, kSetToggleCheckedSignature,
+                         sizeof(kSetToggleCheckedSignature));
+}
+
+bool executableAddress(const void* address)
+{
+    if (!isUserPtr(address))
+        return false;
+    MEMORY_BASIC_INFORMATION info = {};
+    if (!VirtualQuery(address, &info, sizeof(info)) || info.State != MEM_COMMIT ||
+        (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)))
+        return false;
+    const DWORD protection = info.Protect & 0xFF;
+    return protection == PAGE_EXECUTE || protection == PAGE_EXECUTE_READ ||
+           protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
+}
+
+void* autoBattleToggle(void* batViewer)
+{
+    if (!InterlockedExchangeAdd(&g.forceAutoUiAvailable, 0))
+        return nullptr;
+    void* const outer = battleInterf(batViewer);
+    if (!isUserPtr(outer))
+        return nullptr;
+    __try {
+        void* const dialog = reinterpret_cast<void*(__thiscall*)(void*)>(
+            kGetBattleDialog)(outer);
+        return isUserPtr(dialog)
+            ? reinterpret_cast<void*(__stdcall*)(void*, const char*)>(
+                  kFindToggleButton)(dialog, "TOG_AUTOBATTLE")
+            : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+int autoBattleSideOffset(void* batViewer)
+{
+    char* data = nullptr;
+    char* data2 = nullptr;
+    if (!battleData(batViewer, &data, &data2))
+        return -1;
+    __try {
+        return data2[kAutoBattleCurrentSideOffset]
+            ? kAutoBattleSideAOffset
+            : kAutoBattleSideBOffset;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+int nativeAutoBattleEnabledForSide(void* batViewer, int sideOffset)
+{
+    if (sideOffset != static_cast<int>(kAutoBattleSideAOffset) &&
+        sideOffset != static_cast<int>(kAutoBattleSideBOffset))
+        return -1;
+    char* data = nullptr;
+    char* data2 = nullptr;
+    if (!battleData(batViewer, &data, &data2))
+        return -1;
+    __try {
+        return data2[sideOffset] ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+bool setNativeAutoBattleForSide(void* batViewer, int sideOffset, bool enabled)
+{
+    if (sideOffset != static_cast<int>(kAutoBattleSideAOffset) &&
+        sideOffset != static_cast<int>(kAutoBattleSideBOffset))
+        return false;
+    char* data = nullptr;
+    char* data2 = nullptr;
+    if (!battleData(batViewer, &data, &data2))
+        return false;
+    __try {
+        data2[sideOffset] = enabled ? 1 : 0;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool setAutoBattleToggleEnabled(void* toggle, bool enabled)
+{
+    if (!isUserPtr(toggle))
+        return false;
+    __try {
+        void* const vtable = *reinterpret_cast<void**>(toggle);
+        void* const method = isUserPtr(vtable)
+            ? *reinterpret_cast<void**>(reinterpret_cast<char*>(vtable) +
+                                        kToggleSetEnabledVtableOffset)
+            : nullptr;
+        if (!executableAddress(method))
+            return false;
+        reinterpret_cast<void(__thiscall*)(void*, bool)>(method)(toggle, enabled);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool forcedAutoLatchForViewer(void* batViewer, int* protectedSideOffset)
+{
+    bool matched = false;
+    int sideOffset = -1;
+    AcquireSRWLockShared(&g_battleStateLock);
+    if (g.forceAutoLatched && g.autoBattleToggleGuardInstalled &&
+        batViewer == g.forceAutoLatchedViewer && batViewer == g.battleViewer &&
+        g.forceAutoLatchedInstance == g.battleInstance) {
+        sideOffset = g.forceAutoLatchedSideOffset;
+        matched = sideOffset == static_cast<int>(kAutoBattleSideAOffset) ||
+                  sideOffset == static_cast<int>(kAutoBattleSideBOffset);
+    }
+    ReleaseSRWLockShared(&g_battleStateLock);
+    if (protectedSideOffset)
+        *protectedSideOffset = matched ? sideOffset : -1;
+    return matched;
+}
+
+bool latchForcedAutoBattle(void* batViewer, LONG battleInstance, int sideOffset)
+{
+    if (sideOffset != static_cast<int>(kAutoBattleSideAOffset) &&
+        sideOffset != static_cast<int>(kAutoBattleSideBOffset))
+        return false;
+
+    bool latched = false;
+    AcquireSRWLockExclusive(&g_battleStateLock);
+    if (g.autoBattleToggleGuardInstalled && g.battleViewer == batViewer &&
+        g.battleInstance == battleInstance && g.battleKindPublished == 1) {
+        // Identity is complete before the final interlocked publication of the active bit.
+        InterlockedExchangePointer(
+            reinterpret_cast<void* volatile*>(&g.forceAutoLatchedViewer), batViewer);
+        InterlockedExchange(&g.forceAutoLatchedInstance, battleInstance);
+        InterlockedExchange(&g.forceAutoLatchedSideOffset, sideOffset);
+        InterlockedExchange(&g.forceAutoLatched, 1);
+        latched = true;
+    }
+    ReleaseSRWLockExclusive(&g_battleStateLock);
+    return latched;
+}
+
+bool enforceForcedAutoBattlePresentation(void* batViewer, int protectedSideOffset)
+{
+    // Preserve the native per-side authority first. The checked/disabled control is presentation
+    // and first-line input rejection; the callback detour below is the final cancellation guard.
+    const bool flagRestored =
+        setNativeAutoBattleForSide(batViewer, protectedSideOffset, true);
+    void* const toggle = autoBattleToggle(batViewer);
+    if (!isUserPtr(toggle))
+        return false;
+    bool checked = false;
+    __try {
+        reinterpret_cast<void(__thiscall*)(void*, bool)>(
+            kSetToggleChecked)(toggle, true);
+        checked = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        checked = false;
+    }
+    const bool disabled = setAutoBattleToggleEnabled(toggle, false);
+    return flagRestored && checked && disabled;
+}
+
+// TOG_AUTOBATTLE's mouse click and dialog hotkey A both reach this one stored functor. Protect only
+// an already-latched side: no window messages are swallowed and no unrelated control is affected.
+int __fastcall hookAutoBattleToggle(void* self, void* /*edx*/, unsigned char checked, int a3)
+{
+    void* const batViewer = isUserPtr(self)
+        ? reinterpret_cast<char*>(self) + kBatViewerOffset
+        : nullptr;
+    int protectedSideOffset = -1;
+    if (isUserPtr(batViewer) &&
+        forcedAutoLatchForViewer(batViewer, &protectedSideOffset)) {
+        const int currentSideOffset = autoBattleSideOffset(batViewer);
+        // A failed selector read is fail-closed for this exact callback. It must not become an easy
+        // cancellation race during teardown; the stored protected side can still be restored safely.
+        if (currentSideOffset < 0 || currentSideOffset == protectedSideOffset) {
+            const bool restored =
+                enforceForcedAutoBattlePresentation(batViewer, protectedSideOffset);
+            if (!checked || !restored) {
+                tlog("[timer] forced Auto Battle cancellation blocked "
+                     "(viewer=%p side=%d source=%s restored=%d)",
+                     batViewer, protectedSideOffset, checked ? "repeat" : "uncheck",
+                     restored ? 1 : 0);
+            }
+            return 1;
+        }
+    }
+    return reinterpret_cast<int(__thiscall*)(void*, unsigned char, int)>(
+        g.g_origAutoBattleToggle)(self, checked, a3);
+}
+
+bool installAutoBattleToggleGuard()
+{
+    if (!validateBytes(kAutoBattleToggleCallback,
+                       kAutoBattleToggleCallbackSignature,
+                       sizeof(kAutoBattleToggleCallbackSignature))) {
+        tlog("[timer] TOG_AUTOBATTLE callback signature mismatch; forced Auto disabled");
+        return false;
+    }
+
+    g.g_origAutoBattleToggle = reinterpret_cast<void*>(kAutoBattleToggleCallback);
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(&g.g_origAutoBattleToggle,
+                 reinterpret_cast<void*>(hookAutoBattleToggle));
+    if (DetourTransactionCommit() != NO_ERROR) {
+        g.g_origAutoBattleToggle = reinterpret_cast<void*>(kAutoBattleToggleCallback);
+        tlog("[timer] TOG_AUTOBATTLE cancellation guard detour FAILED");
+        return false;
+    }
+    g.autoBattleToggleGuardInstalled = 1;
+    tlog("[timer] forced Auto Battle click/hotkey guard installed "
+         "(TOG_AUTOBATTLE 0x635509, hotkey A)");
+    return true;
+}
+
+enum NativeAutoBattleResult
+{
+    kNativeAutoDeferred = -1, // the battle control is temporarily covered/not available; retry
+    kNativeAutoRejected = 0,  // the native callback was attempted; wait for a new generation
+    kNativeAutoApplied = 1,
+};
+
+// Runs only on the game GUI thread. This follows the same public UI route as a player click:
+// update the checked state, then call CToggleButton::callOnClicked so the stored native functor
+// reaches CBattleViewerInterf_OnAutoBattleToggle with its normal argument and object lifetime.
+int invokeNativeAutoBattle(void* batViewer, int* appliedSideOffset)
+{
+    if (appliedSideOffset)
+        *appliedSideOffset = -1;
+    void* const toggle = autoBattleToggle(batViewer);
+    if (!isUserPtr(toggle) || !interfaceOnTop(toggle))
+        return kNativeAutoDeferred;
+
+    const int sideOffset = autoBattleSideOffset(batViewer);
+    if (sideOffset < 0)
+        return kNativeAutoRejected;
+
+    __try {
+        void* const vtable = *reinterpret_cast<void**>(toggle);
+        void* const onClicked = isUserPtr(vtable)
+            ? *reinterpret_cast<void**>(reinterpret_cast<char*>(vtable) +
+                                        kToggleCallOnClickedVtableOffset)
+            : nullptr;
+        if (!executableAddress(onClicked))
+            return kNativeAutoRejected;
+
+        reinterpret_cast<void(__thiscall*)(void*, bool)>(kSetToggleChecked)(toggle, true);
+        int enabled = nativeAutoBattleEnabledForSide(batViewer, sideOffset);
+        if (enabled != 1) {
+            reinterpret_cast<void(__thiscall*)(void*)>(onClicked)(toggle);
+            enabled = nativeAutoBattleEnabledForSide(batViewer, sideOffset);
+        }
+        if (enabled == 1) {
+            // Tournament timeout is final for this battle side. Disable only this native toggle;
+            // mouse, keyboard and WM_CHAR remain untouched, so chat and the rest of the UI work.
+            if (!setAutoBattleToggleEnabled(toggle, false))
+                tlog("[timer] forced Auto Battle toggle disable failed; callback guard remains active");
+            if (appliedSideOffset)
+                *appliedSideOffset = sideOffset;
+            return kNativeAutoApplied;
+        }
+
+        // Do not leave a checked-looking control behind when its native callback was rejected.
+        reinterpret_cast<void(__thiscall*)(void*, bool)>(kSetToggleChecked)(toggle, false);
+        return kNativeAutoRejected;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // An exception after entering the native path is not a transient topmost condition. Do not
+        // hammer the same control every 32ms; the next accepted ChooseAction gets a new generation.
+        return kNativeAutoRejected;
+    }
+}
+
+LONG volatile g_autoBattleMessage = 0;
+
+UINT autoBattleMessageId()
+{
+    LONG message = InterlockedExchangeAdd(&g_autoBattleMessage, 0);
+    if (!message) {
+        const UINT registered = RegisterWindowMessageA("C4dllR.TimerAutoBattle.v2");
+        if (registered)
+            InterlockedCompareExchange(&g_autoBattleMessage,
+                                       static_cast<LONG>(registered), 0);
+        message = InterlockedExchangeAdd(&g_autoBattleMessage, 0);
+    }
+    return static_cast<UINT>(message);
+}
+
+bool autoBattleSelectionEligible(const C4P_BattleTimerState& state)
+{
+    return state.battle_kind == 1 && state.local_active == 1 &&
+           state.selection_open == 1 && state.playback_local < 0;
+}
+
+bool postForcedAutoBattleIfReady()
+{
+    if (!InterlockedExchangeAdd(&g.forceAutoRequested, 0) ||
+        !InterlockedExchangeAdd(&g.forceAutoUiAvailable, 0))
+        return false;
+
+    C4P_BattleTimerState state = {};
+    state.struct_size = sizeof(state);
+    if (!timerhost_get_battle_timer_state(&state) || !autoBattleSelectionEligible(state))
+        return false;
+    if (InterlockedExchangeAdd(&g.forceAutoLastInstance, 0) ==
+            static_cast<LONG>(state.battle_instance) &&
+        InterlockedExchangeAdd(&g.forceAutoLastGeneration, 0) ==
+            static_cast<LONG>(state.generation))
+        return false;
+    if (InterlockedCompareExchange(&g.forceAutoMessagePosted, 1, 0) != 0)
+        return true;
+
+    const UINT message = autoBattleMessageId();
+    const HWND hwnd = pluginhost_game_hwnd();
+    if (!message || !hwnd || !PostMessageA(hwnd, message, 0, 0)) {
+        InterlockedExchange(&g.forceAutoMessagePosted, 0);
+        return false;
+    }
+    return true;
+}
+
+int dispatchForcedAutoBattle()
+{
+    if (!InterlockedExchangeAdd(&g.forceAutoRequested, 0) ||
+        !InterlockedExchangeAdd(&g.forceAutoUiAvailable, 0) ||
+        InterlockedCompareExchange(&g.forceAutoDispatching, 1, 0) != 0)
+        return 0;
+
+    InterlockedExchange(&g.forceAutoMessagePosted, 0);
+    void* viewer = nullptr;
+    LONG instance = -1;
+    LONG generation = -1;
+    bool eligible = false;
+
+    // Capture the exact open selection before entering game code. The callback can synchronously
+    // submit an action and mutate battle state; no SRW lock may be held across that call. The
+    // dispatching guard prevents re-entry while this selection has not yet been classified.
+    AcquireSRWLockShared(&g_battleStateLock);
+    generation = g.battleStateSeq;
+    instance = g.battleInstance;
+    viewer = g.battleViewer;
+    eligible = !(generation & 1) && g.battleKindPublished == 1 &&
+               g.battleTurnActive == 1 && g.battleSelectionOpen == 1 &&
+               g.battlePlaybackLocal < 0 && isUserPtr(viewer) &&
+               !(g.forceAutoLastInstance == instance &&
+                 g.forceAutoLastGeneration == generation);
+    ReleaseSRWLockShared(&g_battleStateLock);
+
+    int result = kNativeAutoDeferred;
+    int appliedSideOffset = -1;
+    if (eligible)
+        result = invokeNativeAutoBattle(viewer, &appliedSideOffset);
+    if (eligible && result != kNativeAutoDeferred) {
+        // Only an actual callback attempt consumes this generation. A covered battle control is a
+        // normal transient state (for example chat/modal UI) and must retry after it becomes topmost.
+        InterlockedExchange(&g.forceAutoLastInstance, instance);
+        InterlockedExchange(&g.forceAutoLastGeneration, generation);
+    }
+    if (result == kNativeAutoApplied) {
+        // The UI functor can submit synchronously. Publish the persistent guard only if this is
+        // still the same battle instance and the exact side flag accepted by 0x635509 remains set.
+        const bool latched =
+            nativeAutoBattleEnabledForSide(viewer, appliedSideOffset) == 1 &&
+            latchForcedAutoBattle(viewer, instance, appliedSideOffset);
+        if (latched) {
+            const int currentSideOffset = autoBattleSideOffset(viewer);
+            if (currentSideOffset == appliedSideOffset) {
+                const bool presentation =
+                    enforceForcedAutoBattlePresentation(viewer, appliedSideOffset);
+                if (!presentation)
+                    tlog("[timer] forced Auto Battle latched; "
+                         "checked/disabled presentation will retry");
+            } else {
+                tlog("[timer] forced Auto Battle latched after side advanced; "
+                     "presentation deferred (protected=%d current=%d)",
+                     appliedSideOffset, currentSideOffset);
+            }
+            InterlockedExchange(&g.forceAutoRequested, 0);
+            tlog("[timer] forced Auto Battle locked for battle side "
+                 "(viewer=%p instance=%ld side=%d)",
+                 viewer, instance, appliedSideOffset);
+        } else {
+            // Teardown/viewer replacement raced the callback. Never publish a stale lock into the
+            // next battle; its own timeout request will carry a different instance token.
+            result = kNativeAutoRejected;
+        }
+    }
+    if (eligible && result == kNativeAutoRejected) {
+        // A semantic submit gate is active while requested. If the native toggle rejected the
+        // activation, release that gate immediately rather than trapping the battle on one choice.
+        InterlockedExchange(&g.forceAutoRequested, 0);
+        tlog("[timer] forced Auto Battle request released after native rejection; manual submit restored");
+    }
+    if (eligible && result != kNativeAutoDeferred)
+        tlog("[timer] forced Auto Battle native toggle %s (viewer=%p instance=%ld generation=%ld)",
+             result == kNativeAutoApplied ? "APPLIED" : "REJECTED",
+             viewer, instance, generation);
+    InterlockedExchange(&g.forceAutoDispatching, 0);
+    return result == kNativeAutoApplied ? 1 : 0;
 }
 
 int nativeBattleAnimationState(void* batViewer)
@@ -491,56 +1047,6 @@ bool localPlayerId(int* rawId, int* typeIndex)
     *rawId = id;
     *typeIndex = id & 0xFFFF;
     return true;
-}
-
-void* autoBattleToggle(void* batViewer)
-{
-    void* outer = battleInterf(batViewer);
-    if (!isUserPtr(outer))
-        return nullptr;
-    __try {
-        void* dialog = reinterpret_cast<void*(__thiscall*)(void*)>(0x56CEA4)(outer);
-        return isUserPtr(dialog)
-            ? reinterpret_cast<void*(__stdcall*)(void*, const char*)>(0x50BB1F)(
-                  dialog, "TOG_AUTOBATTLE")
-            : nullptr;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
-    }
-}
-
-void setToggleForced(void* batViewer, bool forced)
-{
-    char* data = nullptr;
-    char* data2 = nullptr;
-    if (!battleData(batViewer, &data, &data2))
-        return;
-    __try {
-        const unsigned flagOffset = data2[kAutoSideSelectorOffset]
-            ? kAutoAttackerOffset
-            : kAutoDefenderOffset;
-        data2[flagOffset] = forced ? 1 : 0;
-        void* toggle = autoBattleToggle(batViewer);
-        if (isUserPtr(toggle)) {
-            reinterpret_cast<void(__thiscall*)(void*, bool)>(0x5355B3)(toggle, forced);
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-}
-
-bool kickNativeAutoBattle(void* batViewer)
-{
-    void* outer = battleInterf(batViewer);
-    if (!isUserPtr(outer))
-        return false;
-    __try {
-        // CBattleViewerInterf::autoBattleCallback: clears its timer UiEvent, then sends the native
-        // BattleAction::Auto through IBatNotify on the game thread.
-        reinterpret_cast<void(__thiscall*)(void*)>(0x6355EF)(outer);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
 }
 
 enum BattleTurnParseReason
@@ -768,52 +1274,41 @@ bool parseBattlePlayback(void* batViewer, const void* msg, int* localPlayback,
     }
 }
 
-// TOG_AUTOBATTLE callback @0x635509: __thiscall(CBattleViewerInterf*, bool, int), retn 8.
-// Once forced, an uncheck click/hotkey is acknowledged visually but never reaches the native clear.
-int __fastcall hookAutoBattleToggle(void* self, void* /*edx*/, unsigned char checked, int a3)
+bool forcedAutoBlocksManualSubmit(void** batViewerOut, int* protectedSideOffsetOut,
+                                  bool* pendingOut)
 {
-    void* batViewer = reinterpret_cast<char*>(self) + kBatViewerOffset;
-    if (g.forceAutoActive && batViewer == g.battleViewer) {
-        if (!checked)
-            tlog("[timer] forced Auto Battle cancellation blocked (viewer=%p)", batViewer);
-        setToggleForced(batViewer, g.battleTurnActive == 1);
-        return 1;
-    }
-    return reinterpret_cast<int(__thiscall*)(void*, unsigned char, int)>(
-        g.g_origAutoBattleToggle)(self, checked, a3);
-}
+    void* batViewer = nullptr;
+    int protectedSideOffset = -1;
+    bool pending = false;
+    bool latched = false;
 
-bool installAutoBattleToggleHook()
-{
-    constexpr uintptr_t kCallback = 0x635509;
-    const unsigned char expected[12] = {
-        0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0x89, 0x4D, 0xF4, 0x8B, 0x45, 0xF4};
-    const unsigned char nativeAutoExpected[12] = {
-        0x55, 0x8B, 0xEC, 0x6A, 0xFF, 0x68, 0x07, 0x5C, 0x6C, 0x00, 0x64, 0xA1};
-    __try {
-        if (memcmp(reinterpret_cast<const void*>(kCallback), expected, sizeof(expected)) != 0 ||
-            memcmp(reinterpret_cast<const void*>(0x6355EF), nativeAutoExpected,
-                   sizeof(nativeAutoExpected)) != 0) {
-            tlog("[timer] native Auto Battle signature mismatch; forcing disabled");
-            return false;
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+    AcquireSRWLockShared(&g_battleStateLock);
+    batViewer = g.battleViewer;
+    pending = g.forceAutoRequested && g.battleKindPublished == 1 &&
+              g.battleTurnActive == 1 && g.battleSelectionOpen == 1 &&
+              g.battlePlaybackLocal < 0 && isUserPtr(batViewer);
+    if (g.forceAutoLatched && g.autoBattleToggleGuardInstalled &&
+        batViewer == g.forceAutoLatchedViewer &&
+        g.forceAutoLatchedInstance == g.battleInstance) {
+        protectedSideOffset = g.forceAutoLatchedSideOffset;
+        latched = protectedSideOffset == static_cast<int>(kAutoBattleSideAOffset) ||
+                  protectedSideOffset == static_cast<int>(kAutoBattleSideBOffset);
     }
+    ReleaseSRWLockShared(&g_battleStateLock);
 
-    g.g_origAutoBattleToggle = reinterpret_cast<void*>(kCallback);
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-    DetourAttach(&g.g_origAutoBattleToggle,
-                 reinterpret_cast<void*>(hookAutoBattleToggle));
-    if (DetourTransactionCommit() != NO_ERROR) {
-        g.g_origAutoBattleToggle = reinterpret_cast<void*>(kCallback);
-        tlog("[timer] TOG_AUTOBATTLE detour FAILED");
-        return false;
+    if (!pending && latched) {
+        const int currentSideOffset = autoBattleSideOffset(batViewer);
+        // The exact protected viewer/instance is known. A transient selector read failure must not
+        // turn into a one-click bypass while the native Auto UiEvent is pending.
+        latched = currentSideOffset < 0 || currentSideOffset == protectedSideOffset;
     }
-    g.autoBattleToggleHookInstalled = 1;
-    tlog("[timer] forced Auto Battle guard installed (TOG_AUTOBATTLE 0x635509)");
-    return true;
+    if (batViewerOut)
+        *batViewerOut = batViewer;
+    if (protectedSideOffsetOut)
+        *protectedSideOffsetOut = protectedSideOffset;
+    if (pendingOut)
+        *pendingOut = pending;
+    return pending || latched;
 }
 
 // CTaskBattle's two IBatNotify entry points (ordinary BattleAction and UseItem) converge on this
@@ -824,17 +1319,27 @@ bool installAutoBattleToggleHook()
 void __fastcall hookBattleSubmit(void* self, void* /*edx*/, const void* battleMsgData,
                                  int action, const void* targetId, const void* attackerId)
 {
-    void* const forcedViewer = g.battleViewer;
-    const LONG forcedInstance = InterlockedExchangeAdd(&g.battleInstance, 0);
-    const bool forcedAutoCandidate = action == kBattleActionAuto &&
-        InterlockedExchangeAdd(&g.forceAutoRequested, 0) != 0 &&
-        InterlockedExchangeAdd(&g.forceAutoKickPending, 0) != 0 &&
-        isUserPtr(forcedViewer);
+    if (action != kBattleActionAuto) {
+        void* forcedViewer = nullptr;
+        int protectedSideOffset = -1;
+        bool pending = false;
+        if (forcedAutoBlocksManualSubmit(&forcedViewer, &protectedSideOffset, &pending)) {
+            // Do not close selection_open and do not touch window input. The queued/normal native
+            // Auto callback remains free to submit action 5; chat and every non-battle command work.
+            if (!pending && protectedSideOffset >= 0)
+                enforceForcedAutoBattlePresentation(forcedViewer, protectedSideOffset);
+            tlog("[timer] manual battle action blocked by forced Auto "
+                 "(action=%d viewer=%p side=%d phase=%s)",
+                 action, forcedViewer, protectedSideOffset,
+                 pending ? "requested" : "latched");
+            return;
+        }
+    }
+
     if (isUserPtr(g.battleViewer) &&
         InterlockedExchangeAdd(&g.battleTurnActive, 0) == 1) {
-        // Close only this choice. Keep the parsed local-side and double-attack continuation fields
-        // for diagnostics/force safety, but selection_open is the timer authority. Clearing the
-        // continuation here could still let a pending timeout kick AI inside an in-flight action.
+        // Close only this choice. Keep the parsed local-side and double-attack continuation fields;
+        // selection_open is the timer authority until the next ChooseAction event.
         beginBattleStateWrite();
         InterlockedExchange(&g.battleSelectionOpen, 0);
         InterlockedExchange(&g.battleSelectionPending, 0);
@@ -845,27 +1350,6 @@ void __fastcall hookBattleSubmit(void* self, void* /*edx*/, const void* battleMs
     reinterpret_cast<void(__thiscall*)(void*, const void*, int,
                                        const void*, const void*)>(
         g.g_origBattleSubmit)(self, battleMsgData, action, targetId, attackerId);
-
-    // The native callback returning is not an acknowledgement: on a joiner it can be a no-op. Only
-    // the exact common submit boundary with BattleAction::Auto proves that the game accepted the
-    // transition. Revalidate the battle generation after the original sender returns so a nested
-    // teardown cannot relatch a stale force request onto the next battle.
-    if (forcedAutoCandidate) {
-        bool confirmed = false;
-        beginBattleStateWrite();
-        if (g.battleViewer == forcedViewer && g.battleInstance == forcedInstance &&
-            g.forceAutoRequested && g.forceAutoKickPending) {
-            InterlockedExchange(&g.forceAutoActive, 1);
-            InterlockedExchange(&g.forceAutoKickPending, 0);
-            confirmed = true;
-        }
-        endBattleStateWrite();
-        if (confirmed) {
-            setToggleForced(forcedViewer, true);
-            tlog("[timer] forced Auto Battle submit acknowledged (viewer=%p instance=%ld)",
-                 forcedViewer, forcedInstance);
-        }
-    }
 }
 
 bool installBattleSubmitHook()
@@ -948,6 +1432,10 @@ bool installEndTurnConfirmHook()
 // Chain first: only a successfully completed native callback publishes the acknowledgement.
 void* __fastcall hookBeginTurnOk(void* self, void* /*edx*/)
 {
+    // Clear the load-resume arm before entering game code. If the native callback pumps a nested
+    // WM_TIMER while closing its modal, that tick must not publish an early synthetic acceptance.
+    InterlockedExchange(&g.beginTurnReadyPending, 0);
+    InterlockedExchange(&g.beginTurnReadyTicks, 0);
     void* result = reinterpret_cast<void*(__thiscall*)(void*)>(g.g_origBeginTurnOk)(self);
     const LONG serial = InterlockedIncrement(&g.beginTurnAckSerial);
     tlog("[timer] DLG_BEGIN_TURN BTN_OK accepted (ack=%ld)", serial);
@@ -993,6 +1481,8 @@ bool installBeginTurnAckHook()
 extern "C" void timerhost_on_battle_update(void* batViewer, const void* battleMsgData,
                                              const void* unitId, const void* actions)
 {
+    // Idempotent fallback if a non-standard viewer path skipped the normal DLG_BATTLE_B create hook.
+    pluginhost_queue_battle_state(1);
     int localActive = -1, continuation = 0, pvp = 0;
     BattleTurnDiag diag = {};
     const bool valid = parseBattleTurn(batViewer, battleMsgData, unitId, actions,
@@ -1008,8 +1498,10 @@ extern "C" void timerhost_on_battle_update(void* batViewer, const void* battleMs
     if (previousViewer != batViewer) {
         InterlockedIncrement(&g.battleInstance);
         InterlockedExchange(&g.forceAutoRequested, 0);
-        InterlockedExchange(&g.forceAutoActive, 0);
-        InterlockedExchange(&g.forceAutoKickPending, 0);
+        InterlockedExchange(&g.forceAutoMessagePosted, 0);
+        InterlockedExchange(&g.forceAutoLastInstance, -1);
+        InterlockedExchange(&g.forceAutoLastGeneration, -1);
+        clearForcedAutoLatch();
     }
     InterlockedExchange(&g.anyCombat, 1);
     InterlockedExchange(&g.battleTurnActive, valid ? localActive : -1);
@@ -1054,6 +1546,8 @@ extern "C" void timerhost_on_battle_update(void* batViewer, const void* battleMs
 
 extern "C" void timerhost_on_battle_result(void* batViewer, const void* battleMsgData)
 {
+    // Result playback is still part of the visible battle UI lifetime.
+    pluginhost_queue_battle_state(1);
     int localPlayback = -1, pvp = 0;
     BattleTurnDiag diag = {};
     const bool valid = parseBattlePlayback(batViewer, battleMsgData,
@@ -1066,8 +1560,10 @@ extern "C" void timerhost_on_battle_result(void* batViewer, const void* battleMs
     if (previousViewer != batViewer) {
         InterlockedIncrement(&g.battleInstance);
         InterlockedExchange(&g.forceAutoRequested, 0);
-        InterlockedExchange(&g.forceAutoActive, 0);
-        InterlockedExchange(&g.forceAutoKickPending, 0);
+        InterlockedExchange(&g.forceAutoMessagePosted, 0);
+        InterlockedExchange(&g.forceAutoLastInstance, -1);
+        InterlockedExchange(&g.forceAutoLastGeneration, -1);
+        clearForcedAutoLatch();
         InterlockedExchange(&g.battleTurnActive, -1);
         InterlockedExchange(&g.battleSelectionOpen, 0);
         InterlockedExchange(&g.battleSelectionPending, 0);
@@ -1134,57 +1630,42 @@ extern "C" void timerhost_after_battle_update(void* batViewer)
             opened = true;
         }
         endBattleStateWrite();
-        if (opened)
+        if (opened) {
             tlog("[timer] local battle selection opened (viewer=%p)", batViewer);
+            postForcedAutoBattleIfReady();
+        }
     }
-    if (g.forceAutoRequested && !g.forceAutoActive)
-        timerhost_force_auto_battle(); // re-evaluate the deferred latch on the new full choice
-    if (g.forceAutoActive && batViewer == g.battleViewer) {
-        setToggleForced(batViewer, g.battleTurnActive == 1);
-        if (g.battleTurnActive == 1 && g.battleSelectionOpen &&
-            g.battlePlaybackLocal < 0)
-            InterlockedExchange(&g.forceAutoKickPending, 1);
+
+    // Native battle refresh mirrors the side flag back into the control. Reassert checked+disabled
+    // whenever the protected side is current, covering UI recreation without owning general input.
+    int protectedSideOffset = -1;
+    if (forcedAutoLatchForViewer(batViewer, &protectedSideOffset)) {
+        const int currentSideOffset = autoBattleSideOffset(batViewer);
+        if (currentSideOffset == protectedSideOffset) {
+            if (!enforceForcedAutoBattlePresentation(batViewer, protectedSideOffset))
+                tlog("[timer] forced Auto Battle presentation retry deferred "
+                     "(viewer=%p side=%d)", batViewer, protectedSideOffset);
+        }
     }
 }
 
 extern "C" void timerhost_on_battle_end(void)
 {
-    clearForcedBattle("battle end/destructor");
+    // IBatViewer teardown happens before reward/artifact dialogs have necessarily returned to the
+    // strategic interface. Preserve that provenance so a timeout in the transition takes the same
+    // strict path as a timeout which happened while BTN_CLOSE was still alive.
+    InterlockedExchange(&g.postBattleTransition, 1);
+    InterlockedExchange(&g.postBattleReadyTicks, 0);
+    clearBattleState();
 }
 
 extern "C" int timerhost_filter_input(UINT msg, WPARAM /*wParam*/, LPARAM /*lParam*/)
 {
-    // Block the brief request->UI-thread-dispatch window as well. Waiting for the submit ACK here
-    // lets a manual action race the queued Auto callback and send two choices.
-    if (!g.forceAutoRequested || !g.forceAutoKickPending)
-        return 0;
-    C4P_BattleTimerState state = {};
-    state.struct_size = sizeof(state);
-    if (!timerhost_get_battle_timer_state(&state) || state.battle_kind != 1 ||
-        state.local_active != 1 || state.selection_open != 1 || state.playback_local >= 0)
-        return 0;
-    switch (msg) {
-    case WM_LBUTTONDOWN:
-    case WM_LBUTTONUP:
-    case WM_LBUTTONDBLCLK:
-    case WM_RBUTTONDOWN:
-    case WM_RBUTTONUP:
-    case WM_RBUTTONDBLCLK:
-    case WM_MBUTTONDOWN:
-    case WM_MBUTTONUP:
-    case WM_MBUTTONDBLCLK:
-    case WM_XBUTTONDOWN:
-    case WM_XBUTTONUP:
-    case WM_XBUTTONDBLCLK:
-    case WM_MOUSEWHEEL:
-    case WM_MOUSEHWHEEL:
-    case WM_KEYDOWN:
-    case WM_KEYUP:
-    case WM_CHAR:
-        return 1;
-    default:
-        return 0;
-    }
+    // Fail open. The released forced-Auto path used this hook to swallow all mouse, keyboard and
+    // WM_CHAR input while waiting for a local submit. A lost/rejected multiplayer action then
+    // locked both gameplay and chat indefinitely. Manual native Auto Battle needs no input filter.
+    (void)msg;
+    return 0;
 }
 
 // Exported read accessors (lock-free volatile reads; called by pluginhost thunks).
@@ -1287,66 +1768,62 @@ extern "C" int timerhost_turn_player_id(void)
     int raw = -1, index = -1;
     return localPlayerId(&raw, &index) ? index : -1;
 }
-extern "C" int timerhost_force_auto_battle(void)
+int queueForcedAutoBattle(uint32_t expectedBattleInstance, bool requireExpectedInstance)
 {
-    if (!g.autoBattleToggleHookInstalled || !g.battleSubmitHookInstalled)
+    if (!g.installed || !InterlockedExchangeAdd(&g.forceAutoUiAvailable, 0))
         return 0;
 
-    for (int attempt = 0; attempt < 4; ++attempt) {
-        C4P_BattleTimerState state = {};
-        state.struct_size = sizeof(state);
-        if (!timerhost_get_battle_timer_state(&state) || state.battle_kind != 1 ||
-            state.local_active < 0) {
-            tlog("[timer] forced Auto Battle rejected (toggleHook=%d submitHook=%d "
-                 "kind=%d active=%d)", g.autoBattleToggleHookInstalled,
-                 g.battleSubmitHookInstalled, state.battle_kind, state.local_active);
-            return 0;
-        }
+    // The plugin reached 00:00 from a coherent billable-local snapshot, but the game thread may
+    // advance to Result/opponent selection before this worker-thread call samples host state. V2
+    // accepts the intent only for that same live PvP instance and defers to its next local choice;
+    // legacy compatibility can target only the safe current instance because its ABI has no token.
+    LONG instance = -1;
+    LONG generation = -1;
+    bool livePvp = false;
+    AcquireSRWLockShared(&g_battleStateLock);
+    instance = g.battleInstance;
+    generation = g.battleStateSeq;
+    livePvp = !(generation & 1) && g.battleKindPublished == 1 &&
+              isUserPtr(g.battleViewer) &&
+              (!requireExpectedInstance ||
+               static_cast<uint32_t>(instance) == expectedBattleInstance);
+    if (livePvp)
+        InterlockedExchange(&g.forceAutoRequested, 1);
+    ReleaseSRWLockShared(&g_battleStateLock);
+    if (!livePvp)
+        return 0;
 
-        // Serialize the request with battle begin/end publications. A stale worker snapshot can
-        // never relatch force fields after the game thread has advanced to another instance.
-        AcquireSRWLockShared(&g_battleStateLock);
-        const bool sameState = state.generation == static_cast<uint32_t>(
-                                   InterlockedExchangeAdd(&g.battleStateSeq, 0)) &&
-                               state.battle_instance == static_cast<uint32_t>(
-                                   InterlockedExchangeAdd(&g.battleInstance, 0));
-        if (!sameState) {
-            ReleaseSRWLockShared(&g_battleStateLock);
-            continue;
-        }
-
-        const LONG wasRequested = InterlockedExchange(&g.forceAutoRequested, 1);
-        // A continuation ChooseAction is a fresh, controllable decision boundary. selection_open
-        // plus no attributed Result playback is sufficient to avoid kicking AI inside a submitted
-        // action. The viewer's aggregate animation byte can still be busy during the first valid
-        // choice, so it is not an authority for whether that choice is actionable.
-        const bool canActivate = state.local_active == 1 && state.selection_open == 1 &&
-                                 state.playback_local < 0;
-        bool scheduledNow = false;
-        if (canActivate && !g.forceAutoKickPending) {
-            InterlockedExchange(&g.forceAutoKickPending, 1);
-            scheduledNow = true;
-        }
-        ReleaseSRWLockShared(&g_battleStateLock);
-
-        if (scheduledNow) {
-            tlog("[timer] forced Auto Battle callback scheduled (instance=%u generation=%u)",
-                  state.battle_instance, state.generation);
-        }
-        if (!wasRequested) {
-            tlog("[timer] forced Auto Battle requested (defer=%d selection=%d anim=%d "
-                 "playbackLocal=%d continuation=%d)", canActivate ? 0 : 1,
-                 state.selection_open, state.animation_active, state.playback_local,
-                 state.continuation);
-        }
-        return 1;
-    }
-
-    tlog("[timer] forced Auto Battle request dropped: battle state kept changing");
-    return 0;
+    // The caller may be the timer worker. It only publishes a request under the battle-state lock;
+    // teardown/viewer replacement must therefore either precede validation or clear it afterward.
+    // Native UI code is reached later through the window message (or GUI WM_TIMER fallback).
+    postForcedAutoBattleIfReady();
+    tlog("[timer] forced Auto Battle queued (instance=%ld generation=%ld)",
+         instance, generation);
+    return 1;
 }
-// Phase 2 on-elapse: plugin (worker thread) QUEUES the press; timerhost_pump() performs it on each
-// idle WM_TIMER (featuremenu's 32ms timer), retrying until the turn ends - like the legacy 0x113 case.
+
+extern "C" int timerhost_force_auto_battle(void)
+{
+    // Compatibility for the 1.8 plugin, which has no instance argument. It still uses the safe
+    // native-UI enqueue and never takes input ownership; current plugins use the strict v2 entry.
+    return queueForcedAutoBattle(0, false);
+}
+
+extern "C" int timerhost_force_auto_battle_v2(uint32_t expectedBattleInstance)
+{
+    return queueForcedAutoBattle(expectedBattleInstance, true);
+}
+
+extern "C" int timerhost_auto_battle_message(UINT msg)
+{
+    const UINT expected = autoBattleMessageId();
+    if (!expected || msg != expected)
+        return 0;
+    dispatchForcedAutoBattle();
+    return 1;
+}
+// Phase 2 on-elapse: the worker queues work and timerhost_pump() waits for a safe idle WM_TIMER.
+// Local intermediate dialogs may be revisited; the final networked END_TURN click is one-shot.
 extern "C" int timerhost_retreat(void)
 {
     // ABI compatibility only. Retreat/Defend are intentionally disabled in the timer menu.
@@ -1358,12 +1835,20 @@ extern "C" int timerhost_end_day(void)
     if (!g.confirmHookInstalled)
         return 0; // never replace a timeout with an unavoidable confirmation dialog
     const bool fromBattle = isUserPtr(g.battleViewer) || isUserPtr(g.btnRetreat) ||
-                            isUserPtr(g.btnDefend) || isUserPtr(g.btnClose);
+                            isUserPtr(g.btnDefend) || isUserPtr(g.btnClose) ||
+                            InterlockedExchangeAdd(&g.postBattleTransition, 0) != 0;
+    const LONG localOrigin = featuremenu_my_turn();
     InterlockedExchange(&g.pendingEndDayBattle, fromBattle ? 1 : 0);
+    InterlockedExchange(&g.pendingEndDayLocalOrigin, localOrigin);
     InterlockedExchange(&g.battleClosePressed, 0);
     InterlockedExchange(&g.strategicReadyTicks, 0);
+    InterlockedExchange(&g.endDayLockWaitLogged, 0);
     InterlockedExchange(&g.pendingEndDay, 1);
-    tlog("[timer] end_day QUEUED by plugin (fromBattle=%d)", fromBattle ? 1 : 0);
+    tlog("[timer] end_day QUEUED by plugin "
+         "(fromBattle=%d localOrigin=%ld battleKind=%ld instance=%ld)",
+         fromBattle ? 1 : 0, localOrigin,
+         InterlockedExchangeAdd(&g.battleKindPublished, 0),
+         InterlockedExchangeAdd(&g.battleInstance, 0));
     return 1;
 }
 extern "C" int timerhost_cancel_elapse(void)
@@ -1381,51 +1866,62 @@ extern "C" uint32_t timerhost_begin_turn_ack_serial(void)
 
 extern "C" void timerhost_pump(void)
 {
-    // Called ONLY on WM_TIMER (featuremenu's 32ms timer) = an idle point, after the hero finished
-    // moving. Pressing END_TURN mid-move fires onClick but the game rejects the turn-end.
-    if (!g.pendingEndDay && !g.forceAutoKickPending)
+    // Load Game restores clientTakesTurn and the strategic interface but never executes the normal
+    // DLG_BEGIN_TURN/BTN_OK callback. Publish the same readiness serial after two 32-ms GUI ticks
+    // prove that the ordinary END_TURN control is enabled and genuinely topmost. During a normal
+    // turn-start modal interfaceOnTop(endTurn) stays false, so BTN_OK remains the only fast path.
+    if (InterlockedExchangeAdd(&g.beginTurnReadyPending, 0)) {
+        const bool ready = featuremenu_my_turn() == 1 && isUserPtr(g.endTurn) &&
+                           btnEnabled(g.endTurn) && interfaceOnTop(g.endTurn);
+        if (!ready) {
+            InterlockedExchange(&g.beginTurnReadyTicks, 0);
+        } else if (InterlockedIncrement(&g.beginTurnReadyTicks) >= 2 &&
+                   InterlockedCompareExchange(&g.beginTurnReadyPending, 0, 1) == 1) {
+            InterlockedExchange(&g.beginTurnReadyTicks, 0);
+            const LONG serial = InterlockedIncrement(&g.beginTurnAckSerial);
+            tlog("[timer] loaded/resumed strategic turn accepted on stable topmost UI "
+                 "(owner=%08X ack=%ld)",
+                 static_cast<unsigned>(g.lastTurnPlayer), serial);
+        }
+    } else {
+        InterlockedExchange(&g.beginTurnReadyTicks, 0);
+    }
+
+    // GUI-thread fallback for the private message path. It also covers the brief startup interval
+    // before pluginhost can resolve the canonical game HWND.
+    if (InterlockedExchangeAdd(&g.forceAutoRequested, 0) &&
+        !InterlockedExchangeAdd(&g.forceAutoMessagePosted, 0))
+        dispatchForcedAutoBattle();
+
+    // Retire post-battle provenance only after the ordinary strategic END_TURN control is topmost
+    // for two idle ticks. Until then a reward/artifact/modal interface must keep End Day on the
+    // strict post-battle path even though IBatViewer has already been destroyed.
+    if (InterlockedExchangeAdd(&g.postBattleTransition, 0)) {
+        const int myTurn = featuremenu_my_turn();
+        const bool stableStrategic = myTurn == 1 && isUserPtr(g.endTurn) &&
+            btnEnabled(g.endTurn) && interfaceOnTop(g.endTurn);
+        if (!stableStrategic) {
+            InterlockedExchange(&g.postBattleReadyTicks, 0);
+        } else if (InterlockedIncrement(&g.postBattleReadyTicks) >= 2) {
+            clearPostBattleTransition();
+            tlog("[timer] post-battle transition retired on stable strategic UI");
+        }
+    }
+
+    // Called ONLY on WM_TIMER (featuremenu's 32ms timer), outside the live mouse/key callback stack.
+    // That is necessary for UI lifetime safety but does not prove command readiness: after combat the
+    // strategic interface can already be visible while CPhaseGame's object lock is still held below.
+    if (!g.pendingEndDay)
         return;
-    // Holding LMB must never stall a permanent forced-Auto latch. It blocks only End Day, whose
-    // button press tears down strategic UI and is unsafe mid-drag; that request remains pending.
-    const bool endDayBlockedByDrag = g.pendingEndDay &&
-        ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0);
-    if (endDayBlockedByDrag && !g.forceAutoKickPending)
+    // The button press tears down strategic UI and is unsafe in the middle of a drag. Keep this
+    // request queued until the mouse is released.
+    const bool endDayBlockedByDrag =
+        (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    if (endDayBlockedByDrag)
         return;
     if (InterlockedCompareExchange(&g.inAction, 1, 0) != 0)
         return; // re-entry guard: the press pumps messages; never recurse into a second press
     __try {
-        // First activation needs one native AI callback because downstream UI handling has already
-        // returned without seeing the newly-set side flag. Later unit updates schedule the
-        // same callback themselves through the game's normal five-millisecond UiEvent.
-        C4P_BattleTimerState battleState = {};
-        battleState.struct_size = sizeof(battleState);
-        const bool forceKickEligible = g.forceAutoKickPending && g.forceAutoRequested &&
-            timerhost_get_battle_timer_state(&battleState) &&
-            battleState.battle_kind == 1 && battleState.local_active == 1 &&
-            battleState.selection_open == 1 && battleState.playback_local < 0 &&
-            isUserPtr(g.battleViewer);
-        if (forceKickEligible) {
-            void* const viewer = g.battleViewer;
-            const bool callbackReturned = kickNativeAutoBattle(viewer);
-            const bool submitAcknowledged =
-                InterlockedExchangeAdd(&g.forceAutoActive, 0) != 0 &&
-                InterlockedExchangeAdd(&g.forceAutoKickPending, 0) == 0;
-            if (submitAcknowledged) {
-                tlog("[timer] native Auto Battle callback dispatched and acknowledged "
-                     "(viewer=%p instance=%u)", viewer, battleState.battle_instance);
-            } else {
-                // A callback that returned without crossing hookBattleSubmit is not success. Restore
-                // manual control immediately; otherwise a pure joiner can wait forever with every
-                // key and mouse action swallowed.
-                InterlockedExchange(&g.forceAutoKickPending, 0);
-                InterlockedExchange(&g.forceAutoRequested, 0);
-                InterlockedExchange(&g.forceAutoActive, 0);
-                setToggleForced(viewer, false);
-                tlog("[timer] native Auto Battle callback unacknowledged (returned=%d); "
-                     "manual input restored", callbackReturned ? 1 : 0);
-            }
-        }
-
         if (g.pendingEndDay && !endDayBlockedByDrag) {
             const bool battleUi = isUserPtr(g.btnRetreat) || isUserPtr(g.btnDefend) ||
                                   isUserPtr(g.btnClose);
@@ -1434,14 +1930,27 @@ extern "C" void timerhost_pump(void)
                 if (!g.battleClosePressed && isUserPtr(g.btnClose) && btnEnabled(g.btnClose)) {
                     InterlockedExchange(&g.battleClosePressed, 1);
                     InterlockedExchange(&g.strategicReadyTicks, 0);
+                    InterlockedExchange(&g.postBattleTransition, 1);
+                    InterlockedExchange(&g.postBattleReadyTicks, 0);
                     tlog("[timer] battle resolved; pressing BTN_CLOSE before End Day");
                     pressBtn(g.btnClose);
                 }
             } else {
                 const int myTurn = featuremenu_my_turn();
-                if (myTurn == 0) {
-                    // Includes the defender-timeout case: never end the attacker's strategic turn.
-                    tlog("[timer] End Day discarded: local strategic turn is not active");
+                const LONG localOrigin =
+                    InterlockedExchangeAdd(&g.pendingEndDayLocalOrigin, 0);
+                if (g.pendingEndDayBattle && localOrigin != 1) {
+                    // End Day belongs only to the client which owned the strategic turn when its
+                    // clock expired. A defender's local battle clock can also reach zero and force
+                    // Auto Battle, but must never consume the attacker's strategic turn. Unknown
+                    // provenance fails closed for the same reason.
+                    tlog("[timer] post-battle End Day discarded: timeout did not originate from "
+                         "the local strategic owner (current=%d origin=%ld); attacker's turn preserved",
+                         myTurn, localOrigin);
+                    clearPendingActions();
+                } else if (myTurn == 0 && !g.pendingEndDayBattle) {
+                    tlog("[timer] End Day discarded: local strategic turn is not active "
+                         "(current=%d origin=%ld postBattle=0)", myTurn, localOrigin);
                     clearPendingActions();
                 } else if (g.pendingEndDayBattle) {
                     // Post-battle path is intentionally strict. Victory/defeat screens do not expose
@@ -1451,11 +1960,42 @@ extern "C" void timerhost_pump(void)
                         interfaceOnTop(g.endTurn);
                     if (!strategicReady) {
                         InterlockedExchange(&g.strategicReadyTicks, 0);
-                    } else if (InterlockedIncrement(&g.strategicReadyTicks) >= 2) {
-                        tlog("[timer] strategic UI stably restored; pressing END_TURN after battle");
-                        InterlockedExchange(&g.suppressEndTurnConfirm, 1);
-                        pressBtn(g.endTurn);
-                        InterlockedExchange(&g.suppressEndTurnConfirm, 0);
+                        InterlockedExchange(&g.endDayLockWaitLogged, 0);
+                    } else {
+                        const PhaseGameLockSnapshot objectLock = phaseGameLockSnapshot();
+                        if (!objectLock.available || objectLock.locked) {
+                            InterlockedExchange(&g.strategicReadyTicks, 0);
+                            if (InterlockedCompareExchange(&g.endDayLockWaitLogged, 1, 0) == 0) {
+                                if (objectLock.available) {
+                                    tlog("[timer] post-battle END_TURN deferred by native object lock "
+                                         "(local=%lu network=%lu special=%u)",
+                                         static_cast<unsigned long>(objectLock.pendingLocalUpdates),
+                                         static_cast<unsigned long>(objectLock.pendingNetworkUpdates),
+                                         static_cast<unsigned>(objectLock.specialState));
+                                } else {
+                                    tlog("[timer] post-battle END_TURN deferred: native object-lock "
+                                         "state is not yet available");
+                                }
+                            }
+                        } else if (InterlockedIncrement(&g.strategicReadyTicks) >= 2) {
+                            if (InterlockedExchange(&g.endDayLockWaitLogged, 0)) {
+                                tlog("[timer] native object lock released "
+                                     "(local=%lu network=%lu special=%u)",
+                                     static_cast<unsigned long>(objectLock.pendingLocalUpdates),
+                                     static_cast<unsigned long>(objectLock.pendingNetworkUpdates),
+                                     static_cast<unsigned>(objectLock.specialState));
+                            }
+                            tlog("[timer] strategic UI and native command gate stably ready; "
+                                 "pressing END_TURN after battle");
+                            // The native click is a network submission, not an idempotent poll. Consume
+                            // the request before entering game code so WM_TIMER cannot send it again
+                            // while the turn-info broadcast is in flight.
+                            InterlockedExchange(&g.pendingEndDay, 0);
+                            InterlockedExchange(&g.pendingEndDayBattle, 0);
+                            InterlockedExchange(&g.suppressEndTurnConfirm, 1);
+                            pressBtn(g.endTurn);
+                            InterlockedExchange(&g.suppressEndTurnConfirm, 0);
+                        }
                     }
                 } else if (myTurn != 0) {
                     // Preserve the legacy non-battle End Day priority chain for ordinary timeouts.
@@ -1463,10 +2003,15 @@ extern "C" void timerhost_pump(void)
                     for (int i = 0; i < 4; ++i) {
                         if (!isUserPtr(order[i]) || !btnEnabled(order[i]))
                             continue;
-                        tlog("[timer] pressing btn[%d]=%p (WM_TIMER idle)", i, order[i]);
                         const bool endTurn = order[i] == g.endTurn;
-                        if (endTurn)
+                        if (endTurn && !interfaceOnTop(g.endTurn))
+                            continue;
+                        tlog("[timer] pressing btn[%d]=%p (WM_TIMER idle)", i, order[i]);
+                        if (endTurn) {
+                            InterlockedExchange(&g.pendingEndDay, 0);
+                            InterlockedExchange(&g.pendingEndDayBattle, 0);
                             InterlockedExchange(&g.suppressEndTurnConfirm, 1);
+                        }
                         pressBtn(order[i]);
                         if (endTurn)
                             InterlockedExchange(&g.suppressEndTurnConfirm, 0);
@@ -1487,8 +2032,14 @@ extern "C" void timerhost_install(void)
         return;
     g.installed = 1;
     g.lastTurnPlayer = -1;
+    InterlockedExchange(&g.beginTurnReadyPending, 0);
+    InterlockedExchange(&g.beginTurnReadyTicks, 0);
     InterlockedExchange(&g.battleTurnActive, -1);
     InterlockedExchange(&g.battlePlaybackLocal, -1);
+    InterlockedExchange(&g.forceAutoLastInstance, -1);
+    InterlockedExchange(&g.forceAutoLastGeneration, -1);
+    InterlockedExchange(&g.forceAutoLatchedInstance, -1);
+    InterlockedExchange(&g.forceAutoLatchedSideOffset, -1);
 
     const bool localPlayerAccessorValid = validateLocalNetworkPlayerIdAccessor();
     InterlockedExchange(&g_localNetworkPlayerIdAccessorAvailable,
@@ -1497,6 +2048,16 @@ extern "C" void timerhost_install(void)
         tlog("[timer] local-player accessor validated (0x403384, netPlayerClientPtr +32)");
     else
         tlog("[timer] local-player accessor signature mismatch; PvP decision timing unavailable");
+
+    const bool autoBattleUiHelpersValid = validateNativeAutoBattleUi();
+    const bool autoBattleGuardValid =
+        autoBattleUiHelpersValid && installAutoBattleToggleGuard();
+    const bool autoBattleUiValid = autoBattleUiHelpersValid && autoBattleGuardValid;
+    InterlockedExchange(&g.forceAutoUiAvailable, autoBattleUiValid ? 1 : 0);
+    if (autoBattleUiValid)
+        tlog("[timer] native Auto Battle UI path + click/hotkey guard validated");
+    else
+        tlog("[timer] native Auto Battle signature/guard mismatch; forced Auto remains fail-closed");
 
     // off[9] dialog/button-create capture (__stdcall 5-arg); off[6] turn-info handler (cross-client).
     g.g_orig_dlgCreate = reinterpret_cast<void*>(0x5C93D6);
@@ -1513,8 +2074,9 @@ extern "C" void timerhost_install(void)
 
     // off[8] CButtonInterf::vftable[0] destructor -> null captured buttons on destroy.
     g.g_orig_btnDtor = patchVtableSlot(0x6E3294, 0, reinterpret_cast<void*>(hook_btnDestroy));
-    // off[5] CMidClient::vftable[0] scenario-init -> drop all captures.
-    g.g_orig_scenInit = patchVtableSlot(0x6CEB5C, 0, reinterpret_cast<void*>(hook_scenarioInit));
+    // off[5] CMidClient::vftable[0] destructor -> drop all captures at scenario teardown.
+    g.g_orig_midClientDtor =
+        patchVtableSlot(0x6CEB5C, 0, reinterpret_cast<void*>(hook_midClientDestroy));
 
     // Exact Russobit/MNS 3.01a callsite used by the original timer.mod off[13] table. Signature-gated:
     // on another executable this remains a clean no-op and automatic End Day is not queued.
@@ -1522,11 +2084,12 @@ extern "C" void timerhost_install(void)
     // Exact Russobit begin-turn confirmation callback. Other executable families deliberately keep
     // the existing active-turn edge because this address is not assumed to be portable.
     installBeginTurnAckHook();
-    // Native Auto Battle toggle/callback addresses are used only behind this exact prologue gate.
-    installAutoBattleToggleHook();
+    // Forced Auto enters through the toggle's ordinary callOnClicked path. The callback detour above
+    // does not trigger Auto and never calls 0x6355EF: it only rejects later cancellation of the exact
+    // latched side. General mouse/key/WM_CHAR input is never captured.
     // Exact common IBatNotify sender: closes the local selection interval for every action kind.
     installBattleSubmitHook();
 
     tlog("[timer] keystone capture installed (off9 dlg-create 0x5C93D6, off8 btn-dtor 0x6E3294, "
-         "off5 scen-init 0x6CEB5C)");
+         "off5 CMidClient-dtor 0x6CEB5C)");
 }

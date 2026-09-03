@@ -33,7 +33,6 @@ extern "C" int widebattle_canvas_hook_is_available(void);
 extern "C" int widebattle_get_enabled(void);
 extern "C" int widebattle_is_active(void);
 extern "C" void DDSetGameCanvasMetrics(int width, int height, int injectResolution);
-extern "C" void DDInvalidateDecorativeFrame(void);
 extern "C" int DDReadConfigString(const char* key, const char* defaultValue,
                                     char* value, unsigned int capacity);
 
@@ -237,8 +236,20 @@ volatile LONG g_active = 0;
 volatile LONG g_activeCanvas[2] = {kBaseWidth, kBaseHeight};
 volatile LONG g_zoomEnabled = 1;
 volatile LONG g_zoomFactor = 100;
-volatile LONG g_surfaceAdjustActive = 0;
-volatile LONG g_wideBattleSurface = 0;
+enum SurfaceLayoutBits : LONG
+{
+    kSurfaceAdjustBit = 1 << 0,
+    kWideBattleSurfaceBit = 1 << 1,
+};
+
+// The game-side classifier runs before the matching pixels necessarily reach
+// the DirectDraw primary. Keep its result pending until an actual primary
+// Blt/Flip/DC/Unlock publishes those pixels. Pending stores the two raw
+// classifier bits; published stores the fully resolved decorate/wide decision.
+// A single packed LONG makes each renderer-side snapshot indivisible on
+// 32-bit Windows.
+volatile LONG g_surfaceLayoutPending = 0;
+volatile LONG g_surfaceLayoutPublished = 0;
 volatile LONG g_legacyCanvasNativeFallback = 0;
 PatchSites g_sites = {};
 const AddressLayout* g_layout = nullptr;
@@ -491,27 +502,42 @@ void prepareLegacyZoomState()
         factor > 100)
         factor = 100;
 
-    InterlockedExchange(&g_zoomEnabled, enabled ? 1 : 0);
-    InterlockedExchange(&g_zoomFactor, factor);
-    InterlockedExchange(&g_surfaceAdjustActive, 0);
-    InterlockedExchange(&g_wideBattleSurface, 0);
+    // Fixed-screen layout remains active independently of centered crop.
+    InterlockedExchange(&g_zoomEnabled, 1);
+    InterlockedExchange(&g_zoomFactor, enabled ? factor : 0);
+    InterlockedExchange(&g_surfaceLayoutPending, 0);
+    InterlockedExchange(&g_surfaceLayoutPublished, 0);
 }
 
-bool canvasAdjustmentActive()
+LONG resolvePresentationLayout(LONG surfaceLayout)
 {
     if (InterlockedExchangeAdd(&g_active, 0) == 0 ||
         InterlockedExchangeAdd(&g_zoomEnabled, 0) == 0 ||
-        InterlockedExchangeAdd(&g_surfaceAdjustActive, 0) == 0)
-        return false;
+        (surfaceLayout & kSurfaceAdjustBit) == 0)
+        return 0;
 
     // The legacy renderer suppresses the centered 800x600 adjustment only
     // for its special WideBattle surface while WideBattle is enabled but not
     // latched for the current battle.  Use the battle hook's latched state;
     // recomputing it here can disagree for a frame while a battle opens.
-    return InterlockedExchangeAdd(&g_wideBattleSurface, 0) == 0 ||
-           widebattle_canvas_hook_is_available() == 0 ||
-           widebattle_get_enabled() == 0 ||
-           widebattle_is_active() != 0;
+    const bool wideSurface =
+        (surfaceLayout & kWideBattleSurfaceBit) != 0;
+    const bool wideEnabled =
+        widebattle_canvas_hook_is_available() != 0 &&
+        widebattle_get_enabled() != 0;
+    const bool wideActive = wideEnabled && widebattle_is_active() != 0;
+    if (wideSurface && wideEnabled && !wideActive)
+        return 0;
+
+    return kSurfaceAdjustBit |
+           (wideSurface && wideActive ? kWideBattleSurfaceBit : 0);
+}
+
+bool canvasAdjustmentActive()
+{
+    return (resolvePresentationLayout(
+                InterlockedExchangeAdd(&g_surfaceLayoutPending, 0)) &
+            kSurfaceAdjustBit) != 0;
 }
 
 bool initializeImageRange()
@@ -1010,21 +1036,25 @@ void __declspec(naked) canvasModeHook()
 
 void __stdcall recordSurfaceState(const DWORD* object, DWORD result)
 {
-    const LONG oldActive = InterlockedExchange(
-        &g_surfaceAdjustActive, (result & 1U) != 0 ? 1 : 0);
-    LONG oldWide = InterlockedExchangeAdd(&g_wideBattleSurface, 0);
+    LONG layout = InterlockedExchangeAdd(&g_surfaceLayoutPending, 0);
+    if ((result & 1U) != 0)
+        layout |= kSurfaceAdjustBit;
+    else
+        layout &= ~kSurfaceAdjustBit;
 
     // The legacy wrapper deliberately retains the previous surface kind while
     // this sentinel is present.
     if (object && object[2] != 0xFFFFFFFFU) {
-        oldWide = InterlockedExchange(
-            &g_wideBattleSurface,
-            object[0] == g_wideBattleSurfaceVtable ? 1 : 0);
+        if (object[0] == g_wideBattleSurfaceVtable)
+            layout |= kWideBattleSurfaceBit;
+        else
+            layout &= ~kWideBattleSurfaceBit;
     }
+    InterlockedExchange(&g_surfaceLayoutPending, layout);
 
-    if (oldActive != InterlockedExchangeAdd(&g_surfaceAdjustActive, 0) ||
-        oldWide != InterlockedExchangeAdd(&g_wideBattleSurface, 0))
-        DDInvalidateDecorativeFrame();
+    // Do not wake or publish to the renderer here. The matching primary update
+    // commits both pixels and this pending policy, mirroring DisciplesGL's
+    // StateBuffer -> Flush order.
 }
 
 void __declspec(naked) surfaceStateHook()
@@ -1044,21 +1074,21 @@ void __declspec(naked) halfSizeDrawHook()
     __asm {
         cmp [esi+68h], ebx
         je draw
-        cmp dword ptr [g_surfaceAdjustActive], ebx
+        test dword ptr [g_surfaceLayoutPending], 1
         je done
 
     draw:
         mov eax, [ecx]
         add esi, 64h
         mov edx, [esi+4]
-        cmp dword ptr [g_surfaceAdjustActive], ebx
+        test dword ptr [g_surfaceLayoutPending], 1
         je pushHeight
         shr edx, 1
 
     pushHeight:
         push edx
         mov edx, [esi]
-        cmp dword ptr [g_surfaceAdjustActive], ebx
+        test dword ptr [g_surfaceLayoutPending], 1
         je pushWidth
         shr edx, 1
 
@@ -1415,6 +1445,13 @@ void migrateLegacyCanvasRequest()
 
 } // namespace
 
+extern "C" void horplus_publish_surface_state(void)
+{
+    const LONG layout = resolvePresentationLayout(
+        InterlockedExchangeAdd(&g_surfaceLayoutPending, 0));
+    InterlockedExchange(&g_surfaceLayoutPublished, layout);
+}
+
 extern "C" void horplus_install(void)
 {
     if (InterlockedCompareExchange(&g_installAttempted, 1, 0) != 0)
@@ -1519,8 +1556,8 @@ extern "C" void horplus_install(void)
     if (!preparePlans(requested.width, requested.height) || !applyPlans()) {
         InterlockedExchange(&g_activeCanvas[0], nativeWidth);
         InterlockedExchange(&g_activeCanvas[1], nativeHeight);
-        InterlockedExchange(&g_surfaceAdjustActive, 0);
-        InterlockedExchange(&g_wideBattleSurface, 0);
+        InterlockedExchange(&g_surfaceLayoutPending, 0);
+        InterlockedExchange(&g_surfaceLayoutPublished, 0);
         InterlockedExchange(&g_available, 0);
         OutputDebugStringA(
             "C4dll-R: Hor+ disabled (could not apply the complete patch transaction)\n");
@@ -1584,17 +1621,28 @@ extern "C" int horplus_get_battle_view_width(void)
     return canvasWidth - static_cast<int>(static_cast<DWORD>(reduction));
 }
 
+extern "C" void horplus_set_window_stretch_percent(int percent)
+{
+    if (percent < 0)
+        percent = 0;
+    else if (percent > 100)
+        percent = 100;
+
+    // "Off" disables only centered crop; fixed-screen layout remains active.
+    InterlockedExchange(&g_zoomEnabled, 1);
+    InterlockedExchange(&g_zoomFactor, percent);
+}
+
 extern "C" int horplus_get_decor_layout(int* contentWidth,
                                           int* contentHeight,
                                           int* wideBattle)
 {
-    if (!canvasAdjustmentActive())
+    const LONG layout =
+        InterlockedExchangeAdd(&g_surfaceLayoutPublished, 0);
+    if ((layout & kSurfaceAdjustBit) == 0)
         return 0;
 
-    const bool wide =
-        InterlockedExchangeAdd(&g_wideBattleSurface, 0) != 0 &&
-        widebattle_canvas_hook_is_available() != 0 &&
-        widebattle_get_enabled() != 0 && widebattle_is_active() != 0;
+    const bool wide = (layout & kWideBattleSurfaceBit) != 0;
     if (contentWidth)
         *contentWidth = wide ? 990 : kBaseWidth;
     if (contentHeight)

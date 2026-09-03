@@ -80,7 +80,11 @@ COMPAT_VARYING vec4 TEX0;
 #define outsize vec4(OutputSize, 1.0 / OutputSize)
 
 vec3 FsrEasuCF(vec2 p) {
-    return COMPAT_TEXTURE(Source,p).rgb;
+    // The active crop is packed at the origin of a larger POT texture. Clamp
+    // taps to that active rectangle, not merely to the physical texture edge.
+    vec2 minCoord = vec2(0.5) / TextureSize;
+    vec2 maxCoord = (InputSize - vec2(0.5)) / TextureSize;
+    return COMPAT_TEXTURE(Source, clamp(p, minCoord, maxCoord)).rgb;
 }
 
 /**** EASU ****/
@@ -312,10 +316,11 @@ void main()
     vec3 c;
     vec4 con0,con1,con2,con3;
     
-    vec2 fragCoord = vTexCoord.xy * OutputSize.xy;
+    vec2 fragCoord =
+        vTexCoord.xy * TextureSize.xy * (OutputSize.xy / InputSize.xy);
     
     FsrEasuCon(
-        con0, con1, con2, con3, SourceSize.xy, SourceSize.xy, OutputSize.xy
+        con0, con1, con2, con3, InputSize.xy, TextureSize.xy, OutputSize.xy
     );
     FsrEasuF(c, fragCoord, con0, con1, con2, con3);
     FragColor = vec4(c.xyz, 1);

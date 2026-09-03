@@ -1,0 +1,950 @@
+diff --git a/inc/render_ogl.h b/inc/render_ogl.h
+index 15049a7..a627eed 100644
+--- a/inc/render_ogl.h
++++ b/inc/render_ogl.h
+@@ -40,6 +40,9 @@ typedef struct OGLRENDERER
+     GLint shader1_frame_count_uni_loc;
+     GLint shader2_frame_count_uni_loc;
+     GLint shader1_output_size_uni_loc;
++    GLint shader1_input_size_uni_loc;
++    GLint shader2_output_size_uni_loc;
++    GLint shader2_input_size_uni_loc;
+     GLuint frame_buffer_id[FBO_COUNT];
+     GLuint frame_buffer_tex_id[FBO_COUNT];
+     GLint shader1_tex_coord_attr_loc;
+@@ -51,6 +54,25 @@ typedef struct OGLRENDERER
+     BOOL use_opengl;
+     BOOL filter_bilinear;
+     BOOL shader2_upscale;
++    /* Recognized upscaler which is precompiled for live fixed-screen crop,
++     * but bypassed on an unscaled 1:1 strategic frame (DisciplesGL parity). */
++    BOOL shader1_dynamic_upscaler;
++    int output_viewport_x;
++    int output_viewport_y;
++    int output_viewport_width;
++    int output_viewport_height;
++    int filter_viewport_width;
++    int filter_viewport_height;
++    int quad_crop_left;
++    int quad_crop_top;
++    int quad_crop_width;
++    int quad_crop_height;
++    BOOL quad_to_fbo;
++    int shader1_crop_width;
++    int shader1_crop_height;
++    BOOL shader1_quad_to_fbo;
++    int shader2_input_width;
++    int shader2_input_height;
+     volatile LONG live_resize_ready;
+     LONG live_resize_size;
+     int live_viewport_x;
+diff --git a/src/render_d3d9.c b/src/render_d3d9.c
+index 364c042..9e3ffe3 100644
+--- a/src/render_d3d9.c
++++ b/src/render_d3d9.c
+@@ -36,6 +36,9 @@ static D3D9RENDERER g_d3d9;
+ 
+ extern void DDApplySimpleZoomViewport(
+     int bottom_origin, int* x, int* y, int* width, int* height);
++extern int DDGetWindowStretchCrop(
++    int game_width, int game_height,
++    int* left, int* top, int* crop_width, int* crop_height);
+ 
+ BOOL d3d9_is_available()
+ {
+@@ -561,15 +564,41 @@ static BOOL d3d9_update_vertices(BOOL upscale_hack, BOOL stretch)
+     float vp_w = (float)(vp_x_i + vp_width_i);
+     float vp_h = (float)(vp_y_i + vp_height_i);
+ 
+-    float s_h = upscale_hack ? g_d3d9.scale_h * ((float)g_ddraw.upscale_hack_height / g_ddraw.height) : g_d3d9.scale_h;
+-    float s_w = upscale_hack ? g_d3d9.scale_w * ((float)g_ddraw.upscale_hack_width / g_ddraw.width) : g_d3d9.scale_w;
++    int src_left = 0;
++    int src_top = 0;
++    int src_width = g_ddraw.width;
++    int src_height = g_ddraw.height;
++
++    /* The legacy fixed-window stretch is a centered source crop, not another destination
++     * viewport transform.  Keep cnc-ddraw's low-resolution hack unchanged: it already owns a
++     * different source region and must not be composed with the DisciplesGL crop. */
++    if (upscale_hack)
++    {
++        src_width = g_ddraw.upscale_hack_width;
++        src_height = g_ddraw.upscale_hack_height;
++    }
++    else
++    {
++        DDGetWindowStretchCrop(
++            g_ddraw.width,
++            g_ddraw.height,
++            &src_left,
++            &src_top,
++            &src_width,
++            &src_height);
++    }
++
++    const float s_left = (float)src_left / (float)g_d3d9.tex_width;
++    const float s_top = (float)src_top / (float)g_d3d9.tex_height;
++    const float s_right = (float)(src_left + src_width) / (float)g_d3d9.tex_width;
++    const float s_bottom = (float)(src_top + src_height) / (float)g_d3d9.tex_height;
+ 
+     CUSTOMVERTEX vertices[] =
+     {
+-        { vp_x - 0.5f, vp_h - 0.5f, 0.0f, 1.0f, 0.0f, s_h },
+-        { vp_x - 0.5f, vp_y - 0.5f, 0.0f, 1.0f, 0.0f, 0.0f },
+-        { vp_w - 0.5f, vp_h - 0.5f, 0.0f, 1.0f, s_w,  s_h },
+-        { vp_w - 0.5f, vp_y - 0.5f, 0.0f, 1.0f, s_w,  0.0f }
++        { vp_x - 0.5f, vp_h - 0.5f, 0.0f, 1.0f, s_left,  s_bottom },
++        { vp_x - 0.5f, vp_y - 0.5f, 0.0f, 1.0f, s_left,  s_top },
++        { vp_w - 0.5f, vp_h - 0.5f, 0.0f, 1.0f, s_right, s_bottom },
++        { vp_w - 0.5f, vp_y - 0.5f, 0.0f, 1.0f, s_right, s_top }
+     };
+ 
+     void* data;
+diff --git a/src/render_gdi.c b/src/render_gdi.c
+index d2f8d83..5f98e70 100644
+--- a/src/render_gdi.c
++++ b/src/render_gdi.c
+@@ -12,6 +12,9 @@
+ 
+ extern void DDApplySimpleZoomViewport(
+     int bottom_origin, int* x, int* y, int* width, int* height);
++extern int DDGetWindowStretchCrop(
++    int game_width, int game_height,
++    int* left, int* top, int* crop_width, int* crop_height);
+ 
+ extern const void* DDGetDecoratedSurface(
+     const void* source, int width, int height, int pitch, int bpp, int rgb555);
+@@ -136,6 +139,25 @@ DWORD WINAPI gdi_render_main(void)
+                     (g_ddraw.child_window_exists ? g_ddraw.width : g_ddraw.render.viewport.width) ||
+                 dst_height !=
+                     (g_ddraw.child_window_exists ? g_ddraw.height : g_ddraw.render.viewport.height);
++            int src_x = 0;
++            int src_y = 0;
++            int src_width = g_ddraw.width;
++            int src_height = g_ddraw.height;
++            BOOL window_crop = FALSE;
++
++            /* DisciplesGL's fixed-window stretch crops the source before the selected GDI
++             * resampler scales it to the final destination.  The cnc-ddraw low-resolution hack
++             * is a separate source-region mode and keeps precedence when active. */
++            if (!upscale_hack)
++            {
++                window_crop = DDGetWindowStretchCrop(
++                    g_ddraw.width,
++                    g_ddraw.height,
++                    &src_x,
++                    &src_y,
++                    &src_width,
++                    &src_height);
++            }
+ 
+             if (g_ddraw.bnet_active)
+             {
+@@ -160,7 +182,7 @@ DWORD WINAPI gdi_render_main(void)
+                     DIB_RGB_COLORS,
+                     SRCCOPY);
+             }
+-            else if (simple_zoom || (!g_ddraw.child_window_exists &&
++            else if (window_crop || simple_zoom || (!g_ddraw.child_window_exists &&
+                 (g_ddraw.render.width != g_ddraw.width || g_ddraw.render.height != g_ddraw.height)))
+             {
+                 lines_copied = real_StretchDIBits(
+@@ -169,10 +191,10 @@ DWORD WINAPI gdi_render_main(void)
+                     dst_y,
+                     dst_width,
+                     dst_height,
+-                    0,
+-                    0,
+-                    g_ddraw.width,
+-                    g_ddraw.height,
++                    src_x,
++                    src_y,
++                    src_width,
++                    src_height,
+                     present_surface,
+                     g_ddraw.primary->bmi,
+                     DIB_RGB_COLORS,
+diff --git a/src/render_ogl.c b/src/render_ogl.c
+index 1fe7cd7..13a4ddf 100644
+--- a/src/render_ogl.c
++++ b/src/render_ogl.c
+@@ -13,6 +13,9 @@
+ 
+ extern const void* DDGetDecoratedSurface(
+     const void* source, int width, int height, int pitch, int bpp, int rgb555);
++extern int DDGetWindowStretchCrop(
++    int game_width, int game_height,
++    int* left, int* top, int* crop_width, int* crop_height);
+ 
+ 
+ static HGLRC ogl_create_core_context(HDC hdc);
+@@ -27,6 +30,15 @@ static BOOL ogl_release_resources();
+ static BOOL ogl_texture_upload_test();
+ static BOOL ogl_shader_test();
+ static void ogl_check_error(const char* stmt);
++static void ogl_update_main_quad(
++    BOOL to_fbo, int left, int top, int width, int height, BOOL force);
++static void ogl_update_shader1_quad(
++    BOOL to_fbo, int width, int height, BOOL force);
++static void ogl_update_shader1_sizes(
++    int input_width, int input_height, int output_width, int output_height);
++static void ogl_update_shader2_quad(int width, int height, BOOL force);
++static void ogl_update_shader2_sizes(
++    int input_width, int input_height, int output_width, int output_height);
+ 
+ static OGLRENDERER g_ogl;
+ 
+@@ -79,8 +91,18 @@ static void ogl_set_output_viewport()
+         height = g_ddraw.render.viewport.height;
+     }
+ 
++    /* Shader passes run at the fitted/live output size. The optional simple
++     * zoom is a later destination-only transform and must not enlarge an FBO. */
++    g_ogl.filter_viewport_width = width;
++    g_ogl.filter_viewport_height = height;
++
+     DDApplySimpleZoomViewport(TRUE, &x, &y, &width, &height);
+ 
++    g_ogl.output_viewport_x = x;
++    g_ogl.output_viewport_y = y;
++    g_ogl.output_viewport_width = width;
++    g_ogl.output_viewport_height = height;
++
+     if (g_ogl.max_viewport_width > 0 &&
+         g_ogl.max_viewport_height > 0 &&
+         (width > g_ogl.max_viewport_width || height > g_ogl.max_viewport_height))
+@@ -99,6 +121,224 @@ static void ogl_set_output_viewport()
+     glViewport(x, y, width, height);
+ }
+ 
++/*
++ * The legacy Stretch-windows stage is a source crop, not a larger destination
++ * rectangle. Keep the quad mutable because the published surface classifier can
++ * switch between a strategic frame and a fixed dialog without rebuilding OpenGL.
++ * The FBO orientation matches cnc-ddraw's existing palette/conversion pass; the
++ * direct orientation is the normal back-buffer presentation orientation.
++ */
++static void ogl_update_main_quad(
++    BOOL to_fbo, int left, int top, int width, int height, BOOL force)
++{
++    if (!g_oglu_got_version3 || !g_ogl.main_program ||
++        width <= 0 || height <= 0 ||
++        g_ogl.surface_tex_width <= 0 || g_ogl.surface_tex_height <= 0)
++    {
++        return;
++    }
++
++    if (!force &&
++        g_ogl.quad_to_fbo == to_fbo &&
++        g_ogl.quad_crop_left == left &&
++        g_ogl.quad_crop_top == top &&
++        g_ogl.quad_crop_width == width &&
++        g_ogl.quad_crop_height == height)
++    {
++        return;
++    }
++
++    const GLfloat u0 = (GLfloat)left / (GLfloat)g_ogl.surface_tex_width;
++    const GLfloat v0 = (GLfloat)top / (GLfloat)g_ogl.surface_tex_height;
++    const GLfloat u1 = (GLfloat)(left + width) / (GLfloat)g_ogl.surface_tex_width;
++    const GLfloat v1 = (GLfloat)(top + height) / (GLfloat)g_ogl.surface_tex_height;
++    const GLfloat vertex_to_fbo[] = {
++        -1.0f,-1.0f,
++        -1.0f, 1.0f,
++         1.0f, 1.0f,
++         1.0f,-1.0f,
++    };
++    const GLfloat vertex_to_screen[] = {
++        -1.0f, 1.0f,
++         1.0f, 1.0f,
++         1.0f,-1.0f,
++        -1.0f,-1.0f,
++    };
++    const GLfloat tex_to_fbo[] = {
++        u0, v0,
++        u0, v1,
++        u1, v1,
++        u1, v0,
++    };
++    const GLfloat tex_to_screen[] = {
++        u0, v0,
++        u1, v0,
++        u1, v1,
++        u0, v1,
++    };
++
++    glBindVertexArray(g_ogl.main_vao);
++    glBindBuffer(GL_ARRAY_BUFFER, g_ogl.main_vbos[0]);
++    glBufferData(
++        GL_ARRAY_BUFFER,
++        sizeof(vertex_to_fbo),
++        to_fbo ? vertex_to_fbo : vertex_to_screen,
++        GL_DYNAMIC_DRAW);
++    glBindBuffer(GL_ARRAY_BUFFER, g_ogl.main_vbos[1]);
++    glBufferData(
++        GL_ARRAY_BUFFER,
++        sizeof(tex_to_fbo),
++        to_fbo ? tex_to_fbo : tex_to_screen,
++        GL_DYNAMIC_DRAW);
++    glBindBuffer(GL_ARRAY_BUFFER, 0);
++    glBindVertexArray(0);
++
++    g_ogl.quad_to_fbo = to_fbo;
++    g_ogl.quad_crop_left = left;
++    g_ogl.quad_crop_top = top;
++    g_ogl.quad_crop_width = width;
++    g_ogl.quad_crop_height = height;
++}
++
++/* The crop is packed at FBO origin, so later passes sample an origin-based
++ * active rectangle rather than re-reading the centered source coordinates. */
++static void ogl_update_shader1_quad(
++    BOOL to_fbo, int width, int height, BOOL force)
++{
++    if (!g_ogl.shader1_program ||
++        width <= 0 || height <= 0 ||
++        g_ogl.surface_tex_width <= 0 || g_ogl.surface_tex_height <= 0)
++    {
++        return;
++    }
++
++    if (!force &&
++        g_ogl.shader1_quad_to_fbo == to_fbo &&
++        g_ogl.shader1_crop_width == width &&
++        g_ogl.shader1_crop_height == height)
++    {
++        return;
++    }
++
++    const GLfloat u1 = (GLfloat)width / (GLfloat)g_ogl.surface_tex_width;
++    const GLfloat v1 = (GLfloat)height / (GLfloat)g_ogl.surface_tex_height;
++    const GLfloat tex_to_fbo[] = {
++        0.0f, 0.0f,
++        0.0f, v1,
++        u1,   v1,
++        u1,   0.0f,
++    };
++    const GLfloat tex_to_screen[] = {
++        0.0f, 0.0f,
++        u1,   0.0f,
++        u1,   v1,
++        0.0f, v1,
++    };
++
++    glBindVertexArray(g_ogl.shader1_vao);
++    glBindBuffer(GL_ARRAY_BUFFER, g_ogl.shader1_vbos[1]);
++    glBufferData(
++        GL_ARRAY_BUFFER,
++        sizeof(tex_to_fbo),
++        to_fbo ? tex_to_fbo : tex_to_screen,
++        GL_DYNAMIC_DRAW);
++    glBindBuffer(GL_ARRAY_BUFFER, 0);
++    glBindVertexArray(0);
++
++    g_ogl.shader1_quad_to_fbo = to_fbo;
++    g_ogl.shader1_crop_width = width;
++    g_ogl.shader1_crop_height = height;
++}
++
++static void ogl_update_shader1_sizes(
++    int input_width, int input_height, int output_width, int output_height)
++{
++    if (!g_ogl.shader1_program)
++        return;
++
++    glUseProgram(g_ogl.shader1_program);
++
++    if (g_ogl.shader1_input_size_uni_loc != -1)
++    {
++        const float input_size[2] = {
++            (float)input_width,
++            (float)input_height,
++        };
++        glUniform2fv(g_ogl.shader1_input_size_uni_loc, 1, input_size);
++    }
++
++    if (g_ogl.shader1_output_size_uni_loc != -1)
++    {
++        const float output_size[2] = {
++            (float)output_width,
++            (float)output_height,
++        };
++        glUniform2fv(g_ogl.shader1_output_size_uni_loc, 1, output_size);
++    }
++}
++
++static void ogl_update_shader2_quad(int width, int height, BOOL force)
++{
++    if (!g_ogl.shader2_program ||
++        width <= 0 || height <= 0 ||
++        g_ogl.surface_tex_width <= 0 || g_ogl.surface_tex_height <= 0)
++    {
++        return;
++    }
++
++    if (!force &&
++        g_ogl.shader2_input_width == width &&
++        g_ogl.shader2_input_height == height)
++    {
++        return;
++    }
++
++    const GLfloat u1 = (GLfloat)width / (GLfloat)g_ogl.surface_tex_width;
++    const GLfloat v1 = (GLfloat)height / (GLfloat)g_ogl.surface_tex_height;
++    const GLfloat tex_coord[] = {
++        0.0f, 0.0f,
++        u1,   0.0f,
++        u1,   v1,
++        0.0f, v1,
++    };
++
++    glBindVertexArray(g_ogl.shader2_vao);
++    glBindBuffer(GL_ARRAY_BUFFER, g_ogl.shader2_vbos[1]);
++    glBufferData(GL_ARRAY_BUFFER, sizeof(tex_coord), tex_coord, GL_DYNAMIC_DRAW);
++    glBindBuffer(GL_ARRAY_BUFFER, 0);
++    glBindVertexArray(0);
++
++    g_ogl.shader2_input_width = width;
++    g_ogl.shader2_input_height = height;
++}
++
++static void ogl_update_shader2_sizes(
++    int input_width, int input_height, int output_width, int output_height)
++{
++    if (!g_ogl.shader2_program)
++        return;
++
++    glUseProgram(g_ogl.shader2_program);
++
++    if (g_ogl.shader2_input_size_uni_loc != -1)
++    {
++        const float input_size[2] = {
++            (float)input_width,
++            (float)input_height,
++        };
++        glUniform2fv(g_ogl.shader2_input_size_uni_loc, 1, input_size);
++    }
++
++    if (g_ogl.shader2_output_size_uni_loc != -1)
++    {
++        const float output_size[2] = {
++            (float)output_width,
++            (float)output_height,
++        };
++        glUniform2fv(g_ogl.shader2_output_size_uni_loc, 1, output_size);
++    }
++}
++
+ BOOL ogl_create()
+ {
+     if (g_ogl.hwnd == g_ddraw.hwnd && g_ogl.hdc == g_ddraw.render.hdc && g_ogl.context)
+@@ -171,6 +411,26 @@ DWORD WINAPI ogl_render_main(void)
+     InterlockedExchange(&g_ogl.live_resize_ready, FALSE);
+     g_ogl.live_resize_size = -1;
+     g_ogl.shader1_output_size_uni_loc = -1;
++    g_ogl.shader1_input_size_uni_loc = -1;
++    g_ogl.shader2_output_size_uni_loc = -1;
++    g_ogl.shader2_input_size_uni_loc = -1;
++    g_ogl.shader1_dynamic_upscaler = FALSE;
++    g_ogl.output_viewport_x = 0;
++    g_ogl.output_viewport_y = 0;
++    g_ogl.output_viewport_width = 0;
++    g_ogl.output_viewport_height = 0;
++    g_ogl.filter_viewport_width = 0;
++    g_ogl.filter_viewport_height = 0;
++    g_ogl.quad_crop_left = -1;
++    g_ogl.quad_crop_top = -1;
++    g_ogl.quad_crop_width = -1;
++    g_ogl.quad_crop_height = -1;
++    g_ogl.quad_to_fbo = FALSE;
++    g_ogl.shader1_crop_width = -1;
++    g_ogl.shader1_crop_height = -1;
++    g_ogl.shader1_quad_to_fbo = FALSE;
++    g_ogl.shader2_input_width = -1;
++    g_ogl.shader2_input_height = -1;
+     g_ogl.got_error = g_ogl.use_opengl = FALSE;
+     GLenum err = GL_NO_ERROR;
+     BOOL made_current = FALSE;
+@@ -356,7 +616,7 @@ static void ogl_build_programs()
+                 //g_config.shader[0] = 0;
+             }
+ 
+-            /* detect common upscaling shaders and disable them if no upscaling is required */
++            /* Detect common upscalers for per-frame 1:1/downscale bypass. */
+ 
+             BOOL is_upscaler =
+                 strstr(g_config.shader, "fsr.glsl") != NULL ||
+@@ -366,41 +626,40 @@ static void ogl_build_programs()
+                 strstr(g_config.shader, "xbrz-freescale-multipass.glsl") != NULL ||
+                 strstr(g_config.shader, "xbrz-freescale.glsl") != NULL;
+ 
+-            if (!is_upscaler ||
+-                g_ddraw.render.viewport.width != g_ddraw.width ||
+-                g_ddraw.render.viewport.height != g_ddraw.height ||
+-                g_config.vhack)
+-            {
+-                g_ogl.shader1_program = oglu_build_program_from_file(shader_path, core_profile);
++            /* Stretch windows is surface-state driven and may first appear after the renderer
++             * starts at 1:1. Precompile every recognized upscaler so a later fixed-screen frame
++             * can activate either its single- or multipass route without a renderer restart. */
++            g_ogl.shader1_dynamic_upscaler = is_upscaler;
+ 
+-                if (g_ogl.shader1_program && 
+-                    (strstr(g_config.shader, "xbrz-freescale-multipass.glsl") != NULL || 
+-                        strstr(g_config.shader, "-pass1scale") != NULL))
+-                {
+-                    g_ogl.shader2_upscale = TRUE;
+-                }
++            g_ogl.shader1_program = oglu_build_program_from_file(shader_path, core_profile);
+ 
+-                if (!g_ogl.shader1_program &&
+-                    (g_ddraw.render.viewport.width != g_ddraw.width ||
+-                        g_ddraw.render.viewport.height != g_ddraw.height ||
+-                        g_config.vhack))
+-                {
+-                    g_ogl.shader1_program = 
+-                        oglu_build_program(
+-                            _stricmp(g_config.shader, "xBR-lv2") == 0 ? XBR_LV2_VERT_SHADER :
+-                            PASSTHROUGH_VERT_SHADER, 
+-                            _stricmp(g_config.shader, "Nearest neighbor") == 0 ? PASSTHROUGH_FRAG_SHADER :
+-                            _stricmp(g_config.shader, "Bilinear") == 0 ? PASSTHROUGH_FRAG_SHADER :
+-                            _stricmp(g_config.shader, "Lanczos") == 0 ? LANCZOS2_FRAG_SHADER :
+-                            _stricmp(g_config.shader, "xBR-lv2") == 0 ? XBR_LV2_FRAG_SHADER :
+-                            CATMULL_ROM_FRAG_SHADER, 
+-                            core_profile);
+-
+-                    bilinear =
+-                        _stricmp(g_config.shader, "Nearest neighbor") != 0 && 
+-                        _stricmp(g_config.shader, "Lanczos") != 0 &&
+-                        _stricmp(g_config.shader, "xBR-lv2") != 0;
+-                }
++            if (g_ogl.shader1_program &&
++                (strstr(g_config.shader, "xbrz-freescale-multipass.glsl") != NULL ||
++                    strstr(g_config.shader, "-pass1scale") != NULL))
++            {
++                g_ogl.shader2_upscale = TRUE;
++            }
++
++            if (!g_ogl.shader1_program &&
++                (g_ddraw.render.viewport.width != g_ddraw.width ||
++                    g_ddraw.render.viewport.height != g_ddraw.height ||
++                    g_config.vhack))
++            {
++                g_ogl.shader1_program =
++                    oglu_build_program(
++                        _stricmp(g_config.shader, "xBR-lv2") == 0 ? XBR_LV2_VERT_SHADER :
++                        PASSTHROUGH_VERT_SHADER,
++                        _stricmp(g_config.shader, "Nearest neighbor") == 0 ? PASSTHROUGH_FRAG_SHADER :
++                        _stricmp(g_config.shader, "Bilinear") == 0 ? PASSTHROUGH_FRAG_SHADER :
++                        _stricmp(g_config.shader, "Lanczos") == 0 ? LANCZOS2_FRAG_SHADER :
++                        _stricmp(g_config.shader, "xBR-lv2") == 0 ? XBR_LV2_FRAG_SHADER :
++                        CATMULL_ROM_FRAG_SHADER,
++                        core_profile);
++
++                bilinear =
++                    _stricmp(g_config.shader, "Nearest neighbor") != 0 &&
++                    _stricmp(g_config.shader, "Lanczos") != 0 &&
++                    _stricmp(g_config.shader, "xBR-lv2") != 0;
+             }
+         }
+         else
+@@ -418,6 +677,9 @@ static void ogl_build_programs()
+             }
+         }
+ 
++        if (!g_ogl.shader1_program)
++            g_ogl.shader1_dynamic_upscaler = FALSE;
++
+         g_ogl.filter_bilinear = strstr(g_config.shader, "bilinear.glsl") != NULL || bilinear;
+     }
+ 
+@@ -457,6 +719,8 @@ static void ogl_create_textures(int width, int height)
+         glBindTexture(GL_TEXTURE_2D, g_ogl.surface_tex_ids[i]);
+         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+ 
+         g_ogl.got_error = g_ogl.got_error || (err = glGetError()) != GL_NO_ERROR;
+         
+@@ -807,12 +1071,14 @@ static void ogl_init_shader1_program()
+         glUniform2fv(loc, 1, texture_size);
+ 
+ 
+-    loc = glGetUniformLocation(g_ogl.shader1_program, "InputSize");
+-    if (loc == -1)
+-        loc = glGetUniformLocation(g_ogl.shader1_program, "rubyInputSize");
++    g_ogl.shader1_input_size_uni_loc =
++        glGetUniformLocation(g_ogl.shader1_program, "InputSize");
++    if (g_ogl.shader1_input_size_uni_loc == -1)
++        g_ogl.shader1_input_size_uni_loc =
++            glGetUniformLocation(g_ogl.shader1_program, "rubyInputSize");
+ 
+-    if (loc != -1) 
+-        glUniform2fv(loc, 1, input_size);
++    if (g_ogl.shader1_input_size_uni_loc != -1)
++        glUniform2fv(g_ogl.shader1_input_size_uni_loc, 1, input_size);
+ 
+ 
+     loc = glGetUniformLocation(g_ogl.shader1_program, "Texture");
+@@ -854,6 +1120,8 @@ static void ogl_init_shader1_program()
+         glBindTexture(GL_TEXTURE_2D, g_ogl.frame_buffer_tex_id[i]);
+         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, g_ogl.filter_bilinear ? GL_LINEAR : GL_NEAREST);
+         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, g_ogl.filter_bilinear ? GL_LINEAR : GL_NEAREST);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+         glTexImage2D(
+             GL_TEXTURE_2D,
+             0,
+@@ -1011,15 +1279,17 @@ static void ogl_init_shader2_program()
+     output_size[0] = (float)g_ddraw.render.viewport.width;
+     output_size[1] = (float)g_ddraw.render.viewport.height;
+ 
+-    GLint loc = glGetUniformLocation(g_ogl.shader2_program, "OutputSize");
+-    if (loc == -1)
+-        loc = glGetUniformLocation(g_ogl.shader2_program, "rubyOutputSize");
++    g_ogl.shader2_output_size_uni_loc =
++        glGetUniformLocation(g_ogl.shader2_program, "OutputSize");
++    if (g_ogl.shader2_output_size_uni_loc == -1)
++        g_ogl.shader2_output_size_uni_loc =
++            glGetUniformLocation(g_ogl.shader2_program, "rubyOutputSize");
+ 
+-    if (loc != -1)
+-        glUniform2fv(loc, 1, output_size);
++    if (g_ogl.shader2_output_size_uni_loc != -1)
++        glUniform2fv(g_ogl.shader2_output_size_uni_loc, 1, output_size);
+ 
+ 
+-    loc = glGetUniformLocation(g_ogl.shader2_program, "TextureSize");
++    GLint loc = glGetUniformLocation(g_ogl.shader2_program, "TextureSize");
+     if (loc == -1)
+         loc = glGetUniformLocation(g_ogl.shader2_program, "rubyTextureSize");
+ 
+@@ -1027,12 +1297,14 @@ static void ogl_init_shader2_program()
+         glUniform2fv(loc, 1, texture_size);
+ 
+ 
+-    loc = glGetUniformLocation(g_ogl.shader2_program, "InputSize");
+-    if (loc == -1)
+-        loc = glGetUniformLocation(g_ogl.shader2_program, "rubyInputSize");
++    g_ogl.shader2_input_size_uni_loc =
++        glGetUniformLocation(g_ogl.shader2_program, "InputSize");
++    if (g_ogl.shader2_input_size_uni_loc == -1)
++        g_ogl.shader2_input_size_uni_loc =
++            glGetUniformLocation(g_ogl.shader2_program, "rubyInputSize");
+ 
+-    if (loc != -1)
+-        glUniform2fv(loc, 1, input_size);
++    if (g_ogl.shader2_input_size_uni_loc != -1)
++        glUniform2fv(g_ogl.shader2_input_size_uni_loc, 1, input_size);
+ 
+ 
+     loc = glGetUniformLocation(g_ogl.shader2_program, "Texture");
+@@ -1107,17 +1379,6 @@ static BOOL ogl_update_live_resize()
+ 
+     g_ogl.live_resize_size = size;
+ 
+-    if (g_ogl.shader1_program && g_ogl.shader1_output_size_uni_loc != -1)
+-    {
+-        float output_size[2] = {
+-            (float)g_ogl.live_viewport_width,
+-            (float)g_ogl.live_viewport_height,
+-        };
+-
+-        glUseProgram(g_ogl.shader1_program);
+-        glUniform2fv(g_ogl.shader1_output_size_uni_loc, 1, output_size);
+-    }
+-
+     return TRUE;
+ }
+ 
+@@ -1318,88 +1579,63 @@ static void ogl_render()
+             glClear(GL_COLOR_BUFFER_BIT);
+         }
+ 
+-        if (scale_changed)
++        /* Resolve the published fixed-screen crop against this frame. The vhack
++         * supplies a different physical source size and retains its old path. */
++        const BOOL upscale_hack_active =
++            InterlockedCompareExchange(&g_ddraw.upscale_hack_active, 0, 0) != 0;
++        const int source_width = upscale_hack_active ?
++            (int)g_ddraw.upscale_hack_width : (int)g_ddraw.width;
++        const int source_height = upscale_hack_active ?
++            (int)g_ddraw.upscale_hack_height : (int)g_ddraw.height;
++        int crop_left = 0;
++        int crop_top = 0;
++        int crop_width = source_width;
++        int crop_height = source_height;
++        if (!upscale_hack_active)
+         {
+-            if (g_ogl.shader2_upscale && g_ogl.shader2_program && g_ogl.shader1_program && g_ogl.main_program)
+-            {
+-                glBindVertexArray(g_ogl.shader2_vao);
+-                glBindBuffer(GL_ARRAY_BUFFER, g_ogl.shader2_vbos[1]);
+-                GLfloat tex_coord[] = {
+-                    0.0f,           0.0f,
+-                    g_ogl.scale_w,  0.0f,
+-                    g_ogl.scale_w,  g_ogl.scale_h,
+-                    0.0f,           g_ogl.scale_h,
+-                };
+-                glBufferData(GL_ARRAY_BUFFER, sizeof(tex_coord), tex_coord, GL_STATIC_DRAW);
+-                if (g_ogl.shader2_tex_coord_attr_loc != -1)
+-                {
+-                    glVertexAttribPointer(g_ogl.shader2_tex_coord_attr_loc, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+-                    glEnableVertexAttribArray(g_ogl.shader2_tex_coord_attr_loc);
+-                }
+-                glBindBuffer(GL_ARRAY_BUFFER, 0);
+-                glBindVertexArray(0);
+-            }
+-            else if (g_ogl.shader2_program && g_ogl.shader1_program && g_ogl.main_program)
+-            {
+-                glBindVertexArray(g_ogl.shader1_vao);
+-                glBindBuffer(GL_ARRAY_BUFFER, g_ogl.shader1_vbos[1]);
+-                GLfloat tex_coord[] = {
+-                    0.0f,          0.0f,
+-                    0.0f,          g_ogl.scale_h,
+-                    g_ogl.scale_w, g_ogl.scale_h,
+-                    g_ogl.scale_w, 0.0f,
+-                };
+-                glBufferData(GL_ARRAY_BUFFER, sizeof(tex_coord), tex_coord, GL_STATIC_DRAW);
+-                if (g_ogl.shader1_tex_coord_attr_loc != -1)
+-                {
+-                    glVertexAttribPointer(g_ogl.shader1_tex_coord_attr_loc, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+-                    glEnableVertexAttribArray(g_ogl.shader1_tex_coord_attr_loc);
+-                }
+-                glBindBuffer(GL_ARRAY_BUFFER, 0);
+-                glBindVertexArray(0);
+-            }
+-            else if (g_ogl.shader1_program && g_ogl.main_program)
+-            {
+-                glBindVertexArray(g_ogl.shader1_vao);
+-                glBindBuffer(GL_ARRAY_BUFFER, g_ogl.shader1_vbos[1]);
+-                GLfloat tex_coord[] = {
+-                    0.0f,           0.0f,
+-                    g_ogl.scale_w,  0.0f,
+-                    g_ogl.scale_w,  g_ogl.scale_h,
+-                    0.0f,           g_ogl.scale_h,
+-                };
+-                glBufferData(GL_ARRAY_BUFFER, sizeof(tex_coord), tex_coord, GL_STATIC_DRAW);
+-                if (g_ogl.shader1_tex_coord_attr_loc != -1)
+-                {
+-                    glVertexAttribPointer(g_ogl.shader1_tex_coord_attr_loc, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+-                    glEnableVertexAttribArray(g_ogl.shader1_tex_coord_attr_loc);
+-                }
+-                glBindBuffer(GL_ARRAY_BUFFER, 0);
+-                glBindVertexArray(0);
+-            }
+-            else if (g_oglu_got_version3 && g_ogl.main_program)
+-            {
+-                glBindVertexArray(g_ogl.main_vao);
+-                glBindBuffer(GL_ARRAY_BUFFER, g_ogl.main_vbos[1]);
+-                GLfloat tex_coord[] = {
+-                    0.0f,           0.0f,
+-                    g_ogl.scale_w,  0.0f,
+-                    g_ogl.scale_w,  g_ogl.scale_h,
+-                    0.0f,           g_ogl.scale_h,
+-                };
+-                glBufferData(GL_ARRAY_BUFFER, sizeof(tex_coord), tex_coord, GL_STATIC_DRAW);
+-                glVertexAttribPointer(g_ogl.main_tex_coord_attr_loc, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+-                glEnableVertexAttribArray(g_ogl.main_tex_coord_attr_loc);
+-                glBindBuffer(GL_ARRAY_BUFFER, 0);
+-                glBindVertexArray(0);
+-            }
++            DDGetWindowStretchCrop(
++                g_ddraw.width,
++                g_ddraw.height,
++                &crop_left,
++                &crop_top,
++                &crop_width,
++                &crop_height);
+         }
+ 
++        /* Compute the final (including Ctrl+Wheel) destination before selecting
++         * the route. Intermediate FBO passes restore this cached viewport. */
++        ogl_set_output_viewport();
++
++        const BOOL output_upscales =
++            crop_width < g_ogl.filter_viewport_width ||
++            crop_height < g_ogl.filter_viewport_height;
++        const BOOL use_multipass =
++            g_ogl.shader1_program && g_ogl.shader2_program &&
++            g_ogl.main_program &&
++            (!g_ogl.shader1_dynamic_upscaler || output_upscales);
++        const BOOL use_singlepass =
++            g_ogl.shader1_program && !g_ogl.shader2_program &&
++            g_ogl.main_program &&
++            (!g_ogl.shader1_dynamic_upscaler || output_upscales);
++
+         if (glActiveTexture)
+             glActiveTexture(GL_TEXTURE0);
+ 
+         glBindTexture(GL_TEXTURE_2D, g_ogl.surface_tex_ids[tex_index]);
+ 
++        /* DisciplesGL demotes its higher-order filter for 1:1/downscale. Exact
++         * 1:1 is identical under nearest; a real downscale uses linear. */
++        GLenum source_filter = GL_NEAREST;
++        if (g_ogl.shader1_dynamic_upscaler &&
++            !output_upscales &&
++            (crop_width != g_ogl.filter_viewport_width ||
++                crop_height != g_ogl.filter_viewport_height))
++        {
++            source_filter = GL_LINEAR;
++        }
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, source_filter);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, source_filter);
++
+         if (g_ddraw.bpp == 8)
+         {
+             glActiveTexture(GL_TEXTURE1);
+@@ -1408,7 +1644,57 @@ static void ogl_render()
+             glActiveTexture(GL_TEXTURE0);
+         }
+ 
+-        if (g_ogl.shader1_program && g_ogl.shader2_program && g_ogl.main_program)
++        ogl_update_main_quad(
++            use_multipass || use_singlepass,
++            crop_left,
++            crop_top,
++            crop_width,
++            crop_height,
++            scale_changed);
++
++        /* xBRZ preprocesses one metadata pixel per source pixel. FSR EASU instead
++         * produces the fitted image in pass 1 and RCAS consumes that active extent.
++         * Clamp the latter to the allocated FBO if a live resize outgrows it; the
++         * final pass still presents to the full destination rather than clipping. */
++        const int shader1_output_width =
++            use_multipass ?
++                (g_ogl.shader2_upscale ? crop_width :
++                    min(g_ogl.filter_viewport_width, g_ogl.surface_tex_width)) :
++                g_ogl.filter_viewport_width;
++        const int shader1_output_height =
++            use_multipass ?
++                (g_ogl.shader2_upscale ? crop_height :
++                    min(g_ogl.filter_viewport_height, g_ogl.surface_tex_height)) :
++                g_ogl.filter_viewport_height;
++
++        if (use_multipass || use_singlepass)
++        {
++            ogl_update_shader1_quad(
++                use_multipass,
++                crop_width,
++                crop_height,
++                scale_changed);
++            ogl_update_shader1_sizes(
++                crop_width,
++                crop_height,
++                shader1_output_width,
++                shader1_output_height);
++        }
++
++        if (use_multipass)
++        {
++            ogl_update_shader2_quad(
++                shader1_output_width,
++                shader1_output_height,
++                scale_changed);
++            ogl_update_shader2_sizes(
++                shader1_output_width,
++                shader1_output_height,
++                g_ogl.filter_viewport_width,
++                g_ogl.filter_viewport_height);
++        }
++
++        if (use_multipass)
+         {
+             static int frames = 0;
+             frames++;
+@@ -1416,7 +1702,7 @@ static void ogl_render()
+             /* draw surface into framebuffer */
+             glUseProgram(g_ogl.main_program);
+ 
+-            glViewport(0, 0, g_ddraw.width, g_ddraw.height);
++            glViewport(0, 0, crop_width, crop_height);
+ 
+             glBindFramebuffer(GL_FRAMEBUFFER, g_ogl.frame_buffer_id[0]);
+ 
+@@ -1431,10 +1717,7 @@ static void ogl_render()
+ 
+             /* apply shader1 */
+ 
+-            if (!g_ogl.shader2_upscale)
+-            {
+-                glViewport(0, 0, g_ddraw.render.viewport.width, g_ddraw.render.viewport.height);
+-            }
++            glViewport(0, 0, shader1_output_width, shader1_output_height);
+ 
+             glUseProgram(g_ogl.shader1_program);
+             glActiveTexture(GL_TEXTURE0);
+@@ -1453,7 +1736,11 @@ static void ogl_render()
+ 
+             /* apply shader2 */
+ 
+-            ogl_set_output_viewport();
++            glViewport(
++                g_ogl.output_viewport_x,
++                g_ogl.output_viewport_y,
++                g_ogl.output_viewport_width,
++                g_ogl.output_viewport_height);
+ 
+             glUseProgram(g_ogl.shader2_program);
+             glActiveTexture(GL_TEXTURE0);
+@@ -1472,12 +1759,12 @@ static void ogl_render()
+             glActiveTexture(GL_TEXTURE1);
+             glBindTexture(GL_TEXTURE_2D, 0);
+         }
+-        else if (g_ogl.shader1_program && g_ogl.main_program)
++        else if (use_singlepass)
+         {
+             /* draw surface into framebuffer */
+             glUseProgram(g_ogl.main_program);
+ 
+-            glViewport(0, 0, g_ddraw.width, g_ddraw.height);
++            glViewport(0, 0, crop_width, crop_height);
+ 
+             glBindFramebuffer(GL_FRAMEBUFFER, g_ogl.frame_buffer_id[0]);
+ 
+@@ -1490,7 +1777,11 @@ static void ogl_render()
+             glActiveTexture(GL_TEXTURE1);
+             glBindTexture(GL_TEXTURE_2D, 0);
+ 
+-            ogl_set_output_viewport();
++            glViewport(
++                g_ogl.output_viewport_x,
++                g_ogl.output_viewport_y,
++                g_ogl.output_viewport_width,
++                g_ogl.output_viewport_height);
+ 
+             /* apply filter */
+ 
+@@ -1508,7 +1799,6 @@ static void ogl_render()
+         }
+         else if (g_oglu_got_version3 && g_ogl.main_program)
+         {
+-            ogl_set_output_viewport();
+             glUseProgram(g_ogl.main_program);
+             glBindVertexArray(g_ogl.main_vao);
+             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, 0);
+@@ -1516,12 +1806,17 @@ static void ogl_render()
+         }
+         else
+         {
+-            ogl_set_output_viewport();
++            const GLfloat u0 = (GLfloat)crop_left / (GLfloat)g_ogl.surface_tex_width;
++            const GLfloat v0 = (GLfloat)crop_top / (GLfloat)g_ogl.surface_tex_height;
++            const GLfloat u1 = (GLfloat)(crop_left + crop_width) /
++                (GLfloat)g_ogl.surface_tex_width;
++            const GLfloat v1 = (GLfloat)(crop_top + crop_height) /
++                (GLfloat)g_ogl.surface_tex_height;
+             glBegin(GL_TRIANGLE_FAN);
+-            glTexCoord2f(0, 0);                          glVertex2f(-1, 1);
+-            glTexCoord2f(g_ogl.scale_w, 0);              glVertex2f(1, 1);
+-            glTexCoord2f(g_ogl.scale_w, g_ogl.scale_h);  glVertex2f(1, -1);
+-            glTexCoord2f(0, g_ogl.scale_h);              glVertex2f(-1, -1);
++            glTexCoord2f(u0, v0); glVertex2f(-1, 1);
++            glTexCoord2f(u1, v0); glVertex2f(1, 1);
++            glTexCoord2f(u1, v1); glVertex2f(1, -1);
++            glTexCoord2f(u0, v1); glVertex2f(-1, -1);
+             glEnd();
+         }
+ 

@@ -1,0 +1,72 @@
+diff --git a/src/dd.c b/src/dd.c
+--- a/src/dd.c
++++ b/src/dd.c
+@@ -16,6 +16,8 @@
+ #include "blt.h"
+ #include "versionhelpers.h"
+ 
++extern void horplus_publish_surface_state(void);
++
+ 
+ CNCDDRAW g_ddraw;
+ 
+@@ -1338,6 +1340,7 @@ HRESULT dd_SetDisplayMode(
+     if (g_ddraw.render.thread == NULL)
+     {
+         InterlockedExchange(&g_ddraw.render.palette_updated, TRUE);
++        horplus_publish_surface_state();
+         InterlockedExchange(&g_ddraw.render.surface_updated, TRUE);
+         ReleaseSemaphore(g_ddraw.render.sem, 1, NULL);
+ 
+diff --git a/src/ddsurface.c b/src/ddsurface.c
+--- a/src/ddsurface.c
++++ b/src/ddsurface.c
+@@ -16,6 +16,8 @@
+ #include "palette.h"
+ 
+ 
++extern void horplus_publish_surface_state(void);
++
+ LONG g_dds_gdi_handles;
+ 
+ HRESULT dds_AddAttachedSurface(IDirectDrawSurfaceImpl* This, IDirectDrawSurfaceImpl* lpDDSurface)
+@@ -446,6 +448,7 @@ HRESULT dds_Blt(
+ 
+     if ((This->caps & DDSCAPS_PRIMARYSURFACE) && g_ddraw.ref && g_ddraw.render.run)
+     {
++        horplus_publish_surface_state();
+         InterlockedExchange(&g_ddraw.render.surface_updated, TRUE);
+         InterlockedExchange(&g_ddraw.render.screen_updated, TRUE);
+ 
+@@ -685,6 +688,7 @@ HRESULT dds_BltFast(
+ 
+     if ((This->caps & DDSCAPS_PRIMARYSURFACE) && g_ddraw.ref && g_ddraw.render.run)
+     {
++        horplus_publish_surface_state();
+         InterlockedExchange(&g_ddraw.render.surface_updated, TRUE);
+         InterlockedExchange(&g_ddraw.render.screen_updated, TRUE);
+ 
+@@ -843,6 +847,7 @@ HRESULT dds_Flip(IDirectDrawSurfaceImpl* This, IDirectDrawSurfaceImpl* lpDDSurfaceTargetOverride, DWORD dwFlags)
+     {
+         This->last_flip_tick = timeGetTime();
+ 
++        horplus_publish_surface_state();
+         InterlockedExchange(&g_ddraw.render.surface_updated, TRUE);
+         InterlockedExchange(&g_ddraw.render.screen_updated, TRUE);
+         ReleaseSemaphore(g_ddraw.render.sem, 1, NULL);
+@@ -1052,6 +1057,7 @@ HRESULT dds_ReleaseDC(IDirectDrawSurfaceImpl* This, HDC hDC)
+ {
+     if ((This->caps & DDSCAPS_PRIMARYSURFACE) && g_ddraw.ref && g_ddraw.render.run)
+     {
++        horplus_publish_surface_state();
+         InterlockedExchange(&g_ddraw.render.surface_updated, TRUE);
+         InterlockedExchange(&g_ddraw.render.screen_updated, TRUE);
+ 
+@@ -1238,6 +1244,7 @@ HRESULT dds_Unlock(IDirectDrawSurfaceImpl* This, LPRECT lpRect)
+ 
+     if ((This->caps & DDSCAPS_PRIMARYSURFACE) && g_ddraw.ref && g_ddraw.render.run)
+     {
++        horplus_publish_surface_state();
+         InterlockedExchange(&g_ddraw.render.surface_updated, TRUE);
+         InterlockedExchange(&g_ddraw.render.screen_updated, TRUE);
+ 

@@ -32,15 +32,21 @@ $patch = Join-Path $root "patches\cnc-ddraw-c4dll-r.patch"
 $patchNull = Join-Path $root "patches\cnc-ddraw-render-null.patch"
 $patchIni = Join-Path $root "patches\cnc-ddraw-default-ini.patch"
 $patchZoom = Join-Path $root "patches\cnc-ddraw-simple-zoom.patch"
+$patchZoomMouse = Join-Path $root "patches\cnc-ddraw-simple-zoom-mouse.patch"
 $patchDecorative = Join-Path $root "patches\cnc-ddraw-decorative-background.patch"
 $patchPrintScreen = Join-Path $root "patches\cnc-ddraw-printscreen-compositor.patch"
 $patchSystemOpenGL = Join-Path $root "patches\cnc-ddraw-system-opengl-fallback.patch"
 $patchGdiFilter = Join-Path $root "patches\cnc-ddraw-gdi-filter.patch"
 $patchCursorOwnership = Join-Path $root "patches\cnc-ddraw-d2-cursor-ownership.patch"
+$patchLiveResize = Join-Path $root "patches\cnc-ddraw-live-resize.patch"
+$patchSurfacePublish = Join-Path $root "patches\cnc-ddraw-surface-layout-publish.patch"
+$patchWindowStretchFilter = Join-Path $root "patches\cnc-ddraw-window-stretch-filter.patch"
 $cb63def = Join-Path $root "forwarder\C4dll-R.cb63.def"
 $out = Join-Path $build "bin\Release\C4dll-R.dll"
-$pluginProj = Join-Path $root "plugins\timer\timer.vcxproj"
-$pluginOut = Join-Path $root "plugins\timer\bin\Release\timer.c4p"
+$timerPluginProj = Join-Path $root "plugins\timer\timer.vcxproj"
+$timerPluginOut = Join-Path $root "plugins\timer\bin\Release\timer.c4p"
+$twitchStatPluginProj = Join-Path $root "plugins\unitinfo\unitinfo.vcxproj"
+$twitchStatPluginOut = Join-Path $root "plugins\unitinfo\bin\Release\twitchstat.c4p"
 
 # Locate MSBuild robustly (works on a dev box AND on GitHub windows-latest, where VS is Enterprise).
 function Find-MSBuild {
@@ -75,17 +81,19 @@ if ($Restore) {
     Start-Sleep -Milliseconds 600
     if (Test-Path $bC4) { Copy-Item $bC4 (Join-Path $Game "C4dll-R.dll") -Force; [System.IO.File]::Delete($bC4) }
     if (Test-Path $dOff) { Move-Item $dOff (Join-Path $Game "ddraw.dll") -Force }
-    $depC4p = Join-Path $Game "Mods\timer.c4p"
-    if (Test-Path $depC4p) { [System.IO.File]::Delete($depC4p) }
-    Write-Host "Restored vanilla baseline (C4dll-R = CB63 copy, standalone ddraw.dll back, timer.c4p removed)." -ForegroundColor Cyan
+    foreach ($pluginLeaf in @("timer.c4p", "twitchstat.c4p", "unitinfo.c4p")) {
+        $depC4p = Join-Path $Game "Mods\$pluginLeaf"
+        if (Test-Path $depC4p) { [System.IO.File]::Delete($depC4p) }
+    }
+    Write-Host "Restored vanilla baseline (C4dll-R = CB63 copy, standalone ddraw.dll back, native plugins removed)." -ForegroundColor Cyan
     return
 }
 
-Write-Host "[1/6] clean build dir" -ForegroundColor Cyan
+Write-Host "[1/8] clean build dir" -ForegroundColor Cyan
 if (Test-Path $build) { [System.IO.Directory]::Delete($build, $true) }
 New-Item -ItemType Directory -Force -Path (Split-Path $build) | Out-Null
 
-Write-Host "[2/6] copy pristine upstream cnc-ddraw (submodule)" -ForegroundColor Cyan
+Write-Host "[2/8] copy pristine upstream cnc-ddraw (submodule)" -ForegroundColor Cyan
 # cnc-ddraw is a git submodule pinned at the exact upstream commit (c4ddraw/upstream/cnc-ddraw).
 # Init it if a fresh/partial checkout left it empty (CI's actions/checkout submodules:recursive
 # already populates it).
@@ -98,7 +106,7 @@ Copy-Item $upstream $build -Recurse -Force
 # the submodule working tree carries a .git gitlink file; drop it so the throwaway git-apply repo below is clean
 Remove-Item (Join-Path $build ".git") -Force -Recurse -ErrorAction SilentlyContinue
 
-Write-Host "[3/6] apply our patches (embed + render_null + defaults + zoom + decorative/screenshot seams)" -ForegroundColor Cyan
+Write-Host "[3/8] apply our patches (embed + render_null + defaults + zoom + decorative/screenshot seams)" -ForegroundColor Cyan
 # Apply inside a throwaway repo so git apply resolves paths cleanly (it "Skipped patch" when
 # run outside a working tree). autocrlf=false keeps the patch context matching the upstream EOLs.
 # Patches: the minimal C4dll-R integration point (dllmain.c only) + render-null
@@ -128,6 +136,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "git apply (GDI filter) failed (exit $LASTEXITCODE)" }
     & git -c core.autocrlf=false apply --ignore-whitespace "$patchCursorOwnership"
     if ($LASTEXITCODE -ne 0) { throw "git apply (D2 cursor ownership) failed (exit $LASTEXITCODE)" }
+    & git -c core.autocrlf=false apply --ignore-whitespace "$patchLiveResize"
+    if ($LASTEXITCODE -ne 0) { throw "git apply (selective OpenGL live resize) failed (exit $LASTEXITCODE)" }
+    & git -c core.autocrlf=false apply --ignore-whitespace "$patchSurfacePublish"
+    if ($LASTEXITCODE -ne 0) { throw "git apply (surface-layout publish) failed (exit $LASTEXITCODE)" }
+    & git -c core.autocrlf=false apply --ignore-whitespace "$patchWindowStretchFilter"
+    if ($LASTEXITCODE -ne 0) { throw "git apply (window-stretch final filter) failed (exit $LASTEXITCODE)" }
+    & git -c core.autocrlf=false apply --ignore-whitespace "$patchZoomMouse"
+    if ($LASTEXITCODE -ne 0) { throw "git apply (simple-zoom mouse mapping) failed (exit $LASTEXITCODE)" }
 }
 finally { Pop-Location }
 if (-not (Select-String -Path (Join-Path $build "src\dllmain.c") -Pattern "c4features_install" -Quiet)) {
@@ -152,8 +168,11 @@ if (([regex]::Matches($keyboardSource, '(?m)^\s+DDTakeScreenshot\(\);\s*$')).Cou
     $keyboardSource -match 'ss_take_screenshot\s*\(\s*g_ddraw\.primary\s*\)') {
     throw "PrintScreen compositor patch did not apply: upstream primary-surface capture remains"
 }
-if (-not (Select-String -Path (Join-Path $build "src\opengl_utils.c") -Pattern "system_opengl" -Quiet)) {
-    throw "system OpenGL fallback patch did not apply: system loader path missing"
+$openGlUtils = Get-Content -LiteralPath (Join-Path $build "src\opengl_utils.c") -Raw
+if ($openGlUtils -notmatch "system_opengl" -or
+    $openGlUtils -notmatch 'glGetIntegerv\s*=\s*\(PFNGLGETINTEGERVPROC\)real_GetProcAddress' -or
+    $openGlUtils -match 'xwglGetProcAddress\("glGetIntegerv"\)') {
+    throw "system OpenGL fallback patch did not apply: system path or core glGetIntegerv resolver missing"
 }
 if (-not (Select-String -Path (Join-Path $build "src\render_gdi.c") -Pattern "SetStretchBltMode" -Quiet)) {
     throw "GDI filter patch did not apply: stretch mode missing"
@@ -170,12 +189,76 @@ if ($cursorHooks -notmatch "return bShow \? 1 : -1" -or
     ([regex]::Matches($cursorWndProc, "g_c4_d2_cursor_ownership")).Count -lt 5) {
     throw "D2 cursor ownership patch did not apply: show-count / SetCursor / synthetic-warp-pair / legacy-center guards missing"
 }
+if (([regex]::Matches($cursorHooks, 'DDApplySimpleZoomMouse\(&x, &y, g_ddraw\.width, g_ddraw\.height\);')).Count -ne 2 -or
+    $cursorHooks -notmatch "D2 polls GetCursorPos while processing hover" -or
+    $cursorHooks -notmatch "lParam is deliberately left for") {
+    throw "simple-zoom mouse patch did not apply: GetCursorPos / MSG.pt inverse mapping missing or duplicated"
+}
+$liveResizeDd = Get-Content -LiteralPath (Join-Path $build "inc\dd.h") -Raw
+$liveResizeOgl = Get-Content -LiteralPath (Join-Path $build "src\render_ogl.c") -Raw
+$liveResizeWndProc = Get-Content -LiteralPath (Join-Path $build "src\wndproc.c") -Raw
+$liveResizePatchText = Get-Content -LiteralPath $patchLiveResize -Raw
+if ($liveResizeDd -notmatch "live_resize_active" -or
+    $liveResizeDd -notmatch "dd_CalcViewport" -or
+    $liveResizeOgl -notmatch "ogl_update_live_resize" -or
+    $liveResizeOgl -notmatch "GL_MAX_VIEWPORT_DIMS" -or
+    $liveResizeOgl -notmatch 'if \(glGetIntegerv\)\s+\{\s+glGetIntegerv\(GL_MAX_VIEWPORT_DIMS' -or
+    $liveResizeOgl -notmatch "glGetIntegerv unavailable; live resize disabled" -or
+    $liveResizeOgl -notmatch "g_oglu_got_version3\s*&&\s*g_ogl\.main_program\s*&&\s*!g_ogl\.shader2_program" -or
+    $liveResizeOgl -notmatch "g_ogl\.main_program\s*&&\s*!g_ogl\.shader2_program" -or
+    $liveResizeOgl -notmatch "g_ogl\.shader1_output_size_uni_loc\s*!=\s*-1" -or
+    $liveResizeOgl -notmatch "DDApplySimpleZoomViewport\(TRUE, &x, &y, &width, &height\);" -or
+    $liveResizeOgl -notmatch "g_ogl\.output_viewport_width\s*=\s*width;" -or
+    $liveResizeOgl -notmatch "exceeds GL_MAX_VIEWPORT_DIMS.*falling back to GDI" -or
+    $liveResizeOgl -notmatch "InterlockedExchange\(&g_ogl\.live_resize_ready, FALSE\);\s+g_ogl\.use_opengl = FALSE;\s+return;" -or
+    $liveResizeOgl -notmatch "ogl_set_output_viewport\(\);" -or
+    $liveResizeOgl -notmatch "glViewport\(\s*g_ogl\.output_viewport_x,\s*g_ogl\.output_viewport_y,\s*g_ogl\.output_viewport_width,\s*g_ogl\.output_viewport_height\s*\);" -or
+    $liveResizeWndProc -notmatch "ogl_live_resize_supported" -or
+    $liveResizePatchText -match "live_single_pass_candidate" -or
+    $liveResizePatchText -match 'a/src/render_(d3d9|gdi)\.c') {
+    throw "selective OpenGL live-resize patch did not apply cleanly or touched a fallback renderer"
+}
+$surfacePublishDd = Get-Content -LiteralPath (Join-Path $build "src\dd.c") -Raw
+$surfacePublishDds = Get-Content -LiteralPath (Join-Path $build "src\ddsurface.c") -Raw
+$publishThenUpdate = 'horplus_publish_surface_state\(\);\s+InterlockedExchange\(&g_ddraw\.render\.surface_updated, TRUE\);'
+if (([regex]::Matches($surfacePublishDd, $publishThenUpdate)).Count -ne 1 -or
+    ([regex]::Matches($surfacePublishDds, $publishThenUpdate)).Count -ne 5 -or
+    ([regex]::Matches($surfacePublishDds, '(?m)^\s+horplus_publish_surface_state\(\);\s*$')).Count -ne 5) {
+    throw "surface-layout publish patch incomplete: expected startup + five primary-update commits"
+}
+$windowStretchOgl = Get-Content -LiteralPath (Join-Path $build "src\render_ogl.c") -Raw
+$windowStretchD3d = Get-Content -LiteralPath (Join-Path $build "src\render_d3d9.c") -Raw
+$windowStretchGdi = Get-Content -LiteralPath (Join-Path $build "src\render_gdi.c") -Raw
+if ($windowStretchOgl -notmatch 'DDGetWindowStretchCrop' -or
+    $windowStretchOgl -notmatch 'ogl_update_shader1_sizes' -or
+    $windowStretchOgl -notmatch 'ogl_update_shader2_sizes' -or
+    $windowStretchOgl -notmatch 'shader1_dynamic_upscaler' -or
+    $windowStretchOgl -match 'multipass crop uses safe GL_LINEAR fallback' -or
+    $windowStretchD3d -notmatch 'DDGetWindowStretchCrop' -or
+    $windowStretchGdi -notmatch 'window_crop') {
+    throw "window-stretch filter patch incomplete: crop-aware single/multipass routes missing"
+}
+$fsrEasu = Get-Content -LiteralPath (Join-Path $root "release\Shaders\interpolation\fsr.glsl") -Raw
+$fsrRcas = Get-Content -LiteralPath (Join-Path $root "release\Shaders\interpolation\fsr.glsl.pass1") -Raw
+$xbrzPre = Get-Content -LiteralPath (Join-Path $root "release\Shaders\xbrz\xbrz-freescale-multipass.glsl") -Raw
+$xbrzScale = Get-Content -LiteralPath (Join-Path $root "release\Shaders\xbrz\xbrz-freescale-multipass.glsl.pass1") -Raw
+if ($fsrEasu -notmatch 'FsrEasuCon\(\s*con0, con1, con2, con3, InputSize\.xy, TextureSize\.xy, OutputSize\.xy' -or
+    $fsrEasu -notmatch 'vTexCoord\.xy \* TextureSize\.xy \* \(OutputSize\.xy / InputSize\.xy\)' -or
+    $fsrRcas -notmatch 'sourceCoord / TextureSize\.xy' -or
+    $xbrzPre -notmatch 'ClampSourceCoord' -or
+    $xbrzScale -notmatch 'OutputSize\.xy / InputSize\.xy' -or
+    $xbrzScale -notmatch 'ClampInfoCoord') {
+    throw "runtime FSR/xBRZ shaders are not active-crop/POT-padding safe"
+}
 
 # Add our self-contained C4dll-R sources. They are NOT part of upstream cnc-ddraw; the integration
 # patch only redirects DirectDraw imports and calls c4features_install() from DllMain. Renderer
 # adapters, screenshot, edge-scroll, localization and save handling all stay in these own sources.
 Copy-Item (Join-Path $root "features\c4features.cpp") (Join-Path $build "src\c4features.cpp") -Force
 Copy-Item (Join-Path $root "features\rendererbridge.c") (Join-Path $build "src\rendererbridge.c") -Force
+if (-not (Select-String -LiteralPath (Join-Path $build "src\rendererbridge.c") -Pattern "DDGetWindowStretchCrop" -Quiet)) {
+    throw "renderer bridge missing exact DisciplesGL window-stretch crop API"
+}
 Copy-Item (Join-Path $root "features\featuremenu.cpp") (Join-Path $build "src\featuremenu.cpp") -Force
 Copy-Item (Join-Path $root "features\featuremenu_resources.h") (Join-Path $build "src\featuremenu_resources.h") -Force
 Copy-Item (Join-Path $root "features\featuremenu_resources.rc") (Join-Path $build "src\featuremenu_resources.rc") -Force
@@ -227,7 +310,7 @@ foreach ($sym in @("localization_install", "savelogic_install", "horplus_install
     }
 }
 
-Write-Host "[4/6] generate C4dll-R.def (483 CB63 forwards + 2 exports)" -ForegroundColor Cyan
+Write-Host "[4/8] generate C4dll-R.def (483 CB63 forwards + 2 exports)" -ForegroundColor Cyan
 $def = Join-Path $build "C4dll-R.def"
 $lines = @("; C4dll-R.dll - CB63 forwarder + embedded cnc-ddraw + wrapper exports")
 $lines += (Get-Content $cb63def | Where-Object { $_ -match '^(EXPORTS|\s+\S+=CB63\.)' })
@@ -235,7 +318,7 @@ $lines += "    DDReloadConfig @484"
 $lines += "    DDTakeScreenshot @485"
 Set-Content -Path $def -Value $lines -Encoding ASCII
 
-Write-Host "[5/6] retarget vcxproj (output C4dll-R, use C4dll-R.def, add C4dll-R sources)" -ForegroundColor Cyan
+Write-Host "[5/8] retarget vcxproj (output C4dll-R, use C4dll-R.def, add C4dll-R sources)" -ForegroundColor Cyan
 $vcx = Join-Path $build "cnc-ddraw.vcxproj"
 (Get-Content $vcx -Raw) `
     -replace '<ClCompile>', "<ClCompile>`r`n      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>" `
@@ -252,7 +335,7 @@ foreach ($src in @('rendererbridge\.c', 'c4features\.cpp', 'featuremenu\.cpp', '
     }
 }
 
-Write-Host "[5b/6] stamp version identity (inc/git.h + res.rc; PreBuildEvent stripped)" -ForegroundColor Cyan
+Write-Host "[5b/8] stamp version identity (inc/git.h + res.rc; PreBuildEvent stripped)" -ForegroundColor Cyan
 # The upstream PreBuildEvent regenerates inc/git.h with `git describe` in the PROJECT dir - the
 # throwaway git-apply repo above has zero commits, so it always yielded "git~UNKNOWN, UNKNOWN"
 # in the DLL version resource. Strip the event and write git.h from the OUTER repo instead.
@@ -303,7 +386,7 @@ if (-not (Select-String -Path $rc -SimpleMatch '#include "src\\featuremenu_resou
 }
 Write-Host ("  version: {0} (git {1})" -f $Version, $mainSha)
 
-Write-Host "[6/6] msbuild Release ($Toolset)" -ForegroundColor Cyan
+Write-Host "[6/8] msbuild Release ($Toolset)" -ForegroundColor Cyan
 $env:_CL_ = ""
 $ms = Find-MSBuild
 $mbArgs = @($vcx, '/t:Rebuild', '/p:Configuration=Release', '/p:Platform=Win32',
@@ -327,13 +410,23 @@ Write-Host "  menu localization: UTF-8 -> UTF-16 validation passed" -ForegroundC
 
 # Build the native timer plugin (timer.c4p). Self-contained Win32 DLL (GDI+, static CRT, system-font
 # fallback); on MNS/SMNS the host drives its turn reset and timeout actions.
-Write-Host "[7/7] build timer.c4p plugin" -ForegroundColor Cyan
-$pbArgs = @($pluginProj, '/t:Rebuild', '/p:Configuration=Release', '/p:Platform=Win32',
+Write-Host "[7/8] build timer.c4p plugin" -ForegroundColor Cyan
+$pbArgs = @($timerPluginProj, '/t:Rebuild', '/p:Configuration=Release', '/p:Platform=Win32',
     "/p:PlatformToolset=$Toolset", '/nologo', '/v:minimal')
 if ($SdkVersion) { $pbArgs += "/p:WindowsTargetPlatformVersion=$SdkVersion" }
 & $ms @pbArgs
 if ($LASTEXITCODE -ne 0) { throw "timer.c4p build failed" }
-Write-Host ("BUILT -> {0} ({1:n0} bytes)" -f $pluginOut, (Get-Item $pluginOut).Length) -ForegroundColor Green
+Write-Host ("BUILT -> {0} ({1:n0} bytes)" -f $timerPluginOut, (Get-Item $timerPluginOut).Length) -ForegroundColor Green
+
+# Twitch Stat plugin. It owns the live process extractor and transport snapshot, but no unit assets
+# or unit database; the wrapper only loads it and routes mouse input.
+Write-Host "[8/8] build twitchstat.c4p plugin" -ForegroundColor Cyan
+$ubArgs = @($twitchStatPluginProj, '/t:Rebuild', '/p:Configuration=Release', '/p:Platform=Win32',
+    "/p:PlatformToolset=$Toolset", '/nologo', '/v:minimal')
+if ($SdkVersion) { $ubArgs += "/p:WindowsTargetPlatformVersion=$SdkVersion" }
+& $ms @ubArgs
+if ($LASTEXITCODE -ne 0) { throw "twitchstat.c4p build failed" }
+Write-Host ("BUILT -> {0} ({1:n0} bytes)" -f $twitchStatPluginOut, (Get-Item $twitchStatPluginOut).Length) -ForegroundColor Green
 
 if ($Deploy) {
     Stop-TargetGame
@@ -345,7 +438,10 @@ if ($Deploy) {
     }
     $modsDir = Join-Path $Game "Mods"
     if (-not (Test-Path $modsDir)) { New-Item -ItemType Directory -Force -Path $modsDir | Out-Null }
-    Copy-Item $pluginOut (Join-Path $modsDir "timer.c4p") -Force                            # native timer plugin
-    Write-Host "Deployed monolith C4dll-R.dll + Mods\timer.c4p; standalone ddraw.dll parked." -ForegroundColor Green
-    Write-Host "(.\build.ps1 -Restore restores the previous wrapper and removes timer.c4p)" -ForegroundColor Green
+    Copy-Item $timerPluginOut (Join-Path $modsDir "timer.c4p") -Force                      # native timer plugin
+    $legacyUnitInfo = Join-Path $modsDir "unitinfo.c4p"
+    if (Test-Path $legacyUnitInfo) { [System.IO.File]::Delete($legacyUnitInfo) }
+    Copy-Item $twitchStatPluginOut (Join-Path $modsDir "twitchstat.c4p") -Force            # native Twitch Stat plugin
+    Write-Host "Deployed monolith C4dll-R.dll + Mods\timer.c4p + Mods\twitchstat.c4p; standalone ddraw.dll parked." -ForegroundColor Green
+    Write-Host "(.\build.ps1 -Restore restores the previous wrapper and removes both native plugins)" -ForegroundColor Green
 }

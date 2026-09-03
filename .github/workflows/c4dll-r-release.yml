@@ -67,9 +67,9 @@ jobs:
           "pre=$pre" | Out-File $env:GITHUB_OUTPUT -Append
           Write-Host "version $ver (tag $tag, prerelease=$pre)"
 
-      - name: Build C4dll-R.dll + timer.c4p
+      - name: Build C4dll-R.dll + native plugins
         run: |
-          # Same build a dev runs: build.ps1 produces the monolith (step 1-6) and timer.c4p (step 7).
+          # Same build a dev runs: monolith (steps 1-6), timer.c4p (7) and twitchstat.c4p (8).
           # -Version stamps the release version into the DLL version resource (res.rc + git.h).
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
@@ -77,6 +77,7 @@ jobs:
           ./c4ddraw/build.ps1 -Version "${{ steps.ver.outputs.ver }}"
           if (-not (Test-Path "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll")) { Write-Error "C4dll-R.dll missing"; exit 1 }
           if (-not (Test-Path "c4ddraw/plugins/timer/bin/Release/timer.c4p")) { Write-Error "timer.c4p missing"; exit 1 }
+          if (-not (Test-Path "c4ddraw/plugins/unitinfo/bin/Release/twitchstat.c4p")) { Write-Error "twitchstat.c4p missing"; exit 1 }
 
       - name: Package drop-in zip
         id: pkg
@@ -86,7 +87,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$stage/Mods" | Out-Null
           Copy-Item "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll" "$stage/C4dll-R.dll"
           Copy-Item "c4ddraw/plugins/timer/bin/Release/timer.c4p" "$stage/Mods/timer.c4p"
+          Copy-Item "c4ddraw/plugins/unitinfo/bin/Release/twitchstat.c4p" "$stage/Mods/twitchstat.c4p"
           Copy-Item "c4ddraw/release/INSTALL.txt" "$stage/INSTALL.txt"
+          Copy-Item "c4ddraw/release/C4PLUGINS.txt" "$stage/C4PLUGINS.txt"
           Copy-Item "c4ddraw/release/C4plugins.ini" "$stage/C4plugins.ini"
           Copy-Item "c4ddraw/release/ddraw.ini" "$stage/ddraw.ini"
           Copy-Item "c4ddraw/release/Shaders" "$stage/Shaders" -Recurse
@@ -96,7 +99,7 @@ jobs:
           Compress-Archive -Path "$stage" -DestinationPath $zip -Force
           # matching symbols for crash triage, published next to the zip
           $symzip = "C4dll-R-$ver-symbols.zip"
-          Compress-Archive -Path "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.pdb", "c4ddraw/plugins/timer/bin/Release/timer.pdb" -DestinationPath $symzip -Force
+          Compress-Archive -Path "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.pdb", "c4ddraw/plugins/timer/bin/Release/timer.pdb", "c4ddraw/plugins/unitinfo/bin/Release/twitchstat.pdb" -DestinationPath $symzip -Force
           "zip=$zip" | Out-File $env:GITHUB_OUTPUT -Append
           "symzip=$symzip" | Out-File $env:GITHUB_OUTPUT -Append
           Write-Host "packaged $zip + $symzip"
@@ -131,6 +134,6 @@ jobs:
           }
 
           # Attach the zip, the symbols and the loose files (clobber so re-runs replace assets).
-          gh release upload $tag $zip $symzip "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll" "c4ddraw/plugins/timer/bin/Release/timer.c4p" --clobber
+          gh release upload $tag $zip $symzip "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll" "c4ddraw/plugins/timer/bin/Release/timer.c4p" "c4ddraw/plugins/unitinfo/bin/Release/twitchstat.c4p" --clobber
           if ($LASTEXITCODE -ne 0) { Write-Error "gh release upload failed"; exit 1 }
           Write-Host "published release $tag (prerelease=$pre)"
