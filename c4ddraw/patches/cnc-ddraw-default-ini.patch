@@ -2,6 +2,24 @@ diff --git a/src/config.c b/src/config.c
 index 18cfacdd..c37086c8 100644
 --- a/src/config.c
 +++ b/src/config.c
+@@ -43,7 +43,7 @@ void cfg_load()
+     GET_INT(g_config.maxfps, "maxfps", -1);
+     GET_BOOL(g_config.vsync, "vsync", FALSE);
+     GET_BOOL(g_config.adjmouse, "adjmouse", TRUE);
+-    GET_STRING("shader", "Shaders\\interpolation\\catmull-rom-bilinear.glsl", g_config.shader, sizeof(g_config.shader));
++    GET_STRING("shader", "Shaders\\interpolation\\lanczos2-sharp.glsl", g_config.shader, sizeof(g_config.shader));
+     GET_INT(g_config.window_rect.left, "posX", -32000);
+     GET_INT(g_config.window_rect.top, "posY", -32000);
+     GET_STRING("renderer", "auto", g_config.renderer, sizeof(g_config.renderer));
+@@ -51,7 +51,7 @@ void cfg_load()
+     GET_BOOL(g_config.border, "border", TRUE);
+     GET_INT(g_config.save_settings, "savesettings", 1);
+     GET_BOOL(g_config.resizable, "resizable", TRUE);
+-    GET_INT(g_config.d3d9_filter, "d3d9_filter", FILTER_CUBIC);
++    GET_INT(g_config.d3d9_filter, "d3d9_filter", FILTER_LANCZOS);
+     GET_INT(g_config.anti_aliased_fonts_min_size, "anti_aliased_fonts_min_size", 13);
+     GET_INT(g_config.min_font_size, "min_font_size", 0);
+     GET_INT(g_config.center_window, "center_window", CENTER_WINDOW_AUTO);
 @@ -64,6 +64,6 @@ void cfg_load()
      /* Compatibility settings */
  

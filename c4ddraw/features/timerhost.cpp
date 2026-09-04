@@ -16,6 +16,9 @@
 extern "C" void pluginhost_bump_turn(int player);
 extern "C" void pluginhost_turn_reset(void);
 extern "C" void pluginhost_queue_battle_state(int active);
+#include "c4trace.h"
+#include "eventtrace.h"
+
 // Client-valid scenario-day source (featuremenu.cpp); logged per turn edge to verify the per-day budget.
 extern "C" int featuremenu_current_day(void);
 // "Is it my turn" = CPhaseGameData.clientTakesTurn (sub-dialog-immune); -1 if unavailable -> fallback.
@@ -1319,11 +1322,28 @@ bool forcedAutoBlocksManualSubmit(void** batViewerOut, int* protectedSideOffsetO
 void __fastcall hookBattleSubmit(void* self, void* /*edx*/, const void* battleMsgData,
                                  int action, const void* targetId, const void* attackerId)
 {
+    // Raw ABI arguments, plus guarded ID snapshots only while diagnostics are enabled.
+    c4trace_event(C4TRACE_BATTLE_SUBMIT, reinterpret_cast<uintptr_t>(self), action,
+                  reinterpret_cast<uintptr_t>(battleMsgData), reinterpret_cast<uintptr_t>(targetId),
+                  reinterpret_cast<uintptr_t>(attackerId));
+    if (c4trace_enabled()) {
+        const DWORD saved = GetLastError();
+        unsigned target = 0xffffffffu, actor = 0xffffffffu;
+        __try { if (targetId) target = *reinterpret_cast<const unsigned*>(targetId); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+        __try { if (attackerId) actor = *reinterpret_cast<const unsigned*>(attackerId); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+        c4trace_event(C4TRACE_BATTLE_IDS, reinterpret_cast<uintptr_t>(self), target, actor,
+                      action, reinterpret_cast<uintptr_t>(battleMsgData));
+        SetLastError(saved);
+    }
     if (action != kBattleActionAuto) {
         void* forcedViewer = nullptr;
         int protectedSideOffset = -1;
         bool pending = false;
         if (forcedAutoBlocksManualSubmit(&forcedViewer, &protectedSideOffset, &pending)) {
+            c4trace_event(C4TRACE_AUTO_BLOCK, reinterpret_cast<uintptr_t>(forcedViewer),
+                          action, protectedSideOffset, pending, 0);
             // Do not close selection_open and do not touch window input. The queued/normal native
             // Auto callback remains free to submit action 5; chat and every non-battle command work.
             if (!pending && protectedSideOffset >= 0)
@@ -1350,6 +1370,7 @@ void __fastcall hookBattleSubmit(void* self, void* /*edx*/, const void* battleMs
     reinterpret_cast<void(__thiscall*)(void*, const void*, int,
                                        const void*, const void*)>(
         g.g_origBattleSubmit)(self, battleMsgData, action, targetId, attackerId);
+    c4trace_event(C4TRACE_BATTLE_SUBMIT_RETURN, reinterpret_cast<uintptr_t>(self), action, 0, 0, 0);
 }
 
 bool installBattleSubmitHook()
@@ -1519,6 +1540,8 @@ extern "C" void timerhost_on_battle_update(void* batViewer, const void* battleMs
 
     static volatile LONG receiveSerial = 0;
     const LONG receive = InterlockedIncrement(&receiveSerial);
+    c4trace_event(C4TRACE_BATTLE_SELECT, reinterpret_cast<uintptr_t>(batViewer),
+                  receive, diag.activeId, localActive, (valid ? 1u : 0u) | (continuation ? 2u : 0u));
     if (valid) {
         tlog("[timer] battle-select #%ld viewer=%p local=%d pvp=%d selection=%d continuation=%d "
              "localId=%08X/%d attacker=%08X defender=%08X unit=%08X actions=%u flags=%02X",
@@ -1583,6 +1606,8 @@ extern "C" void timerhost_on_battle_result(void* batViewer, const void* battleMs
 
     static volatile LONG resultSerial = 0;
     const LONG serial = InterlockedIncrement(&resultSerial);
+    c4trace_event(C4TRACE_BATTLE_RESULT, reinterpret_cast<uintptr_t>(batViewer),
+                  serial, diag.activeId, localPlayback, valid);
     if (valid) {
         tlog("[timer] battle-result #%ld playback local=%d pvp=%d viewer=%p "
              "localId=%08X/%d attacker=%08X defender=%08X unit=%08X flags=%02X",
@@ -1631,6 +1656,8 @@ extern "C" void timerhost_after_battle_update(void* batViewer)
         }
         endBattleStateWrite();
         if (opened) {
+            c4trace_event(C4TRACE_BATTLE_OPEN, reinterpret_cast<uintptr_t>(batViewer),
+                          g.battleInstance, g.battleStateSeq, 0, 0);
             tlog("[timer] local battle selection opened (viewer=%p)", batViewer);
             postForcedAutoBattleIfReady();
         }

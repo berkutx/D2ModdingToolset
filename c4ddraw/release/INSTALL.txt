@@ -48,6 +48,32 @@ INSTALL
   resizing and remembers window size/position, so copying it remains the intended setup.
 
 USING IT
+  - See RELEASE_NOTES.md for this exact package's changes and known limitations.
+    Bounded message batching is ON by default on the validated executable. It
+    accelerates command delivery without raising the configured 180-tick cap.
+    To disable it, set messageBatching=0 in the existing [menu] section of
+    C4menu.ini and restart the game. See MESSAGE_BATCHING.md for details.
+    Network tracing is optional and OFF by default. Performance > Network/timing
+    diagnostics (restart)... asks for confirmation, saves netTrace and immediately
+    closes this client. Launch it again manually to apply the setting. Save first:
+    unsaved progress can be lost and a network session will disconnect. There is
+    no automatic save or relaunch. C4DLL_NETTRACE=1 forces tracing ON; the menu
+    explains this override and cannot turn it OFF until that environment setting
+    is removed before the next launch. NETWORK_TRACE.md covers capture and limits.
+    Tracing is not required for batching and is not a freeze-recovery mechanism.
+  - Missing filter settings now default to Lanczos; an existing explicit choice
+    is preserved until you change it or reset the wrapper. Game > Reset wrapper
+    settings... asks for confirmation and restores video/scaling, performance,
+    animation multipliers and convenience defaults. Timer/plugin settings and
+    native gameplay settings are preserved. After successfully saving the reset,
+    the client closes immediately; all defaults apply on your next manual launch.
+    It does not half-apply settings live. Save first: unsaved progress can be lost
+    and a network session will disconnect. No automatic save or relaunch occurs.
+  - General Win32 message/timing tracing does not depend on a mod version. Detailed
+    game-queue observers require the recognized EXE hash and unchanged hook-site
+    signatures. A modified prologue is skipped, not followed into another DLL.
+    Diagnostics do not use mss32.dll-relative addresses; missing hooks mean less
+    coverage, not proof that a network message was lost.
   - In-game menu (under the title bar): Game / Video / Performance / Plugins.
     Renderer, shader, windowed/fullscreen etc. are in Video / Performance.
     The current wrapper has three output modes: normal window, adaptive
@@ -163,8 +189,9 @@ UNINSTALL / REVERT
     Mods\twitchstat.c4p (and legacy Mods\unitinfo.c4p, if present).
 
 This package is independent of the mss32 mod and is versioned separately.
-It is distributed under GPL-3.0; see LICENSE. Matching source for 1.8 is at
-https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.8
+It is distributed under GPL-3.0; see LICENSE. Use the exact package version/tag
+for matching source.
+Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/releases
 
 ================================================================================
  C4dll-R  -  самодостаточный DirectDraw-врапер для Disciples II
@@ -219,6 +246,32 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.8
   копирование остаётся задуманным вариантом.
 
 КАК ПОЛЬЗОВАТЬСЯ
+  - Изменения и известные ограничения именно этого пакета — в RELEASE_NOTES.md.
+    Обработка ограниченных пачек сообщений включена по умолчанию на проверенном
+    exe. Она ускоряет доставку команд без повышения настройки 180 тиков.
+    Для отключения задайте messageBatching=0 в существующей секции [menu]
+    файла C4menu.ini и перезапустите игру. Подробности — в MESSAGE_BATCHING.md.
+    Трассировка необязательна и по умолчанию выключена. «Производительность >
+    Диагностика сети и задержек (рестарт)...» после подтверждения сохраняет netTrace
+    и сразу закрывает этот клиент. Для применения запустите его снова вручную.
+    Сначала сохраните игру: несохранённый прогресс может пропасть, сетевое подключение
+    прервётся. Автосохранения и автозапуска нет. C4DLL_NETTRACE=1 принудительно включает
+    трассу; меню показывает эту причину и не позволяет выключить её, пока переменная
+    не убрана перед следующим запуском. Сбор логов и лимиты — в NETWORK_TRACE.md.
+    Для пачек трасса не нужна и средством разблокировки зависания не является.
+  - Без ключа фильтра используется Lanczos; существующий явный выбор сохраняется
+    до его смены или сброса. «Игра > Сбросить настройки враппера...» после
+    подтверждения возвращает стандартные видео/масштаб, производительность,
+    множители анимаций и удобства. Настройки таймера, плагинов и штатные игровые
+    параметры сохраняются. После успешной записи сброса клиент сразу закрывается;
+    все значения применяются при следующем ручном запуске, не частично на лету.
+    Сначала сохраните игру: несохранённый прогресс может пропасть, сетевое подключение
+    прервётся. Автосохранения и автоматического повторного запуска нет.
+  - Общая Win32-трасса сообщений/тайминга не зависит от версии мода. Подробные
+    наблюдатели игровых очередей требуют проверенного хэша EXE и неизменённых
+    сигнатур точек перехвата. Изменённый пролог пропускается: переход в другую DLL
+    не прослеживается. Диагностика не использует адреса относительно mss32.dll;
+    отсутствие наблюдателя уменьшает покрытие, а не доказывает потерю сообщения.
   - Внутриигровое меню (под заголовком окна): Game / Video / Performance /
     Plugins. Рендерер, шейдер, окно/полный экран - в Video / Performance.
     Текущий враппер имеет три режима вывода: обычное окно, адаптивный
@@ -335,5 +388,5 @@ https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.8
     Mods\twitchstat.c4p (и старый Mods\unitinfo.c4p, если он остался).
 
 Пакет независим от мода mss32 и версионируется отдельно. Лицензия — GPL-3.0,
-см. LICENSE. Соответствующие исходники 1.8:
-https://github.com/berkutx/D2ModdingToolset/tree/c4dll-r-v1.8
+см. LICENSE. Исходники выбирайте по точной версии/тегу пакета.
+Релизы и их теги исходников: https://github.com/berkutx/D2ModdingToolset/releases

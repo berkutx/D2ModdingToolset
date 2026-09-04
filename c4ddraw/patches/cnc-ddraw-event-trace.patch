@@ -1,0 +1,146 @@
+diff --git a/src/winapi_hooks.c b/src/winapi_hooks.c
+--- a/src/winapi_hooks.c
++++ b/src/winapi_hooks.c
+@@ -1,1 +1,2 @@
+ #include <windows.h>
++#include "eventtrace.h"
+ #include <windowsx.h>
+ #include <intrin.h>
+ #include <math.h>
+@@ -825,8 +826,10 @@ BOOL WINAPI fake_GetMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax)
+     BOOL result = real_GetMessageA(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax);
++    eventtrace_pulled(C4TRACE_GET_RAW, lpMsg, result, PM_REMOVE);
+     if (result)
+     {
+         HandleMessage(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, PM_REMOVE);
+     }
++    eventtrace_pulled(C4TRACE_GET_MAPPED, lpMsg, result, PM_REMOVE);
+ 
+     return result;
+ }
+@@ -853,8 +856,10 @@ BOOL WINAPI fake_PeekMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg)
+     BOOL result = real_PeekMessageA(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
++    eventtrace_pulled(C4TRACE_PEEK_RAW, lpMsg, result, wRemoveMsg);
+     if (result)
+     {
+         HandleMessage(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
+     }
++    eventtrace_pulled(C4TRACE_PEEK_MAPPED, lpMsg, result, wRemoveMsg);
+ 
+     return result;
+ }
+diff --git a/src/utils.c b/src/utils.c
+--- a/src/utils.c
++++ b/src/utils.c
+@@ -1,1 +1,2 @@
+ #include <windows.h>
++#include "eventtrace.h"
+ #include <intrin.h>
+ #include <stdio.h>
+@@ -471,5 +472,7 @@
+ void util_limit_game_ticks()
+ {
++    unsigned long long trace_start;
+     if (GetCurrentThreadId() != g_ddraw.gui_thread_id)
+         return;
++    trace_start = eventtrace_wait_begin();
+ 
+@@ -536,6 +539,7 @@
+         if (!next_game_tick)
+         {
+             next_game_tick = timeGetTime();
++            eventtrace_wait_end(trace_start, g_ddraw.ticks_limiter.tick_length);
+             return;
+         }
+@@ -552,6 +556,7 @@
+             Sleep(sleep_time);
+         }
+     }
++    eventtrace_wait_end(trace_start, g_ddraw.ticks_limiter.tick_length);
+ }
+ 
+ void util_update_bnet_pos(int new_x, int new_y)
+diff --git a/src/ddsurface.c b/src/ddsurface.c
+--- a/src/ddsurface.c
++++ b/src/ddsurface.c
+@@ -1,1 +1,2 @@
+ #include <windows.h>
++#include "eventtrace.h"
+ #include <stdio.h>
+ #include "dllmain.h"
+@@ -451,3 +452,5 @@
+         horplus_publish_surface_state();
+         InterlockedExchange(&g_ddraw.render.surface_updated, TRUE);
++        eventtrace_surface(C4TRACE_SURFACE, (uintptr_t)This, This->caps, This->flags,
++                           This->last_flip_tick, This->last_blt_tick);
+         InterlockedExchange(&g_ddraw.render.screen_updated, TRUE);
+@@ -459,2 +462,3 @@
+             ReleaseSemaphore(g_ddraw.render.sem, 1, NULL);
++            eventtrace_frame(C4TRACE_SURFACE_WAKE, (uintptr_t)This);
+             SwitchToThread();
+@@ -691,3 +695,5 @@
+         horplus_publish_surface_state();
+         InterlockedExchange(&g_ddraw.render.surface_updated, TRUE);
++        eventtrace_surface(C4TRACE_SURFACE, (uintptr_t)This, This->caps, This->flags,
++                           This->last_flip_tick, This->last_blt_tick);
+         InterlockedExchange(&g_ddraw.render.screen_updated, TRUE);
+@@ -700,2 +706,3 @@
+             ReleaseSemaphore(g_ddraw.render.sem, 1, NULL);
++            eventtrace_frame(C4TRACE_SURFACE_WAKE, (uintptr_t)This);
+ 
+             if (g_config.limiter_type == LIMIT_BLTFAST && g_ddraw.ticks_limiter.tick_length > 0)
+@@ -850,4 +857,7 @@
+         horplus_publish_surface_state();
+         InterlockedExchange(&g_ddraw.render.surface_updated, TRUE);
++        eventtrace_surface(C4TRACE_SURFACE, (uintptr_t)This, This->caps, This->flags,
++                           This->last_flip_tick, This->last_blt_tick);
+         InterlockedExchange(&g_ddraw.render.screen_updated, TRUE);
+         ReleaseSemaphore(g_ddraw.render.sem, 1, NULL);
++        eventtrace_frame(C4TRACE_SURFACE_WAKE, (uintptr_t)This);
+         SwitchToThread();
+@@ -1060,3 +1070,5 @@
+         horplus_publish_surface_state();
+         InterlockedExchange(&g_ddraw.render.surface_updated, TRUE);
++        eventtrace_surface(C4TRACE_SURFACE, (uintptr_t)This, This->caps, This->flags,
++                           This->last_flip_tick, This->last_blt_tick);
+         InterlockedExchange(&g_ddraw.render.screen_updated, TRUE);
+@@ -1069,2 +1081,3 @@
+             ReleaseSemaphore(g_ddraw.render.sem, 1, NULL);
++            eventtrace_frame(C4TRACE_SURFACE_WAKE, (uintptr_t)This);
+         }
+@@ -1247,3 +1260,5 @@
+         horplus_publish_surface_state();
+         InterlockedExchange(&g_ddraw.render.surface_updated, TRUE);
++        eventtrace_surface(C4TRACE_SURFACE, (uintptr_t)This, This->caps, This->flags,
++                           This->last_flip_tick, This->last_blt_tick);
+         InterlockedExchange(&g_ddraw.render.screen_updated, TRUE);
+@@ -1256,2 +1271,3 @@
+             ReleaseSemaphore(g_ddraw.render.sem, 1, NULL);
++            eventtrace_frame(C4TRACE_SURFACE_WAKE, (uintptr_t)This);
+ 
+             if (g_ddraw.ticks_limiter.tick_length > 0 &&
+diff --git a/src/render_ogl.c b/src/render_ogl.c
+--- a/src/render_ogl.c
++++ b/src/render_ogl.c
+@@ -1,1 +1,2 @@
+ #include <windows.h>
++#include "eventtrace.h"
+ #include <stdio.h>
+ #include "config.h"
+@@ -408,4 +409,5 @@
+ DWORD WINAPI ogl_render_main(void)
+ {
++    eventtrace_frame(C4TRACE_RENDER_START, 0);
+     Sleep(250);
+@@ -1476,4 +1478,5 @@
+             if (InterlockedExchange(&g_ddraw.render.surface_updated, FALSE) || g_config.minfps == -2)
+             {
++                eventtrace_frame(C4TRACE_UPLOAD, (uintptr_t)g_ddraw.primary);
+                 if (++tex_index >= TEXTURE_COUNT)
+                     tex_index = 0;
+@@ -1826,3 +1829,5 @@
++        eventtrace_frame(C4TRACE_SWAP_ENTER, (uintptr_t)g_ddraw.primary);
+         SwapBuffers(g_ogl.hdc);
++        eventtrace_frame(C4TRACE_SWAP_RETURN, (uintptr_t)g_ddraw.primary);
+ 
+         /* Force redraw for GDI games (ClueFinders) */

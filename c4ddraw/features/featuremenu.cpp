@@ -16,6 +16,11 @@
 #include <detours.h>
 #include <intrin.h>
 #include "featuremenu_resources.h"
+#include "eventtrace.h"
+#include "messagebatch.h"
+#include "c4trace.h"
+#include "inisettingsreset.h"
+#include "wrapperdefaults.h"
 #pragma intrinsic(_ReturnAddress)
 
 // Renderer bridge (rendererbridge.c, same module): DDReloadConfig re-reads ddraw.ini + dd_SetDisplayMode;
@@ -54,6 +59,9 @@ extern "C" void DDApplySimpleZoomMouse(int* x, int* y,
 extern "C" int DDReadConfigString(const char* key, const char* defaultValue,
                                     char* value, unsigned int capacity);
 extern "C" int DDWriteConfigString(const char* key, const char* value);
+extern "C" int DDGetConfigWriteTarget(char* path, unsigned int pathCapacity,
+                                       char* section, unsigned int sectionCapacity);
+extern "C" void DDExitClientAfterSettingsChange(int discardOldWindowState);
 extern "C" void DDEnableD2CursorOwnership(void);
 extern "C" HCURSOR DDSetPhysicalCursor(HCURSOR cursor);
 extern "C" BOOL DDGetPhysicalCursorPos(POINT* point);
@@ -342,6 +350,7 @@ DWORD WINAPI timeGetTimeHook(void)
         g_vcRealAnchor = g_vcRealNow = realNow;
         g_vcVirtAnchor = g_vcVirtNow = realNow;
         ReleaseSRWLockExclusive(&g_vcLock);
+        eventtrace_clock(realNow, realNow, factor, reinterpret_cast<uintptr_t>(_ReturnAddress()));
         return realNow;
     }
     if (g_vcLastFactor != factor) { // factor changed (incl. battle<->map switch) -> re-anchor
@@ -355,6 +364,7 @@ DWORD WINAPI timeGetTimeHook(void)
         static_cast<unsigned long long>(realDelta) * factor / 10u + g_vcVirtAnchor);
     g_vcVirtNow = result;
     ReleaseSRWLockExclusive(&g_vcLock);
+    eventtrace_clock(realNow, result, factor, reinterpret_cast<uintptr_t>(_ReturnAddress()));
     return result;
 }
 
@@ -1026,6 +1036,7 @@ enum : UINT
     kIdSingleCpu = 0xA164, // ddraw.ini singlecpu toggle (full restart)
     // New isolated id: preserve old commands and avoid the derived kIdResBase[] range.
     kIdTicks180 = 0xA1F6,
+    kIdResetWrapper = 0xA1F7, // all wrapper preferences, never timer/plugin settings
     kIdFastAi = 0xA17E, // bounded DisciplesGL-compatible host AI pump (live, experimental)
     kIdHorplusBase = 0xA165, // + index into kHorplusSizes[] (restart)
     kIdHorplusAuto = 0xA16F, // monitor-adaptive stock/Hor+ selection (restart)
@@ -1075,6 +1086,8 @@ enum : UINT
     kIdOutputSizeCustom = 0xA1F5, // persisted live ddraw.ini window/output-size dialog
     kIdClouds = 0xA1F8, // restart-latched optional IsoClouds.ff pipeline
     kIdCloudsInfo = 0xA1F9, // disabled active -> requested / asset-status line
+    kIdNetTrace = 0xA1FA, // optional diagnostic recorder, restart by closing client
+    kIdNetTraceInfo = 0xA1FB,
     kIdLocaleNone = 0xA200, // disable wrapper OEM/ANSI recoding
     kIdLocaleBase = 0xA201, // + index into installed Windows locales
     kIdLast = 0xA2FF, // upper bound of our WM_COMMAND id block
@@ -1306,7 +1319,7 @@ bool g_perUnitBurst = false;        // EXPERIMENTAL: scale only the acting anima
 // cnc-ddraw (ddraw.ini) state, read at startup so the menu shows current values (-1 = unknown/custom)
 int g_rendererIdx = 0;  // index into kRenderers
 int g_shaderIdx = -1;   // index into kShaders
-int g_d3dFilter = 2;    // FILTER_CUBIC; also selects GDI nearest vs HALFTONE fallback
+int g_d3dFilter = 3;    // FILTER_LANCZOS; also selects GDI nearest vs HALFTONE fallback
 bool g_maintas = false, g_vsync = false, g_boxing = false;
 char g_aspectRatio[32] = {}; // non-empty overrides native aspect and forces maintas in cnc-ddraw
 bool g_singlecpu = true; // ddraw.ini singlecpu stability mode (cnc-ddraw default true)
@@ -1498,6 +1511,13 @@ void seedConfigFirstRun()
         "; Experimental Fast AI: accelerates only the local host's hidden AI message pump.\r\n"
         "; It does not change AI decisions, but can expose native game races/crashes. Default off.\r\n"
         "fastAI=%d\r\n"
+        "\r\n"
+        "; Bounded native notification batches. 1 = on (default), 0 = off; restart required.\r\n"
+        "messageBatching=1\r\n"
+        "\r\n"
+        "; Optional network/timing CSV diagnostics; toggling from the menu closes the client.\r\n"
+        "; 0 = off (default), 1 = on at next launch. See NETWORK_TRACE.md.\r\n"
+        "netTrace=0\r\n"
         "\r\n"
         "; Write C4menu-<pid>.log / C4plugins.log diagnostics next to the exe.\r\n"
         "; 0 = off (default), 1 = on.\r\n"
@@ -1721,7 +1741,7 @@ void readDdrawState()
         }
 
     char sh[MAX_PATH] = {};
-    readDdrawStr("shader", "", sh,
+    readDdrawStr("shader", kShaders[0].value, sh,
                  static_cast<unsigned int>(sizeof(sh)));
     g_shaderIdx = -1;
     for (int i = 0; i < kShaderCount; ++i)
@@ -1729,7 +1749,7 @@ void readDdrawState()
             g_shaderIdx = i;
             break;
         }
-    g_d3dFilter = readDdrawInt("d3d9_filter", 2);
+    g_d3dFilter = readDdrawInt("d3d9_filter", 3);
     if (g_d3dFilter < 0 || g_d3dFilter > 3)
         g_d3dFilter = 2;
 
@@ -4200,6 +4220,20 @@ void refreshCloudItem()
 
 void refreshChecks()
 {
+    if (g_perfMenu) {
+        const bool forced = c4trace_environment_forced() != 0;
+        CheckMenuItem(g_perfMenu, kIdNetTrace, MF_BYCOMMAND |
+                      ((forced || c4trace_configured(iniFile())) ? MF_CHECKED : MF_UNCHECKED));
+        EnableMenuItem(g_perfMenu, kIdNetTrace, MF_BYCOMMAND |
+                       (forced ? MF_GRAYED : MF_ENABLED));
+        ModifyMenuW(g_perfMenu, kIdNetTraceInfo, MF_BYCOMMAND | MF_STRING | MF_GRAYED,
+                    kIdNetTraceInfo,
+                    forced
+                        ? L(L"Forced by C4DLL_NETTRACE=1; change the launch environment to disable.",
+                            L"Включено через C4DLL_NETTRACE=1; отключается в среде запуска.")
+                        : L(L"Changing this option closes the client. Logs are limited; see NETWORK_TRACE.md.",
+                            L"Смена настройки закрывает клиент. Логи ограничены; см. NETWORK_TRACE.md."));
+    }
     if (!g_gameMenu)
         return;
     if (g_editorModeMenu)
@@ -4437,8 +4471,136 @@ void verifyPendingRenderer()
         MB_OK | MB_ICONWARNING);
 }
 
+void resetWrapperSettings()
+{
+    if (MessageBoxW(
+            g_gameHwnd,
+            L(L"Restore all wrapper defaults and CLOSE THE CLIENT NOW?\n\nTimer/plugin configuration and the game's own gameplay options will NOT be reset. The current multiplayer connection will end. Unsaved progress is NOT saved automatically.\n\nAfter the client closes, launch it again to apply all defaults together, including OpenGL + Lanczos, scaling, CPU affinity, animation speeds and message batching.",
+              L"Вернуть все стандартные настройки враппера и СЕЙЧАС ЗАКРЫТЬ КЛИЕНТ?\n\nНастройки таймера, плагинов и родные игровые параметры НЕ сбрасываются. Текущее сетевое соединение завершится. Несохранённый прогресс автоматически НЕ сохраняется.\n\nПосле закрытия запустите клиент снова: все стандартные настройки применятся вместе, включая OpenGL + Lanczos, масштаб, число CPU, скорости анимаций и обработку очереди."),
+            L(L"Reset wrapper settings", L"Сброс настроек враппера"),
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
+        return;
+
+    char rendererPath[MAX_PATH] = {}, rendererSection[256] = {};
+    if (!DDGetConfigWriteTarget(rendererPath, sizeof(rendererPath),
+                                rendererSection, sizeof(rendererSection))) {
+        MessageBoxW(g_gameHwnd,
+                    L(L"Cannot determine the active ddraw.ini profile. Nothing was reset.",
+                      L"Не удалось определить активный профиль ddraw.ini. Ничего не сброшено."),
+                    L(L"Reset failed", L"Ошибка сброса"), MB_OK | MB_ICONERROR);
+        return;
+    }
+    // exeDirFile reuses a scratch buffer: retain independent path strings.
+    const std::string menuPath = iniFile();
+    const std::string gamePath = discipleIni();
+    std::vector<c4_ini_reset::Entry> entries;
+    for (const auto& setting : c4defaults::renderer) {
+        entries.push_back({rendererPath, "ddraw", setting.key, setting.value});
+        // Empty profile values inherit [ddraw] (notably aspect_ratio), so reset both
+        // the global defaults and the currently effective profile, never other profiles.
+        if (lstrcmpiA(rendererSection, "ddraw") != 0)
+            entries.push_back({rendererPath, rendererSection, setting.key, setting.value});
+    }
+    for (const auto& setting : c4defaults::menu)
+        entries.push_back({menuPath, "menu", setting.key, setting.value});
+    entries.push_back({menuPath, "menu", "autoConfirmUnitHire",
+                       g_ver == VerRussobit ? "1" : "0"});
+    for (const auto& setting : c4defaults::wrapper)
+        entries.push_back({gamePath, "Wrapper", setting.key, setting.value});
+    char locale[24] = {};
+    wsprintfA(locale, "%lu", GetUserDefaultLCID());
+    entries.push_back({gamePath, "Wrapper", "Locale", locale});
+
+    if (horplus_is_available()) {
+        // Auto uses a window-sized canvas, not the old fullscreen/custom output.
+        // Resolve the monitor work area before the transaction; the live canvas is
+        // never patched here. Its native compatibility base must match next start.
+        MONITORINFO monitor = {sizeof(MONITORINFO)};
+        int width = 0, height = 0, nativeSize = -1;
+        if (!GetMonitorInfoW(MonitorFromWindow(g_gameHwnd, MONITOR_DEFAULTTOPRIMARY), &monitor) ||
+            !horplus_get_adaptive_for_output(
+                monitor.rcWork.right - monitor.rcWork.left,
+                monitor.rcWork.bottom - monitor.rcWork.top,
+                &width, &height, &nativeSize)) {
+            MessageBoxW(g_gameHwnd,
+                        L(L"Cannot determine a safe automatic game resolution. Nothing was reset.",
+                          L"Не удалось определить безопасное автоматическое разрешение. Ничего не сброшено."),
+                        L(L"Reset failed", L"Ошибка сброса"), MB_OK | MB_ICONERROR);
+            return;
+        }
+        char nativeText[16] = {};
+        wsprintfA(nativeText, "%d", nativeSize < 0 ? 0 : nativeSize);
+        entries.push_back({gamePath, "Disciple", "DisplaySize", nativeText});
+        entries.push_back({gamePath, "Wrapper", "GameCanvasMode", "2"});
+        entries.push_back({gamePath, "Wrapper", "GameCanvasWidth", "0"});
+        entries.push_back({gamePath, "Wrapper", "GameCanvasHeight", "0"});
+        entries.push_back({gamePath, "Wrapper", "LegacyDisplaySizeMigrated", "1"});
+    }
+
+    const auto saved = c4_ini_reset::Apply(entries);
+    if (!saved.success) {
+        mlog("[menu] settings reset failed index=%u error=%lu rollback=%d",
+             static_cast<unsigned>(saved.failedIndex), saved.error, saved.rollbackComplete);
+        MessageBoxW(g_gameHwnd,
+                    saved.rollbackComplete
+                        ? L(L"Could not save the defaults. Previous settings were restored; live settings are unchanged.",
+                            L"Не удалось сохранить стандартные настройки. Прежние значения восстановлены; текущие настройки не изменены.")
+                        : L(L"Saving and rollback failed. Live settings are unchanged; check ddraw.ini, C4menu.ini and Disciple.ini before restarting.",
+                            L"Сохранение и откат завершились ошибкой. Текущие настройки не изменены; проверьте ddraw.ini, C4menu.ini и Disciple.ini перед перезапуском."),
+                    L(L"Reset failed", L"Ошибка сброса"), MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    // No partial live reset: all defaults become active together on the next start.
+    // Suppress old runtime geometry persistence for this exit only.
+    DDExitClientAfterSettingsChange(1);
+}
+
+void toggleNetworkTrace()
+{
+    if (c4trace_environment_forced()) {
+        MessageBoxW(g_gameHwnd,
+                    L(L"Diagnostics are forced by C4DLL_NETTRACE=1. Remove that variable from the launch environment and restart to disable recording.",
+                      L"Диагностика принудительно включена через C4DLL_NETTRACE=1. Для отключения уберите эту переменную из среды запуска и перезапустите клиент."),
+                    L(L"Diagnostics", L"Диагностика"), MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    const bool enabled = c4trace_configured(iniFile()) == 0;
+    if (MessageBoxW(g_gameHwnd,
+            enabled
+                ? L(L"Enable network/timing diagnostics and CLOSE THE CLIENT NOW?\n\nLaunch it again to start recording. The multiplayer connection will end; unsaved progress is NOT saved automatically.\n\nCSV logs are written beside the EXE: up to 32 MiB per process, stopping below 64 MiB of free space. Recording affects timing. Enable it separately in both clients when investigating a network issue. See NETWORK_TRACE.md.",
+                    L"Включить диагностику сети/задержек и СЕЙЧАС ЗАКРЫТЬ КЛИЕНТ?\n\nЗапустите его снова для начала записи. Сетевое соединение завершится; несохранённый прогресс автоматически НЕ сохраняется.\n\nCSV создаются рядом с EXE: до 32 МиБ на процесс, остановка при остатке менее 64 МиБ. Запись влияет на тайминги. Для сетевого исследования включите её отдельно в обоих клиентах. Подробности — NETWORK_TRACE.md.")
+                : L(L"Disable diagnostics and CLOSE THE CLIENT NOW?\n\nThe next launch will run without recording. The multiplayer connection will end; unsaved progress is NOT saved automatically. Existing logs will not be deleted.",
+                    L"Отключить диагностику и СЕЙЧАС ЗАКРЫТЬ КЛИЕНТ?\n\nСледующий запуск будет без записи. Сетевое соединение завершится; несохранённый прогресс автоматически НЕ сохраняется. Существующие логи не удаляются."),
+            L(L"Diagnostics: restart required", L"Диагностика: нужен перезапуск"),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
+        return;
+    const std::vector<c4_ini_reset::Entry> entries = {
+        {iniFile(), "menu", "netTrace", enabled ? "1" : "0"}};
+    const auto saved = c4_ini_reset::Apply(entries);
+    if (!saved.success) {
+        MessageBoxW(g_gameHwnd,
+                    saved.rollbackComplete
+                        ? L(L"Could not save diagnostics. The previous setting remains; the client stays open.",
+                            L"Не удалось сохранить диагностику. Прежняя настройка сохранена; клиент остаётся открытым.")
+                        : L(L"Saving and rollback failed. Check [menu] netTrace in C4menu.ini. The client stays open.",
+                            L"Сохранение и откат завершились ошибкой. Проверьте [menu] netTrace в C4menu.ini. Клиент остаётся открытым."),
+                    L(L"Diagnostics", L"Диагностика"), MB_OK | MB_ICONERROR);
+        return;
+    }
+    DDExitClientAfterSettingsChange(0);
+}
+
 void onMenuCommand(UINT id)
 {
+    if (id == kIdNetTrace) {
+        toggleNetworkTrace();
+        return;
+    }
+    if (id == kIdResetWrapper) {
+        resetWrapperSettings();
+        return;
+    }
     if (g_ver != VerRussobit &&
         (id == kIdAlwaysActive ||
          (id >= kIdAnimOff && id <= kIdAnim6) ||
@@ -5212,7 +5374,9 @@ LRESULT dispatchGameWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     // restore the exact previous value even if a third-party game hook faults or unwinds.
     if (msg != WM_MOUSEMOVE ||
         classifyPhysicalPointer(hwnd) != PhysicalPointerRegion::NativeViewport) {
+        eventtrace_message(C4TRACE_NATIVE_WND_ENTER, hwnd, msg, wParam, lParam);
         const LRESULT result = g_origWndProc(hwnd, msg, wParam, lParam);
+        eventtrace_message(C4TRACE_NATIVE_WND_RETURN, hwnd, msg, wParam, lParam);
         // A no-move press is deliberately forwarded so the native iso handler can replay it as a
         // click. If the release landed on another panel/outside the iso view, that handler is not
         // called; repair the still-live wrapper capture after native dispatch instead of carrying
@@ -5263,6 +5427,10 @@ LRESULT dispatchGameWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    eventtrace_install();
+    messagebatch_install(hwnd, iniFile());
+    messagebatch_window_event(hwnd, msg, wParam);
+    eventtrace_message(C4TRACE_FEATURE_WND, hwnd, msg, wParam, lParam);
     if (msg == WM_CLOSE || msg == WM_DESTROY || msg == WM_NCDESTROY ||
         msg == WM_QUERYENDSESSION || msg == WM_ENDSESSION ||
         (msg == WM_SYSCOMMAND && (wParam & 0xFFF0u) == SC_CLOSE) ||
@@ -5625,6 +5793,10 @@ void buildMenu()
                   L"(MNS/SMNS) Скорость передвижения на карте (опция игры)"));
     }
 
+    AppendMenuW(g_gameMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_gameMenu, MF_STRING, kIdResetWrapper,
+                L(L"Reset wrapper settings...", L"Сбросить настройки враппера..."));
+
     // ===== "Video" - presentation choices are live; logical game resolution is restart-only =====
     g_videoMenu = CreatePopupMenu();
     g_modeMenu = CreatePopupMenu();
@@ -5808,6 +5980,13 @@ void buildMenu()
     AppendMenuW(g_perfMenu, MF_STRING | MF_GRAYED, 0,
                 L(L"Accelerates AI message processing; off by default because it may expose game crashes.",
                   L"Ускоряет обработку сообщений ИИ; по умолчанию выкл., так как может проявить вылеты игры."));
+    AppendMenuW(g_perfMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_perfMenu, MF_STRING, kIdNetTrace,
+                L(L"Network/timing diagnostics (restart)...",
+                  L"Диагностика сети и задержек (рестарт)..."));
+    AppendMenuW(g_perfMenu, MF_STRING | MF_GRAYED, kIdNetTraceInfo,
+                L(L"Changing this option closes the client. Logs are limited; see NETWORK_TRACE.md.",
+                  L"Смена настройки закрывает клиент. Логи ограничены; см. NETWORK_TRACE.md."));
 
     g_bar = CreateMenu();
     AppendMenuW(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_gameMenu),
@@ -6090,6 +6269,10 @@ void installWndProcDetour()
 extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                             LRESULT* result)
 {
+    eventtrace_install();
+    messagebatch_install(hwnd, iniFile());
+    messagebatch_window_event(hwnd, msg, wParam);
+    eventtrace_message(C4TRACE_RENDER_WND, hwnd, msg, wParam, lParam);
     if (!result)
         return 0;
 

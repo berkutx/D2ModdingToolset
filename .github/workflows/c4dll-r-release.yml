@@ -82,26 +82,35 @@ jobs:
       - name: Package drop-in zip
         id: pkg
         run: |
+          $ErrorActionPreference = 'Stop'
           $ver = "${{ steps.ver.outputs.ver }}"
+          $zip = "C4dll-R-$ver.zip"
           $stage = "pkg/C4dll-R-$ver"
           New-Item -ItemType Directory -Force -Path "$stage/Mods" | Out-Null
           Copy-Item "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll" "$stage/C4dll-R.dll"
           Copy-Item "c4ddraw/plugins/timer/bin/Release/timer.c4p" "$stage/Mods/timer.c4p"
           Copy-Item "c4ddraw/plugins/unitinfo/bin/Release/twitchstat.c4p" "$stage/Mods/twitchstat.c4p"
           Copy-Item "c4ddraw/release/INSTALL.txt" "$stage/INSTALL.txt"
+          Copy-Item "c4ddraw/MESSAGE_BATCHING.md" "$stage/MESSAGE_BATCHING.md"
+          Copy-Item "c4ddraw/NETWORK_TRACE.md" "$stage/NETWORK_TRACE.md"
+          # Resolve once: the archive and GitHub page must carry identical notes.
+          $notes = (Get-Content "c4ddraw/release/RELEASE_NOTES.md" -Raw -Encoding utf8).Replace('__VER__', $ver).Replace('__ZIP__', $zip)
+          if ($notes -match '__(VER|ZIP)__') { throw 'Unresolved release-note tokens' }
+          $notesPath = "$stage/RELEASE_NOTES.md"
+          Set-Content -LiteralPath $notesPath -Value $notes -Encoding utf8
           Copy-Item "c4ddraw/release/C4PLUGINS.txt" "$stage/C4PLUGINS.txt"
           Copy-Item "c4ddraw/release/C4plugins.ini" "$stage/C4plugins.ini"
           Copy-Item "c4ddraw/release/ddraw.ini" "$stage/ddraw.ini"
           Copy-Item "c4ddraw/release/Shaders" "$stage/Shaders" -Recurse
           Copy-Item "c4ddraw/release/THIRD_PARTY_NOTICES.txt" "$stage/THIRD_PARTY_NOTICES.txt"
           Copy-Item "LICENSE" "$stage/LICENSE"
-          $zip = "C4dll-R-$ver.zip"
           Compress-Archive -Path "$stage" -DestinationPath $zip -Force
           # matching symbols for crash triage, published next to the zip
           $symzip = "C4dll-R-$ver-symbols.zip"
           Compress-Archive -Path "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.pdb", "c4ddraw/plugins/timer/bin/Release/timer.pdb", "c4ddraw/plugins/unitinfo/bin/Release/twitchstat.pdb" -DestinationPath $symzip -Force
           "zip=$zip" | Out-File $env:GITHUB_OUTPUT -Append
           "symzip=$symzip" | Out-File $env:GITHUB_OUTPUT -Append
+          "notes=$notesPath" | Out-File $env:GITHUB_OUTPUT -Append
           Write-Host "packaged $zip + $symzip"
 
       - name: Publish GitHub Release
@@ -113,23 +122,19 @@ jobs:
           $pre = "${{ steps.ver.outputs.pre }}" -eq "true"
           $zip = "${{ steps.pkg.outputs.zip }}"
           $symzip = "${{ steps.pkg.outputs.symzip }}"
-
-          # Release notes from the committed template (avoids a here-string, which cannot close at
-          # column 0 inside a YAML run block). Substitute the version + zip name.
-          $notes = (Get-Content "c4ddraw/release/RELEASE_NOTES.md" -Raw) -replace '__VER__', $ver -replace '__ZIP__', $zip
-          Set-Content -Path notes.md -Value $notes -Encoding utf8
+          $notesPath = "${{ steps.pkg.outputs.notes }}"
 
           # Create the release if it does not exist yet (tag push: tag exists; dispatch: gh makes it).
           gh release view $tag 1>$null 2>$null
           if ($LASTEXITCODE -ne 0) {
-            $createArgs = @('release', 'create', $tag, '--title', "C4dll-R $ver", '--notes-file', 'notes.md', '--target', $env:GITHUB_SHA)
+            $createArgs = @('release', 'create', $tag, '--title', "C4dll-R $ver", '--notes-file', $notesPath, '--target', $env:GITHUB_SHA)
             if ($pre) { $createArgs += '--prerelease' }
             gh @createArgs
             if ($LASTEXITCODE -ne 0) { Write-Error "gh release create failed"; exit 1 }
           } else {
             # The release already exists (e.g. a real tag push after an earlier manual prerelease
             # created the same tag): make the prerelease flag match THIS run.
-            gh release edit $tag --prerelease=$("$pre".ToLower())
+            gh release edit $tag --title "C4dll-R $ver" --notes-file $notesPath --target $env:GITHUB_SHA --prerelease=$("$pre".ToLower())
             if ($LASTEXITCODE -ne 0) { Write-Error "gh release edit failed"; exit 1 }
           }
 

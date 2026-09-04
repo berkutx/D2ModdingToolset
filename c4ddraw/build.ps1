@@ -22,12 +22,26 @@ param(
     [switch]$Deploy,
     [switch]$Restore,
     [string]$Game = "C:\GOG Games\slasher_mns_2_4",
-    [string]$Version = ""       # stamped into the DLL version resource; "" = dev-<repo short sha>
+    [string]$Version = "",      # stamped into the DLL version resource; "" = dev-<repo short sha>
+    [string]$BuildDirectory = "", # optional NEW directory beneath c4ddraw/build; existing paths refused
+    [switch]$WrapperOnly         # diagnostic build only; cannot deploy an incomplete bundle
 )
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $upstream = Join-Path $root "upstream\cnc-ddraw"
 $build = Join-Path $root "build\cnc-ddraw"
+if ($WrapperOnly -and ($Deploy -or $Restore)) {
+    throw "WrapperOnly is build-only; Deploy/Restore are not permitted."
+}
+if ($BuildDirectory) {
+    $allowedBuildRoot = [IO.Path]::GetFullPath((Join-Path $root "build")) + [IO.Path]::DirectorySeparatorChar
+    $candidateBuild = [IO.Path]::GetFullPath($BuildDirectory)
+    if (-not $candidateBuild.StartsWith($allowedBuildRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        (Test-Path -LiteralPath $candidateBuild)) {
+        throw "BuildDirectory must be a NEW directory beneath $allowedBuildRoot (nothing will be deleted)."
+    }
+    $build = $candidateBuild
+}
 $patch = Join-Path $root "patches\cnc-ddraw-c4dll-r.patch"
 $patchNull = Join-Path $root "patches\cnc-ddraw-render-null.patch"
 $patchIni = Join-Path $root "patches\cnc-ddraw-default-ini.patch"
@@ -41,6 +55,7 @@ $patchCursorOwnership = Join-Path $root "patches\cnc-ddraw-d2-cursor-ownership.p
 $patchLiveResize = Join-Path $root "patches\cnc-ddraw-live-resize.patch"
 $patchSurfacePublish = Join-Path $root "patches\cnc-ddraw-surface-layout-publish.patch"
 $patchWindowStretchFilter = Join-Path $root "patches\cnc-ddraw-window-stretch-filter.patch"
+$patchEventTrace = Join-Path $root "patches\cnc-ddraw-event-trace.patch"
 $cb63def = Join-Path $root "forwarder\C4dll-R.cb63.def"
 $out = Join-Path $build "bin\Release\C4dll-R.dll"
 $timerPluginProj = Join-Path $root "plugins\timer\timer.vcxproj"
@@ -144,6 +159,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "git apply (window-stretch final filter) failed (exit $LASTEXITCODE)" }
     & git -c core.autocrlf=false apply --ignore-whitespace "$patchZoomMouse"
     if ($LASTEXITCODE -ne 0) { throw "git apply (simple-zoom mouse mapping) failed (exit $LASTEXITCODE)" }
+    & git -c core.autocrlf=false apply --recount --ignore-whitespace "$patchEventTrace"
+    if ($LASTEXITCODE -ne 0) { throw "git apply (opt-in event diagnostics) failed (exit $LASTEXITCODE)" }
 }
 finally { Pop-Location }
 if (-not (Select-String -Path (Join-Path $build "src\dllmain.c") -Pattern "c4features_install" -Quiet)) {
@@ -260,6 +277,11 @@ if (-not (Select-String -LiteralPath (Join-Path $build "src\rendererbridge.c") -
     throw "renderer bridge missing exact DisciplesGL window-stretch crop API"
 }
 Copy-Item (Join-Path $root "features\featuremenu.cpp") (Join-Path $build "src\featuremenu.cpp") -Force
+Copy-Item (Join-Path $root "features\inisettingsreset.h") (Join-Path $build "src\inisettingsreset.h") -Force
+Copy-Item (Join-Path $root "features\wrapperdefaults.h") (Join-Path $build "src\wrapperdefaults.h") -Force
+foreach ($traceFile in @('c4trace.cpp', 'c4trace.h', 'eventtrace.cpp', 'eventtrace.h', 'inventorytrace.cpp', 'inventorytrace.h', 'messagebatch.cpp', 'messagebatch.h')) {
+    Copy-Item -LiteralPath (Join-Path $root "features\$traceFile") -Destination (Join-Path $build "src\$traceFile") -Force
+}
 Copy-Item (Join-Path $root "features\featuremenu_resources.h") (Join-Path $build "src\featuremenu_resources.h") -Force
 Copy-Item (Join-Path $root "features\featuremenu_resources.rc") (Join-Path $build "src\featuremenu_resources.rc") -Force
 Copy-Item (Join-Path $root "features\horplus.cpp") (Join-Path $build "src\horplus.cpp") -Force
@@ -329,7 +351,15 @@ Set-Content -Path $vcx -Encoding UTF8
 if (-not (Select-String -Path $vcx -SimpleMatch '<AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>' -Quiet)) {
     throw "vcxproj retarget failed: compiler UTF-8 source/execution charset missing"
 }
-foreach ($src in @('rendererbridge\.c', 'c4features\.cpp', 'featuremenu\.cpp', 'horplus\.cpp', 'widebattle\.cpp', 'decorative\.cpp', 'cursorcapture\.cpp', 'clouds\.cpp', 'pluginhost\.cpp', 'localization\.cpp', 'savelogic\.cpp', 'timerhost\.cpp', 'fastai\.cpp', 'headless\.cpp')) {
+$traceProject = Get-Content -LiteralPath $vcx -Raw
+$traceEntries = '    <ClCompile Include="src\c4trace.cpp" />' + "`r`n" +
+    '    <ClCompile Include="src\eventtrace.cpp" />' + "`r`n" +
+    '    <ClCompile Include="src\inventorytrace.cpp" />' + "`r`n" +
+    '    <ClCompile Include="src\messagebatch.cpp" />' + "`r`n"
+$traceProject = $traceProject.Replace('    <ClCompile Include="src\featuremenu.cpp" />',
+    $traceEntries + '    <ClCompile Include="src\featuremenu.cpp" />')
+Set-Content -LiteralPath $vcx -Value $traceProject -Encoding UTF8
+foreach ($src in @('rendererbridge\.c', 'c4features\.cpp', 'featuremenu\.cpp', 'horplus\.cpp', 'widebattle\.cpp', 'decorative\.cpp', 'cursorcapture\.cpp', 'clouds\.cpp', 'pluginhost\.cpp', 'localization\.cpp', 'savelogic\.cpp', 'timerhost\.cpp', 'fastai\.cpp', 'headless\.cpp', 'c4trace\.cpp', 'eventtrace\.cpp', 'inventorytrace\.cpp', 'messagebatch\.cpp')) {
     if (-not (Select-String -Path $vcx -Pattern $src -Quiet)) {
         throw "vcxproj retarget failed: $src not added to the project"
     }
@@ -407,6 +437,14 @@ if (-not $wideImage.Contains($russianGameLabel)) {
     throw "menu localization validation failed: UTF-16 Russian label missing from C4dll-R.dll"
 }
 Write-Host "  menu localization: UTF-8 -> UTF-16 validation passed" -ForegroundColor Green
+foreach ($diagnosticReadme in @('NETWORK_TRACE.md', 'MESSAGE_BATCHING.md')) {
+    Copy-Item -LiteralPath (Join-Path $root $diagnosticReadme) `
+              -Destination (Join-Path (Split-Path $out -Parent) $diagnosticReadme) -Force
+}
+if ($WrapperOnly) {
+    Write-Host "Wrapper-only diagnostic build complete. No plugins rebuilt; no game instance changed." -ForegroundColor Green
+    return
+}
 
 # Build the native timer plugin (timer.c4p). Self-contained Win32 DLL (GDI+, static CRT, system-font
 # fallback); on MNS/SMNS the host drives its turn reset and timeout actions.

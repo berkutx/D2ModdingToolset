@@ -7,7 +7,8 @@
  * sites, not their shared target: detouring 0x61BF74 globally would mark unrelated callers as AI.
  *
  * Unlike the legacy unbounded while loop, one real ThreadWindowClass WM_TIMER may synthesize at
- * most 32 dispatches and at most 3 ms of work.  The normal message loop always regains control.
+ * most 32 dispatches, checking a 3 ms budget between callbacks. A native callback itself is not
+ * preempted. Real queued messages retain normal Windows dispatch semantics.
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -17,6 +18,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include "c4trace.h"
+#include "eventtrace.h"
 
 extern "C" int featuremenu_debug_enabled(void);
 extern "C" int pluginhost_has_server(void);
@@ -50,8 +53,26 @@ volatile LONG g_lastLoggedTurn = -1;
 volatile LONG g_lastSliceLog = 0;
 volatile PVOID g_serverHwnd = nullptr;
 volatile PVOID g_serverWndProc = nullptr;
+SRWLOCK g_serverStateLock = SRWLOCK_INIT; // Protect the pair/generation, never a window API call.
+LONG g_serverGeneration = 0;
 UINT g_aiMessage = 0;
 DWORD g_nextWindowScan = 0;
+
+// Trace provenance is local to this forwarding seam, not a new game policy.
+enum : unsigned {
+    kTraceExternal = 0,
+    kTraceClassFallback = 1,
+    kTraceQueued = 2,
+    kTraceSyntheticEmpty = 3,
+    kTraceSyntheticAfterTimer = 4 // Reserved for old traces; real queued timers are no longer replaced.
+};
+__declspec(thread) unsigned g_traceDispatchDepth = 0;
+
+struct QueuedDispatchContext {
+    const MSG* message;
+    bool consumed;
+};
+__declspec(thread) QueuedDispatchContext* g_queuedDispatch = nullptr;
 
 const char* logPath()
 {
@@ -280,11 +301,48 @@ bool aiThinking(DWORD now)
     return InterlockedCompareExchange(&g_fastai_turn, 0, 0) != 0 || tickBefore(now, until);
 }
 
+struct ServerState {
+    HWND hwnd;
+    WNDPROC proc;
+    LONG generation;
+};
+
+ServerState serverState()
+{
+    AcquireSRWLockShared(&g_serverStateLock);
+    const ServerState state = {reinterpret_cast<HWND>(g_serverHwnd),
+                              reinterpret_cast<WNDPROC>(g_serverWndProc), g_serverGeneration};
+    ReleaseSRWLockShared(&g_serverStateLock);
+    return state;
+}
+
 WNDPROC serverWndProc()
 {
-    return reinterpret_cast<WNDPROC>(
-        InterlockedCompareExchangePointer(const_cast<PVOID volatile*>(&g_serverWndProc), nullptr,
-                                          nullptr));
+    return serverState().proc;
+}
+
+bool currentSliceWindow(const ServerState& expected)
+{
+    const ServerState current = serverState();
+    return expected.hwnd && expected.proc && current.hwnd == expected.hwnd &&
+           current.generation == expected.generation && current.proc == expected.proc &&
+           GetWindowThreadProcessId(expected.hwnd, nullptr) == GetCurrentThreadId();
+}
+
+bool clearServerWindow(HWND hwnd, LONG generation)
+{
+    bool cleared = false;
+    AcquireSRWLockExclusive(&g_serverStateLock);
+    if (g_serverHwnd == hwnd && g_serverGeneration == generation) {
+        g_serverHwnd = nullptr;
+        g_serverWndProc = nullptr;
+        ++g_serverGeneration;
+        InterlockedExchange(&g_timeoutUntil, 0);
+        InterlockedExchange(&g_fastai_turn, 0);
+        cleared = true;
+    }
+    ReleaseSRWLockExclusive(&g_serverStateLock);
+    return cleared;
 }
 
 void beginAiGrace()
@@ -293,71 +351,133 @@ void beginAiGrace()
     InterlockedExchange(&g_timeoutUntil, static_cast<LONG>(deadline));
 }
 
-LRESULT dispatchOriginal(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+LRESULT dispatchOriginal(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                         unsigned traceSource = kTraceExternal)
 {
     WNDPROC original = serverWndProc();
-    return original ? CallWindowProcA(original, hwnd, message, wParam, lParam)
-                    : DefWindowProcA(hwnd, message, wParam, lParam);
+    if (!c4trace_enabled())
+        return original ? CallWindowProcA(original, hwnd, message, wParam, lParam)
+                        : DefWindowProcA(hwnd, message, wParam, lParam);
+
+    // Record every enabled server forward, including periods without player input. QPC lives in
+    // c4trace_event: two bounded records, no extra message API, wait, allocation or file IO here.
+    // Context d: low 7 bits=source above; bit7=abnormal return (RETURN only); upper24=TLS depth.
+    // ENTER: object=HWND, a=message, b=wParam, c=lParam. RETURN: b=LRESULT, c=LastError.
+    // Per-TID ENTER/RETURN QPC + context delimit slow calls and nested native dispatch. This is
+    // a callback return, not proof that a network packet/command was processed successfully.
+    const DWORD beforeError = GetLastError();
+    const unsigned depth = ++g_traceDispatchDepth;
+    const uintptr_t context = ((depth & 0xFFFFFFu) << 8) | traceSource;
+    c4trace_event(C4TRACE_FASTAI_DISPATCH_ENTER, reinterpret_cast<uintptr_t>(hwnd),
+                  message, wParam, static_cast<uintptr_t>(lParam), context);
+    SetLastError(beforeError);
+    LRESULT result = 0;
+    __try {
+        result = original ? CallWindowProcA(original, hwnd, message, wParam, lParam)
+                          : DefWindowProcA(hwnd, message, wParam, lParam);
+    } __finally {
+        // Do not catch or convert a native exception. Restore diagnostic depth even on unwind.
+        const DWORD afterError = GetLastError();
+        c4trace_event(C4TRACE_FASTAI_DISPATCH_RETURN, reinterpret_cast<uintptr_t>(hwnd),
+                      message, static_cast<uintptr_t>(result), afterError,
+                      context | (AbnormalTermination() ? 0x80u : 0u));
+        --g_traceDispatchDepth;
+        SetLastError(afterError);
+    }
+    return result;
 }
 
-void runTimerSlice(HWND hwnd, WPARAM timerId, LPARAM timerProc)
+void dispatchQueued(const MSG& queued)
 {
-    if (InterlockedCompareExchange(&g_enabled, 0, 0) == 0 ||
-        InterlockedCompareExchange(&g_available, 0, 0) == 0 || !pluginhost_has_server())
-        return;
-    if (InterlockedCompareExchange(&g_pumping, 1, 0) != 0)
-        return;
+    // Mark exactly the expected server forward, not arbitrary nested/sent callbacks. TIMERPROC
+    // and child-window dispatch need not reach our server WndProc and therefore have no 70/71 pair.
+    QueuedDispatchContext context = {&queued, false};
+    QueuedDispatchContext* previous = g_queuedDispatch;
+    // A TIMERPROC can itself send the same WM_TIMER to the WndProc. That is a nested callback,
+    // not the queued DispatchMessage's direct server forward, even if all four arguments match.
+    g_queuedDispatch = queued.message == WM_TIMER && queued.lParam ? nullptr : &context;
+    __try {
+        DispatchMessageA(&queued);
+    } __finally {
+        g_queuedDispatch = previous;
+    }
+}
 
+bool sliceBudgetRemaining(LONGLONG deadline, LONGLONG& previousCounter)
+{
+    LARGE_INTEGER now = {};
+    if (!QueryPerformanceCounter(&now) || now.QuadPart < previousCounter)
+        return false;
+    previousCounter = now.QuadPart;
+    return now.QuadPart < deadline;
+}
+
+void runTimerSliceBody(const ServerState& window, WPARAM timerId, LPARAM timerProc)
+{
     LARGE_INTEGER frequency = {};
     LARGE_INTEGER started = {};
-    QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&started);
+    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0 ||
+        !QueryPerformanceCounter(&started))
+        return;
     // QPC is available on every Windows version supported by the wrapper.  Round the deadline up
     // so the slice receives the requested budget without relying on GetTickCount's coarse tick.
     const LONGLONG budgetTicks =
         (frequency.QuadPart * kSliceBudgetMs + 999) / 1000;
     const LONGLONG deadline = started.QuadPart + budgetTicks;
+    LONGLONG previousCounter = started.QuadPart;
     unsigned dispatched = 0;
     bool stop = false;
 
     for (;;) {
-        LARGE_INTEGER nowCounter = {};
-        QueryPerformanceCounter(&nowCounter);
-        if (dispatched >= kSliceDispatchLimit || nowCounter.QuadPart >= deadline ||
-            InterlockedCompareExchange(&g_enabled, 0, 0) == 0 || !aiThinking(GetTickCount()))
+        if (dispatched >= kSliceDispatchLimit || !currentSliceWindow(window) ||
+            InterlockedCompareExchange(&g_enabled, 0, 0) == 0 || !aiThinking(GetTickCount()) ||
+            !sliceBudgetRemaining(deadline, previousCounter))
             break;
         Sleep(0);
+        // Yielding may consume the remaining budget. Do not remove another queued message then.
+        if (!currentSliceWindow(window) ||
+            InterlockedCompareExchange(&g_enabled, 0, 0) == 0 || !aiThinking(GetTickCount()) ||
+            !sliceBudgetRemaining(deadline, previousCounter))
+            break;
         MSG queued = {};
-        const BOOL haveMessage = PeekMessageA(&queued, hwnd, 0, 0, PM_REMOVE);
-        if (haveMessage && queued.message != WM_TIMER) {
+        const BOOL haveMessage = PeekMessageA(&queued, window.hwnd, 0, 0, PM_REMOVE);
+        if (haveMessage) {
             if (queued.message == WM_QUIT) {
                 PostQuitMessage(static_cast<int>(queued.wParam));
                 stop = true;
             } else {
-                dispatchOriginal(hwnd, queued.message, queued.wParam, queued.lParam);
-                if (queued.message == g_aiMessage)
-                    beginAiGrace();
-                if (queued.message == WM_CLOSE || queued.message == WM_DESTROY ||
-                    queued.message == WM_NCDESTROY)
+                // A real queued timer keeps its own id/TIMERPROC; a child retains its own HWND.
+                // Once removed, deliver it even if Peek's sent callbacks exhausted the budget.
+                // Re-entering our server subclass is intentional: g_pumping prevents a nested
+                // slice, while normal subclass/teardown handling still runs exactly once.
+                dispatchQueued(queued);
+                if (queued.hwnd == window.hwnd &&
+                    (queued.message == WM_CLOSE || queued.message == WM_DESTROY ||
+                     queued.message == WM_NCDESTROY))
                     stop = true;
             }
         } else {
-            // No work was queued (or a redundant queued timer was consumed): give the native server
-            // WndProc one synthetic tick using the real timer's id/callback pair.
-            dispatchOriginal(hwnd, WM_TIMER, timerId, timerProc);
+            // Peek may execute sent callbacks even when it returns FALSE. Recheck the attachment
+            // and the budget after that possible teardown/reentry before any synthetic work.
+            if (!currentSliceWindow(window) ||
+                InterlockedCompareExchange(&g_enabled, 0, 0) == 0 || !aiThinking(GetTickCount()) ||
+                !sliceBudgetRemaining(deadline, previousCounter))
+                break;
+            // This is deliberately not DispatchMessage: preserve the existing native AI-tick
+            // contract, using the outer real server timer's id/parameter only when no work queued.
+            dispatchOriginal(window.hwnd, WM_TIMER, timerId, timerProc, kTraceSyntheticEmpty);
         }
         ++dispatched;
-        if (stop)
+        if (stop || !currentSliceWindow(window))
             break;
     }
 
-    InterlockedExchange(&g_pumping, 0);
     if (dispatched != 0) {
         const LONG turn = InterlockedCompareExchange(&g_fastai_turn, 0, 0);
         const LONG previous = InterlockedExchange(&g_lastLoggedTurn, turn);
         LARGE_INTEGER ended = {};
-        QueryPerformanceCounter(&ended);
-        const DWORD elapsedUs = frequency.QuadPart > 0
+        const BOOL haveEnded = QueryPerformanceCounter(&ended);
+        const DWORD elapsedUs = haveEnded && ended.QuadPart >= started.QuadPart
                                     ? static_cast<DWORD>(
                                           (ended.QuadPart - started.QuadPart) * 1000000 /
                                           frequency.QuadPart)
@@ -374,27 +494,65 @@ void runTimerSlice(HWND hwnd, WPARAM timerId, LPARAM timerProc)
     }
 }
 
+void runTimerSlice(HWND hwnd, WPARAM timerId, LPARAM timerProc)
+{
+    // Preserve the outer native callback's LastError. Never convert an exception to success.
+    const DWORD savedError = GetLastError();
+    bool acquired = false;
+    __try {
+        const ServerState window = serverState();
+        if (window.hwnd != hwnd || !currentSliceWindow(window) ||
+            InterlockedCompareExchange(&g_enabled, 0, 0) == 0 ||
+            InterlockedCompareExchange(&g_available, 0, 0) == 0 || !pluginhost_has_server())
+            __leave;
+        if (InterlockedCompareExchange(&g_pumping, 1, 0) != 0)
+            __leave;
+        acquired = true;
+        runTimerSliceBody(window, timerId, timerProc);
+    } __finally {
+        if (acquired)
+            InterlockedExchange(&g_pumping, 0);
+        SetLastError(savedError);
+    }
+}
+
 LRESULT CALLBACK fastAiServerWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     // This subclass is installed only after an exact class-name and process check.  Keep the
     // runtime guard too: a stale/reused HWND must never turn an unrelated window into an AI pump.
+    const DWORD beforeError = GetLastError();
+    const ServerState window = serverState();
     char className[64] = {};
     if (!GetClassNameA(hwnd, className, sizeof(className)) ||
-        lstrcmpA(className, "ThreadWindowClass") != 0)
-        return dispatchOriginal(hwnd, message, wParam, lParam);
+        lstrcmpA(className, "ThreadWindowClass") != 0) {
+        SetLastError(beforeError);
+        return dispatchOriginal(hwnd, message, wParam, lParam, kTraceClassFallback);
+    }
 
-    const LRESULT result = dispatchOriginal(hwnd, message, wParam, lParam);
-    if (message == g_aiMessage)
-        beginAiGrace();
-    else if (message == WM_TIMER)
-        runTimerSlice(hwnd, wParam, lParam);
-
-    if (message == WM_NCDESTROY) {
-        InterlockedCompareExchangePointer(const_cast<PVOID volatile*>(&g_serverHwnd), nullptr, hwnd);
-        InterlockedExchangePointer(const_cast<PVOID volatile*>(&g_serverWndProc), nullptr);
-        InterlockedExchange(&g_timeoutUntil, 0);
-        InterlockedExchange(&g_fastai_turn, 0);
-        flog("[fast-ai] ThreadWindowClass destroyed; pump detached");
+    unsigned source = kTraceExternal;
+    if (g_queuedDispatch && !g_queuedDispatch->consumed) {
+        const MSG& expected = *g_queuedDispatch->message;
+        if (expected.hwnd == hwnd && expected.message == message &&
+            expected.wParam == wParam && expected.lParam == lParam) {
+            g_queuedDispatch->consumed = true;
+            source = kTraceQueued;
+        }
+    }
+    SetLastError(beforeError);
+    LRESULT result = 0;
+    __try {
+        result = dispatchOriginal(hwnd, message, wParam, lParam, source);
+        const DWORD nativeError = GetLastError();
+        if (message == g_aiMessage && currentSliceWindow(window))
+            beginAiGrace();
+        else if (message == WM_TIMER)
+            runTimerSlice(hwnd, wParam, lParam);
+        SetLastError(nativeError);
+    } __finally {
+        const DWORD afterError = GetLastError();
+        if (message == WM_NCDESTROY && clearServerWindow(hwnd, window.generation))
+            flog("[fast-ai] ThreadWindowClass destroyed; pump detached");
+        SetLastError(afterError);
     }
     return result;
 }
@@ -472,25 +630,36 @@ void attachServerWindow(HWND hwnd)
     if (!original || original == &fastAiServerWndProc)
         return;
 
-    // Publish the original before installing our procedure so an immediately delivered message
-    // can always forward safely.  Only the one scanner admitted by g_scanBusy reaches this block.
-    InterlockedExchangePointer(const_cast<PVOID volatile*>(&g_serverWndProc),
-                               reinterpret_cast<PVOID>(original));
+    // Publish the complete attachment before installing the procedure. An immediate callback can
+    // forward and teardown safely. No window API runs while this small metadata lock is held.
+    AcquireSRWLockExclusive(&g_serverStateLock);
+    if (g_serverHwnd) {
+        ReleaseSRWLockExclusive(&g_serverStateLock);
+        return;
+    }
+    g_serverWndProc = reinterpret_cast<PVOID>(original);
+    g_serverHwnd = hwnd;
+    const LONG generation = ++g_serverGeneration;
+    ReleaseSRWLockExclusive(&g_serverStateLock);
     SetLastError(ERROR_SUCCESS);
     const LONG_PTR previous = SetWindowLongPtrA(
         hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&fastAiServerWndProc));
     if (!previous && GetLastError() != ERROR_SUCCESS) {
-        InterlockedExchangePointer(const_cast<PVOID volatile*>(&g_serverWndProc), nullptr);
+        clearServerWindow(hwnd, generation);
         flog("[fast-ai] ThreadWindowClass subclass failed (%lu)", GetLastError());
         return;
     }
     if (previous && reinterpret_cast<WNDPROC>(previous) != original) {
         // A competing subclass appeared between Get/Set.  Chain to the actual procedure returned by
         // SetWindowLongPtr rather than bypassing it.
-        InterlockedExchangePointer(const_cast<PVOID volatile*>(&g_serverWndProc),
-                                   reinterpret_cast<PVOID>(previous));
+        AcquireSRWLockExclusive(&g_serverStateLock);
+        if (g_serverHwnd == hwnd && g_serverGeneration == generation)
+            g_serverWndProc = reinterpret_cast<PVOID>(previous);
+        ReleaseSRWLockExclusive(&g_serverStateLock);
     }
-    InterlockedExchangePointer(const_cast<PVOID volatile*>(&g_serverHwnd), hwnd);
+    const ServerState attached = serverState();
+    if (attached.hwnd != hwnd || attached.generation != generation)
+        return; // The window was destroyed during installation; do not resurrect the attachment.
     flog("[fast-ai] attached to hidden ThreadWindowClass hwnd=%p thread=%lu",
          hwnd, GetWindowThreadProcessId(hwnd, nullptr));
 }
@@ -543,16 +712,11 @@ extern "C" void fastai_pump(void)
         }
     }
 
-    HWND attached = reinterpret_cast<HWND>(
-        InterlockedCompareExchangePointer(const_cast<PVOID volatile*>(&g_serverHwnd), nullptr,
-                                          nullptr));
-    if (isOwnedServerWindow(attached))
+    const ServerState attached = serverState();
+    if (isOwnedServerWindow(attached.hwnd))
         return;
-    if (attached) {
-        InterlockedCompareExchangePointer(const_cast<PVOID volatile*>(&g_serverHwnd), nullptr,
-                                          attached);
-        InterlockedExchangePointer(const_cast<PVOID volatile*>(&g_serverWndProc), nullptr);
-    }
+    if (attached.hwnd)
+        clearServerWindow(attached.hwnd, attached.generation);
 
     const DWORD now = GetTickCount();
     if (tickBefore(now, g_nextWindowScan))

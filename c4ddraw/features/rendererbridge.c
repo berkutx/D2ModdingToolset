@@ -27,6 +27,9 @@
 #include "screenshot.h"
 #include "utils.h"
 #include "versionhelpers.h"
+#include "eventtrace.h"
+
+extern void HandleMessage(LPMSG, HWND, UINT, UINT, UINT);
 
 extern const void* DDGetDecoratedSurface(
     const void* source, int width, int height, int pitch, int bpp, int rgb555);
@@ -78,6 +81,22 @@ HWND DDPhysicalWindowFromPoint(POINT point)
 BOOL DDPhysicalPeekMessage(MSG* message, HWND hwnd, UINT first, UINT last, UINT remove)
 {
     return real_PeekMessageA(message, hwnd, first, last, remove);
+}
+
+/* Batching separates raw FIFO inspection from one normal post-removal mapping.
+ * No extra Peek, game limiter, drawing or MSS call belongs in these bridges. */
+BOOL WINAPI DDMessageBatchPeekRaw(LPMSG message, HWND hwnd, UINT first, UINT last, UINT remove)
+{
+    return real_PeekMessageA(message, hwnd, first, last, remove);
+}
+
+void DDMessageBatchMapRemoved(LPMSG message)
+{
+    if (g_ddraw.ref)
+        g_ddraw.last_msg_pull_tick = timeGetTime();
+    eventtrace_pulled(C4TRACE_PEEK_RAW, message, TRUE, PM_REMOVE);
+    HandleMessage(message, NULL, 0, 0, PM_REMOVE);
+    eventtrace_pulled(C4TRACE_PEEK_MAPPED, message, TRUE, PM_REMOVE);
 }
 
 /* A plugin canvas update is a presentation update even when the game-owned primary did not change.
@@ -1251,6 +1270,19 @@ int DDWriteConfigString(const char* key, const char* value)
         section, key, value, g_config.ini_path) != FALSE;
 }
 
+/* Exact reset destination: preserve non-active profiles and never hide a failed write. */
+int DDGetConfigWriteTarget(char* path, unsigned int path_capacity,
+                          char* section, unsigned int section_capacity)
+{
+    const char* target = g_config.game_section[0] ? g_config.game_section : "ddraw";
+    if (!path || !section || !g_config.ini_path[0] ||
+        path_capacity <= strlen(g_config.ini_path) || section_capacity <= strlen(target))
+        return 0;
+    lstrcpynA(path, g_config.ini_path, path_capacity);
+    lstrcpynA(section, target, section_capacity);
+    return 1;
+}
+
 /*
  * Enable the single-owner cursor model only after featuremenu has validated the exact MNS/SMNS
  * executable. DisciplesGL's model assumes unlocked, absolute pointer coordinates. Pin devmode for
@@ -1306,6 +1338,18 @@ static LONG g_last_normal_output_width;
 static LONG g_last_normal_output_height;
 static WINDOWPLACEMENT g_last_normal_window_placement;
 static volatile LONG g_restore_normal_placement_pending;
+
+/* Same process-exit path as upstream's default SC_CLOSE. Call only after
+ * confirmation and successful INI writes, never from DllMain. For reset, the
+ * persisted defaults are authoritative: cfg_save must not restore old geometry. */
+void DDExitClientAfterSettingsChange(int discard_old_window_state)
+{
+    if (discard_old_window_state)
+        g_config.save_settings = 0; /* memory only, not savesettings=0 in the INI */
+    if (g_config.terminate_process)
+        g_config.terminate_process = 2;
+    ExitProcess(0);
+}
 
 static LONG dd_read_config_long(const char* key, LONG fallback)
 {
