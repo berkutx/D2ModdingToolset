@@ -60,8 +60,6 @@ $cb63def = Join-Path $root "forwarder\C4dll-R.cb63.def"
 $out = Join-Path $build "bin\Release\C4dll-R.dll"
 $timerPluginProj = Join-Path $root "plugins\timer\timer.vcxproj"
 $timerPluginOut = Join-Path $root "plugins\timer\bin\Release\timer.c4p"
-$twitchStatPluginProj = Join-Path $root "plugins\unitinfo\unitinfo.vcxproj"
-$twitchStatPluginOut = Join-Path $root "plugins\unitinfo\bin\Release\twitchstat.c4p"
 
 # Locate MSBuild robustly (works on a dev box AND on GitHub windows-latest, where VS is Enterprise).
 function Find-MSBuild {
@@ -91,24 +89,60 @@ function Stop-TargetGame {
     } | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
+# Older experimental bundles included Twitch Stat / UnitInfo. The release owns only timer.c4p.
+# Park those two exact files reversibly: the loader scans *.c4p, not these disabled suffixes.
+function Disable-ExperimentalPluginFiles {
+    $gameRoot = [IO.Path]::GetFullPath($Game).TrimEnd('\')
+    $gameItem = Get-Item -LiteralPath $gameRoot -Force
+    if (-not $gameItem.PSIsContainer -or ($gameItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Experimental-plugin migration requires a normal game directory: $gameRoot"
+    }
+    $modsRoot = [IO.Path]::GetFullPath((Join-Path $gameRoot 'Mods'))
+    if ([IO.Path]::GetDirectoryName($modsRoot) -ine $gameRoot) {
+        throw "Mods directory escaped the selected game directory."
+    }
+    if (-not (Test-Path -LiteralPath $modsRoot)) { return }
+    $modsItem = Get-Item -LiteralPath $modsRoot -Force
+    if (-not $modsItem.PSIsContainer -or ($modsItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Experimental-plugin migration will not follow a reparse Mods directory: $modsRoot"
+    }
+    $moves = foreach ($leaf in @('twitchstat.c4p', 'unitinfo.c4p')) {
+        $source = [IO.Path]::GetFullPath((Join-Path $modsRoot $leaf))
+        if ([IO.Path]::GetDirectoryName($source) -ine $modsRoot) { throw "Invalid plugin migration path." }
+        if (-not (Test-Path -LiteralPath $source)) { continue }
+        $item = Get-Item -LiteralPath $source -Force
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Experimental-plugin migration will not move a directory or reparse file: $source"
+        }
+        $destination = $source + '.disabled-' + [Guid]::NewGuid().ToString('N')
+        if ([IO.Path]::GetDirectoryName($destination) -ine $modsRoot -or
+            (Test-Path -LiteralPath $destination)) { throw "Invalid plugin backup destination." }
+        [pscustomobject]@{Source=$source; Destination=$destination}
+    }
+    foreach ($move in $moves) {
+        Move-Item -LiteralPath $move.Source -Destination $move.Destination -ErrorAction Stop
+        Write-Host "Experimental plugin parked (recoverable): $($move.Destination)" -ForegroundColor Yellow
+    }
+}
+
 if ($Restore) {
     Stop-TargetGame
     Start-Sleep -Milliseconds 600
     if (Test-Path $bC4) { Copy-Item $bC4 (Join-Path $Game "C4dll-R.dll") -Force; [System.IO.File]::Delete($bC4) }
     if (Test-Path $dOff) { Move-Item $dOff (Join-Path $Game "ddraw.dll") -Force }
-    foreach ($pluginLeaf in @("timer.c4p", "twitchstat.c4p", "unitinfo.c4p")) {
+    foreach ($pluginLeaf in @("timer.c4p")) {
         $depC4p = Join-Path $Game "Mods\$pluginLeaf"
         if (Test-Path $depC4p) { [System.IO.File]::Delete($depC4p) }
     }
-    Write-Host "Restored vanilla baseline (C4dll-R = CB63 copy, standalone ddraw.dll back, native plugins removed)." -ForegroundColor Cyan
+    Write-Host "Restored vanilla baseline (C4dll-R = CB63 copy, standalone ddraw.dll back, bundled timer removed; experimental backups preserved)." -ForegroundColor Cyan
     return
 }
 
-Write-Host "[1/8] clean build dir" -ForegroundColor Cyan
+Write-Host "[1/7] clean build dir" -ForegroundColor Cyan
 if (Test-Path $build) { [System.IO.Directory]::Delete($build, $true) }
 New-Item -ItemType Directory -Force -Path (Split-Path $build) | Out-Null
 
-Write-Host "[2/8] copy pristine upstream cnc-ddraw (submodule)" -ForegroundColor Cyan
+Write-Host "[2/7] copy pristine upstream cnc-ddraw (submodule)" -ForegroundColor Cyan
 # cnc-ddraw is a git submodule pinned at the exact upstream commit (c4ddraw/upstream/cnc-ddraw).
 # Init it if a fresh/partial checkout left it empty (CI's actions/checkout submodules:recursive
 # already populates it).
@@ -121,7 +155,7 @@ Copy-Item $upstream $build -Recurse -Force
 # the submodule working tree carries a .git gitlink file; drop it so the throwaway git-apply repo below is clean
 Remove-Item (Join-Path $build ".git") -Force -Recurse -ErrorAction SilentlyContinue
 
-Write-Host "[3/8] apply our patches (embed + render_null + defaults + zoom + decorative/screenshot seams)" -ForegroundColor Cyan
+Write-Host "[3/7] apply our patches (embed + render_null + defaults + zoom + decorative/screenshot seams)" -ForegroundColor Cyan
 # Apply inside a throwaway repo so git apply resolves paths cleanly (it "Skipped patch" when
 # run outside a working tree). autocrlf=false keeps the patch context matching the upstream EOLs.
 # Patches: the minimal C4dll-R integration point (dllmain.c only) + render-null
@@ -332,7 +366,7 @@ foreach ($sym in @("localization_install", "savelogic_install", "horplus_install
     }
 }
 
-Write-Host "[4/8] generate C4dll-R.def (483 CB63 forwards + 2 exports)" -ForegroundColor Cyan
+Write-Host "[4/7] generate C4dll-R.def (483 CB63 forwards + 2 exports)" -ForegroundColor Cyan
 $def = Join-Path $build "C4dll-R.def"
 $lines = @("; C4dll-R.dll - CB63 forwarder + embedded cnc-ddraw + wrapper exports")
 $lines += (Get-Content $cb63def | Where-Object { $_ -match '^(EXPORTS|\s+\S+=CB63\.)' })
@@ -340,7 +374,7 @@ $lines += "    DDReloadConfig @484"
 $lines += "    DDTakeScreenshot @485"
 Set-Content -Path $def -Value $lines -Encoding ASCII
 
-Write-Host "[5/8] retarget vcxproj (output C4dll-R, use C4dll-R.def, add C4dll-R sources)" -ForegroundColor Cyan
+Write-Host "[5/7] retarget vcxproj (output C4dll-R, use C4dll-R.def, add C4dll-R sources)" -ForegroundColor Cyan
 $vcx = Join-Path $build "cnc-ddraw.vcxproj"
 (Get-Content $vcx -Raw) `
     -replace '<ClCompile>', "<ClCompile>`r`n      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>" `
@@ -365,7 +399,7 @@ foreach ($src in @('rendererbridge\.c', 'c4features\.cpp', 'featuremenu\.cpp', '
     }
 }
 
-Write-Host "[5b/8] stamp version identity (inc/git.h + res.rc; PreBuildEvent stripped)" -ForegroundColor Cyan
+Write-Host "[5b/7] stamp version identity (inc/git.h + res.rc; PreBuildEvent stripped)" -ForegroundColor Cyan
 # The upstream PreBuildEvent regenerates inc/git.h with `git describe` in the PROJECT dir - the
 # throwaway git-apply repo above has zero commits, so it always yielded "git~UNKNOWN, UNKNOWN"
 # in the DLL version resource. Strip the event and write git.h from the OUTER repo instead.
@@ -416,7 +450,7 @@ if (-not (Select-String -Path $rc -SimpleMatch '#include "src\\featuremenu_resou
 }
 Write-Host ("  version: {0} (git {1})" -f $Version, $mainSha)
 
-Write-Host "[6/8] msbuild Release ($Toolset)" -ForegroundColor Cyan
+Write-Host "[6/7] msbuild Release ($Toolset)" -ForegroundColor Cyan
 $env:_CL_ = ""
 $ms = Find-MSBuild
 $mbArgs = @($vcx, '/t:Rebuild', '/p:Configuration=Release', '/p:Platform=Win32',
@@ -448,7 +482,7 @@ if ($WrapperOnly) {
 
 # Build the native timer plugin (timer.c4p). Self-contained Win32 DLL (GDI+, static CRT, system-font
 # fallback); on MNS/SMNS the host drives its turn reset and timeout actions.
-Write-Host "[7/8] build timer.c4p plugin" -ForegroundColor Cyan
+Write-Host "[7/7] build timer.c4p plugin" -ForegroundColor Cyan
 $pbArgs = @($timerPluginProj, '/t:Rebuild', '/p:Configuration=Release', '/p:Platform=Win32',
     "/p:PlatformToolset=$Toolset", '/nologo', '/v:minimal')
 if ($SdkVersion) { $pbArgs += "/p:WindowsTargetPlatformVersion=$SdkVersion" }
@@ -456,19 +490,13 @@ if ($SdkVersion) { $pbArgs += "/p:WindowsTargetPlatformVersion=$SdkVersion" }
 if ($LASTEXITCODE -ne 0) { throw "timer.c4p build failed" }
 Write-Host ("BUILT -> {0} ({1:n0} bytes)" -f $timerPluginOut, (Get-Item $timerPluginOut).Length) -ForegroundColor Green
 
-# Twitch Stat plugin. It owns the live process extractor and transport snapshot, but no unit assets
-# or unit database; the wrapper only loads it and routes mouse input.
-Write-Host "[8/8] build twitchstat.c4p plugin" -ForegroundColor Cyan
-$ubArgs = @($twitchStatPluginProj, '/t:Rebuild', '/p:Configuration=Release', '/p:Platform=Win32',
-    "/p:PlatformToolset=$Toolset", '/nologo', '/v:minimal')
-if ($SdkVersion) { $ubArgs += "/p:WindowsTargetPlatformVersion=$SdkVersion" }
-& $ms @ubArgs
-if ($LASTEXITCODE -ne 0) { throw "twitchstat.c4p build failed" }
-Write-Host ("BUILT -> {0} ({1:n0} bytes)" -f $twitchStatPluginOut, (Get-Item $twitchStatPluginOut).Length) -ForegroundColor Green
+# Experimental plugins remain source-only and can be built manually from their project.
+# Do not build or distribute them in the default wrapper release/deployment.
 
 if ($Deploy) {
     Stop-TargetGame
     Start-Sleep -Milliseconds 600
+    Disable-ExperimentalPluginFiles
     if (-not (Test-Path $bC4)) { Copy-Item (Join-Path $Game "C4dll-R.dll") $bC4 -Force }  # baseline once
     Copy-Item $out (Join-Path $Game "C4dll-R.dll") -Force
     if ((Test-Path (Join-Path $Game "ddraw.dll")) -and -not (Test-Path $dOff)) {
@@ -477,9 +505,6 @@ if ($Deploy) {
     $modsDir = Join-Path $Game "Mods"
     if (-not (Test-Path $modsDir)) { New-Item -ItemType Directory -Force -Path $modsDir | Out-Null }
     Copy-Item $timerPluginOut (Join-Path $modsDir "timer.c4p") -Force                      # native timer plugin
-    $legacyUnitInfo = Join-Path $modsDir "unitinfo.c4p"
-    if (Test-Path $legacyUnitInfo) { [System.IO.File]::Delete($legacyUnitInfo) }
-    Copy-Item $twitchStatPluginOut (Join-Path $modsDir "twitchstat.c4p") -Force            # native Twitch Stat plugin
-    Write-Host "Deployed monolith C4dll-R.dll + Mods\timer.c4p + Mods\twitchstat.c4p; standalone ddraw.dll parked." -ForegroundColor Green
-    Write-Host "(.\build.ps1 -Restore restores the previous wrapper and removes both native plugins)" -ForegroundColor Green
+    Write-Host "Deployed monolith C4dll-R.dll + Mods\timer.c4p; standalone ddraw.dll parked." -ForegroundColor Green
+    Write-Host "(.\build.ps1 -Restore restores the previous wrapper and removes the bundled timer; experimental backups are preserved)" -ForegroundColor Green
 }

@@ -20,7 +20,6 @@ foreach ($target in @($stage, $zip, $symzip, $checksums)) { if (Test-Path -Liter
 $files = [ordered]@{
     'C4dll-R.dll' = "$build/bin/Release/C4dll-R.dll"
     'Mods/timer.c4p' = "$build/plugins/timer/bin/timer.c4p"
-    'Mods/twitchstat.c4p' = "$build/plugins/unitinfo/bin/twitchstat.c4p"
     'INSTALL.txt' = "$repo/c4ddraw/release/INSTALL.txt"
     'C4PLUGINS.txt' = "$repo/c4ddraw/release/C4PLUGINS.txt"
     'C4plugins.ini' = "$repo/c4ddraw/release/C4plugins.ini"
@@ -33,7 +32,6 @@ $files = [ordered]@{
 $symbols = [ordered]@{
     'C4dll-R.pdb' = "$build/bin/Release/C4dll-R.pdb"
     'timer.pdb' = "$build/plugins/timer/bin/timer.pdb"
-    'twitchstat.pdb' = "$build/plugins/unitinfo/bin/twitchstat.pdb"
 }
 $shaderRoot = "$repo/c4ddraw/release/Shaders"
 $shaderFiles = @(Get-ChildItem -LiteralPath $shaderRoot -Recurse -File)
@@ -58,7 +56,7 @@ $info = [ordered]@{
     BaselineTags = [ordered]@{ 'c4dll-r-v1.8' = (Commit 'c4dll-r-v1.8'); 'c4dll-r-v1.9' = (Commit 'c4dll-r-v1.9') }
     WorkingTreeStatus = @(& git -C $repo status --porcelain --untracked-files=normal 2>$null)
     SourceNote = 'Source hashes describe the working tree at packaging; dirty changes are not represented by HEAD alone.'
-    Scope = 'Wrapper and native plugins only. MSS is neither rebuilt nor included; no game instance is changed.'
+    Scope = 'Stable wrapper and timer only. Experimental Twitch/UnitInfo and MSS are not included; no game instance is changed.'
     SymbolEvidence = 'Adjacent DLL/plugin and PDB from the supplied isolated build directory; SHA256 below. PDB GUID/age validation is separate.'
     SourceSHA256 = $sourceHashes; PackageFileSHA256 = $fileHashes; SymbolSHA256 = $symbolHashes
 }
@@ -86,6 +84,8 @@ function Validate-Zip([string]$Path, [string]$Prefix, $Expected) {
             if ($entryName.EndsWith('/')) { continue }
             if (-not $entryName.StartsWith($Prefix, [StringComparison]::Ordinal) -or $entry.Length -eq 0) { throw "Invalid/empty ZIP entry: $entryName" }
             $relative = $entryName.Substring($Prefix.Length)
+            if ($relative -match '(?i)(^|/)(twitchstat|unitinfo)\.(c4p|pdb)$' -or
+                ($relative -match '(?i)\.c4p$' -and $relative -cne 'Mods/timer.c4p')) { throw "Non-release plugin in ZIP: $relative" }
             if ($relative -match '(?i)(^|/)mss32\.dll$|\.(exe|log|csv|dmp)$' -or -not $Expected.Contains($relative) -or $seen.ContainsKey($relative)) { throw "Unexpected/duplicate ZIP entry: $relative" }
             $stream = $entry.Open(); $sha = [Security.Cryptography.SHA256]::Create()
             try { $actual = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() } finally { $stream.Dispose(); $sha.Dispose() }

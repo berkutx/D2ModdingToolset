@@ -7,6 +7,11 @@ separate `ddraw.dll` to ship), the original CodeBase exports are **forwarded** t
 in-game **menu** is included. It does **not** depend on, modify, or require the
 `mss32` mod: `mss32.dll` keeps calling `Mss23.dll` and is never touched.
 
+> **Upgrading:** the stable package contains only `C4dll-R.dll` and `Mods\timer.c4p`.
+> Fully close the game and move any existing `Mods\twitchstat.c4p` and legacy
+> `Mods\unitinfo.c4p` outside `Mods\`. Extracting the ZIP over an installation does not
+> remove old plugins; `Enabled=0` does not hide their menu or prevent their DLL from loading.
+
 ## Layout
 
 | Path | What it is | Committed |
@@ -28,7 +33,7 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 | `features/rendererbridge.c` | Wrapper-owned adapters to cnc-ddraw internals: live reload, screenshot, coordinate mapping, fixed-window stretch and simple-zoom state/formulae | yes |
 | `features/localization.cpp` | Locale/encoding bridge modelled after the legacy wrapper; no hard-coded Russian code pages | yes |
 | `features/savelogic.cpp` | Version-independent save/archive hooks | yes |
-| `plugins/timer/`, `plugins/unitinfo/` | Native turn-clock plugin and Twitch Stat battle-snapshot source | yes |
+| `plugins/timer/`, `plugins/unitinfo/` | Native turn-clock plugin and retained experimental battle-snapshot source (not built, deployed or published by default) | yes |
 | `docs/hook-points.md` | Every MNS/SMNS game address/structure C4dll-R attaches to | yes |
 | `forwarder/C4dll-R.cb63.def` | The 483 CB63 export forwards (`Name=CB63.Name @ord`) | yes |
 | `build.ps1` | Reproducible build + deploy/restore | yes |
@@ -68,7 +73,7 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 `decorative-background` + `printscreen-compositor` + system-OpenGL/GDI fallbacks + D2 cursor ownership +
 selective OpenGL live resize), copies in the
 wrapper-owned feature sources (renderer bridge, menu, Hor+, Widescreen Battle, cursor capture,
-clouds, plugins/timer, plugins/unitinfo, Fast AI, locale, saves and headless mode), embeds the reviewed wide-battle dialog and decorative
+clouds, plugins/timer, Fast AI, locale, saves and headless mode), embeds the reviewed wide-battle dialog and decorative
 resources as RCDATA,
 generates `C4dll-R.def` (the CB63 forwards plus the two exports), retargets the vcxproj
 (`TargetName` + `.def` + the extra source), stamps the version identity (`-Version <ver>`, default
@@ -76,8 +81,7 @@ generates `C4dll-R.def` (the CB63 forwards plus the two exports), retargets the 
 strips the upstream PreBuildEvent that regenerated `git.h` as UNKNOWN), and runs MSBuild (Release,
 Win32, v143, static CRT).
 MSBuild is located via `vswhere`, so it works both on a dev box and on CI. The CI workflow
-`.github/workflows/c4ddraw.yml` runs the same `build.ps1` and uploads `C4dll-R.dll`, `timer.c4p`
-and `twitchstat.c4p`.
+`.github/workflows/c4ddraw.yml` runs the same `build.ps1` and uploads `C4dll-R.dll` and `timer.c4p`.
 
 ## Releases
 
@@ -90,11 +94,10 @@ git tag c4dll-r-v1.0
 git push origin c4dll-r-v1.0
 ```
 
-`.github/workflows/c4dll-r-release.yml` then builds `C4dll-R.dll` plus `Mods/timer.c4p` and
-`Mods/twitchstat.c4p`, packages them
+`.github/workflows/c4dll-r-release.yml` then builds `C4dll-R.dll` plus `Mods/timer.c4p`, packages them
 with `Shaders`, `INSTALL.txt`, the `C4PLUGINS.txt` key guide, a sample `C4plugins.ini`, `ddraw.ini`, `LICENSE` and third-party notices into `C4dll-R-v1.0.zip`, and publishes a GitHub
 Release with that zip, a `-symbols.zip` (the matching PDBs for crash triage) and the loose
-`C4dll-R.dll`, `timer.c4p` and `twitchstat.c4p` attached. The release version is stamped into the DLL version
+`C4dll-R.dll` and `timer.c4p` attached. The release version is stamped into the DLL version
 resource (`build.ps1 -Version`), so a build is identifiable from file properties. Running the
 workflow manually (workflow_dispatch) publishes a **prerelease** tagged `c4dll-r-dev-<sha>` (or
 your label); versions containing `rc` / `alpha` / `beta` / `dev` are always marked prerelease. The
@@ -107,8 +110,9 @@ is copied into the archive by the workflow.
 Put `C4dll-R.dll` next to `Discipl2.exe` (replacing the CodeBase copy), keep `CB63.dll` and
 `ddraw.ini` there. If the folder also contains a standalone `ddraw.dll` from another wrapper,
 rename or remove that file; a clean installation normally has none, so otherwise do nothing.
-Before copying `Mods/twitchstat.c4p`, remove the exact legacy `Mods/unitinfo.c4p`; keeping both makes
-plugin de-duplication depend on filesystem enumeration order. Copy `Mods/timer.c4p` normally.
+Before updating, fully close the game and move `Mods/twitchstat.c4p` and legacy
+`Mods/unitinfo.c4p` outside `Mods\`; a ZIP overwrite does not remove them. Copy `Mods/timer.c4p`
+normally. `Enabled=0` does not hide the old plugin menu or stop its DLL from loading.
 To A/B test our-vs-stock, swap `C4dll-R.dll` only.
 
 ## Updating cnc-ddraw
@@ -131,8 +135,10 @@ One binary, three layers:
 | C4dll-R layer | `features/rendererbridge.c`, `c4features.cpp`, `featuremenu.cpp`, `cursorcapture.cpp`, `fastai.cpp`, `decorative.cpp`, `horplus.cpp`, `widebattle.cpp`, `clouds.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `localization.cpp`, `savelogic.cpp`, `headless.cpp` | wrapper integration, menu, presentation-only decorative background, true Hor+ game canvas, wide battle, external cloud archive pipeline, plugins, locale conversion, save/archive logic, D2 cursor ownership and headless windowing |
 
 Exports: the 483 CodeBase forwards (`name=CB63.name`) plus `DDReloadConfig` (live settings
-reload) and `DDTakeScreenshot`. `Mods\timer.c4p` and `Mods\twitchstat.c4p` are built separately from
-`plugins/timer/` and `plugins/unitinfo/`; neither plugin is inside the DLL.
+reload) and `DDTakeScreenshot`. `Mods\timer.c4p` is built separately from `plugins/timer/` and is not
+inside the DLL. `plugins/unitinfo/` is retained only as experimental source: it has no Twitch
+transport, is not built, deployed or published by default, and may be compiled deliberately through
+`plugins/unitinfo/unitinfo.vcxproj` for local development.
 
 Why one DLL: the game already imports a library named `C4dll-R` (the CodeBase copy), so a single
 file swap delivers the renderer, the menu and the plugin host, with no separate `ddraw.dll` that
@@ -537,20 +543,9 @@ to follow the desktop.
 
 ### Plugins
 
-Loads only native `Mods\*.c4p` plugins and grafts each plugin directly under **Plugins**. The bundled
-**Twitch Stat** plugin is enabled by default. On the exact Russobit/MNS executable, while the
-990-wide battle dialog is active, a left click on an occupied unit image snapshots all twelve visual
-slots, logical game resolution, battle/slot bounds and the visible encyclopedia text of every unique
-displayed unit into the versioned `c4dll.battle-roster` / `battle.snapshot` transport payload. The
-game's native `150x85` hit area is authoritative for a large portrait, so its central slot seam is
-clickable as part of the same unit. The
-diagnostic preview is disabled by default (`Preview=0`). The host suspends the plugin's draw/tick/input
-callbacks outside the lifetime of the battle UI. It contains no unit art or duplicate database and
-imports no `mss32.dll` API. If the player already has the native RMB encyclopedia open, Twitch Stat
-does not construct its hidden layout or consume the click; it resumes after that window closes. Outside
-the validated context it also leaves normal clicks untouched. A successful snapshot consumes that one
-LMB down/up gesture so it cannot also activate a battle command. Toggle it through
-**Plugins > Twitch Stat > Enabled** or `[TwitchStat] Enabled=0|1` in `C4plugins.ini`.
+Loads only native `Mods\*.c4p` plugins and grafts each plugin directly under **Plugins**. The stable
+package includes only the Timer plugin. Old `twitchstat.c4p` or `unitinfo.c4p` files left in `Mods\`
+are still loaded at startup even with `Enabled=0`; remove them while the game is closed.
 
 The bundled Timer is configured via `C4plugins.ini`; its countdown uses `TableDuration_0`. Hold **Ctrl+Alt** and
 drag the clock with LMB to reposition it. On the exact Russobit/MNS layout, Force mode starts only
@@ -649,6 +644,11 @@ C4dll-R.
 включено внутриигровое **меню**. Сборка **не** зависит от мода `mss32`, не меняет
 его и не требует: `mss32.dll` так же зовёт `Mss23.dll` и не трогается.
 
+> **При обновлении:** в стабильном пакете оставлены только `C4dll-R.dll` и `Mods\timer.c4p`.
+> Полностью закройте игру и переместите имеющиеся `Mods\twitchstat.c4p` и старый
+> `Mods\unitinfo.c4p` за пределы `Mods\`. Распаковка ZIP поверх установки не удаляет
+> старые плагины; `Enabled=0` не скрывает их меню и не предотвращает загрузку DLL.
+
 ## Структура
 
 | Путь | Что это | В репозитории |
@@ -670,7 +670,7 @@ C4dll-R.
 | `features/rendererbridge.c` | Собственные адаптеры врапера к внутренностям cnc-ddraw: live reload, скриншот, перевод координат, растяжение фиксированных окон и simple zoom | да |
 | `features/localization.cpp` | Мост локали/кодировок по образцу старого врапера, без жёстких русских кодовых страниц | да |
 | `features/savelogic.cpp` | Независимые от версии хуки сейвов/архива | да |
-| `plugins/timer/`, `plugins/unitinfo/` | Нативный таймер хода и источник боевых снимков Twitch Stat | да |
+| `plugins/timer/`, `plugins/unitinfo/` | Нативный таймер хода и сохранённые экспериментальные исходники боевого снимка (по умолчанию не собираются, не устанавливаются и не публикуются) | да |
 | `docs/hook-points.md` | Все адреса/структуры MNS/SMNS, к которым цепляется C4dll-R | да |
 | `forwarder/C4dll-R.cb63.def` | 483 форварда экспортов CB63 (`Name=CB63.Name @ord`) | да |
 | `build.ps1` | Воспроизводимая сборка + deploy/restore | да |
@@ -717,8 +717,8 @@ C4dll-R.
 PreBuildEvent, который перегенерировал `git.h` в UNKNOWN) и запускает MSBuild (Release, Win32,
 v143, статический CRT). MSBuild ищется
 через `vswhere`, поэтому работает и на машине разработчика, и на CI. Workflow
-`.github/workflows/c4ddraw.yml` запускает тот же `build.ps1` и выгружает `C4dll-R.dll`,
-`timer.c4p` и `twitchstat.c4p`.
+`.github/workflows/c4ddraw.yml` запускает тот же `build.ps1` и выгружает `C4dll-R.dll` и
+`timer.c4p`.
 
 ## Релизы
 
@@ -731,11 +731,10 @@ git tag c4dll-r-v1.0
 git push origin c4dll-r-v1.0
 ```
 
-`.github/workflows/c4dll-r-release.yml` соберёт `C4dll-R.dll`, `Mods/timer.c4p` и
-`Mods/twitchstat.c4p`, упакует их с
+`.github/workflows/c4dll-r-release.yml` соберёт `C4dll-R.dll` и `Mods/timer.c4p`, упакует их с
 `Shaders`, `INSTALL.txt`, инструкцией `C4PLUGINS.txt`, примером `C4plugins.ini`, `ddraw.ini`, `LICENSE` и notices в `C4dll-R-v1.0.zip` и опубликует GitHub Release с этим
 архивом, `-symbols.zip` (соответствующие PDB для разбора крашей) и отдельными файлами
-`C4dll-R.dll`, `timer.c4p` и `twitchstat.c4p`. Версия релиза зашивается в ресурс версии DLL (`build.ps1 -Version`),
+`C4dll-R.dll` и `timer.c4p`. Версия релиза зашивается в ресурс версии DLL (`build.ps1 -Version`),
 так что сборка опознаётся по свойствам файла. Ручной запуск workflow (workflow_dispatch) публикует
 **пре-релиз** с тегом `c4dll-r-dev-<sha>` (или вашей меткой); версии, содержащие `rc` / `alpha` /
 `beta` / `dev`, всегда помечаются пре-релизом. Исходники пакета — в `c4ddraw/release/`
@@ -747,8 +746,9 @@ git push origin c4dll-r-v1.0
 Положите `C4dll-R.dll` рядом с `Discipl2.exe` (заменив копию CodeBase), оставьте `CB63.dll` и
 `ddraw.ini`. Если в папке есть отдельный `ddraw.dll` от другого врапера, переименуйте или удалите
 его; в чистой установке такого файла обычно нет, и тогда ничего делать не нужно.
-Перед копированием `Mods/twitchstat.c4p` удалите именно старый `Mods/unitinfo.c4p`: если оставить оба,
-результат дедупликации будет зависеть от порядка файловой системы. `Mods/timer.c4p` копируется обычно.
+Перед обновлением полностью закройте игру и переместите `Mods/twitchstat.c4p` и старый
+`Mods/unitinfo.c4p` за пределы `Mods\`: перезапись ZIP их не удаляет. `Mods/timer.c4p` копируется
+обычно. `Enabled=0` не скрывает меню старого плагина и не прекращает загрузку его DLL.
 Для сравнения наш/сток меняйте только `C4dll-R.dll`.
 
 ## Обновление cnc-ddraw
@@ -771,8 +771,10 @@ git push origin c4dll-r-v1.0
 | Слой C4dll-R | `features/rendererbridge.c`, `c4features.cpp`, `featuremenu.cpp`, `cursorcapture.cpp`, `fastai.cpp`, `decorative.cpp`, `horplus.cpp`, `widebattle.cpp`, `clouds.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `localization.cpp`, `savelogic.cpp`, `headless.cpp` | интеграция врапера, меню, декоративный фон только на этапе вывода, настоящий Hor+ кадр, широкий бой, pipeline внешнего архива облаков, плагины, локаль, сейвы/архив, владение курсором D2 и headless-окна |
 
 Экспорты: 483 форварда CodeBase (`name=CB63.name`) плюс `DDReloadConfig` (живое перечтение
-настроек) и `DDTakeScreenshot`. `Mods\timer.c4p` и `Mods\twitchstat.c4p` собираются отдельно из
-`plugins/timer/` и `plugins/unitinfo/`; внутрь DLL плагины НЕ входят.
+настроек) и `DDTakeScreenshot`. `Mods\timer.c4p` собирается отдельно из `plugins/timer/` и не входит
+в DLL. `plugins/unitinfo/` сохранён только как экспериментальный исходник без Twitch-транспорта:
+по умолчанию он не собирается, не устанавливается и не публикуется. Для локальной разработки его
+можно явно собрать через `plugins/unitinfo/unitinfo.vcxproj`.
 
 Почему одна DLL: игра уже импортирует библиотеку с именем `C4dll-R` (копию CodeBase), поэтому
 замена одного файла даёт рендерер, меню и хост плагинов сразу, без отдельного `ddraw.dll`,
@@ -1143,19 +1145,9 @@ crop упаковывается в FBO, затем выполняется выб
 ### Плагины
 
 Загружаются только нативные плагины `Mods\*.c4p`; меню каждого сразу появляется в разделе
-**Плагины**. **Twitch Stat** включён по умолчанию. На точном exe Russobit/MNS, пока активен
-боевой диалог шириной 990, ЛКМ по занятому изображению отряда создаёт `battle.snapshot`: все 12
-видимых слотов, логическое разрешение, границы боя/портретов и видимые тексты энциклопедии каждого
-уникального отряда. Это transport payload `c4dll.battle-roster`; диагностическое окно по умолчанию
-отключено (`Preview=0`). Для большого портрета используется штатная непрерывная hit-area `150x85`,
-поэтому центральный шов между двумя логическими слотами тоже считается кликом по этому отряду. Вне
-времени жизни боевого UI host вообще не вызывает у плагина draw/tick/input. В плагине нет картинок,
-второй базы или импорта `mss32.dll`. Пока игрок сам
-смотрит штатную энциклопедию по ПКМ, скрытый layout не создаётся и ЛКМ не поглощается; после закрытия
-работа автоматически возобновляется. Вне проверенного контекста обычный клик тоже остаётся игре.
-Успешный снимок поглощает только этот жест ЛКМ down/up, чтобы тот же клик не активировал боевую команду.
-Управление:
-**Плагины > Twitch Stat > Enabled** или `[TwitchStat] Enabled=0|1` в `C4plugins.ini`.
+**Плагины**. В стабильный пакет входит только Timer. Оставленные в `Mods\` старые
+`twitchstat.c4p` или `unitinfo.c4p` всё равно загружаются при старте даже с `Enabled=0`;
+переместите их при полностью закрытой игре.
 
 Комплектный Timer настраивается через `C4plugins.ini`, длина отсчёта —
 `TableDuration_0`. Для перемещения часов зажмите **Ctrl+Alt** и перетащите их ЛКМ. На точной

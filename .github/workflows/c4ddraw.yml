@@ -10,8 +10,8 @@ name: c4ddraw
 #   - renderer-specific patches: render_null, D2 defaults, Ctrl+Wheel simple zoom, filtered output
 #     downscaling and the OpenGL/D3D9/GDI decorative-presentation seam
 #   - the CB63 export forwarder (c4ddraw/forwarder/C4dll-R.cb63.def): all 483 CB63 exports
-#   - native plugins: timer.c4p (host-driven turn clock) and twitchstat.c4p (Wide Battle LMB -> the
-#     transport snapshot of all battle slots). Built by build.ps1 steps [7/8] and [8/8].
+#   - released native plugin: timer.c4p (host-driven turn clock), build.ps1 step [7/7].
+#     Experimental plugin sources are retained but excluded from default builds/artifacts.
 # Everything is driven by c4ddraw/build.ps1 (same script a dev runs locally). See c4ddraw/README.md.
 
 on:
@@ -75,7 +75,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path out | Out-Null
           Copy-Item $dll out/C4dll-R.dll
 
-          # Native plugins (built by build.ps1 steps [7/8] and [8/8]) - verify their c4p_* exports.
+          # The only released native plugin (build.ps1 step [7/7]) - verify its c4p_* exports.
           $c4p = "c4ddraw/plugins/timer/bin/Release/timer.c4p"
           if (-not (Test-Path $c4p)) { Write-Error "timer.c4p was not produced"; exit 1 }
           $pexp = (& dumpbin /exports $c4p | Select-String 'c4p_query|c4p_init|c4p_tick|c4p_draw|c4p_shutdown').Count
@@ -83,17 +83,14 @@ jobs:
           if ($pexp -lt 5) { Write-Error "timer.c4p missing c4p_* exports ($pexp/5)"; exit 1 }
           Copy-Item $c4p out/timer.c4p
 
-          $twitchstat = "c4ddraw/plugins/unitinfo/bin/Release/twitchstat.c4p"
-          if (-not (Test-Path $twitchstat)) { Write-Error "twitchstat.c4p was not produced"; exit 1 }
-          $uexp = (& dumpbin /exports $twitchstat | Select-String 'c4p_query|c4p_init|c4p_draw|c4p_mouse').Count
-          Write-Host "twitchstat.c4p: $uexp/4 required c4p exports, $((Get-Item $twitchstat).Length) bytes"
-          if ($uexp -lt 4) { Write-Error "twitchstat.c4p missing required c4p_* exports ($uexp/4)"; exit 1 }
-          Copy-Item $twitchstat out/twitchstat.c4p
-
           # keep the matching symbols for crash triage
           Copy-Item "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.pdb" out/C4dll-R.pdb
           Copy-Item "c4ddraw/plugins/timer/bin/Release/timer.pdb" out/timer.pdb
-          Copy-Item "c4ddraw/plugins/unitinfo/bin/Release/twitchstat.pdb" out/twitchstat.pdb
+          $packagedPlugins = @(Get-ChildItem -LiteralPath out -Recurse -File |
+            Where-Object { $_.Extension -ieq '.c4p' })
+          if ($packagedPlugins.Count -ne 1 -or $packagedPlugins[0].Name -ine 'timer.c4p') {
+            throw 'Build artifacts must contain only the released timer.c4p plugin.'
+          }
 
       - name: Upload C4dll-R.dll
         if: success()
@@ -113,15 +110,6 @@ jobs:
           if-no-files-found: warn
           archive: false
 
-      - name: Upload twitchstat.c4p
-        if: success()
-        uses: actions/upload-artifact@v7
-        with:
-          name: twitchstat.c4p
-          path: out/twitchstat.c4p
-          if-no-files-found: warn
-          archive: false
-
       - name: Upload PDB symbols
         if: success()
         uses: actions/upload-artifact@v7
@@ -130,5 +118,4 @@ jobs:
           path: |
             out/C4dll-R.pdb
             out/timer.pdb
-            out/twitchstat.pdb
           if-no-files-found: warn

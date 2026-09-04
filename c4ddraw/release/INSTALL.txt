@@ -2,11 +2,15 @@
  C4dll-R  -  self-contained DirectDraw wrapper for Disciples II
 ================================================================================
 
+UPGRADE WARNING
+  The stable package contains only C4dll-R.dll and Mods\timer.c4p. Fully close
+  the game, then move existing Mods\twitchstat.c4p and legacy Mods\unitinfo.c4p
+  outside Mods\. Extracting this ZIP over an installation does not remove old
+  plugins. Enabled=0 does not hide their menu or prevent their DLL from loading.
+
 WHAT THIS IS
   C4dll-R.dll embeds cnc-ddraw in one drop-in DirectDraw wrapper.
-  Included plugins: Mods\timer.c4p is the reconstructed turn timer;
-  Mods\twitchstat.c4p snapshots all 12 battle slots for Twitch on left click without
-  bundling unit art or a duplicate database.
+  Included plugin: Mods\timer.c4p is the reconstructed turn timer.
 
 REQUIREMENTS
   - Disciples II. Renderer, video/performance menu, language and locale work on
@@ -24,10 +28,9 @@ INSTALL
      Upgrading and already tuned your ddraw.ini? Keep yours.
   4. Copy the Shaders\ folder next to Discipl2.exe. It contains the exact eight
      OpenGL filters shown by the Video menu, including required multipass files.
-  5. If upgrading from Unit Info, delete the exact old Mods\unitinfo.c4p first.
-     Then copy Mods\timer.c4p and Mods\twitchstat.c4p into the game's Mods\ folder.
+  5. Copy Mods\timer.c4p into the game's Mods\ folder.
      Always update C4dll-R.dll and timer.c4p together; safe tournament Auto Battle needs both.
-  6. (Optional) Copy C4plugins.ini next to Discipl2.exe to configure both plugins.
+  6. (Optional) Copy C4plugins.ini next to Discipl2.exe to configure the timer.
      C4PLUGINS.txt explains every key and which changes apply live or need a restart.
   7. (Optional) Keep an existing Imgs\IsoClouds.ff from a DisciplesGL install
      if you want to use Game > Show map clouds. The archive is not redistributed
@@ -150,18 +153,6 @@ USING IT
     1024x768/1280x1024 zoom stays 800-wide, while Hor+ is 990-wide; it does not
     select or replace the game resolution. Windowed, borderless and exclusive
     modes use the same predicate; output mode and physical output size are not inputs.
-  - Twitch Stat is ON by default. On the exact Russobit/MNS executable with the
-    990-wide battle dialog active, left-click an occupied unit image. One click snapshots
-     all 12 visual slots, logical game resolution, battle/slot bounds and the
-     visible encyclopedia text of each unique displayed unit as the versioned
-     c4dll.battle-roster / battle.snapshot payload. A large portrait uses the game's
-     continuous native 150x85 hit area, including the seam between its two logical slots.
-     The diagnostic preview is OFF by default. The host sends Twitch Stat no draw/tick/input callbacks outside battle.
-     If the player's native right-click encyclopedia is already open, Twitch Stat neither creates a second
-     layout nor consumes the click; it resumes after close. A successful snapshot consumes only that
-     LMB down/up gesture so it cannot also activate a battle command. Toggle it at Plugins >
-    Twitch Stat > Enabled or in C4plugins.ini [TwitchStat]. It has no unit art/database
-    and no mss32.dll import.
   - The turn timer is configured in C4plugins.ini, section [Timer]; see the included
     C4PLUGINS.txt for all keys and live/restart behaviour. The bundled
     PvP defaults use a 5-minute Force countdown, pause for battle animations and
@@ -185,8 +176,7 @@ USING IT
     layouts keep the active-turn-edge fallback.
 
 UNINSTALL / REVERT
-  - Restore your backed-up C4dll-R.dll and remove Mods\timer.c4p and
-    Mods\twitchstat.c4p (and legacy Mods\unitinfo.c4p, if present).
+  - Restore your backed-up C4dll-R.dll and remove Mods\timer.c4p.
 
 This package is independent of the mss32 mod and is versioned separately.
 It is distributed under GPL-3.0; see LICENSE. Use the exact package version/tag
@@ -197,11 +187,15 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
  C4dll-R  -  самодостаточный DirectDraw-врапер для Disciples II
 ================================================================================
 
+ВАЖНО ПРИ ОБНОВЛЕНИИ
+  В стабильном пакете оставлены только C4dll-R.dll и Mods\timer.c4p. Полностью
+  закройте игру, затем переместите имеющиеся Mods\twitchstat.c4p и старый
+  Mods\unitinfo.c4p за пределы Mods\. Распаковка ZIP поверх установки не удаляет
+  старые плагины. Enabled=0 не скрывает их меню и не предотвращает загрузку DLL.
+
 ЧТО ЭТО
   C4dll-R.dll встраивает cnc-ddraw в одну подключаемую DirectDraw-DLL.
-  В комплекте два плагина: Mods\timer.c4p — воссозданный таймер хода;
-  Mods\twitchstat.c4p — источник снимка всех 12 боевых слотов для Twitch без
-  собственной базы или картинок.
+  В комплекте один плагин: Mods\timer.c4p — воссозданный таймер хода.
 
 ТРЕБОВАНИЯ
   - Disciples II. Рендерер, меню видео/производительности, язык и локаль работают
@@ -219,12 +213,11 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
      Обновляетесь и уже настроили свой ddraw.ini? Оставьте свой.
   4. Скопируйте папку Shaders\ рядом с Discipl2.exe. В ней находятся ровно восемь
      OpenGL-фильтров из меню Video и необходимые файлы multipass.
-  5. При обновлении с Unit Info сначала удалите именно старый Mods\unitinfo.c4p.
-     Затем скопируйте Mods\timer.c4p и Mods\twitchstat.c4p в папку Mods\ игры.
+  5. Скопируйте Mods\timer.c4p в папку Mods\ игры.
      C4dll-R.dll и timer.c4p всегда обновляйте вместе: безопасному турнирному
      автобою нужны обе актуальные части.
   6. (Необязательно) Скопируйте C4plugins.ini рядом с Discipl2.exe для настройки
-     обоих плагинов. Все ключи и различие между живыми изменениями и рестартом
+     таймера. Все ключи и различие между живыми изменениями и рестартом
      описаны в C4PLUGINS.txt.
   7. (Необязательно) Сохраните имеющийся Imgs\IsoClouds.ff от установки
      DisciplesGL, если хотите использовать «Игра > Показывать облака». Этот архив не
@@ -350,17 +343,6 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
      990-wide; само разрешение игры этот режим не выбирает и не заменяет. Условие
      одинаково для окна, borderless и exclusive; режим и физический размер вывода
      в него не входят.
-  - Twitch Stat включён по умолчанию. На точном exe Russobit/MNS при активном
-    боевом диалоге шириной 990 нажмите ЛКМ по занятому изображению отряда. Один клик собирает
-     все 12 видимых слотов, логическое разрешение, границы боя/портретов и видимый
-     текст энциклопедии каждого уникального отряда в payload c4dll.battle-roster /
-     battle.snapshot. Для большого портрета используется непрерывная штатная hit-area
-     150x85, включая шов между двумя логическими слотами. Диагностическое окно по умолчанию отключено. Вне боя host не
-     вызывает draw/tick/input этого плагина. Если штатная энциклопедия по ПКМ уже открыта, второй layout не
-     создаётся и ЛКМ остаётся игре; после закрытия работа возобновляется. Успешный снимок поглощает
-     только этот жест ЛКМ down/up, чтобы он не активировал боевую команду. Плагин не
-    содержит картинок/базы и не импортирует mss32.dll. Переключатель находится в
-    «Плагины > Twitch Stat > Enabled» и в секции [TwitchStat] файла C4plugins.ini.
   - Таймер хода настраивается в C4plugins.ini, секция [Timer]; все ключи и режим
     применения описаны в C4PLUGINS.txt. Комплектные PvP-настройки включают
     принудительный отсчёт 5 минут, паузу на анимациях и в бою
@@ -384,8 +366,7 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
     На других exe сохраняется прежний сигнал активного хода.
 
 УДАЛЕНИЕ / ОТКАТ
-  - Верните сохранённый C4dll-R.dll и удалите Mods\timer.c4p и
-    Mods\twitchstat.c4p (и старый Mods\unitinfo.c4p, если он остался).
+  - Верните сохранённый C4dll-R.dll и удалите Mods\timer.c4p.
 
 Пакет независим от мода mss32 и версионируется отдельно. Лицензия — GPL-3.0,
 см. LICENSE. Исходники выбирайте по точной версии/тегу пакета.
