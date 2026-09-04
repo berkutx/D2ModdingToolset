@@ -89,42 +89,6 @@ function Stop-TargetGame {
     } | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
-# Older experimental bundles included Twitch Stat / UnitInfo. The release owns only timer.c4p.
-# Park those two exact files reversibly: the loader scans *.c4p, not these disabled suffixes.
-function Disable-ExperimentalPluginFiles {
-    $gameRoot = [IO.Path]::GetFullPath($Game).TrimEnd('\')
-    $gameItem = Get-Item -LiteralPath $gameRoot -Force
-    if (-not $gameItem.PSIsContainer -or ($gameItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        throw "Experimental-plugin migration requires a normal game directory: $gameRoot"
-    }
-    $modsRoot = [IO.Path]::GetFullPath((Join-Path $gameRoot 'Mods'))
-    if ([IO.Path]::GetDirectoryName($modsRoot) -ine $gameRoot) {
-        throw "Mods directory escaped the selected game directory."
-    }
-    if (-not (Test-Path -LiteralPath $modsRoot)) { return }
-    $modsItem = Get-Item -LiteralPath $modsRoot -Force
-    if (-not $modsItem.PSIsContainer -or ($modsItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        throw "Experimental-plugin migration will not follow a reparse Mods directory: $modsRoot"
-    }
-    $moves = foreach ($leaf in @('twitchstat.c4p', 'unitinfo.c4p')) {
-        $source = [IO.Path]::GetFullPath((Join-Path $modsRoot $leaf))
-        if ([IO.Path]::GetDirectoryName($source) -ine $modsRoot) { throw "Invalid plugin migration path." }
-        if (-not (Test-Path -LiteralPath $source)) { continue }
-        $item = Get-Item -LiteralPath $source -Force
-        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-            throw "Experimental-plugin migration will not move a directory or reparse file: $source"
-        }
-        $destination = $source + '.disabled-' + [Guid]::NewGuid().ToString('N')
-        if ([IO.Path]::GetDirectoryName($destination) -ine $modsRoot -or
-            (Test-Path -LiteralPath $destination)) { throw "Invalid plugin backup destination." }
-        [pscustomobject]@{Source=$source; Destination=$destination}
-    }
-    foreach ($move in $moves) {
-        Move-Item -LiteralPath $move.Source -Destination $move.Destination -ErrorAction Stop
-        Write-Host "Experimental plugin parked (recoverable): $($move.Destination)" -ForegroundColor Yellow
-    }
-}
-
 if ($Restore) {
     Stop-TargetGame
     Start-Sleep -Milliseconds 600
@@ -134,7 +98,7 @@ if ($Restore) {
         $depC4p = Join-Path $Game "Mods\$pluginLeaf"
         if (Test-Path $depC4p) { [System.IO.File]::Delete($depC4p) }
     }
-    Write-Host "Restored vanilla baseline (C4dll-R = CB63 copy, standalone ddraw.dll back, bundled timer removed; experimental backups preserved)." -ForegroundColor Cyan
+    Write-Host "Restored vanilla baseline (C4dll-R = CB63 copy, standalone ddraw.dll back, bundled timer removed)." -ForegroundColor Cyan
     return
 }
 
@@ -496,7 +460,6 @@ Write-Host ("BUILT -> {0} ({1:n0} bytes)" -f $timerPluginOut, (Get-Item $timerPl
 if ($Deploy) {
     Stop-TargetGame
     Start-Sleep -Milliseconds 600
-    Disable-ExperimentalPluginFiles
     if (-not (Test-Path $bC4)) { Copy-Item (Join-Path $Game "C4dll-R.dll") $bC4 -Force }  # baseline once
     Copy-Item $out (Join-Path $Game "C4dll-R.dll") -Force
     if ((Test-Path (Join-Path $Game "ddraw.dll")) -and -not (Test-Path $dOff)) {
@@ -506,5 +469,5 @@ if ($Deploy) {
     if (-not (Test-Path $modsDir)) { New-Item -ItemType Directory -Force -Path $modsDir | Out-Null }
     Copy-Item $timerPluginOut (Join-Path $modsDir "timer.c4p") -Force                      # native timer plugin
     Write-Host "Deployed monolith C4dll-R.dll + Mods\timer.c4p; standalone ddraw.dll parked." -ForegroundColor Green
-    Write-Host "(.\build.ps1 -Restore restores the previous wrapper and removes the bundled timer; experimental backups are preserved)" -ForegroundColor Green
+    Write-Host "(.\build.ps1 -Restore restores the previous wrapper and removes the bundled timer)" -ForegroundColor Green
 }

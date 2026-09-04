@@ -104,10 +104,7 @@ jobs:
           Copy-Item "c4ddraw/release/THIRD_PARTY_NOTICES.txt" "$stage/THIRD_PARTY_NOTICES.txt"
           Copy-Item "LICENSE" "$stage/LICENSE"
           Compress-Archive -Path "$stage" -DestinationPath $zip -Force
-          # matching symbols for crash triage, published next to the zip
-          $symzip = "C4dll-R-$ver-symbols.zip"
-          Compress-Archive -Path "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.pdb", "c4ddraw/plugins/timer/bin/Release/timer.pdb" -DestinationPath $symzip -Force
-          # Inspect the actual archives, not just copy commands: stale stage files must not leak.
+          # Inspect the actual player archive, not just copy commands: stale stage files must not leak.
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $runtimeArchive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $zip))
           try {
@@ -117,20 +114,9 @@ jobs:
               throw 'Runtime ZIP must contain exactly Mods/timer.c4p and no other plugins.'
             }
           } finally { $runtimeArchive.Dispose() }
-          $symbolArchive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $symzip))
-          try {
-            $symbols = @($symbolArchive.Entries | Where-Object { $_.Name })
-            $expectedSymbols = @('C4dll-R.pdb', 'timer.pdb')
-            if ($symbols.Count -ne 2 -or
-                @($symbols | Where-Object { $_.FullName -notin $expectedSymbols }).Count -ne 0 -or
-                @($symbols | Select-Object -ExpandProperty FullName -Unique).Count -ne 2) {
-              throw 'Symbols ZIP must contain only C4dll-R.pdb and timer.pdb.'
-            }
-          } finally { $symbolArchive.Dispose() }
           "zip=$zip" | Out-File $env:GITHUB_OUTPUT -Append
-          "symzip=$symzip" | Out-File $env:GITHUB_OUTPUT -Append
           "notes=$notesPath" | Out-File $env:GITHUB_OUTPUT -Append
-          Write-Host "packaged $zip + $symzip"
+          Write-Host "packaged player archive $zip"
 
       - name: Publish GitHub Release
         env:
@@ -140,7 +126,6 @@ jobs:
           $ver = "${{ steps.ver.outputs.ver }}"
           $pre = "${{ steps.ver.outputs.pre }}" -eq "true"
           $zip = "${{ steps.pkg.outputs.zip }}"
-          $symzip = "${{ steps.pkg.outputs.symzip }}"
           $notesPath = "${{ steps.pkg.outputs.notes }}"
 
           # Create the release if it does not exist yet (tag push: tag exists; dispatch: gh makes it).
@@ -157,7 +142,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { Write-Error "gh release edit failed"; exit 1 }
           }
 
-          # Attach the zip, the symbols and the loose files (clobber so re-runs replace assets).
-          gh release upload $tag $zip $symzip "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll" "c4ddraw/plugins/timer/bin/Release/timer.c4p" --clobber
+          # Player Releases expose one ready-to-use archive. PDBs and loose binaries remain only in
+          # the separate technical c4ddraw Actions workflow.
+          gh release upload $tag $zip --clobber
           if ($LASTEXITCODE -ne 0) { Write-Error "gh release upload failed"; exit 1 }
           Write-Host "published release $tag (prerelease=$pre)"

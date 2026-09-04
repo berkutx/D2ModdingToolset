@@ -4,11 +4,6 @@
 
 QUICK START (EN)
 
-UPGRADE WARNING: The stable package contains only the Timer plugin. Fully close the game,
-then move existing Mods\twitchstat.c4p and legacy Mods\unitinfo.c4p outside Mods\.
-Extracting a ZIP over an installation does not remove old files. Enabled=0 does not hide the
-Twitch Stat menu or prevent its DLL from loading. Do not move other plugins or timer.c4p.
-
 1. Put C4plugins.ini next to Discipl2.exe, not in Mods\.
 2. Put timer.c4p in Mods\.
 3. Missing keys are safe: the defaults printed in the bundled C4plugins.ini are used.
@@ -104,11 +99,6 @@ TROUBLESHOOTING
 --------------------------------------------------------------------------------
 
 БЫСТРЫЙ СТАРТ (RU)
-
-ВАЖНО ПРИ ОБНОВЛЕНИИ: В стабильном пакете оставлен только плагин Timer. Полностью закройте игру
-и переместите имеющиеся Mods\twitchstat.c4p и старый Mods\unitinfo.c4p за пределы Mods\.
-Распаковка ZIP поверх установки не удаляет старые файлы. Enabled=0 не скрывает меню Twitch Stat
-и не предотвращает загрузку его DLL. Другие плагины и timer.c4p не перемещайте.
 
 1. Положите C4plugins.ini рядом с Discipl2.exe, а не в Mods\.
 2. Положите timer.c4p в Mods\.

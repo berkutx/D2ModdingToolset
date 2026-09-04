@@ -53,5 +53,9 @@ foreach ($workflow in @('c4ddraw.yml','c4dll-r-release.yml')) {
     $text = Get-Content -LiteralPath (Join-Path $repo ('.github/workflows/' + $workflow)) -Raw
     Check ($text -notmatch 'plugins/unitinfo/bin|out/twitchstat') "CI has no experimental artifact source: $workflow"
 }
+$releaseWorkflow = Get-Content -LiteralPath (Join-Path $repo '.github/workflows/c4dll-r-release.yml') -Raw
+Check ($releaseWorkflow -notmatch '\$symzip|C4dll-R\.pdb.*timer\.pdb') 'Player release does not build or publish a symbols archive'
+Check ($releaseWorkflow -match 'gh release upload \$tag \$zip --clobber' -and
+       @($releaseWorkflow -split "`n" | Where-Object { $_ -match '^\s*gh release upload\s' }).Count -eq 1) 'Player release uploads exactly one ready-to-use ZIP'
 Check (Test-Path -LiteralPath (Join-Path $repo 'c4ddraw/plugins/unitinfo/unitinfo.cpp')) 'Experimental source remains in Git tree'
 Write-Output "Completed $checks checks. Evidence: $run"

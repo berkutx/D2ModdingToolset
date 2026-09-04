@@ -7,11 +7,6 @@ separate `ddraw.dll` to ship), the original CodeBase exports are **forwarded** t
 in-game **menu** is included. It does **not** depend on, modify, or require the
 `mss32` mod: `mss32.dll` keeps calling `Mss23.dll` and is never touched.
 
-> **Upgrading:** the stable package contains only `C4dll-R.dll` and `Mods\timer.c4p`.
-> Fully close the game and move any existing `Mods\twitchstat.c4p` and legacy
-> `Mods\unitinfo.c4p` outside `Mods\`. Extracting the ZIP over an installation does not
-> remove old plugins; `Enabled=0` does not hide their menu or prevent their DLL from loading.
-
 ## Layout
 
 | Path | What it is | Committed |
@@ -33,7 +28,7 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 | `features/rendererbridge.c` | Wrapper-owned adapters to cnc-ddraw internals: live reload, screenshot, coordinate mapping, fixed-window stretch and simple-zoom state/formulae | yes |
 | `features/localization.cpp` | Locale/encoding bridge modelled after the legacy wrapper; no hard-coded Russian code pages | yes |
 | `features/savelogic.cpp` | Version-independent save/archive hooks | yes |
-| `plugins/timer/`, `plugins/unitinfo/` | Native turn-clock plugin and retained experimental battle-snapshot source (not built, deployed or published by default) | yes |
+| `plugins/timer/`, `plugins/unitinfo/` | Native turn-clock plugin and experimental snapshot source; `plugins/unitinfo/` is not part of the distribution | yes |
 | `docs/hook-points.md` | Every MNS/SMNS game address/structure C4dll-R attaches to | yes |
 | `forwarder/C4dll-R.cb63.def` | The 483 CB63 export forwards (`Name=CB63.Name @ord`) | yes |
 | `build.ps1` | Reproducible build + deploy/restore | yes |
@@ -110,9 +105,7 @@ is copied into the archive by the workflow.
 Put `C4dll-R.dll` next to `Discipl2.exe` (replacing the CodeBase copy), keep `CB63.dll` and
 `ddraw.ini` there. If the folder also contains a standalone `ddraw.dll` from another wrapper,
 rename or remove that file; a clean installation normally has none, so otherwise do nothing.
-Before updating, fully close the game and move `Mods/twitchstat.c4p` and legacy
-`Mods/unitinfo.c4p` outside `Mods\`; a ZIP overwrite does not remove them. Copy `Mods/timer.c4p`
-normally. `Enabled=0` does not hide the old plugin menu or stop its DLL from loading.
+Copy `Mods/timer.c4p` into the game's `Mods\` folder.
 To A/B test our-vs-stock, swap `C4dll-R.dll` only.
 
 ## Updating cnc-ddraw
@@ -136,9 +129,7 @@ One binary, three layers:
 
 Exports: the 483 CodeBase forwards (`name=CB63.name`) plus `DDReloadConfig` (live settings
 reload) and `DDTakeScreenshot`. `Mods\timer.c4p` is built separately from `plugins/timer/` and is not
-inside the DLL. `plugins/unitinfo/` is retained only as experimental source: it has no Twitch
-transport, is not built, deployed or published by default, and may be compiled deliberately through
-`plugins/unitinfo/unitinfo.vcxproj` for local development.
+inside the DLL.
 
 Why one DLL: the game already imports a library named `C4dll-R` (the CodeBase copy), so a single
 file swap delivers the renderer, the menu and the plugin host, with no separate `ddraw.dll` that
@@ -544,8 +535,7 @@ to follow the desktop.
 ### Plugins
 
 Loads only native `Mods\*.c4p` plugins and grafts each plugin directly under **Plugins**. The stable
-package includes only the Timer plugin. Old `twitchstat.c4p` or `unitinfo.c4p` files left in `Mods\`
-are still loaded at startup even with `Enabled=0`; remove them while the game is closed.
+package includes only the Timer plugin.
 
 The bundled Timer is configured via `C4plugins.ini`; its countdown uses `TableDuration_0`. Hold **Ctrl+Alt** and
 drag the clock with LMB to reposition it. On the exact Russobit/MNS layout, Force mode starts only
@@ -644,11 +634,6 @@ C4dll-R.
 включено внутриигровое **меню**. Сборка **не** зависит от мода `mss32`, не меняет
 его и не требует: `mss32.dll` так же зовёт `Mss23.dll` и не трогается.
 
-> **При обновлении:** в стабильном пакете оставлены только `C4dll-R.dll` и `Mods\timer.c4p`.
-> Полностью закройте игру и переместите имеющиеся `Mods\twitchstat.c4p` и старый
-> `Mods\unitinfo.c4p` за пределы `Mods\`. Распаковка ZIP поверх установки не удаляет
-> старые плагины; `Enabled=0` не скрывает их меню и не предотвращает загрузку DLL.
-
 ## Структура
 
 | Путь | Что это | В репозитории |
@@ -670,7 +655,7 @@ C4dll-R.
 | `features/rendererbridge.c` | Собственные адаптеры врапера к внутренностям cnc-ddraw: live reload, скриншот, перевод координат, растяжение фиксированных окон и simple zoom | да |
 | `features/localization.cpp` | Мост локали/кодировок по образцу старого врапера, без жёстких русских кодовых страниц | да |
 | `features/savelogic.cpp` | Независимые от версии хуки сейвов/архива | да |
-| `plugins/timer/`, `plugins/unitinfo/` | Нативный таймер хода и сохранённые экспериментальные исходники боевого снимка (по умолчанию не собираются, не устанавливаются и не публикуются) | да |
+| `plugins/timer/`, `plugins/unitinfo/` | Нативный таймер хода и экспериментальный исходник снимка; `plugins/unitinfo/` не входит в дистрибутив | да |
 | `docs/hook-points.md` | Все адреса/структуры MNS/SMNS, к которым цепляется C4dll-R | да |
 | `forwarder/C4dll-R.cb63.def` | 483 форварда экспортов CB63 (`Name=CB63.Name @ord`) | да |
 | `build.ps1` | Воспроизводимая сборка + deploy/restore | да |
@@ -746,9 +731,7 @@ git push origin c4dll-r-v1.0
 Положите `C4dll-R.dll` рядом с `Discipl2.exe` (заменив копию CodeBase), оставьте `CB63.dll` и
 `ddraw.ini`. Если в папке есть отдельный `ddraw.dll` от другого врапера, переименуйте или удалите
 его; в чистой установке такого файла обычно нет, и тогда ничего делать не нужно.
-Перед обновлением полностью закройте игру и переместите `Mods/twitchstat.c4p` и старый
-`Mods/unitinfo.c4p` за пределы `Mods\`: перезапись ZIP их не удаляет. `Mods/timer.c4p` копируется
-обычно. `Enabled=0` не скрывает меню старого плагина и не прекращает загрузку его DLL.
+Скопируйте `Mods/timer.c4p` в папку `Mods\` игры.
 Для сравнения наш/сток меняйте только `C4dll-R.dll`.
 
 ## Обновление cnc-ddraw
@@ -772,9 +755,7 @@ git push origin c4dll-r-v1.0
 
 Экспорты: 483 форварда CodeBase (`name=CB63.name`) плюс `DDReloadConfig` (живое перечтение
 настроек) и `DDTakeScreenshot`. `Mods\timer.c4p` собирается отдельно из `plugins/timer/` и не входит
-в DLL. `plugins/unitinfo/` сохранён только как экспериментальный исходник без Twitch-транспорта:
-по умолчанию он не собирается, не устанавливается и не публикуется. Для локальной разработки его
-можно явно собрать через `plugins/unitinfo/unitinfo.vcxproj`.
+в DLL.
 
 Почему одна DLL: игра уже импортирует библиотеку с именем `C4dll-R` (копию CodeBase), поэтому
 замена одного файла даёт рендерер, меню и хост плагинов сразу, без отдельного `ddraw.dll`,
@@ -1145,9 +1126,7 @@ crop упаковывается в FBO, затем выполняется выб
 ### Плагины
 
 Загружаются только нативные плагины `Mods\*.c4p`; меню каждого сразу появляется в разделе
-**Плагины**. В стабильный пакет входит только Timer. Оставленные в `Mods\` старые
-`twitchstat.c4p` или `unitinfo.c4p` всё равно загружаются при старте даже с `Enabled=0`;
-переместите их при полностью закрытой игре.
+**Плагины**. В стабильный пакет входит только Timer.
 
 Комплектный Timer настраивается через `C4plugins.ini`, длина отсчёта —
 `TableDuration_0`. Для перемещения часов зажмите **Ctrl+Alt** и перетащите их ЛКМ. На точной

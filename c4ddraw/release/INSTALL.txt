@@ -2,12 +2,6 @@
  C4dll-R  -  self-contained DirectDraw wrapper for Disciples II
 ================================================================================
 
-UPGRADE WARNING
-  The stable package contains only C4dll-R.dll and Mods\timer.c4p. Fully close
-  the game, then move existing Mods\twitchstat.c4p and legacy Mods\unitinfo.c4p
-  outside Mods\. Extracting this ZIP over an installation does not remove old
-  plugins. Enabled=0 does not hide their menu or prevent their DLL from loading.
-
 WHAT THIS IS
   C4dll-R.dll embeds cnc-ddraw in one drop-in DirectDraw wrapper.
   Included plugin: Mods\timer.c4p is the reconstructed turn timer.
@@ -186,12 +180,6 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
 ================================================================================
  C4dll-R  -  самодостаточный DirectDraw-врапер для Disciples II
 ================================================================================
-
-ВАЖНО ПРИ ОБНОВЛЕНИИ
-  В стабильном пакете оставлены только C4dll-R.dll и Mods\timer.c4p. Полностью
-  закройте игру, затем переместите имеющиеся Mods\twitchstat.c4p и старый
-  Mods\unitinfo.c4p за пределы Mods\. Распаковка ZIP поверх установки не удаляет
-  старые плагины. Enabled=0 не скрывает их меню и не предотвращает загрузку DLL.
 
 ЧТО ЭТО
   C4dll-R.dll встраивает cnc-ddraw в одну подключаемую DirectDraw-DLL.
