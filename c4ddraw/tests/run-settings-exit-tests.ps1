@@ -21,6 +21,7 @@ $taskContract = Join-Path $PSScriptRoot 'test-wrapper-reset-contract.py'
 $taskProduction = Join-Path (Split-Path $PSScriptRoot -Parent) 'features/rendererbridge.c'
 $taskMenu = Join-Path (Split-Path $PSScriptRoot -Parent) 'features/featuremenu.cpp'
 $taskDefaults = Join-Path (Split-Path $PSScriptRoot -Parent) 'features/wrapperdefaults.h'
+$taskTrace = Join-Path (Split-Path $PSScriptRoot -Parent) 'features/c4trace.cpp'
 $taskOptimization = if ($Configuration -eq 'Release') { '/O2' } else { '/Od' }
 $taskCommand = 'call "{0}" && cl.exe /nologo /EHsc /W4 {2} "{1}" /Fe:settings_exit_tests.exe /Fo:settings_exit_tests.obj /link /MANIFEST:EMBED /MANIFESTUAC:"level=''asInvoker'' uiAccess=''false''"' -f $taskVcvars,$taskSource,$taskOptimization
 $taskOldTemp = $env:TEMP
@@ -35,7 +36,7 @@ try {
     if ($LASTEXITCODE) { throw "Settings exit fixture compilation failed: $LASTEXITCODE" }
     & (Join-Path $taskBuild 'settings_exit_tests.exe') 2>&1 | Tee-Object -FilePath (Join-Path $taskBuild 'test.log')
     if ($LASTEXITCODE) { throw "Settings exit fixture failed: $LASTEXITCODE" }
-    Get-FileHash -Algorithm SHA256 -LiteralPath $taskSource,$taskContract,$taskProduction,$taskMenu,$taskDefaults,$PSCommandPath,(Join-Path $taskBuild 'settings_exit_tests.exe') |
+    Get-FileHash -Algorithm SHA256 -LiteralPath $taskSource,$taskContract,$taskProduction,$taskMenu,$taskDefaults,$taskTrace,$PSCommandPath,(Join-Path $taskBuild 'settings_exit_tests.exe') |
         Select-Object Path,Hash | ConvertTo-Json | Out-File -Encoding utf8 (Join-Path $taskBuild 'hashes.json')
 } finally {
     $env:TEMP = $taskOldTemp

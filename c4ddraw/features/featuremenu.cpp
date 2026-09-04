@@ -1342,6 +1342,7 @@ int g_windowStretchPercent = 100; // legacy centred fixed-window crop, 0=off, de
 HMENU g_bar = nullptr;
 UINT g_relayoutMsg = 0; // registered msg: marshal menu/fullscreen chrome sync onto the GUI thread
 HMENU g_gameMenu = nullptr, g_videoMenu = nullptr, g_perfMenu = nullptr; // top-level bar menus
+HMENU g_technicalMenu = nullptr; // technical diagnostics live one level below ordinary settings
 HMENU g_battleAnimMenu = nullptr, g_mapAnimMenu = nullptr, g_battleAtkMenu = nullptr;
 HMENU g_rendMenu = nullptr, g_shaderMenu = nullptr;
 HMENU g_ticksMenu = nullptr, g_resMenu = nullptr, g_fpsMenu = nullptr, g_scaleMenu = nullptr;
@@ -4220,13 +4221,13 @@ void refreshCloudItem()
 
 void refreshChecks()
 {
-    if (g_perfMenu) {
+    if (g_technicalMenu) {
         const bool forced = c4trace_environment_forced() != 0;
-        CheckMenuItem(g_perfMenu, kIdNetTrace, MF_BYCOMMAND |
+        CheckMenuItem(g_technicalMenu, kIdNetTrace, MF_BYCOMMAND |
                       ((forced || c4trace_configured(iniFile())) ? MF_CHECKED : MF_UNCHECKED));
-        EnableMenuItem(g_perfMenu, kIdNetTrace, MF_BYCOMMAND |
+        EnableMenuItem(g_technicalMenu, kIdNetTrace, MF_BYCOMMAND |
                        (forced ? MF_GRAYED : MF_ENABLED));
-        ModifyMenuW(g_perfMenu, kIdNetTraceInfo, MF_BYCOMMAND | MF_STRING | MF_GRAYED,
+        ModifyMenuW(g_technicalMenu, kIdNetTraceInfo, MF_BYCOMMAND | MF_STRING | MF_GRAYED,
                     kIdNetTraceInfo,
                     forced
                         ? L(L"Forced by C4DLL_NETTRACE=1; change the launch environment to disable.",
@@ -5981,12 +5982,15 @@ void buildMenu()
                 L(L"Accelerates AI message processing; off by default because it may expose game crashes.",
                   L"Ускоряет обработку сообщений ИИ; по умолчанию выкл., так как может проявить вылеты игры."));
     AppendMenuW(g_perfMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(g_perfMenu, MF_STRING, kIdNetTrace,
+    g_technicalMenu = CreatePopupMenu();
+    AppendMenuW(g_technicalMenu, MF_STRING, kIdNetTrace,
                 L(L"Network/timing diagnostics (restart)...",
                   L"Диагностика сети и задержек (рестарт)..."));
-    AppendMenuW(g_perfMenu, MF_STRING | MF_GRAYED, kIdNetTraceInfo,
+    AppendMenuW(g_technicalMenu, MF_STRING | MF_GRAYED, kIdNetTraceInfo,
                 L(L"Changing this option closes the client. Logs are limited; see NETWORK_TRACE.md.",
                   L"Смена настройки закрывает клиент. Логи ограничены; см. NETWORK_TRACE.md."));
+    AppendMenuW(g_perfMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_technicalMenu),
+                L(L"Technical settings", L"Технические настройки"));
 
     g_bar = CreateMenu();
     AppendMenuW(g_bar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_gameMenu),

@@ -8,6 +8,7 @@ FEATURES = ROOT / 'c4ddraw/features'
 MENU = (FEATURES / 'featuremenu.cpp').read_text(encoding='utf-8-sig')
 BRIDGE = (FEATURES / 'rendererbridge.c').read_text(encoding='utf-8-sig')
 DEFAULTS = (FEATURES / 'wrapperdefaults.h').read_text(encoding='utf-8-sig')
+TRACE = (FEATURES / 'c4trace.cpp').read_text(encoding='utf-8-sig')
 
 def function(source, name):
     match = re.search(r'(?ms)^(?:static )?(?:void|bool|int|BOOL)\s+' +
@@ -148,6 +149,35 @@ class ResetContract(unittest.TestCase):
         guard = toggle.index('if (c4trace_environment_forced())')
         first_return = toggle.index('return;', guard)
         self.assertLess(first_return, toggle.index('c4_ini_reset::Apply(entries)'))
+        refresh = function(MENU, 'refreshChecks')
+        self.assertIn('if (g_technicalMenu)', refresh)
+        self.assertIn('CheckMenuItem(g_technicalMenu, kIdNetTrace,', refresh)
+        self.assertIn('EnableMenuItem(g_technicalMenu, kIdNetTrace,', refresh)
+        self.assertIn('ModifyMenuW(g_technicalMenu, kIdNetTraceInfo,', refresh)
+        self.assertIn('(forced ? MF_GRAYED : MF_ENABLED)', refresh)
+        self.assertNotRegex(refresh, r'(?:CheckMenuItem|EnableMenuItem|ModifyMenuW)\('
+                            r'g_perfMenu,\s*kIdNetTrace(?:Info)?\b')
+
+    def test_diagnostics_nested_at_bottom_of_technical_settings(self):
+        build = function(MENU, 'buildMenu')
+        self.assertIn('g_technicalMenu = CreatePopupMenu();', build)
+        for command in ('kIdNetTrace', 'kIdNetTraceInfo'):
+            self.assertRegex(build, r'AppendMenuW\(g_technicalMenu,\s*[^,]+,\s*' + command + r'\b')
+            self.assertNotRegex(build, r'AppendMenuW\(g_(?:perfMenu|bar),\s*[^,]+,\s*' + command + r'\b')
+        self.assertRegex(build, r'AppendMenuW\(g_perfMenu,\s*MF_POPUP,\s*'
+                         r'reinterpret_cast<UINT_PTR>\(g_technicalMenu\),\s*'
+                         r'L\(L"Technical settings",\s*L"Технические настройки"\)\);')
+        self.assertNotRegex(build, r'AppendMenuW\(g_bar,[^;]*g_technicalMenu')
+        performance_items = re.findall(r'AppendMenuW\(g_perfMenu,.*?\);', build, flags=re.S)
+        self.assertIn('g_technicalMenu', performance_items[-1])
+
+    def test_diagnostics_off_by_default_and_reset(self):
+        self.assertEqual(settings('menu')['netTrace'], '0')
+        self.assertIn('"netTrace=0\\r\\n"', MENU)
+        self.assertIn('volatile LONG g_enabled = 0;', TRACE)
+        for api in ('A', 'W'):
+            self.assertRegex(TRACE, r'GetPrivateProfileString' + api + r'\('
+                             r'L?"menu",\s*L?"netTrace",\s*L?"0",')
 
     def test_build_copies_required_headers(self):
         build = (ROOT / 'c4ddraw/build.ps1').read_text(encoding='utf-8-sig')

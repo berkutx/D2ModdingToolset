@@ -53,7 +53,7 @@ USING IT
     accelerates command delivery without raising the configured 180-tick cap.
     To disable it, set messageBatching=0 in the existing [menu] section of
     C4menu.ini and restart the game. See MESSAGE_BATCHING.md for details.
-    Network tracing is optional and OFF by default. Performance > Network/timing
+    Network tracing is optional and OFF by default. Performance > Technical settings > Network/timing
     diagnostics (restart)... asks for confirmation, saves netTrace and immediately
     closes this client. Launch it again manually to apply the setting. Save first:
     unsaved progress can be lost and a network session will disconnect. There is
@@ -251,7 +251,7 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
     exe. Она ускоряет доставку команд без повышения настройки 180 тиков.
     Для отключения задайте messageBatching=0 в существующей секции [menu]
     файла C4menu.ini и перезапустите игру. Подробности — в MESSAGE_BATCHING.md.
-    Трассировка необязательна и по умолчанию выключена. «Производительность >
+    Трассировка необязательна и по умолчанию выключена. «Производительность > Технические настройки >
     Диагностика сети и задержек (рестарт)...» после подтверждения сохраняет netTrace
     и сразу закрывает этот клиент. Для применения запустите его снова вручную.
     Сначала сохраните игру: несохранённый прогресс может пропасть, сетевое подключение
