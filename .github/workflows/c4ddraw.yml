@@ -49,6 +49,9 @@ jobs:
       - name: Init cnc-ddraw submodule
         run: git submodule update --init -- c4ddraw/upstream/cnc-ddraw
 
+      - name: Validate shader menu bundle contract
+        run: ./c4ddraw/tests/test-shader-bundle.ps1
+
       - name: Build monolith C4dll-R.dll
         run: |
           # Load the MSVC x86 env natively (vswhere + Enter-VsDevShell) so dumpbin is on PATH;

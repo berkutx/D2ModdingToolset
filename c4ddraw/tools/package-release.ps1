@@ -34,8 +34,10 @@ $symbols = [ordered]@{
     'timer.pdb' = "$build/plugins/timer/bin/timer.pdb"
 }
 $shaderRoot = "$repo/c4ddraw/release/Shaders"
+$shaderContract = & "$repo/c4ddraw/tools/validate-shader-bundle.ps1" `
+    -BundleRoot "$repo/c4ddraw/release" -RequireExactShaderSet
 $shaderFiles = @(Get-ChildItem -LiteralPath $shaderRoot -Recurse -File)
-if (-not $shaderFiles.Count) { throw 'Shaders directory is empty' }
+if ($shaderContract.RequiredFileCount -ne 10) { throw 'Shader menu contract is incomplete' }
 foreach ($shader in $shaderFiles) { $files['Shaders/' + $shader.FullName.Substring($shaderRoot.Length + 1).Replace('\', '/')] = $shader.FullName }
 foreach ($inputFile in @($files.Values) + @($symbols.Values) + @("$repo/c4ddraw/release/RELEASE_NOTES.md")) {
     if (-not (Test-Path -LiteralPath $inputFile -PathType Leaf) -or (Get-Item -LiteralPath $inputFile).Length -eq 0) { throw "Missing/empty input: $inputFile" }
@@ -47,7 +49,7 @@ function Commit([string]$Ref) { $value = & git -C $repo rev-parse --verify "$Ref
 $head = Commit 'HEAD'
 if (-not $head) { throw 'Cannot resolve workspace HEAD' }
 $sourceHashes = [ordered]@{}
-$sources = @(Get-ChildItem -LiteralPath "$repo/c4ddraw/features", "$repo/c4ddraw/patches" -Recurse -File) + @(Get-Item -LiteralPath $PSCommandPath, "$repo/c4ddraw/build.ps1")
+$sources = @(Get-ChildItem -LiteralPath "$repo/c4ddraw/features", "$repo/c4ddraw/patches" -Recurse -File) + @(Get-Item -LiteralPath $PSCommandPath, "$repo/c4ddraw/build.ps1", "$repo/c4ddraw/tools/validate-shader-bundle.ps1")
 foreach ($source in $sources | Sort-Object FullName -Unique) { $sourceHashes[$source.FullName.Substring($repo.Length + 1).Replace('\', '/')] = Hash $source.FullName }
 $fileHashes = [ordered]@{}; foreach ($entry in $files.GetEnumerator()) { $fileHashes[$entry.Key] = Hash $entry.Value }
 $symbolHashes = [ordered]@{}; foreach ($entry in $symbols.GetEnumerator()) { $symbolHashes[$entry.Key] = Hash $entry.Value }

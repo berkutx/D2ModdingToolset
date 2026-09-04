@@ -19,7 +19,8 @@ foreach ($relative in @('bin/Release/C4dll-R.dll','bin/Release/C4dll-R.pdb',
     New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
     [IO.File]::WriteAllText($path, 'Inert packaging test fixture: ' + $relative)
 }
-foreach ($relative in @('c4ddraw/build.ps1','c4ddraw/tools/package-release.ps1')) {
+foreach ($relative in @('c4ddraw/build.ps1','c4ddraw/tools/package-release.ps1',
+    'c4ddraw/tools/validate-shader-bundle.ps1')) {
     $tokens = $null; $parseErrors = $null
     [void][Management.Automation.Language.Parser]::ParseFile((Join-Path $repo $relative), [ref]$tokens, [ref]$parseErrors)
     Check ($parseErrors.Count -eq 0) "PowerShell syntax: $relative"
@@ -36,6 +37,24 @@ $runtime = @(Entries $result.Archive)
 $symbols = @(Entries $result.Symbols)
 Check (@($runtime | Where-Object { $_ -match '\.c4p$' }).Count -eq 1) 'Runtime archive contains exactly one plugin'
 Check ($runtime -contains 'C4dll-R-v1.9-test-notwitch/Mods/timer.c4p') 'Timer is the stable plugin'
+$expectedShaders = @(
+    'Shaders/interpolation/lanczos2-sharp.glsl',
+    'Shaders/xbrz/xbrz-freescale-multipass.glsl',
+    'Shaders/xbrz/xbrz-freescale-multipass.glsl.pass1',
+    'Shaders/interpolation/catmull-rom-bilinear.glsl',
+    'Shaders/interpolation/fsr.glsl',
+    'Shaders/interpolation/fsr.glsl.pass1',
+    'Shaders/xbr/xbr-lv2-noblend.glsl',
+    'Shaders/interpolation/bilinear.glsl',
+    'Shaders/nearest-neighbor.glsl',
+    'Shaders/crt/crt-lottes-fast-no-warp-bilinear.glsl'
+)
+$shaderPrefix = 'C4dll-R-v1.9-test-notwitch/'
+$runtimeShaders = @($runtime | Where-Object { $_ -match '(?i)/Shaders/.+\.glsl(?:\.pass1)?$' } |
+    ForEach-Object { $_.Substring($shaderPrefix.Length) })
+Check ($runtimeShaders.Count -eq $expectedShaders.Count -and
+       @($expectedShaders | Where-Object { $runtimeShaders -notcontains $_ }).Count -eq 0) `
+      'Runtime archive contains every shader menu file and both required passes'
 Check (@($runtime + $symbols | Where-Object { $_ -match '(?i)(twitchstat|unitinfo)\.(c4p|pdb)$' }).Count -eq 0) 'Stale Twitch outputs cannot leak into either archive'
 Check ($symbols.Count -eq 2 -and $symbols -contains 'C4dll-R.pdb' -and $symbols -contains 'timer.pdb') 'Symbols belong only to wrapper and timer'
 Check (Test-Path -LiteralPath (Join-Path $build 'plugins/unitinfo/bin/twitchstat.c4p')) 'Experimental build input is preserved'

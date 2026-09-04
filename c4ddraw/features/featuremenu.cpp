@@ -1022,6 +1022,7 @@ enum : UINT
     kIdRendAuto = 0xA132,
     kIdRendererActive = 0xA133, // disabled diagnostic: actual backend, not persisted request
     kIdShaderBase = 0xA140, // + index into kShaders[]
+    kIdShaderStatus = 0xA148, // disabled diagnostic: packaged OpenGL shader assets
     kIdMaintas = 0xA150,
     kIdVsync = 0xA151,
     kIdBoxing = 0xA152,
@@ -1152,6 +1153,13 @@ struct NameVal
     const wchar_t* ru;
     const char* value;
 };
+struct ShaderOption
+{
+    const wchar_t* en;
+    const wchar_t* ru;
+    const char* value;
+    const char* requiredPass1;
+};
 const NameVal kRenderers[] = {
     {L"OpenGL - shaders + best upscaling (recommended)",
      L"OpenGL - шейдеры и лучший апскейл (рекомендуется)", "opengl"},
@@ -1161,32 +1169,36 @@ const NameVal kRenderers[] = {
      L"Auto - сам выберет D3D9 (основные фильтры)", "auto"}};
 const int kRendererCount = 3;
 // Image filters, ranked best->basic for D2's hand-painted art.
-const NameVal kShaders[] = {
+const ShaderOption kShaders[] = {
     {L"Lanczos - sharp, detailed (best for D2 art)",
      L"Lanczos - чёткий, детальный (лучший для графики D2)",
-     "Shaders\\interpolation\\lanczos2-sharp.glsl"},
+     "Shaders\\interpolation\\lanczos2-sharp.glsl", nullptr},
     {L"xBRZ - pixel-art scaler, clean sprite edges",
      L"xBRZ - пиксель-арт скейлер, чистые края спрайтов",
-     "Shaders\\xbrz\\xbrz-freescale-multipass.glsl"},
+     "Shaders\\xbrz\\xbrz-freescale-multipass.glsl",
+     "Shaders\\xbrz\\xbrz-freescale-multipass.glsl.pass1"},
     {L"Bicubic - smooth, balanced (cnc default)",
      L"Bicubic - мягкий, сбалансированный (дефолт cnc)",
-     "Shaders\\interpolation\\catmull-rom-bilinear.glsl"},
+     "Shaders\\interpolation\\catmull-rom-bilinear.glsl", nullptr},
     {L"AMD FSR - modern edge sharpening, crisp",
      L"AMD FSR - современная резкость краёв",
-     "Shaders\\interpolation\\fsr.glsl"},
+     "Shaders\\interpolation\\fsr.glsl",
+     "Shaders\\interpolation\\fsr.glsl.pass1"},
     {L"xBR lv2 - pixel-art, lighter than xBRZ",
      L"xBR lv2 - пиксель-арт, легче xBRZ",
-     "Shaders\\xbr\\xbr-lv2-noblend.glsl"},
+     "Shaders\\xbr\\xbr-lv2-noblend.glsl", nullptr},
     {L"Bilinear - simple smoothing, a bit soft",
      L"Bilinear - простое сглаживание, слегка мыльно",
-     "Shaders\\interpolation\\bilinear.glsl"},
+     "Shaders\\interpolation\\bilinear.glsl", nullptr},
     {L"None - sharpest pixels, blocky on zoom",
      L"Без фильтра - самые чёткие пиксели, кубики при увеличении",
-     "Shaders\\nearest-neighbor.glsl"},
+     "Shaders\\nearest-neighbor.glsl", nullptr},
     {L"CRT - retro scanlines (style, not sharper)",
      L"CRT - ретро-развёртка (стиль, не чёткость)",
-     "Shaders\\crt\\crt-lottes-fast-no-warp-bilinear.glsl"}};
+     "Shaders\\crt\\crt-lottes-fast-no-warp-bilinear.glsl", nullptr}};
 const int kShaderCount = 8;
+static_assert(sizeof(kShaders) / sizeof(kShaders[0]) == kShaderCount,
+              "the Filter menu must expose the eight packaged shaders");
 
 // cnc-ddraw's Direct3D 9 filter values. GDI maps every non-nearest value to HALFTONE; OpenGL uses
 // the full shader path above. A negative result means that filter genuinely requires OpenGL.
@@ -1357,6 +1369,12 @@ volatile LONG g_ncCursorMode = 2; // 0=the native D2 software cursor, 2=Windows 
 volatile LONG g_cursorCaptureInstalled = 0;
 bool g_menuLoopActive = false; // native popup menus need the OS cursor across the whole window
 DWORD g_pendingRendererVerifyTick = 0; // OpenGL finishes its real self-test on the render thread
+bool g_shaderFolderReady = false;
+bool g_shaderPrimaryReady[kShaderCount] = {};
+bool g_shaderPass1Ready[kShaderCount] = {};
+bool g_shaderAvailable[kShaderCount] = {};
+int g_missingShaderFileCount = 0;
+volatile LONG g_shaderAssetsWarningShown = 0;
 
 using WndProcFn = LRESULT(CALLBACK*)(HWND, UINT, WPARAM, LPARAM);
 WndProcFn g_origWndProc = nullptr;
@@ -1365,6 +1383,147 @@ const UINT_PTR kPressTimerId = 0xC4D7; // our WM_TIMER source: on-elapse END_TUR
                                        // WM_TIMER (idle-gated), like legacy SetTimer(hWnd,0,0x20,0)
 HWND g_pressTimerHwnd = nullptr; // tracked independently: renderer bridge may set g_gameHwnd first
 volatile LONG g_pressTimerArmFailureLogged = 0;
+
+bool dllRelativePath(const char* relative, char* path, size_t capacity)
+{
+    if (!relative || !relative[0] || !path || capacity < 2)
+        return false;
+
+    path[0] = 0;
+    const DWORD length = GetModuleFileNameA(
+        g_ddraw_module, path, static_cast<DWORD>(capacity));
+    if (!length || length >= capacity)
+        return false;
+
+    char* slash = strrchr(path, '\\');
+    const size_t prefix = slash ? static_cast<size_t>(slash + 1 - path) : 0;
+    const size_t relativeLength = strlen(relative);
+    if (!prefix || prefix + relativeLength >= capacity)
+        return false;
+
+    memcpy(path + prefix, relative, relativeLength + 1);
+    return true;
+}
+
+bool dllRelativeDirectoryExists(const char* relative)
+{
+    char path[MAX_PATH] = {};
+    if (!dllRelativePath(relative, path, sizeof(path)))
+        return false;
+    const DWORD attributes = GetFileAttributesA(path);
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+bool fileIsNonempty(const char* path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!path || !path[0] ||
+        !GetFileAttributesExA(path, GetFileExInfoStandard, &data) ||
+        (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        return false;
+    return data.nFileSizeHigh != 0 || data.nFileSizeLow != 0;
+}
+
+// Match render_ogl.c exactly: an existing relative path wins, even when it is an empty file or a
+// directory which fopen will reject; only a genuinely missing relative path falls back beside DLL.
+bool resolveShaderPath(const char* relative, char* resolved, size_t capacity)
+{
+    if (!relative || !relative[0] || !resolved || strlen(relative) >= capacity)
+        return false;
+    if (GetFileAttributesA(relative) != INVALID_FILE_ATTRIBUTES) {
+        memcpy(resolved, relative, strlen(relative) + 1);
+        return true;
+    }
+
+    return dllRelativePath(relative, resolved, capacity);
+}
+
+void scanShaderAssets()
+{
+    const DWORD workingAttributes = GetFileAttributesA("Shaders");
+    g_shaderFolderReady =
+        (workingAttributes != INVALID_FILE_ATTRIBUTES &&
+         (workingAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) ||
+        dllRelativeDirectoryExists("Shaders");
+    int missing = 0;
+    for (int i = 0; i < kShaderCount; ++i) {
+        char resolved[MAX_PATH] = {};
+        const bool resolvedPrimary =
+            resolveShaderPath(kShaders[i].value, resolved, sizeof(resolved));
+        g_shaderPrimaryReady[i] = resolvedPrimary && fileIsNonempty(resolved);
+        g_shaderPass1Ready[i] = true;
+        if (kShaders[i].requiredPass1) {
+            // cnc-ddraw does not resolve pass1 independently: it appends the suffix to the already
+            // selected main path. Keep that same root so a stray pass in CWD/DLL cannot mask a miss.
+            const size_t length = resolvedPrimary ? strlen(resolved) : 0;
+            if (!length || length > sizeof(resolved) - 8) {
+                g_shaderPass1Ready[i] = false;
+            } else {
+                strcat_s(resolved, ".pass1");
+                g_shaderPass1Ready[i] = fileIsNonempty(resolved);
+            }
+        }
+        if (!g_shaderPrimaryReady[i])
+            ++missing;
+        if (!g_shaderPass1Ready[i])
+            ++missing;
+        g_shaderAvailable[i] = g_shaderPrimaryReady[i] && g_shaderPass1Ready[i];
+    }
+    g_missingShaderFileCount = missing;
+}
+
+void appendMissingShaderAsset(wchar_t* list, size_t capacity,
+                              const char* relative)
+{
+    if (!list || !capacity || !relative)
+        return;
+    wchar_t wide[MAX_PATH] = {};
+    if (!MultiByteToWideChar(CP_ACP, 0, relative, -1, wide,
+                             static_cast<int>(sizeof(wide) / sizeof(wide[0]))))
+        lstrcpynW(wide, L"?", static_cast<int>(sizeof(wide) / sizeof(wide[0])));
+    const size_t used = wcslen(list);
+    const size_t needed = 4 + wcslen(wide);
+    if (used + needed >= capacity)
+        return;
+    swprintf_s(list + used, capacity - used, L"\r\n  %s", wide);
+}
+
+// Called only from the GUI-thread chrome/menu paths. Claim the notification before opening the
+// modal because MessageBox owns a nested message loop and the periodic chrome message can re-enter.
+void showShaderAssetsWarningOnce(HWND owner)
+{
+    if (!g_missingShaderFileCount ||
+        InterlockedCompareExchange(&g_shaderAssetsWarningShown, 1, 0) != 0)
+        return;
+
+    wchar_t missing[1536] = {};
+    for (int i = 0; i < kShaderCount; ++i) {
+        if (!g_shaderPrimaryReady[i]) {
+            appendMissingShaderAsset(missing,
+                                     sizeof(missing) / sizeof(missing[0]),
+                                     kShaders[i].value);
+            mlog("[menu] missing/empty shader asset: %s", kShaders[i].value);
+        }
+        if (!g_shaderPass1Ready[i]) {
+            appendMissingShaderAsset(missing,
+                                     sizeof(missing) / sizeof(missing[0]),
+                                     kShaders[i].requiredPass1);
+            mlog("[menu] missing/empty shader asset: %s",
+                 kShaders[i].requiredPass1);
+        }
+    }
+
+    wchar_t message[2048] = {};
+    swprintf_s(
+        message,
+        L(L"The Shaders folder next to C4dll-R.dll is missing or incomplete. %d required OpenGL shader file(s) could not be found or are empty. Unavailable OpenGL filters are disabled in Video > Filter.\n\nCopy the complete Shaders folder next to Discipl2.exe. The built-in Direct3D 9/GDI filters remain usable.\n\nMissing:%s",
+          L"Папка Shaders рядом с C4dll-R.dll отсутствует или неполна. Не найдено или пусто обязательных файлов OpenGL-шейдеров: %d. Недоступные OpenGL-фильтры отключены в меню «Видео > Фильтр».\n\nСкопируйте папку Shaders целиком рядом с Discipl2.exe. Встроенные фильтры Direct3D 9/GDI остаются доступны.\n\nОтсутствуют:%s"),
+        g_missingShaderFileCount, missing);
+    MessageBoxW(owner, message,
+                L(L"Incomplete Shaders folder", L"Неполная папка Shaders"),
+                MB_OK | MB_ICONWARNING);
+}
 
 bool ensurePressTimer(HWND hwnd)
 {
@@ -4219,6 +4378,52 @@ void refreshCloudItem()
                 kIdCloudsInfo, info);
 }
 
+bool shaderSupportedByActiveRenderer(int shaderIndex, int activeRenderer)
+{
+    if (shaderIndex < 0 || shaderIndex >= kShaderCount)
+        return false;
+    if (activeRenderer == 0)
+        return g_shaderAvailable[shaderIndex];
+    return (activeRenderer == 1 || activeRenderer == 2) &&
+           portableFilterForShader(shaderIndex) >= 0;
+}
+
+void refreshShaderAssetStatus()
+{
+    if (!g_shaderMenu)
+        return;
+
+    int unavailable = 0;
+    for (int i = 0; i < kShaderCount; ++i) {
+        if (!g_shaderAvailable[i])
+            ++unavailable;
+    }
+
+    wchar_t status[256] = {};
+    if (!g_shaderFolderReady) {
+        lstrcpynW(
+            status,
+            L(L"Shaders folder missing: OpenGL filter files are unavailable",
+              L"Папка Shaders не найдена: файлы OpenGL-фильтров недоступны"),
+            static_cast<int>(sizeof(status) / sizeof(status[0])));
+    } else if (g_missingShaderFileCount) {
+        swprintf_s(
+            status,
+            L(L"Shaders incomplete: required files missing: %d; unavailable OpenGL filters: %d",
+              L"Папка Shaders неполна: обязательных файлов не найдено: %d; недоступно OpenGL-фильтров: %d"),
+            g_missingShaderFileCount, unavailable);
+    } else {
+        swprintf_s(
+            status,
+            L(L"Shader files ready: all %d OpenGL filters are available",
+              L"Файлы шейдеров готовы: доступны все %d OpenGL-фильтров"),
+            kShaderCount);
+    }
+    ModifyMenuW(g_shaderMenu, kIdShaderStatus,
+                MF_BYCOMMAND | MF_STRING | MF_GRAYED,
+                kIdShaderStatus, status);
+}
+
 void refreshChecks()
 {
     if (g_technicalMenu) {
@@ -4373,6 +4578,7 @@ void refreshChecks()
     const int activeRenderer = DDGetActiveRenderer();
     const int activePortableFilter = DDGetActivePortableFilter();
     if (g_shaderMenu) {
+        refreshShaderAssetStatus();
         const int shownShader =
             activeRenderer == 0 ? g_shaderIdx
                                 : shaderForPortableFilter(
@@ -4388,15 +4594,18 @@ void refreshChecks()
              id < kIdShaderBase + static_cast<UINT>(kShaderCount); ++id) {
             const int index = static_cast<int>(id - kIdShaderBase);
             const bool supported =
-                activeRenderer == 0 ||
-                ((activeRenderer == 1 || activeRenderer == 2) &&
-                 portableFilterForShader(index) >= 0);
+                shaderSupportedByActiveRenderer(index, activeRenderer);
             EnableMenuItem(g_shaderMenu, id,
                            MF_BYCOMMAND |
                                (supported ? MF_ENABLED : MF_GRAYED));
         }
     }
     if (g_rendMenu) {
+        const bool openGlSelectable =
+            g_shaderIdx < 0 || g_shaderAvailable[g_shaderIdx];
+        EnableMenuItem(g_rendMenu, kIdRendOpenGL,
+                       MF_BYCOMMAND |
+                           (openGlSelectable ? MF_ENABLED : MF_GRAYED));
         if (g_rendererIdx >= 0)
             CheckMenuRadioItem(g_rendMenu, kIdRendOpenGL, kIdRendAuto,
                                kIdRendOpenGL + static_cast<UINT>(g_rendererIdx),
@@ -4592,6 +4801,16 @@ void toggleNetworkTrace()
     DDExitClientAfterSettingsChange(0);
 }
 
+bool menuCommandReloadsCurrentRenderer(UINT id)
+{
+    return id == kIdMaintas || id == kIdVsync || id == kIdBoxing ||
+           id == kIdOutputSizeCustom ||
+           (g_ver == VerEditor && id >= kIdResBase &&
+            id < kIdResBase + static_cast<UINT>(kResCount)) ||
+           (id >= kIdFpsBase && id < kIdFpsBase + static_cast<UINT>(kFpsCount)) ||
+           (id >= kIdModeWindowed && id <= kIdModeExclusive);
+}
+
 void onMenuCommand(UINT id)
 {
     if (id == kIdNetTrace) {
@@ -4613,6 +4832,19 @@ void onMenuCommand(UINT id)
         // Disabled menu items normally cannot generate WM_COMMAND, but never
         // let a synthetic command reach an exact-address MNS/SMNS path.
         return;
+    }
+
+    // Preserve the already compiled OpenGL program if its file was removed after startup. Every
+    // command below would otherwise destroy it and silently compile cnc-ddraw's fallback. Reject
+    // before changing INI or menu state; restoring the complete folder makes the command live again.
+    if (menuCommandReloadsCurrentRenderer(id) && DDGetActiveRenderer() == 0 &&
+        g_shaderIdx >= 0) {
+        scanShaderAssets();
+        if (!g_shaderAvailable[g_shaderIdx]) {
+            refreshChecks();
+            showShaderAssetsWarningOnce(g_gameHwnd);
+            return;
+        }
     }
 
     // These choices re-create only the presentation backend; the game process keeps running.
@@ -4852,7 +5084,19 @@ void onMenuCommand(UINT id)
             applyPerUnitBurst(10); // restore any scaled intervals
         updateBattleBurst();
     } else if (id >= kIdRendOpenGL && id <= kIdRendAuto) {
-        g_rendererIdx = static_cast<int>(id - kIdRendOpenGL);
+        const int requestedRenderer = static_cast<int>(id - kIdRendOpenGL);
+        if (requestedRenderer == 0 && g_shaderIdx >= 0) {
+            // A portable backend can legitimately use Lanczos/Bicubic/Bilinear/None without the
+            // GLSL files. Do not carry such a known-missing menu preset into OpenGL, where cnc-ddraw
+            // would silently compile its fallback instead.
+            scanShaderAssets();
+            if (!g_shaderAvailable[g_shaderIdx]) {
+                refreshChecks();
+                showShaderAssetsWarningOnce(g_gameHwnd);
+                return;
+            }
+        }
+        g_rendererIdx = requestedRenderer;
         if (!writeDdrawStr("renderer", kRenderers[g_rendererIdx].value)) {
             MessageBoxW(
                 g_gameHwnd,
@@ -4870,8 +5114,13 @@ void onMenuCommand(UINT id)
         const int index = static_cast<int>(id - kIdShaderBase);
         const int portableFilter = portableFilterForShader(index);
         const int activeRenderer = DDGetActiveRenderer();
-        if (activeRenderer != 0 && portableFilter < 0)
-            return; // disabled OpenGL-only item; also reject a synthetic WM_COMMAND
+        // Re-probe before any INI write: a file can disappear after WM_INITMENUPOPUP, and disabled
+        // menu state alone does not protect against a synthetic WM_COMMAND.
+        scanShaderAssets();
+        if (!shaderSupportedByActiveRenderer(index, activeRenderer)) {
+            refreshChecks();
+            return;
+        }
         if (!writeDdrawStr("shader", kShaders[index].value)) {
             MessageBoxW(
                 g_gameHwnd,
@@ -5596,6 +5845,9 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         }
     } else if (msg == WM_INITMENUPOPUP) {
+        if (reinterpret_cast<HMENU>(wParam) == g_shaderMenu ||
+            reinterpret_cast<HMENU>(wParam) == g_rendMenu)
+            scanShaderAssets();
         pluginhost_refresh_menus();
         refreshChecks();
     }
@@ -5610,6 +5862,9 @@ void buildMenu()
     // before reading the list. Loading takes milliseconds vs seconds to the game window, so this
     // effectively never blocks; the timeout just means "build without plugins" if loading hangs.
     pluginhost_wait_ready(5000);
+    // This worker runs after DLL_PROCESS_ATTACH, so filesystem probing is outside loader lock. Keep
+    // the scan beside menu construction; the GUI thread only consumes the resulting status.
+    scanShaderAssets();
     readDdrawState(); // reflect current ddraw.ini in the checks/radios
     if (g_ver == VerEditor)
         readEditorDatabase();
@@ -5906,13 +6161,18 @@ void buildMenu()
     }
 
     g_shaderMenu = CreatePopupMenu();
-    for (int i = 0; i < kShaderCount; ++i)
-        AppendMenuW(g_shaderMenu, MF_STRING, kIdShaderBase + i,
+    for (int i = 0; i < kShaderCount; ++i) {
+        const UINT flags = MF_STRING |
+                           (g_shaderAvailable[i] ? MF_ENABLED : MF_GRAYED);
+        AppendMenuW(g_shaderMenu, flags, kIdShaderBase + i,
                     g_ru ? kShaders[i].ru : kShaders[i].en);
+    }
     AppendMenuW(g_shaderMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_shaderMenu, MF_STRING | MF_GRAYED, kIdShaderStatus, L"...");
     AppendMenuW(g_shaderMenu, MF_STRING | MF_GRAYED, 0,
                 L(L"Lanczos/Bicubic/Bilinear/None also work on D3D9; GDI uses smooth/nearest fallback",
                   L"Lanczos/Bicubic/Bilinear/Нет работают и в D3D9; GDI использует сглаживание/nearest"));
+    refreshShaderAssetStatus();
     AppendMenuW(g_videoMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_shaderMenu),
                 L(L"Filter", L"Фильтр"));
     g_rendMenu = CreatePopupMenu();
@@ -6101,6 +6361,14 @@ bool stageChromeForTargetMode(HWND hwnd, int targetMode)
 int toggleWindowModeWithChrome(HWND hwnd)
 {
     const int before = DDGetDisplayMode();
+    if (DDGetActiveRenderer() == 0 && g_shaderIdx >= 0) {
+        scanShaderAssets();
+        if (!g_shaderAvailable[g_shaderIdx]) {
+            refreshChecks();
+            showShaderAssetsWarningOnce(hwnd);
+            return before;
+        }
+    }
     if (before < 0) {
         DDToggleWindowedMode();
         return DDGetDisplayMode();
@@ -6149,7 +6417,11 @@ void syncChrome(HWND hwnd)
     }
 
     g_liveModeIdx = liveMode;
+    // Reconcile files periodically as part of the existing 1.5 s chrome health check. This also
+    // catches external mode changes and files removed/restored without opening the Filter menu.
+    scanShaderAssets();
     refreshChecks();
+    showShaderAssetsWarningOnce(hwnd);
 
     if (changed || liveModeChanged)
         DrawMenuBar(hwnd);
@@ -6392,6 +6664,9 @@ extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, 
             return 1;
         }
     } else if (msg == WM_INITMENUPOPUP) {
+        if (reinterpret_cast<HMENU>(wParam) == g_shaderMenu ||
+            reinterpret_cast<HMENU>(wParam) == g_rendMenu)
+            scanShaderAssets();
         pluginhost_refresh_menus();
         refreshChecks();
     }

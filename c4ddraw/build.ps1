@@ -60,6 +60,7 @@ $cb63def = Join-Path $root "forwarder\C4dll-R.cb63.def"
 $out = Join-Path $build "bin\Release\C4dll-R.dll"
 $timerPluginProj = Join-Path $root "plugins\timer\timer.vcxproj"
 $timerPluginOut = Join-Path $root "plugins\timer\bin\Release\timer.c4p"
+$shaderValidator = Join-Path $root "tools\validate-shader-bundle.ps1"
 
 # Locate MSBuild robustly (works on a dev box AND on GitHub windows-latest, where VS is Enterprise).
 function Find-MSBuild {
@@ -101,6 +102,11 @@ if ($Restore) {
     Write-Host "Restored vanilla baseline (C4dll-R = CB63 copy, standalone ddraw.dll back, bundled timer removed)." -ForegroundColor Cyan
     return
 }
+
+$shaderValidation = & $shaderValidator -BundleRoot (Join-Path $root "release") `
+    -RequireExactShaderSet
+Write-Host ("Shader menu bundle: {0} filters, {1} required files" -f `
+    $shaderValidation.MenuEntries, $shaderValidation.RequiredFileCount) -ForegroundColor Green
 
 Write-Host "[1/7] clean build dir" -ForegroundColor Cyan
 if (Test-Path $build) { [System.IO.Directory]::Delete($build, $true) }
@@ -458,6 +464,9 @@ Write-Host ("BUILT -> {0} ({1:n0} bytes)" -f $timerPluginOut, (Get-Item $timerPl
 # Do not build or distribute them in the default wrapper release/deployment.
 
 if ($Deploy) {
+    # Validate the target before stopping the game or replacing anything. Deployment never owns
+    # user/custom shader files, so it must not overwrite or later delete them on -Restore.
+    & $shaderValidator -BundleRoot $Game | Out-Null
     Stop-TargetGame
     Start-Sleep -Milliseconds 600
     if (-not (Test-Path $bC4)) { Copy-Item (Join-Path $Game "C4dll-R.dll") $bC4 -Force }  # baseline once
@@ -468,6 +477,6 @@ if ($Deploy) {
     $modsDir = Join-Path $Game "Mods"
     if (-not (Test-Path $modsDir)) { New-Item -ItemType Directory -Force -Path $modsDir | Out-Null }
     Copy-Item $timerPluginOut (Join-Path $modsDir "timer.c4p") -Force                      # native timer plugin
-    Write-Host "Deployed monolith C4dll-R.dll + Mods\timer.c4p; standalone ddraw.dll parked." -ForegroundColor Green
+    Write-Host "Deployed C4dll-R.dll + timer.c4p after validating the complete target Shaders menu bundle; standalone ddraw.dll parked." -ForegroundColor Green
     Write-Host "(.\build.ps1 -Restore restores the previous wrapper and removes the bundled timer)" -ForegroundColor Green
 }

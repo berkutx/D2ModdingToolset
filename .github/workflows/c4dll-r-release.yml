@@ -101,6 +101,9 @@ jobs:
           Copy-Item "c4ddraw/release/C4plugins.ini" "$stage/C4plugins.ini"
           Copy-Item "c4ddraw/release/ddraw.ini" "$stage/ddraw.ini"
           Copy-Item "c4ddraw/release/Shaders" "$stage/Shaders" -Recurse
+          # The menu has eight primary GLSL files plus required FSR/xBRZ second passes. Validate the
+          # staged player payload itself so an incomplete directory can never become the expected ZIP.
+          $shaderContract = ./c4ddraw/tools/validate-shader-bundle.ps1 -BundleRoot $stage -RequireExactShaderSet
           Copy-Item "c4ddraw/release/THIRD_PARTY_NOTICES.txt" "$stage/THIRD_PARTY_NOTICES.txt"
           Copy-Item "LICENSE" "$stage/LICENSE"
           Compress-Archive -Path "$stage" -DestinationPath $zip -Force
@@ -108,10 +111,20 @@ jobs:
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $runtimeArchive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $zip))
           try {
+            $archiveFiles = @($runtimeArchive.Entries | Where-Object { -not $_.FullName.EndsWith('/') } |
+              ForEach-Object { $_.FullName.Replace('\', '/') })
             $plugins = @($runtimeArchive.Entries | Where-Object { $_.FullName -match '(?i)\.c4p$' })
             $expectedPlugin = "C4dll-R-$ver/Mods/timer.c4p"
             if ($plugins.Count -ne 1 -or $plugins[0].FullName.Replace('\', '/') -ine $expectedPlugin) {
               throw 'Runtime ZIP must contain exactly Mods/timer.c4p and no other plugins.'
+            }
+            $expectedShaders = @($shaderContract.RequiredPaths | ForEach-Object {
+              "C4dll-R-$ver/" + $_.Replace('\', '/')
+            })
+            $actualShaders = @($archiveFiles | Where-Object { $_ -match '(?i)/Shaders/.+\.glsl(?:\.pass1)?$' })
+            if ($actualShaders.Count -ne $expectedShaders.Count -or
+                @($expectedShaders | Where-Object { $actualShaders -notcontains $_ }).Count -ne 0) {
+              throw 'Runtime ZIP is missing one or more shader menu files.'
             }
           } finally { $runtimeArchive.Dispose() }
           "zip=$zip" | Out-File $env:GITHUB_OUTPUT -Append
