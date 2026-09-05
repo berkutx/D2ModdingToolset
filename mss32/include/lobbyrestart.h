@@ -25,6 +25,8 @@ enum class RestartOperation : std::uint8_t
     Join = 6,
     SetupReady = 7,
     Launch = 8,
+    Loaded = 9,
+    Complete = 10,
 };
 static constexpr std::uint32_t coordinatedRestartFeature{1};
 }
@@ -46,6 +48,8 @@ void resetLobbyRestart();
 void prepareLobbyRestartSetupMessage(const game::NetMessageHeader* message,
                                      std::vector<unsigned char>& replacement);
 void observeLobbyRestartSetupInfo(const game::NetMessageHeader* message);
+/** Called on the client UI thread immediately before native message dispatch. */
+bool allowLobbyRestartClientMessage(const game::NetMessageHeader* message);
 
 } // namespace hooks
 

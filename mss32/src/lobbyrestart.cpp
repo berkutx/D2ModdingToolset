@@ -71,6 +71,8 @@ struct Restart
     bool querySent{};
     bool setupReadySent{};
     bool launchAllowed{};
+    bool loadedSent{};
+    bool refreshSeen{};
 };
 
 Restart restart;
@@ -195,6 +197,7 @@ void generationCompleted(CMenuRandomScenario*, RestartScenarioGenerationResult r
         return;
     }
     if (result == RestartScenarioGenerationResult::Success) {
+        restart.deadline = Clock::now() + std::chrono::seconds(180);
         restart.stage = Stage::CreateHost;
     } else {
         fail("generation failed or was canceled");
@@ -289,14 +292,25 @@ void handleLobbyRestart(Operation operation, std::uint64_t token)
     if (operation == Operation::Abort) {
         fail("lobby canceled restart", false);
     } else if (operation == Operation::Start && restart.stage == Stage::Waiting) {
+        // The host can inspect, copy and retry the preview without a decision timeout.
+        restart.deadline = Clock::time_point::max();
         if (restart.host) {
             restart.stage = Stage::BeginGeneration;
         }
     } else if (operation == Operation::Join && restart.stage == Stage::Waiting && !restart.host) {
+        restart.deadline = Clock::now() + std::chrono::seconds(180);
         restart.stage = Stage::JoinHost;
     } else if (operation == Operation::Launch && restart.host
                && restart.stage == Stage::SettingUp) {
         restart.launchAllowed = true;
+    } else if (operation == Operation::Complete && restart.stage == Stage::Launching
+               && restart.loadedSent) {
+        spdlog::info("Lobby restart {} completed: all participants loaded", restart.token);
+        closeWait();
+        restart = {};
+        restartActive = false;
+        replaySetup = false;
+        blockGameMessages = false;
     }
 }
 
@@ -459,12 +473,13 @@ bool processLobbyRestart()
             closeWait();
         }
     } else if (restart.stage == Stage::Launching && midgard && midgard->data->client
-               && midgard->data->client->data->scenarioStarted) {
-        spdlog::info("Lobby restart {} completed", restart.token);
-        restart = {};
-        restartActive = false;
-        replaySetup = false;
-        blockGameMessages = false;
+               && midgard->data->client->data->scenarioStarted && !restart.loadedSent) {
+        restart.loadedSent = send(Operation::Loaded);
+        if (restart.loadedSent) {
+            spdlog::info("Lobby restart {}: local world loaded ({})", restart.token,
+                         restart.host ? "host" : "joiner");
+            showWait(L"\u041a\u0430\u0440\u0442\u0430 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043d\u0430.\n\u041e\u0436\u0438\u0434\u0430\u0435\u043c \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438 \u0432\u0441\u0435\u0445 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432...");
+        }
     }
     return true;
 }
@@ -554,6 +569,37 @@ void observeLobbyRestartSetupInfo(const game::NetMessageHeader* message)
     // Native AnsStartInfo serializes face, race category, lord category, in that order.
     setupMatches = readInt(info) == readInt(lord + 4) && readInt(info + 4) == readInt(race)
                    && readInt(info + 8) == readInt(lord);
+}
+
+bool allowLobbyRestartClientMessage(const game::NetMessageHeader* message)
+{
+    if (!isLobbyRestartActive()) {
+        return true;
+    }
+    const bool refresh = isMessage(message, ".?AVCRefreshInfo@@");
+    const bool newScenario = isMessage(message, ".?AVCNewScenarioMsg@@");
+    const bool startScenario = isMessage(message, ".?AVCStartScenarioMsg@@");
+    if (!refresh && !newScenario && !startScenario) {
+        return true;
+    }
+    auto midgard = game::CMidgardApi::get().instance();
+    auto client = midgard && midgard->data ? midgard->data->client : nullptr;
+    auto cache = client && client->core.data ? client->core.data->dataCache : nullptr;
+    if (newScenario || startScenario || !restart.refreshSeen || !cache) {
+        spdlog::info("Lobby restart {} pid {}: dispatch {} stage {} cache {:p}",
+                     restart.token, GetCurrentProcessId(), message->messageClassName,
+                     static_cast<int>(restart.stage), static_cast<void*>(cache));
+    }
+    if (refresh) {
+        restart.refreshSeen = true;
+        // Russobit CRefreshInfo applies objects directly to dataCache (0x41799e).
+        // CNewScenarioMsg must have created it first; dropping a refresh would lose map state.
+        if (!cache) {
+            fail("received CRefreshInfo without a native map; aborting instead of losing objects");
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace hooks

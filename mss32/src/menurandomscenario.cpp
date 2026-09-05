@@ -53,6 +53,7 @@
 namespace hooks {
 
 static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /*%edx*/);
+static void startRestartScenarioGeneration(CMenuRandomScenario* menu);
 
 static const char templatesListName[] = "TLBOX_TEMPLATES";
 static const char sizeSpinName[] = "SPIN_SIZE";
@@ -723,6 +724,20 @@ static void onGenerationResultAccepted(CMenuRandomScenario* menu)
     // Player is satisfied with generation results, start scenario
     removePopup(menu);
 
+    if (menu->restartGeneration) {
+        try {
+            prepareToStartRandomScenario(menu, true);
+        } catch (const std::exception& e) {
+            spdlog::error(e.what());
+            showMessageBox(e.what());
+            completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Error);
+            return;
+        }
+
+        completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Success);
+        return;
+    }
+
     if (menu->startScenario) {
         menu->startScenario(menu);
     }
@@ -735,7 +750,12 @@ static void onGenerationResultRejected(CMenuRandomScenario* menu)
     menu->generator.reset(nullptr);
 
     removePopup(menu);
-    buttonGenerateHandler(menu, 0);
+    if (menu->restartGeneration) {
+        // Keep the accepted template, spins and resolved races; only roll a new map seed.
+        startRestartScenarioGeneration(menu);
+    } else {
+        buttonGenerateHandler(menu, 0);
+    }
 }
 
 static void onGenerationResultCanceled(CMenuRandomScenario* menu)
@@ -745,6 +765,9 @@ static void onGenerationResultCanceled(CMenuRandomScenario* menu)
     menu->generator.reset(nullptr);
 
     removePopup(menu);
+    if (menu->restartGeneration) {
+        completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Canceled);
+    }
 }
 
 static void __fastcall waitGenerationResults(CMenuRandomScenario* menu, int /*%edx*/)
@@ -771,20 +794,6 @@ static void __fastcall waitGenerationResults(CMenuRandomScenario* menu, int /*%e
             if (menu->restartGeneration) {
                 completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Error);
             }
-            return;
-        }
-
-        if (menu->restartGeneration) {
-            try {
-                prepareToStartRandomScenario(menu, true);
-            } catch (const std::exception& e) {
-                spdlog::error(e.what());
-                showMessageBox(e.what());
-                completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Error);
-                return;
-            }
-
-            completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Success);
             return;
         }
 
@@ -844,6 +853,28 @@ static void onGenerationCanceled(CMenuRandomScenario* menu)
     game::CDialogInterfApi::get().hideControl(dialog, "BTN_CANCEL");
 
     menu->cancelGeneration = true;
+}
+
+static void startRestartScenarioGeneration(CMenuRandomScenario* menu)
+{
+    std::time_t seed{std::time(nullptr)};
+    if (seed <= menu->generatedSeed) {
+        seed = menu->generatedSeed + 1;
+    }
+
+    menu->popup = createWaitGenerationInterf(menu, onGenerationCanceled);
+    showInterface(menu->popup);
+
+    menu->generationStatus = GenerationStatus::NotStarted;
+    menu->cancelGeneration = false;
+    createTimerEvent(&menu->uiEvent, menu, waitGenerationResults, 50);
+
+    try {
+        menu->generatorThread = std::thread([menu, seed]() { generateScenario(menu, seed); });
+    } catch (const std::exception& e) {
+        spdlog::error(e.what());
+        menu->generationStatus = GenerationStatus::Error;
+    }
 }
 
 static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /*%edx*/)
@@ -1069,26 +1100,8 @@ bool startPreparedRestartScenarioGeneration(CMenuRandomScenario* menu)
     menu->startScenario = nullptr;
     menu->scenario.reset(nullptr);
     menu->generator.reset(nullptr);
-
-    std::time_t seed{std::time(nullptr)};
-    if (seed <= restartScenario->lastSeed) {
-        seed = restartScenario->lastSeed + 1;
-    }
-
-    menu->popup = createWaitGenerationInterf(menu, onGenerationCanceled);
-    showInterface(menu->popup);
-
-    menu->generationStatus = GenerationStatus::NotStarted;
-    menu->generatedSeed = 0;
-    menu->cancelGeneration = false;
-    createTimerEvent(&menu->uiEvent, menu, waitGenerationResults, 50);
-
-    try {
-        menu->generatorThread = std::thread([menu, seed]() { generateScenario(menu, seed); });
-    } catch (const std::exception& e) {
-        spdlog::error(e.what());
-        menu->generationStatus = GenerationStatus::Error;
-    }
+    menu->generatedSeed = restartScenario->lastSeed;
+    startRestartScenarioGeneration(menu);
 
     return true;
 }

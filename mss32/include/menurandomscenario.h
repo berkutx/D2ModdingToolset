@@ -101,7 +101,7 @@ void clearRestartScenario();
 /** Arms the next restart-menu factory call with its completion callback. */
 bool prepareRestartScenarioGeneration(RestartScenarioCompletion completion);
 
-/** Starts regeneration in a freshly constructed random-scenario menu. */
+/** Starts regeneration with preview/retry; completion is sent only on accept or failure/cancel. */
 bool startPreparedRestartScenarioGeneration(CMenuRandomScenario* menu);
 
 } // namespace hooks
