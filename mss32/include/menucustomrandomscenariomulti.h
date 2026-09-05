@@ -33,6 +33,7 @@ class CMenuCustomRandomScenarioMulti
 {
 public:
     CMenuCustomRandomScenarioMulti(game::CMenuPhase* menuPhase);
+    CMenuCustomRandomScenarioMulti(game::CMenuPhase* menuPhase, bool restartGeneration);
     ~CMenuCustomRandomScenarioMulti();
 
 protected:
@@ -61,9 +62,13 @@ protected:
 
 private:
     RoomsCallback m_roomsCallback;
+    bool m_roomsCallbackRegistered{};
 };
 
 assert_offset(CMenuCustomRandomScenarioMulti, vftable, 0);
+
+/** Menu factory used by the automatic random-scenario restart transition. */
+game::CMenuBase* __stdcall createRestartScenarioMenu(game::CMenuPhase* menuPhase);
 
 } // namespace hooks
 

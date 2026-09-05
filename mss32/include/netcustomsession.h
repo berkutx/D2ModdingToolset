@@ -52,6 +52,8 @@ public:
     CNetCustomService* getService() const;
     const std::string& getName() const;
     bool isHost() const;
+    const SLNet::RakNetGUID& getServerGuid() const { return m_serverGuid; }
+    int getMaxPlayers() const { return m_maxPlayers; }
     bool setMaxPlayers(int maxPlayers);
 
 protected:

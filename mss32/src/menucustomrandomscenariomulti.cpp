@@ -30,6 +30,11 @@ namespace hooks {
 game::RttiInfo<game::CMenuBaseVftable> CMenuCustomRandomScenarioMulti::rttiInfo = {};
 
 CMenuCustomRandomScenarioMulti::CMenuCustomRandomScenarioMulti(game::CMenuPhase* menuPhase)
+    : CMenuCustomRandomScenarioMulti{menuPhase, false}
+{ }
+
+CMenuCustomRandomScenarioMulti::CMenuCustomRandomScenarioMulti(game::CMenuPhase* menuPhase,
+                                                               bool restartGeneration)
     : CMenuRandomScenarioMulti{menuPhase}
     , CMenuCustomBase{this}
     , m_roomsCallback{this}
@@ -42,10 +47,13 @@ CMenuCustomRandomScenarioMulti::CMenuCustomRandomScenarioMulti(game::CMenuPhase*
     }
     this->vftable = &rttiInfo.vftable;
 
-    startScenario = (StartScenario)createRoomAndServer;
+    startScenario = restartGeneration ? nullptr : (StartScenario)createRoomAndServer;
     setUserNameToEditName();
 
-    CNetCustomService::get()->addRoomsCallback(&m_roomsCallback);
+    if (!restartGeneration) {
+        CNetCustomService::get()->addRoomsCallback(&m_roomsCallback);
+        m_roomsCallbackRegistered = true;
+    }
 }
 
 CMenuCustomRandomScenarioMulti::~CMenuCustomRandomScenarioMulti()
@@ -53,7 +61,7 @@ CMenuCustomRandomScenarioMulti::~CMenuCustomRandomScenarioMulti()
     using namespace game;
 
     auto service = CNetCustomService::get();
-    if (service) {
+    if (service && m_roomsCallbackRegistered) {
         service->removeRoomsCallback(&m_roomsCallback);
     }
 }
@@ -110,6 +118,19 @@ void CMenuCustomRandomScenarioMulti::RoomsCallback::CreateRoom_Callback(
         break;
     }
     }
+}
+
+game::CMenuBase* __stdcall createRestartScenarioMenu(game::CMenuPhase* menuPhase)
+{
+    auto menu = static_cast<CMenuCustomRandomScenarioMulti*>(
+        game::Memory::get().allocate(sizeof(CMenuCustomRandomScenarioMulti)));
+    new (menu) CMenuCustomRandomScenarioMulti(menuPhase, true);
+
+    if (!startPreparedRestartScenarioGeneration(menu)) {
+        spdlog::error(__FUNCTION__ ": no prepared random scenario restart");
+    }
+
+    return menu;
 }
 
 } // namespace hooks

@@ -20,6 +20,7 @@
 #include "midgardhooks.h"
 #include "interface.h"
 #include "interfmanager.h"
+#include "lobbyrestart.h"
 #include "mempool.h"
 #include "menucustomlobby.h"
 #include "menuphase.h"
@@ -48,6 +49,7 @@ void __fastcall midgardStartMenuMessageCallbackHooked(game::CMidgard* thisptr,
     } else {
         midgardApi.clearNetworkStateAndService(thisptr);
     }
+    finishLobbyRestartMenuReturn();
 
     auto* data = thisptr->data;
     auto& midStart = data->midStart;
@@ -74,7 +76,9 @@ void __fastcall midgardStartMenuMessageCallbackHooked(game::CMidgard* thisptr,
     }
     data->menuPhase = menuPhase;
 
-    if (lParam) {
+    if (isLoggedInCustomLobby && isLobbyRestartMenuTransition()) {
+        enterLobbyRestartMenu(menuPhase);
+    } else if (lParam) {
         menuPhaseApi.switchToQuickLoad(menuPhase, (const char*)lParam);
         Memory::get().freeNonZero((void*)lParam);
     } else if (isLoggedInCustomLobby) {

@@ -101,11 +101,13 @@ enum LobbyMessageId
     ID_LOBBY_SAVE_STORED_ACK = ID_USER_PACKET_ENUM + 13,
     /** Host -> core: native-save result and actual collision-safe basename. */
     ID_LOBBY_SAVE_NATIVE_RESULT = ID_USER_PACKET_ENUM + 14,
+    /** Coordinated same-room random-map restart; negotiated by ClientCapabilities. */
+    ID_LOBBY_RESTART = ID_USER_PACKET_ENUM + 15,
     ID_GAME_MESSAGE = game::netMessageNormalType & 0xff,
 };
 
 static_assert(ID_GAME_MESSAGE == 255);
-static_assert(ID_LOBBY_SAVE_NATIVE_RESULT < ID_GAME_MESSAGE);
+static_assert(ID_LOBBY_RESTART < ID_GAME_MESSAGE);
 
 /** Lobby-specific wire protocol. Values are serialized field-by-field with SLNet::BitStream;
  * these structures are logical payloads, not packed wire images. Keep in sync with the lobby

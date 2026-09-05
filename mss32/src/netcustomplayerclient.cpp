@@ -18,6 +18,7 @@
  */
 
 #include "netcustomplayerclient.h"
+#include "lobbyrestart.h"
 #include "mempool.h"
 #include "mqnetreception.h"
 #include "mqnetsystem.h"
@@ -99,6 +100,12 @@ bool __fastcall CNetCustomPlayerClient::sendMessage(CNetCustomPlayerClient* this
         return false;
     }
 
+    std::vector<unsigned char> replacement;
+    prepareLobbyRestartSetupMessage(message, replacement);
+    if (!replacement.empty()) {
+        message = reinterpret_cast<const game::NetMessageHeader*>(replacement.data());
+    }
+
     if (thisptr->getSession()->isHost()) {
         const bool sentToGame{thisptr->sendHostMessage(message)};
         if (sentToGame) {
@@ -174,6 +181,7 @@ void CNetCustomPlayerClient::PeerCallback::onPacketReceived(DefaultMessageIDType
                         message->messageClassName, getClientId(sender));
             break;
         }
+        observeLobbyRestartSetupInfo(message);
         m_player->postMessageToReceive(message, availableBytes, game::serverNetPlayerId);
         break;
     }
@@ -186,6 +194,7 @@ void CNetCustomPlayerClient::PeerCallback::onPacketReceived(DefaultMessageIDType
             break;
         }
         message->messageType = game::netMessageNormalType; // TODO: any better way to do this?
+        observeLobbyRestartSetupInfo(message);
         m_player->postMessageToReceive(message, availableBytes, game::serverNetPlayerId);
         break;
     }
