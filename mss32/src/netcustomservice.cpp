@@ -18,8 +18,10 @@
  */
 
 #include "netcustomservice.h"
+#include "lobbyrestart.h"
 #include "lobbysaveexchange.h"
 #include "mempool.h"
+#include "menurestartnative.h"
 #include "midgard.h"
 #include "midgardmsgbox.h"
 #include "midmsgboxbuttonhandler.h"
@@ -55,8 +57,8 @@ static constexpr UINT gameTextCodePage{1251};
 static constexpr std::size_t clientHelloWireSize{
     sizeof(SLNet::MessageID) + sizeof(std::uint8_t) + sizeof(std::uint32_t)
     + LobbyProtocol::clientInstallIdSize + sizeof(std::uint16_t) * 2
-    + sizeof(std::uint32_t)};
-static_assert(clientHelloWireSize == 30);
+    + sizeof(std::uint32_t) * 2};
+static_assert(clientHelloWireSize == 34);
 /** Prevents recursive packet, maintenance, and deferred-UI processing on the main thread. */
 bool mainThreadCallbackActive{};
 
@@ -359,6 +361,7 @@ CNetCustomService::CNetCustomService()
 
 CNetCustomService::~CNetCustomService()
 {
+    resetLobbyRestart();
     spdlog::debug(__FUNCTION__);
 
     clearLobbyMatchState();
@@ -801,6 +804,7 @@ bool CNetCustomService::createRoom(const char* gameName,
 
 void CNetCustomService::leaveRoom()
 {
+    resetLobbyRestart();
     spdlog::debug(__FUNCTION__);
 
     SLNet::LeaveRoom_Func func{};
@@ -1213,6 +1217,9 @@ void CNetCustomService::processDeferredLobbyState()
     }
 
     MainThreadCallbackGuard callbackGuard{mainThreadCallbackActive};
+    if (processLobbyRestart()) {
+        return;
+    }
     if (m_matchEndPending) {
         processPendingMatchEnd();
         return;
@@ -1374,7 +1381,11 @@ void CNetCustomService::PeerCallback::onPacketReceived(DefaultMessageIDTypes typ
     case ID_LOBBY_SAVE_REQUEST: {
         LobbyProtocol::SaveRequest request{};
         if (m_service->readSaveRequest(packet, request)) {
-            handleLobbySaveRequest(request);
+            if (isLobbyRestartActive()) {
+                sendLobbySaveFailure(request, LobbyProtocol::SaveResult::Failed);
+            } else {
+                handleLobbySaveRequest(request);
+            }
         }
         break;
     }
@@ -1395,7 +1406,28 @@ void CNetCustomService::PeerCallback::onPacketReceived(DefaultMessageIDTypes typ
         }
         break;
     }
+    case ID_LOBBY_RESTART: {
+        if (!packet || !packet->data || packet->length != 10) {
+            break;
+        }
+        SLNet::BitStream stream(packet->data, packet->length, false);
+        stream.IgnoreBytes(1);
+        std::uint8_t operation{};
+        std::uint64_t token{};
+        if (stream.Read(operation) && stream.Read(token) && token != 0) {
+            if (packet->guid == m_service->getPeerGuid()
+                && operation == static_cast<std::uint8_t>(LobbyProtocol::RestartOperation::HostReady)) {
+                handleLobbyRestartLoopbackFence(token);
+            } else if (isAuthenticatedLobbyPacket(m_service, packet)) {
+                handleLobbyRestart(static_cast<LobbyProtocol::RestartOperation>(operation), token);
+            }
+        }
+        break;
+    }
     case ID_LOBBY_MATCH_ENDED:
+        if (isLobbyRestartActive()) {
+            break;
+        }
         if (!isAuthenticatedLobbyPacket(m_service, packet)) {
             spdlog::warn(__FUNCTION__ ": refusing MATCH_ENDED not authenticated by lobby session");
         } else if (packet->data && packet->length == sizeof(SLNet::MessageID)) {
@@ -1432,6 +1464,7 @@ void CNetCustomService::LobbyCallback::MessageResult(SLNet::Client_Login* messag
         stream.Write(environment.windowsMajor);
         stream.Write(environment.windowsMinor);
         stream.Write(environment.windowsBuild);
+        stream.Write(restartNativeSupported() ? LobbyProtocol::coordinatedRestartFeature : 0u);
         const auto lobbyGuid{m_service->getLobbyGuid()};
         if (!m_service->send(stream, lobbyGuid, LOW_PRIORITY)) {
             spdlog::warn(__FUNCTION__ ": failed to advertise ranked-lifecycle capability");

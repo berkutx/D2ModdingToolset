@@ -19,6 +19,7 @@
 
 #include "netcustomsession.h"
 #include "d2string.h"
+#include "lobbyrestart.h"
 #include "mempool.h"
 #include "mqnetsystem.h"
 #include "netcustomplayerclient.h"
@@ -61,7 +62,9 @@ CNetCustomSession::CNetCustomSession(CNetCustomService* service,
 CNetCustomSession ::~CNetCustomSession()
 {
     spdlog::debug(__FUNCTION__);
-    m_service->leaveRoom();
+    if (!retainLobbyRoomForRestart()) {
+        m_service->leaveRoom();
+    }
     m_service->notifySessionDestroyed(this);
 }
 
@@ -86,7 +89,7 @@ bool CNetCustomSession::setMaxPlayers(int maxPlayers)
         return false;
     }
 
-    if (m_isHost) {
+    if (m_isHost && !isLobbyRestartActive()) {
         // -1 because room already have moderator
         const auto result{m_service->changeRoomPublicSlots(maxPlayers - 1)};
         if (result) {

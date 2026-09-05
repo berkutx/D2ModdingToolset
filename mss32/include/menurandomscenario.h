@@ -25,6 +25,8 @@
 #include "maptemplate.h"
 #include "menubase.h"
 #include <array>
+#include <ctime>
+#include <string>
 #include <thread>
 #include <utility>
 
@@ -45,6 +47,19 @@ enum class GenerationStatus : int
     Error,         /**< Generation was aborted with an error. */
 };
 
+struct CMenuRandomScenario;
+
+enum class RestartScenarioGenerationResult : int
+{
+    Success,
+    Canceled,
+    LimitExceeded,
+    Error,
+};
+
+using RestartScenarioCompletion = void (*)(CMenuRandomScenario* menu,
+                                           RestartScenarioGenerationResult result);
+
 /** Base menu for random scenario generation. */
 struct CMenuRandomScenario : public game::CMenuBase
 {
@@ -58,6 +73,7 @@ struct CMenuRandomScenario : public game::CMenuBase
     game::UiEvent uiEvent{};
     std::thread generatorThread;
     rsg::MapTemplate scenarioTemplate;
+    std::string scenarioTemplateName;
     rsg::MapPtr scenario;
     std::unique_ptr<rsg::MapGenerator> generator;
 
@@ -68,10 +84,25 @@ struct CMenuRandomScenario : public game::CMenuBase
     game::CPopupDialogInterf* popup{};
     GenerationStatus generationStatus{GenerationStatus::NotStarted};
     StartScenario startScenario{};
+    RestartScenarioCompletion restartCompletion{};
+    std::time_t generatedSeed{};
     bool cancelGeneration{false};
+    bool restartGeneration{false};
 };
 
 void prepareToStartRandomScenario(CMenuRandomScenario* menu, bool networkGame = false);
+
+/** Returns true when an accepted custom-lobby random scenario can be regenerated. */
+bool hasRestartScenario();
+
+/** Drops the retained scenario template after the real lobby room is left. */
+void clearRestartScenario();
+
+/** Arms the next restart-menu factory call with its completion callback. */
+bool prepareRestartScenarioGeneration(RestartScenarioCompletion completion);
+
+/** Starts regeneration in a freshly constructed random-scenario menu. */
+bool startPreparedRestartScenarioGeneration(CMenuRandomScenario* menu);
 
 } // namespace hooks
 

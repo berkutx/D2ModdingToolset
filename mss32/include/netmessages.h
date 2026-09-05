@@ -50,6 +50,12 @@ struct CMenusReqInfoMsg : public CNetMsg
 
 assert_size(CMenusReqInfoMsg, 4);
 
+/** Requests the sending client's accepted race, lord and portrait from the host. */
+struct CMenusReqStartInfoMsg : public CNetMsg
+{ };
+
+assert_size(CMenusReqStartInfoMsg, 4);
+
 /** Send by server to clients in response to CMenusReqInfoMsg. */
 struct CMenusAnsInfoMsg : public CNetMsg
 {
@@ -107,6 +113,7 @@ Api& get();
 
 CNetMsgVftable* getMenusReqVersionVftable();
 CNetMsgVftable* getMenusReqInfoVftable();
+CNetMsgVftable* getMenusReqStartInfoVftable();
 
 } // namespace NetMessagesApi
 

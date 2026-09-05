@@ -755,6 +755,12 @@
     <ClCompile Include="src\lobbysaveexchange.cpp">
       <Filter>features\lobby</Filter>
     </ClCompile>
+    <ClCompile Include="src\lobbyrestart.cpp">
+      <Filter>features\lobby</Filter>
+    </ClCompile>
+    <ClCompile Include="src\menurestartnative.cpp">
+      <Filter>features\lobby</Filter>
+    </ClCompile>
     <ClCompile Include="src\lobbysaveresume.cpp">
       <Filter>features\lobby</Filter>
     </ClCompile>
@@ -2799,6 +2805,12 @@
       <Filter>features\lobby</Filter>
     </ClInclude>
     <ClInclude Include="include\lobbysaveexchange.h">
+      <Filter>features\lobby</Filter>
+    </ClInclude>
+    <ClInclude Include="include\lobbyrestart.h">
+      <Filter>features\lobby</Filter>
+    </ClInclude>
+    <ClInclude Include="include\menurestartnative.h">
       <Filter>features\lobby</Filter>
     </ClInclude>
     <ClInclude Include="include\lobbysaveresume.h">

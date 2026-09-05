@@ -37,6 +37,7 @@ public:
     bool addClient(const SLNet::RakNetGUID& guid, const SLNet::RakString& name);
     bool removeClient(const SLNet::RakNetGUID& guid);
     bool removeClient(const SLNet::RakString& name);
+    std::map<SLNet::RakNetGUID, SLNet::RakString> getRemoteClients() const;
 
 protected:
     // IMqNetPlayerClient
@@ -56,7 +57,6 @@ protected:
                                         bool allowJoin);
 
 private:
-    RemoteClients getRemoteClients() const;
     SLNet::RakNetGUID getRemoteClientGuid(std::uint32_t id) const;
 
     class PeerCallback : public NetPeerCallback

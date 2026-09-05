@@ -19,6 +19,7 @@
 
 #include "netcustomplayer.h"
 #include "d2string.h"
+#include "lobbyrestart.h"
 #include "mempool.h"
 #include "mqnetplayer.h"
 #include "mqnetreception.h"
@@ -177,6 +178,9 @@ void CNetCustomPlayer::postMessageToReceive(const game::NetMessageHeader* messag
                                             std::size_t availableBytes,
                                             std::uint32_t idFrom)
 {
+    if (lobbyRestartBlocksGameMessages()) {
+        return;
+    }
     if (!isValidMessage(message, availableBytes, game::netMessageNormalType)) {
         getLogger()->warn(__FUNCTION__ ": refusing invalid game message from 0x{:x}", idFrom);
         return;
@@ -200,6 +204,9 @@ void CNetCustomPlayer::postMessageToReceive(const game::NetMessageHeader* messag
 bool CNetCustomPlayer::sendRemoteMessage(const game::NetMessageHeader* message,
                                          const SLNet::RakNetGUID& to) const
 {
+    if (lobbyRestartBlocksGameMessages()) {
+        return true;
+    }
     getLogger()->debug(__FUNCTION__ ": '{:s}' to 0x{:x}", message->messageClassName,
                        getClientId(to));
 
@@ -216,6 +223,9 @@ bool CNetCustomPlayer::sendRemoteMessage(const game::NetMessageHeader* message,
 bool CNetCustomPlayer::sendRemoteMessage(const game::NetMessageHeader* message,
                                          const RemoteClients& to) const
 {
+    if (lobbyRestartBlocksGameMessages()) {
+        return true;
+    }
     getLogger()->debug(__FUNCTION__ ": '{:s}' to {:d} recipient(s)", message->messageClassName,
                        to.size());
 
@@ -237,6 +247,9 @@ bool CNetCustomPlayer::sendRemoteMessage(const game::NetMessageHeader* message,
 
 bool CNetCustomPlayer::sendHostMessage(const game::NetMessageHeader* message) const
 {
+    if (lobbyRestartBlocksGameMessages()) {
+        return true;
+    }
     getLogger()->debug(__FUNCTION__ ": '{:s}' to 0x{:x}", message->messageClassName, m_id);
 
     auto msg = const_cast<game::NetMessageHeader*>(message);

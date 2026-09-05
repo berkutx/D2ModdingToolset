@@ -28,6 +28,7 @@
 #include "generatorsettings.h"
 #include "globaldata.h"
 #include "image2outline.h"
+#include "interfaceutils.h"
 #include "listbox.h"
 #include "mapgenerator.h"
 #include "maptemplatereader.h"
@@ -44,6 +45,7 @@
 #include "utils.h"
 #include "waitgenerationinterf.h"
 #include <chrono>
+#include <optional>
 #include <set>
 #include <sol/sol.hpp>
 #include <spdlog/spdlog.h>
@@ -69,6 +71,19 @@ static const int manaSpinStep{50};
 static game::RttiInfo<game::CMenuBaseVftable> menuRttiInfo;
 
 static std::unique_ptr<NativeGameInfo> gameInfo;
+
+struct RestartScenarioSnapshot
+{
+    rsg::MapTemplate scenarioTemplate;
+    std::string templateName;
+    std::string roomName;
+    std::string password;
+    std::string playerName;
+    std::time_t lastSeed{};
+};
+
+static std::optional<RestartScenarioSnapshot> restartScenario;
+static RestartScenarioCompletion pendingRestartCompletion{};
 
 /** Maximum number of attempts to generate scenario map. */
 static constexpr const std::uint32_t generationAttemptsMax{50};
@@ -405,6 +420,15 @@ static void removePopup(CMenuRandomScenario* menu)
     }
 }
 
+static void completeRestartScenarioGeneration(CMenuRandomScenario* menu,
+                                              RestartScenarioGenerationResult result)
+{
+    auto completion = std::exchange(menu->restartCompletion, nullptr);
+    if (completion) {
+        completion(menu, result);
+    }
+}
+
 /** Updates menu UI according to selected index in templates list box. */
 static void updateMenuUi(CMenuRandomScenario* menu, int selectedIndex)
 {
@@ -665,6 +689,7 @@ static void generateScenario(CMenuRandomScenario* menu, std::time_t seed)
             }
 
             // Successfully generated, save results
+            menu->generatedSeed = seed;
             menu->scenario = std::move(scenario);
             menu->generator = std::make_unique<rsg::MapGenerator>(std::move(generator));
 
@@ -743,6 +768,23 @@ static void __fastcall waitGenerationResults(CMenuRandomScenario* menu, int /*%e
         if (!menu->scenario) {
             // This should never happen
             showMessageBox("BUG!\nGeneration completed, but no scenario was created");
+            if (menu->restartGeneration) {
+                completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Error);
+            }
+            return;
+        }
+
+        if (menu->restartGeneration) {
+            try {
+                prepareToStartRandomScenario(menu, true);
+            } catch (const std::exception& e) {
+                spdlog::error(e.what());
+                showMessageBox(e.what());
+                completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Error);
+                return;
+            }
+
+            completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Success);
             return;
         }
 
@@ -761,6 +803,9 @@ static void __fastcall waitGenerationResults(CMenuRandomScenario* menu, int /*%e
         }
 
         showMessageBox(message);
+        if (menu->restartGeneration) {
+            completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Error);
+        }
         return;
     }
 
@@ -775,7 +820,15 @@ static void __fastcall waitGenerationResults(CMenuRandomScenario* menu, int /*%e
         }
 
         showMessageBox(message);
+        if (menu->restartGeneration) {
+            completeRestartScenarioGeneration(menu,
+                                              RestartScenarioGenerationResult::LimitExceeded);
+        }
         return;
+    }
+
+    if (status == GenerationStatus::Canceled && menu->restartGeneration) {
+        completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Canceled);
     }
 }
 
@@ -939,15 +992,14 @@ static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /
         // Roll actual races instead of random
         settings.replaceRandomRaces(rnd);
 
-        // Capture the template at the start of generation.
+        thisptr->scenarioTemplateName =
+            std::filesystem::path(templates[selectedIndex].filename).filename().string();
+
+        // Record the template identity at the start of generation.
         if (auto* service = CNetCustomService::get()) {
-            const auto templateName = std::filesystem::path(templates[selectedIndex].filename)
-                                          .filename()
-                                          .string();
+            spdlog::info("Starting generation using template '{}'", thisptr->scenarioTemplateName);
 
-            spdlog::info("Starting generation using template '{}'", templateName);
-
-            service->setTemplateInfo(templateName);
+            service->setTemplateInfo(thisptr->scenarioTemplateName);
         }
 
 
@@ -974,6 +1026,71 @@ static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /
         showMessageBox(e.what());
         return;
     }
+}
+
+bool hasRestartScenario()
+{
+    return restartScenario.has_value();
+}
+
+void clearRestartScenario()
+{
+    pendingRestartCompletion = nullptr;
+    restartScenario.reset();
+}
+
+bool prepareRestartScenarioGeneration(RestartScenarioCompletion completion)
+{
+    if (!restartScenario || !completion || pendingRestartCompletion) {
+        return false;
+    }
+
+    pendingRestartCompletion = completion;
+    return true;
+}
+
+bool startPreparedRestartScenarioGeneration(CMenuRandomScenario* menu)
+{
+    if (!menu || !restartScenario || !pendingRestartCompletion
+        || menu->generatorThread.joinable()) {
+        return false;
+    }
+
+    menu->scenarioTemplate = restartScenario->scenarioTemplate;
+    menu->scenarioTemplateName = restartScenario->templateName;
+
+    auto dialog = game::CMenuBaseApi::get().getDialogInterface(menu);
+    setEditBoxText(dialog, "EDIT_GAME", restartScenario->roomName.c_str(), false);
+    setEditBoxText(dialog, "EDIT_PASSWORD", restartScenario->password.c_str(), false);
+    setEditBoxText(dialog, "EDIT_NAME", restartScenario->playerName.c_str(), false);
+
+    menu->restartCompletion = std::exchange(pendingRestartCompletion, nullptr);
+    menu->restartGeneration = true;
+    menu->startScenario = nullptr;
+    menu->scenario.reset(nullptr);
+    menu->generator.reset(nullptr);
+
+    std::time_t seed{std::time(nullptr)};
+    if (seed <= restartScenario->lastSeed) {
+        seed = restartScenario->lastSeed + 1;
+    }
+
+    menu->popup = createWaitGenerationInterf(menu, onGenerationCanceled);
+    showInterface(menu->popup);
+
+    menu->generationStatus = GenerationStatus::NotStarted;
+    menu->generatedSeed = 0;
+    menu->cancelGeneration = false;
+    createTimerEvent(&menu->uiEvent, menu, waitGenerationResults, 50);
+
+    try {
+        menu->generatorThread = std::thread([menu, seed]() { generateScenario(menu, seed); });
+    } catch (const std::exception& e) {
+        spdlog::error(e.what());
+        menu->generationStatus = GenerationStatus::Error;
+    }
+
+    return true;
 }
 
 static void setupMenuUi(CMenuRandomScenario* menu, const char* dialogName)
@@ -1152,6 +1269,27 @@ void prepareToStartRandomScenario(CMenuRandomScenario* menu, bool networkGame)
     const auto scenarioFilePath{exportsFolder() / "Random scenario.sg"};
     // Serialize scenario so it can be read from disk later by game
     menu->scenario->serialize(scenarioFilePath);
+
+    if (networkGame) {
+        if (menu->restartGeneration) {
+            if (restartScenario) {
+                restartScenario->lastSeed = menu->generatedSeed;
+            }
+        } else if (CNetCustomService::get()) {
+            auto dialog = game::CMenuBaseApi::get().getDialogInterface(menu);
+            const auto copyEditText = [dialog](const char* control) {
+                const auto text = getEditBoxText(dialog, control);
+                return std::string{text ? text : ""};
+            };
+
+            restartScenario = RestartScenarioSnapshot{menu->scenarioTemplate,
+                                                      menu->scenarioTemplateName,
+                                                      copyEditText("EDIT_GAME"),
+                                                      copyEditText("EDIT_PASSWORD"),
+                                                      copyEditText("EDIT_NAME"),
+                                                      menu->generatedSeed};
+        }
+    }
 
     using namespace game;
 

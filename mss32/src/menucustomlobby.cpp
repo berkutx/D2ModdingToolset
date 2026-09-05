@@ -69,6 +69,10 @@ namespace hooks {
 
 
 CMenuCustomLobby::CMenuCustomLobby(game::CMenuPhase* menuPhase)
+    : CMenuCustomLobby(menuPhase, false)
+{ }
+
+CMenuCustomLobby::CMenuCustomLobby(game::CMenuPhase* menuPhase, bool restartJoin)
     : CMenuCustomBase(this)
     , m_peerCallback(this)
     , m_roomsCallback(this)
@@ -80,6 +84,9 @@ CMenuCustomLobby::CMenuCustomLobby(game::CMenuPhase* menuPhase)
     , m_roomsUpdateEvent{}
     , m_usersUpdateEvent{}
     , m_chatMessageRegenEvent{}
+    , m_restartJoin{restartJoin}
+    , m_restartJoinPending{false}
+    , m_restartJoinCompletion{nullptr}
 {
     using namespace game;
 
@@ -100,12 +107,22 @@ CMenuCustomLobby::CMenuCustomLobby(game::CMenuPhase* menuPhase)
     }
     this->vftable = &rttiInfo.vftable;
 
-    menuBaseApi.createMenu(this, dialogName);
+    if (!restartJoin) {
+        menuBaseApi.createMenu(this, dialogName);
+    }
 
     auto service = CNetCustomService::get();
     initializeNetMsgEntries();
-    service->addPeerCallback(&m_peerCallback);
-    service->addRoomsCallback(&m_roomsCallback);
+    if (service) {
+        service->addPeerCallback(&m_peerCallback);
+        if (!restartJoin) {
+            service->addRoomsCallback(&m_roomsCallback);
+        }
+    }
+
+    if (restartJoin) {
+        return;
+    }
 
     initializeChatControls();
     initializeUserControls();
@@ -149,6 +166,39 @@ void __fastcall CMenuCustomLobby::destructor(CMenuCustomLobby* thisptr, int /*%e
         spdlog::debug("Free CMenuCustomLobby memory");
         game::Memory::get().freeNonZero(thisptr);
     }
+}
+
+game::CMenuBase* __stdcall createRestartJoinMenu(game::CMenuPhase* menuPhase)
+{
+    auto menu = (CMenuCustomLobby*)game::Memory::get().allocate(sizeof(CMenuCustomLobby));
+    return new (menu) CMenuCustomLobby(menuPhase, true);
+}
+
+bool beginRestartJoin(CMenuCustomLobby* menu,
+                      const SLNet::RakNetGUID& hostGuid,
+                      const char* roomName,
+                      int maxPlayers,
+                      RestartJoinCompletion completion)
+{
+    if (!completion) {
+        return false;
+    }
+
+    if (!menu || !menu->m_restartJoin || menu->m_restartJoinPending) {
+        completion(false);
+        return false;
+    }
+
+    menu->m_restartJoinCompletion = completion;
+    menu->m_restartJoinPending = true;
+
+    if (hostGuid == SLNet::UNASSIGNED_RAKNET_GUID || !roomName || !*roomName || maxPlayers < 1
+        || maxPlayers > 4 || !menu->joinServer(hostGuid, roomName, maxPlayers)) {
+        menu->completeRestartJoin(false);
+        return false;
+    }
+
+    return true;
 }
 
 // See CMenuLobbyHandleKeyboard (Akella 0x4e3a98)
@@ -842,11 +892,20 @@ bool __fastcall CMenuCustomLobby::gameVersionMsgHandler(CMenuCustomLobby* menu,
 {
     using namespace game;
 
+    if (menu->m_restartJoin && !menu->m_restartJoinPending) {
+        return true;
+    }
+
     const auto& midgardApi = CMidgardApi::get();
 
     spdlog::debug("CGameVersionMsg received from 0x{:x}", idFrom);
 
     if (message->gameVersion != GameVersion::RiseOfTheElves) {
+        if (menu->m_restartJoin) {
+            menu->completeRestartJoin(false);
+            return true;
+        }
+
         // You are trying to join a game with a newer or an older version of the game.
         midgardApi.clearNetworkState(midgardApi.instance());
         showMessageBox(getInterfaceText("X006TA0008"));
@@ -855,7 +914,13 @@ bool __fastcall CMenuCustomLobby::gameVersionMsgHandler(CMenuCustomLobby* menu,
 
     CMenusReqInfoMsg reqInfoMsg;
     reqInfoMsg.vftable = NetMessagesApi::getMenusReqInfoVftable();
-    return midgardApi.sendNetMsgToServer(midgardApi.instance(), &reqInfoMsg);
+    const bool sent = midgardApi.sendNetMsgToServer(midgardApi.instance(), &reqInfoMsg);
+    if (!sent && menu->m_restartJoin) {
+        menu->completeRestartJoin(false);
+        return true;
+    }
+
+    return sent;
 }
 
 bool __fastcall CMenuCustomLobby::ansInfoMsgHandler(CMenuCustomLobby* menu,
@@ -865,14 +930,25 @@ bool __fastcall CMenuCustomLobby::ansInfoMsgHandler(CMenuCustomLobby* menu,
 {
     using namespace game;
 
+    if (menu->m_restartJoin && !menu->m_restartJoinPending) {
+        return true;
+    }
+
     const auto& midgardApi = CMidgardApi::get();
     const auto& listApi = RaceCategoryListApi::get();
 
     spdlog::debug("CMenusAnsInfoMsg received from 0x{:x}", idFrom);
 
-    menu->hideWaitDialog();
+    if (!menu->m_restartJoin) {
+        menu->hideWaitDialog();
+    }
 
     if (message->raceIds.length == 0) {
+        if (menu->m_restartJoin) {
+            menu->completeRestartJoin(false);
+            return true;
+        }
+
         // Could not join game.  Host did not report any available race.
         midgardApi.clearNetworkState(midgardApi.instance());
         showMessageBox(getInterfaceText("X005TA0886"));
@@ -904,7 +980,19 @@ bool __fastcall CMenuCustomLobby::ansInfoMsgHandler(CMenuCustomLobby* menu,
     allocateString(&phaseData->scenarioName, message->scenarioName);
     allocateString(&phaseData->scenarioDescription, message->scenarioDescription);
 
-    game::CMenuPhaseApi::get().switchPhase(menuPhase, MenuTransition::CustomLobby2LobbyJoin);
+    if (menu->m_restartJoin) {
+        auto completion = menu->takeRestartJoinCompletion();
+
+        // The native session path enters this switch through the same transitional phase.
+        phaseData->currentPhase = MenuPhase::Session2LobbyJoin;
+        CMenuPhaseApi::get().switchToLobbyHostJoin(menuPhase);
+
+        if (completion) {
+            completion(true);
+        }
+    } else {
+        CMenuPhaseApi::get().switchPhase(menuPhase, MenuTransition::CustomLobby2LobbyJoin);
+    }
     return true;
 }
 
@@ -1458,23 +1546,45 @@ void CMenuCustomLobby::joinServer(SLNet::RoomDescriptor* roomDescriptor)
 {
     using namespace game;
 
-    const auto& midgardApi = CMidgardApi::get();
-
-    auto service = CNetCustomService::get();
-    CNetCustomSession* session = nullptr;
-    CNetCustomSessEnum sessEnum{getRoomModerator(roomDescriptor->roomMemberList)->guid,
-                                roomDescriptor->GetProperty(DefaultRoomColumns::TC_ROOM_NAME)->c};
-    service->vftable->joinSession(service, (IMqNetSession**)&session, (IMqNetSessEnum*)&sessEnum,
-                                  nullptr);
-
     // Add 1 to total slots because they are not counting room moderator
     auto maxPlayers = (int)roomDescriptor->GetProperty(DefaultRoomColumns::TC_TOTAL_PUBLIC_SLOTS)->i
                       + 1;
+    const auto hostGuid = getRoomModerator(roomDescriptor->roomMemberList)->guid;
+    const auto roomName = roomDescriptor->GetProperty(DefaultRoomColumns::TC_ROOM_NAME)->c;
+
+    if (!joinServer(hostGuid, roomName, maxPlayers)) {
+        const auto& midgardApi = CMidgardApi::get();
+        // Cannot connect to game session
+        midgardApi.clearNetworkState(midgardApi.instance());
+        showMessageBox(getInterfaceText("X003TA0001"));
+    }
+}
+
+bool CMenuCustomLobby::joinServer(const SLNet::RakNetGUID& hostGuid,
+                                  const char* roomName,
+                                  int maxPlayers)
+{
+    using namespace game;
+
+    auto service = CNetCustomService::get();
+    if (!service) {
+        return false;
+    }
+
+    CNetCustomSession* session = nullptr;
+    CNetCustomSessEnum sessEnum{hostGuid, roomName};
+    service->vftable->joinSession(service, (IMqNetSession**)&session, (IMqNetSessEnum*)&sessEnum,
+                                  nullptr);
+    if (!session) {
+        return false;
+    }
+
     session->setMaxPlayers(maxPlayers);
 
     auto menuPhase = menuBaseData->menuPhase;
     menuPhase->data->maxPlayers = maxPlayers;
 
+    const auto& midgardApi = CMidgardApi::get();
     auto midgard = midgardApi.instance();
     auto& currentSession = midgard->data->netSession;
     if (currentSession) {
@@ -1487,10 +1597,26 @@ void CMenuCustomLobby::joinServer(SLNet::RoomDescriptor* roomDescriptor)
 
     CMenusReqVersionMsg reqVersionMsg;
     reqVersionMsg.vftable = NetMessagesApi::getMenusReqVersionVftable();
-    if (!midgardApi.sendNetMsgToServer(midgard, &reqVersionMsg)) {
-        // Cannot connect to game session
-        midgardApi.clearNetworkState(midgard);
-        showMessageBox(getInterfaceText("X003TA0001"));
+    return midgardApi.sendNetMsgToServer(midgard, &reqVersionMsg);
+}
+
+RestartJoinCompletion CMenuCustomLobby::takeRestartJoinCompletion()
+{
+    if (!m_restartJoinPending) {
+        return nullptr;
+    }
+
+    m_restartJoinPending = false;
+    auto completion = m_restartJoinCompletion;
+    m_restartJoinCompletion = nullptr;
+    return completion;
+}
+
+void CMenuCustomLobby::completeRestartJoin(bool success)
+{
+    auto completion = takeRestartJoinCompletion();
+    if (completion) {
+        completion(success);
     }
 }
 
@@ -1627,6 +1753,13 @@ void CMenuCustomLobby::PeerCallback::onPacketReceived(DefaultMessageIDTypes type
                                                       SLNet::RakPeerInterface* peer,
                                                       const SLNet::Packet* packet)
 {
+    if (m_menu->m_restartJoin) {
+        if (type == ID_DISCONNECTION_NOTIFICATION || type == ID_CONNECTION_LOST) {
+            m_menu->completeRestartJoin(false);
+        }
+        return;
+    }
+
     switch (type) {
     case ID_LOBBY_CHAT_MESSAGE: {
         m_menu->addChatMessage(CNetCustomService::get()->readChatMessage(packet));
