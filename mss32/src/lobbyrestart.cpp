@@ -33,6 +33,7 @@
 #include <map>
 #include <mutex>
 #include <spdlog/spdlog.h>
+#include <utility>
 
 namespace hooks {
 namespace {
@@ -73,9 +74,14 @@ struct Restart
     bool launchAllowed{};
     bool loadedSent{};
     bool refreshSeen{};
+    bool newScenarioReceived{};
+    unsigned int preScenarioDeltaCount{};
+    std::string failureReason;
 };
 
 Restart restart;
+// Native teardown resets Restart before the replacement lobby menu is ready.
+std::string pendingFailureNotice;
 // A native server worker can still send while the UI is clearing the previous world.
 std::atomic_bool blockGameMessages{};
 std::atomic_bool replaySetup{};
@@ -151,9 +157,10 @@ void showWait(const wchar_t* text)
 
 void fail(const char* reason, bool notifyServer = true)
 {
-    if (restart.stage == Stage::Returning) {
+    if (restart.stage == Stage::Failed || restart.stage == Stage::Returning) {
         return;
     }
+    restart.failureReason = reason;
     spdlog::warn("Lobby restart {} failed: {}", restart.token, reason);
     if (notifyServer) {
         send(Operation::Abort);
@@ -387,6 +394,9 @@ bool processLobbyRestart()
         restart.stage = Stage::Returning;
         if (postStartMenu()) {
             spdlog::info("Lobby restart {}: returning to lobby after failure", restart.token);
+            pendingFailureNotice =
+                gameText(L"\u0420\u0435\u0441\u0442\u0430\u0440\u0442 \u043d\u0435 \u0432\u044b\u043f\u043e\u043b\u043d\u0435\u043d.\n\u041f\u0440\u0438\u0447\u0438\u043d\u0430: ")
+                + restart.failureReason;
         } else {
             restart.stage = Stage::Failed;
         }
@@ -462,13 +472,15 @@ bool processLobbyRestart()
             restart.querySent = true;
             if (!requestRestartSetupInfo()) {
                 fail("cannot query restored native setup");
+                return true;
             }
         }
         if (matches && !restart.setupReadySent) {
             restart.setupReadySent = send(Operation::SetupReady);
         }
         if (restart.setupReadySent && (!restart.host || restart.launchAllowed)
-            && pressRestartNativeStartButton(phase)) {
+            && pressRestartNativeStartButton(phase) && restart.stage == Stage::SettingUp) {
+            // A native callback can pump messages and receive a restart cancellation.
             restart.stage = Stage::Launching;
             closeWait();
         }
@@ -493,6 +505,14 @@ void finishLobbyRestartMenuReturn()
         } else {
             resetLobbyRestart();
         }
+    }
+}
+
+void publishLobbyRestartFailureNotice()
+{
+    auto notice = std::exchange(pendingFailureNotice, {});
+    if (auto service = CNetCustomService::get(); service && !notice.empty()) {
+        service->enqueueSystemNotice(std::move(notice));
     }
 }
 
@@ -571,35 +591,57 @@ void observeLobbyRestartSetupInfo(const game::NetMessageHeader* message)
                    && readInt(info + 8) == readInt(lord);
 }
 
-bool allowLobbyRestartClientMessage(const game::NetMessageHeader* message)
+LobbyRestartMessageAction checkLobbyRestartClientMessage(const game::NetMessageHeader* message)
 {
+    using Action = LobbyRestartMessageAction;
     if (!isLobbyRestartActive()) {
-        return true;
+        return Action::Receive;
     }
     const bool refresh = isMessage(message, ".?AVCRefreshInfo@@");
+    const bool erase = isMessage(message, ".?AVCCmdEraseObjMsg@@");
+    const bool objectDelta = refresh || erase;
     const bool newScenario = isMessage(message, ".?AVCNewScenarioMsg@@");
     const bool startScenario = isMessage(message, ".?AVCStartScenarioMsg@@");
-    if (!refresh && !newScenario && !startScenario) {
-        return true;
+    if (!objectDelta && !newScenario && !startScenario) {
+        return Action::Receive;
     }
     auto midgard = game::CMidgardApi::get().instance();
     auto client = midgard && midgard->data ? midgard->data->client : nullptr;
     auto cache = client && client->core.data ? client->core.data->dataCache : nullptr;
-    if (newScenario || startScenario || !restart.refreshSeen || !cache) {
-        spdlog::info("Lobby restart {} pid {}: dispatch {} stage {} cache {:p}",
-                     restart.token, GetCurrentProcessId(), message->messageClassName,
-                     static_cast<int>(restart.stage), static_cast<void*>(cache));
+    if (objectDelta && !restart.newScenarioReceived) {
+        // Host startup broadcasts object changes while joiners are still in setup.
+        // Each joiner gets its own NewScenario and a full object snapshot afterwards
+        // (Russobit 0x421d3a -> 0x4218ca). Discard only deltas preceding that boundary,
+        // including queued ones that survive the transition into the game client.
+        ++restart.preScenarioDeltaCount;
+        if (restart.preScenarioDeltaCount == 1) {
+            spdlog::info("Lobby restart {} pid {}: discard pre-scenario {} stage {} client {:p}",
+                         restart.token, GetCurrentProcessId(), message->messageClassName,
+                         static_cast<int>(restart.stage), static_cast<void*>(client));
+        }
+        return Action::Discard;
     }
-    if (refresh) {
+    if (newScenario) {
+        restart.newScenarioReceived = true;
+        spdlog::info("Lobby restart {}: native bootstrap begins after {} pre-scenario deltas",
+                     restart.token, restart.preScenarioDeltaCount);
+    }
+    if (newScenario || startScenario || !restart.refreshSeen || !cache) {
+        spdlog::info("Lobby restart {} pid {}: dispatch {} stage {} client {:p} cache {:p}",
+                     restart.token, GetCurrentProcessId(), message->messageClassName,
+                     static_cast<int>(restart.stage), static_cast<void*>(client),
+                     static_cast<void*>(cache));
+    }
+    if (objectDelta) {
         restart.refreshSeen = true;
         // Russobit CRefreshInfo applies objects directly to dataCache (0x41799e).
-        // CNewScenarioMsg must have created it first; dropping a refresh would lose map state.
+        // After NewScenario no object changes may be lost or applied to an absent map.
         if (!cache) {
-            fail("received CRefreshInfo without a native map; aborting instead of losing objects");
-            return false;
+            fail("received object changes after NewScenario without a native map");
+            return Action::Stop;
         }
     }
-    return true;
+    return Action::Receive;
 }
 
 } // namespace hooks

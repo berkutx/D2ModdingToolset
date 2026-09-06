@@ -42,14 +42,23 @@ bool retainLobbyRoomForRestart();
 bool isLobbyRestartMenuTransition();
 void enterLobbyRestartMenu(game::CMenuPhase* phase);
 void finishLobbyRestartMenuReturn();
+/** Called after the custom lobby UI has replaced the failed restart's native interfaces. */
+void publishLobbyRestartFailureNotice();
 void resetLobbyRestart();
 
 /** Retains the selected race/lord and replaces native default requests on the next attempt. */
 void prepareLobbyRestartSetupMessage(const game::NetMessageHeader* message,
                                      std::vector<unsigned char>& replacement);
 void observeLobbyRestartSetupInfo(const game::NetMessageHeader* message);
+enum class LobbyRestartMessageAction
+{
+    Receive,
+    Discard,
+    Stop,
+};
+
 /** Called on the client UI thread immediately before native message dispatch. */
-bool allowLobbyRestartClientMessage(const game::NetMessageHeader* message);
+LobbyRestartMessageAction checkLobbyRestartClientMessage(const game::NetMessageHeader* message);
 
 } // namespace hooks
 

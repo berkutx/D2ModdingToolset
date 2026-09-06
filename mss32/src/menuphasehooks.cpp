@@ -18,6 +18,7 @@
  */
 
 #include "menuphasehooks.h"
+#include "lobbyrestart.h"
 #include "mempool.h"
 #include "menucustomloadskirmishmulti.h"
 #include "menucustomlobby.h"
@@ -161,6 +162,7 @@ void __fastcall menuPhaseSwitchPhaseHooked(game::CMenuPhase* thisptr,
             menuPhase.showMenu(thisptr, &data->currentPhase, &data->interfManager,
                                &data->currentMenu, &data->transitionAnimation,
                                MenuPhase::CustomLobby, nullptr, &callback);
+            publishLobbyRestartFailureNotice();
             break;
         }
         case MenuPhase::CustomLobby: {

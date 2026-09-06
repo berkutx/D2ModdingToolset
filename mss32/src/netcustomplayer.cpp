@@ -322,8 +322,6 @@ game::ReceiveMessageResult __fastcall CNetCustomPlayer::receiveMessage(
         return game::ReceiveMessageResult::NoMessages;
     }
 
-    const auto& pair = thisptr->m_messages.front();
-    auto message = reinterpret_cast<const game::NetMessageHeader*>(pair.second.get());
     const auto consumeFront = [thisptr]() {
         thisptr->m_messages.pop();
         if (thisptr->m_messageTracker) {
@@ -331,34 +329,46 @@ game::ReceiveMessageResult __fastcall CNetCustomPlayer::receiveMessage(
         }
     };
 
-    if (message->messageType != game::netMessageNormalType) {
-        thisptr->getLogger()
-            ->debug(__FUNCTION__ ": message from 0x{:x} with unexpected type 0x{:x}", pair.first,
-                     message->messageType);
+    while (!thisptr->m_messages.empty()) {
+        const auto& pair = thisptr->m_messages.front();
+        auto message = reinterpret_cast<const game::NetMessageHeader*>(pair.second.get());
+        if (message->messageType != game::netMessageNormalType) {
+            thisptr->getLogger()
+                ->debug(__FUNCTION__ ": message from 0x{:x} with unexpected type 0x{:x}", pair.first,
+                         message->messageType);
+            consumeFront();
+            return game::ReceiveMessageResult::Failure;
+        }
+
+        if (message->length >= game::netMessageMaxLength) {
+            thisptr->getLogger()->debug(
+                __FUNCTION__ ": message from 0x{:x} with length {:d} that exeeds maximum of {:d}",
+                pair.first, message->length, game::netMessageMaxLength);
+            consumeFront();
+            return game::ReceiveMessageResult::Failure;
+        }
+
+        if (thisptr->m_id != game::serverNetPlayerId) {
+            const auto action = checkLobbyRestartClientMessage(message);
+            if (action == LobbyRestartMessageAction::Stop) {
+                return game::ReceiveMessageResult::NoMessages;
+            }
+            if (action == LobbyRestartMessageAction::Discard) {
+                consumeFront();
+                continue;
+            }
+        }
+
+        *idFrom = pair.first;
+        std::memcpy(buffer, message, message->length);
         consumeFront();
-        return game::ReceiveMessageResult::Failure;
+
+        thisptr->m_logger
+            ->debug(__FUNCTION__ ": '{:s}' from 0x{:x} with length {:d}, messages remain = {:d}",
+                    buffer->messageClassName, *idFrom, buffer->length, thisptr->m_messages.size());
+        return game::ReceiveMessageResult::Success;
     }
-
-    if (message->length >= game::netMessageMaxLength) {
-        thisptr->getLogger()->debug(
-            __FUNCTION__ ": message from 0x{:x} with length {:d} that exeeds maximum of {:d}",
-            pair.first, message->length, game::netMessageMaxLength);
-        consumeFront();
-        return game::ReceiveMessageResult::Failure;
-    }
-
-    if (thisptr->m_id != game::serverNetPlayerId && !allowLobbyRestartClientMessage(message)) {
-        return game::ReceiveMessageResult::NoMessages;
-    }
-
-    *idFrom = pair.first;
-    std::memcpy(buffer, message, message->length);
-    consumeFront();
-
-    thisptr->m_logger
-        ->debug(__FUNCTION__ ": '{:s}' from 0x{:x} with length {:d}, messages remain = {:d}",
-                buffer->messageClassName, *idFrom, buffer->length, thisptr->m_messages.size());
-    return game::ReceiveMessageResult::Success;
+    return game::ReceiveMessageResult::NoMessages;
 }
 
 void __fastcall CNetCustomPlayer::setNetSystem(CNetCustomPlayer* thisptr,

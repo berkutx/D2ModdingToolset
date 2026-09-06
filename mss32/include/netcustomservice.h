@@ -272,6 +272,9 @@ public:
     void sendChatMessage(const char* text);
     ChatMessage readChatMessage(const SLNet::Packet* packet);
 
+    /** Shows a game-encoded notice after pending native transitions have finished. */
+    void enqueueSystemNotice(std::string notice);
+
     /** Requests online user list. Handle ID_LOBBY_GET_ONLINE_USERS_RESPONSE in peer callback. */
     void queryOnlineUsers();
     std::vector<UserInfo> readOnlineUsers(const SLNet::Packet* packet);
@@ -424,7 +427,6 @@ private:
                          LobbyProtocol::SaveRequest& request) const;
     bool readSaveStoredAck(const SLNet::Packet* packet, std::uint64_t& saveId) const;
     bool readSystemNotice(const SLNet::Packet* packet, std::string& notice) const;
-    void enqueueSystemNotice(std::string notice);
     void processDeferredLobbyState();
     void processPendingMatchEnd();
     void processPendingSystemNotices();
