@@ -42,7 +42,7 @@ bool retainLobbyRoomForRestart();
 bool isLobbyRestartMenuTransition();
 void enterLobbyRestartMenu(game::CMenuPhase* phase);
 void finishLobbyRestartMenuReturn();
-/** Called after the custom lobby UI has replaced the failed restart's native interfaces. */
+/** Called after the lobby or main menu has replaced the failed restart's native interfaces. */
 void publishLobbyRestartFailureNotice();
 void resetLobbyRestart();
 

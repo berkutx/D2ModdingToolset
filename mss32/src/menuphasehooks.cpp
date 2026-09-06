@@ -123,10 +123,12 @@ void __fastcall menuPhaseSwitchPhaseHooked(game::CMenuPhase* thisptr,
             spdlog::debug("Current is Credits2Main");
             data->currentPhase = MenuPhase::Back2Main;
             menuPhase.switchToMain(thisptr);
+            publishLobbyRestartFailureNotice();
             break;
         case MenuPhase::Back2Main:
             spdlog::debug("Current is Back2Main");
             menuPhase.switchToMain(thisptr);
+            publishLobbyRestartFailureNotice();
             break;
         case MenuPhase::Main:
             spdlog::debug("Current is Main");

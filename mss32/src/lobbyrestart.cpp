@@ -511,8 +511,15 @@ void finishLobbyRestartMenuReturn()
 void publishLobbyRestartFailureNotice()
 {
     auto notice = std::exchange(pendingFailureNotice, {});
-    if (auto service = CNetCustomService::get(); service && !notice.empty()) {
+    if (notice.empty()) {
+        return;
+    }
+    if (auto service = CNetCustomService::get()) {
         service->enqueueSystemNotice(std::move(notice));
+    } else {
+        // A disconnected lobby service has already been destroyed. The main menu is
+        // ready now; the standard message-box handler retains no old menu pointer.
+        showMessageBox(notice);
     }
 }
 

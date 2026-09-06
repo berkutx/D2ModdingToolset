@@ -113,11 +113,9 @@ CMenuCustomLobby::CMenuCustomLobby(game::CMenuPhase* menuPhase, bool restartJoin
 
     auto service = CNetCustomService::get();
     initializeNetMsgEntries();
-    if (service) {
+    if (service && !restartJoin) {
         service->addPeerCallback(&m_peerCallback);
-        if (!restartJoin) {
-            service->addRoomsCallback(&m_roomsCallback);
-        }
+        service->addRoomsCallback(&m_roomsCallback);
     }
 
     if (restartJoin) {
@@ -1753,13 +1751,6 @@ void CMenuCustomLobby::PeerCallback::onPacketReceived(DefaultMessageIDTypes type
                                                       SLNet::RakPeerInterface* peer,
                                                       const SLNet::Packet* packet)
 {
-    if (m_menu->m_restartJoin) {
-        if (type == ID_DISCONNECTION_NOTIFICATION || type == ID_CONNECTION_LOST) {
-            m_menu->completeRestartJoin(false);
-        }
-        return;
-    }
-
     switch (type) {
     case ID_LOBBY_CHAT_MESSAGE: {
         m_menu->addChatMessage(CNetCustomService::get()->readChatMessage(packet));

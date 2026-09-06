@@ -18,6 +18,7 @@
  */
 
 #include "netcustomplayerserver.h"
+#include "lobbyrestart.h"
 #include "mempool.h"
 #include "mqnetreception.h"
 #include "mqnetsystem.h"
@@ -108,9 +109,12 @@ bool CNetCustomPlayerServer::removeClient(const SLNet::RakNetGUID& guid)
         }
     }
 
-    // TODO: this should be called from the server's thread (from ReceiveMessage method)
-    auto system = getSystem();
-    system->vftable->onPlayerDisconnected(system, getClientId(guid));
+    // Keep the membership update, but let the lobby's Abort own restart teardown.
+    if (!isLobbyRestartActive()) {
+        // TODO: this should be called from the server's thread (from ReceiveMessage method)
+        auto system = getSystem();
+        system->vftable->onPlayerDisconnected(system, getClientId(guid));
+    }
     return true;
 }
 
@@ -134,9 +138,11 @@ bool CNetCustomPlayerServer::removeClient(const SLNet::RakString& name)
         return false;
     }
 
-    // TODO: this should be called from the server's thread (from ReceiveMessage method)
-    auto system = getSystem();
-    system->vftable->onPlayerDisconnected(system, getClientId(guid));
+    if (!isLobbyRestartActive()) {
+        // TODO: this should be called from the server's thread (from ReceiveMessage method)
+        auto system = getSystem();
+        system->vftable->onPlayerDisconnected(system, getClientId(guid));
+    }
     return true;
 }
 
