@@ -18,8 +18,8 @@ namespace worldactions {
  * Move the stack <stackId> toward tile (x, y).
  *
  * The path is built with the GAME'S OWN per-tile functions (computeMovementCost as the edge weight,
- * stackCanMoveToPosition as passability) and annotated by the native PathInfoListApi::populateFromPath,
- * then issued via CPhaseGameApi::sendStackMoveMsg, the exact call the strategic-map click handler makes.
+ * stackCanMoveToPosition as passability), then issued with cumulative path costs via
+ * CPhaseGameApi::sendStackMoveMsg, the exact call the strategic-map click handler makes.
  * Only the visit order of the search is ours; every cost/passability decision is a native game function.
  *
  * If (x, y) is not directly reachable, the stack moves toward it as far as it can (mirrors a player

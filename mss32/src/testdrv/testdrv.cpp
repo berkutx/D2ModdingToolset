@@ -2,8 +2,7 @@
  * Publishable test/logging system for the Disciples 2 modding toolset.
  * Installer / entry point. See testdrv/testdrv.h.
  *
- * Compile-gated by D2_TESTDRV: without the macro the whole file compiles to
- * nothing and the build is byte-identical to vanilla.
+ * Compile-gated by D2_TESTDRV: no test code is compiled without the macro.
  */
 
 #ifdef D2_TESTDRV

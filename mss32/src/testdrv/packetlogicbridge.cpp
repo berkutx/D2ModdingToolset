@@ -2,8 +2,7 @@
  * Publishable test/logging system for the Disciples 2 modding toolset.
  * Relay client. See testdrv/packetlogicbridge.h.
  *
- * Compile-gated by D2_TESTDRV: without the macro the whole file compiles to
- * nothing and the build is byte-identical to vanilla.
+ * Compile-gated by D2_TESTDRV: no test code is compiled without the macro.
  */
 
 #ifdef D2_TESTDRV
@@ -45,16 +44,7 @@ enum class Op : uint16_t
 {
     Hello = 0x0001,
     HelloAck = 0x0002,
-    InvokeButton = 0x0300,   // <- dispatcher: click a button (handled by the autonav executor)
-    SetSelection = 0x0301,   // <- dispatcher: set a listbox selection (autonav executor)
-    SetSpin = 0x0302,        // <- dispatcher: set a spin-button option (autonav executor)
-    SetEditText = 0x0303,    // <- dispatcher: set an edit-box's text (autonav executor)
     CommandResult = 0x0304,  // -> relay: outcome of a dispatcher command (u32 seq | u8 found)
-    MoveStack = 0x0305,      // <- dispatcher: move a stack to a tile (autonav -> worldactions); forwarded by number
-    InvokeToggle = 0x0306,   // <- dispatcher: flip a toggle button (e.g. TOG_AUTOBATTLE); forwarded by number
-    HireMerc = 0x0307,       // <- dispatcher: buy a merc from a camp into a stack (CSiteBuyUnitMsg, autonav -> worldactions); forwarded by number
-    MoveGroupUnit = 0x0308,  // <- dispatcher: move/swap a unit between formation slots (CStackSwapUnitMsg); forwarded by number
-    DismissUnit = 0x0309,    // <- dispatcher: dismiss a non-leader unit from a stack (CStackDismissUnitMsg); forwarded by number
 
     UiSnapshot = 0x0410,     // -> relay: current dialog + all its widgets with state (JSON)
     WorldSnapshot = 0x0411,  // -> relay: players' resources + all map stacks (JSON, world reporter)
@@ -64,17 +54,16 @@ enum class Op : uint16_t
 std::atomic<HANDLE> g_pipe{INVALID_HANDLE_VALUE};
 std::atomic<SOCKET> g_sock{INVALID_SOCKET};
 std::atomic<bool> g_running{false};
-std::thread g_thread;
 HMODULE g_self = nullptr;
 CommandCallback g_command_cb = nullptr;
 
-struct SendItem
+struct CommandResult
 {
-    Op op;
-    std::vector<uint8_t> payload;
+    uint32_t seq;
+    bool found;
 };
 std::mutex g_send_mutex;
-std::deque<SendItem> g_send_queue;
+std::deque<CommandResult> g_send_queue;
 constexpr size_t kSendQueueMax = 256;
 
 bool has_connection()
@@ -210,21 +199,14 @@ bool read_message(Op& out_op, std::vector<uint8_t>& out_payload)
     return true;
 }
 
-bool enqueue(Op opcode, const void* payload, uint32_t size)
+bool send_changed_snapshot(bool (*copy)(std::string&, uint32_t&), Op op, uint32_t& lastEpoch)
 {
-    if (!g_running.load())
-        return false;
-    if (g_pipe.load() == INVALID_HANDLE_VALUE && g_sock.load() == INVALID_SOCKET)
-        return false;
-    SendItem item;
-    item.op = opcode;
-    if (size > 0 && payload)
-        item.payload.assign((const uint8_t*)payload, (const uint8_t*)payload + size);
-    std::lock_guard<std::mutex> lk(g_send_mutex);
-    if (g_send_queue.size() >= kSendQueueMax)
-        g_send_queue.pop_front(); // drop oldest, preserve liveness
-    g_send_queue.push_back(std::move(item));
-    return true;
+    std::string snapshot;
+    uint32_t epoch = 0;
+    if (!copy(snapshot, epoch) || epoch == lastEpoch)
+        return true;
+    lastEpoch = epoch;
+    return write_message(op, snapshot.data(), static_cast<uint32_t>(snapshot.size()));
 }
 
 std::vector<uint8_t> build_hello_payload()
@@ -276,7 +258,7 @@ void bridge_thread_main()
         }
     } threadExit{wsaStarted};
 
-    Sleep(500); // let the loader settle before chatting on a pipe
+    Sleep(500); // retain the initial connection delay; runtime already starts outside DllMain
 
     char tcpHost[256]{};
     const DWORD hostLength =
@@ -418,52 +400,28 @@ void bridge_thread_main()
         while (g_running.load() && has_connection() && connectionOk) {
             // Epochs restart at zero after each Hello so a replacement relay receives
             // the complete current UI/world/chat state without replaying commands.
-            {
-                std::string snap;
-                uint32_t epoch = 0;
-                if (uistatereporter::copyUiSnapshot(snap, epoch) && epoch != lastUiEpoch) {
-                    lastUiEpoch = epoch;
-                    connectionOk =
-                        write_message(Op::UiSnapshot, snap.data(), (uint32_t)snap.size());
-                }
-            }
-            {
-                std::string snap;
-                uint32_t epoch = 0;
-                if (connectionOk && worldreporter::copyWorldSnapshot(snap, epoch)
-                    && epoch != lastWorldEpoch) {
-                    lastWorldEpoch = epoch;
-                    connectionOk =
-                        write_message(Op::WorldSnapshot, snap.data(), (uint32_t)snap.size());
-                }
-            }
-            {
-                std::string snap;
-                uint32_t epoch = 0;
-                if (connectionOk && lobbychatreporter::copyChatLog(snap, epoch)
-                    && epoch != lastChatEpoch) {
-                    lastChatEpoch = epoch;
-                    connectionOk =
-                        write_message(Op::LobbyChat, snap.data(), (uint32_t)snap.size());
-                }
-            }
+            connectionOk =
+                send_changed_snapshot(uistatereporter::copyUiSnapshot, Op::UiSnapshot, lastUiEpoch)
+                && send_changed_snapshot(worldreporter::copyWorldSnapshot, Op::WorldSnapshot,
+                                         lastWorldEpoch)
+                && send_changed_snapshot(lobbychatreporter::copyChatLog, Op::LobbyChat, lastChatEpoch);
             if (!connectionOk)
                 break;
 
             for (;;) {
-                SendItem item;
-                bool has = false;
+                CommandResult result;
                 {
                     std::lock_guard<std::mutex> lock(g_send_mutex);
-                    if (!g_send_queue.empty()) {
-                        item = std::move(g_send_queue.front());
-                        g_send_queue.pop_front();
-                        has = true;
-                    }
+                    if (g_send_queue.empty())
+                        break;
+                    result = g_send_queue.front();
+                    g_send_queue.pop_front();
                 }
-                if (!has)
-                    break;
-                if (!write_message(item.op, item.payload.data(), (uint32_t)item.payload.size())) {
+                // Serialize explicitly: the wire payload is five bytes, not sizeof(CommandResult).
+                uint8_t payload[5];
+                memcpy(payload, &result.seq, sizeof(result.seq));
+                payload[4] = result.found ? 1 : 0;
+                if (!write_message(Op::CommandResult, payload, sizeof(payload))) {
                     connectionOk = false;
                     break;
                 }
@@ -540,17 +498,18 @@ bool start(HMODULE selfModule)
     if (g_running.exchange(true))
         return false; // already started
     g_self = selfModule;
-    g_thread = std::thread(bridge_thread_main);
-    g_thread.detach();
+    std::thread(bridge_thread_main).detach();
     return true;
 }
 
 void send_command_result(std::uint32_t seq, bool found)
 {
-    uint8_t p[5];
-    *(uint32_t*)(p + 0) = seq;
-    p[4] = found ? 1 : 0;
-    enqueue(Op::CommandResult, p, sizeof(p)); // bridge thread writes it; non-blocking on the UI thread
+    if (!g_running.load() || !has_connection())
+        return;
+    std::lock_guard<std::mutex> lock(g_send_mutex);
+    if (g_send_queue.size() >= kSendQueueMax)
+        g_send_queue.pop_front(); // drop oldest, preserve liveness
+    g_send_queue.push_back({seq, found}); // only the bridge thread writes to the transport
 }
 
 

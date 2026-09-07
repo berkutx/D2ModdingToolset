@@ -2,8 +2,7 @@
  * Publishable test/logging system for the Disciples 2 modding toolset.
  * Headless-boot fixes. See testdrv/bootfixes.h.
  *
- * Compile-gated by D2_TESTDRV: without the macro the whole file compiles to
- * nothing and the build is byte-identical to vanilla.
+ * Compile-gated by D2_TESTDRV: no test code is compiled without the macro.
  */
 
 #ifdef D2_TESTDRV
@@ -67,50 +66,32 @@ bool writeBytes(uintptr_t va, const std::uint8_t* bytes, size_t len)
     return restored && flushed;
 }
 
-bool patchSkipIntro()
+bool patchBytes(const char* name, uintptr_t va, const std::uint8_t* expected,
+                const std::uint8_t* patch, size_t len)
 {
-    const std::uint8_t* site = reinterpret_cast<const std::uint8_t*>(kSkipIntroVA);
-    if (memcmp(site, kSkipIntroPatch, sizeof(kSkipIntroPatch)) == 0) {
-        spdlog::info("[testdrv] skip-intro already patched");
+    const auto* site = reinterpret_cast<const std::uint8_t*>(va);
+    if (memcmp(site, patch, len) == 0) {
+        spdlog::info("[testdrv] {} already patched", name);
         return true;
     }
-    if (memcmp(site, kSkipIntroExpected, sizeof(kSkipIntroExpected)) != 0) {
-        spdlog::error("[testdrv] skip-intro: bytes at {:#x} don't match expected; refusing",
-                      kSkipIntroVA);
+    if (memcmp(site, expected, len) != 0) {
+        spdlog::error("[testdrv] {}: bytes at {:#x} don't match expected; refusing", name, va);
         return false;
     }
-    if (writeBytes(kSkipIntroVA, kSkipIntroPatch, sizeof(kSkipIntroPatch))) {
-        spdlog::info("[testdrv] skip-intro patched ({:#x})", kSkipIntroVA);
-        return true;
-    }
-    spdlog::error("[testdrv] skip-intro: VirtualProtect/write failed");
-    return false;
-}
-
-bool patchFgFlag()
-{
-    const std::uint8_t* site = reinterpret_cast<const std::uint8_t*>(kFgFlagVA);
-    if (memcmp(site, kFgFlagPatch, sizeof(kFgFlagPatch)) == 0) {
-        spdlog::info("[testdrv] fg-flag already patched");
-        return true;
-    }
-    if (memcmp(site, kFgFlagExpected, sizeof(kFgFlagExpected)) != 0) {
-        spdlog::error("[testdrv] fg-flag: bytes at {:#x} don't match expected; refusing",
-                      kFgFlagVA);
+    if (!writeBytes(va, patch, len)) {
+        spdlog::error("[testdrv] {}: VirtualProtect/write failed", name);
         return false;
     }
-    std::uint8_t orig[10];
-    memcpy(orig, site, sizeof(orig));
-    if (writeBytes(kFgFlagVA, kFgFlagPatch, sizeof(kFgFlagPatch))) {
+    if (va == kFgFlagVA) {
+        // The original bytes were just checked against expected; retain the diagnostic log.
         spdlog::info("[testdrv] black-screen fg-flag patched ({:#x}); orig {:02X} {:02X} {:02X} "
                      "{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
-                     kFgFlagVA, orig[0], orig[1], orig[2], orig[3], orig[4], orig[5], orig[6],
-                     orig[7], orig[8], orig[9]);
-        return true;
+                     va, expected[0], expected[1], expected[2], expected[3], expected[4],
+                     expected[5], expected[6], expected[7], expected[8], expected[9]);
     } else {
-        spdlog::error("[testdrv] fg-flag: VirtualProtect/write failed");
-        return false;
+        spdlog::info("[testdrv] {} patched ({:#x})", name, va);
     }
+    return true;
 }
 
 } // namespace
@@ -130,9 +111,11 @@ void installEarly()
     if (blackScreen && !bytesMatchEither(kFgFlagVA, kFgFlagExpected, kFgFlagPatch,
                                          sizeof(kFgFlagExpected)))
         failFast("fg-flag preflight");
-    if (skipIntro && !patchSkipIntro())
+    if (skipIntro && !patchBytes("skip-intro", kSkipIntroVA, kSkipIntroExpected, kSkipIntroPatch,
+                                 sizeof(kSkipIntroPatch)))
         failFast("skip-intro commit");
-    if (blackScreen && !patchFgFlag())
+    if (blackScreen && !patchBytes("fg-flag", kFgFlagVA, kFgFlagExpected, kFgFlagPatch,
+                                   sizeof(kFgFlagPatch)))
         failFast("fg-flag commit");
 }
 

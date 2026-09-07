@@ -2,16 +2,15 @@
  * Publishable test/logging system for the Disciples 2 modding toolset.
  * World actions. See testdrv/worldactions.h.
  *
- * Compile-gated by D2_TESTDRV: without the macro the whole file compiles to nothing and the build is
- * byte-identical to vanilla.
+ * Compile-gated by D2_TESTDRV: absent from ordinary Debug and Release builds.
  *
  * moveStack reuses the mod's typed game layer end to end: the path is searched over the game's OWN
- * per-tile enter-cost (computeMovementCost) and passability (stackCanMoveToPosition), annotated with
- * the native PathInfoListApi::populateFromPath, and submitted with CPhaseGameApi::sendStackMoveMsg
+ * per-tile enter-cost (computeMovementCost) and passability (stackCanMoveToPosition), then submitted
+ * with cumulative path costs via CPhaseGameApi::sendStackMoveMsg
  * (the exact call the click handler issues at 0x4ce842) -> the host re-validates and applies it (move
  * points deducted, battle on contact), identical to a real player's click. Only the Dijkstra visit
  * order is ours. Mod style is null-checks, not SEH (the search allocates -> __try would be C2712);
- * crash-safety comes from the thin __try wrapper in autonav (safeMoveStack).
+ * crash-safety comes from the thin __try wrapper in autonav (safeWorldCommand).
  */
 
 #ifdef D2_TESTDRV
@@ -55,9 +54,8 @@ namespace {
 
 // --- bare game-List node helpers ---------------------------------------------------------------
 // The game exposes a typed constructor/pushBack only for IdList (List<CMidgardID>), not for
-// List<CMqPoint> / List<Pair<CMqPoint,int>>, so we build the circular-sentinel list by hand against
-// the game allocator. The game only ITERATES these lists (populateFromPath reads the raw path;
-// CStackMoveMsg deep-copies the wire path), never frees them through our `allocator`, so
+// List<Pair<CMqPoint,int>>, so we build the circular-sentinel list with the game allocator.
+// CStackMoveMsg deep-copies the wire path and never frees our nodes through `allocator`, so
 // allocator=nullptr is safe and we free our own nodes.
 template <typename T>
 void listInit(game::List<T>& list)
@@ -297,9 +295,7 @@ bool moveStack(const char* stackIdStr, int targetX, int targetY)
     if (destIdx < 0 || destIdx == startIdx)
         return false; // nowhere to go
 
-    // Reconstruct the route start..dest. The wire path is the sequence of DESTINATION tiles only: the
-    // engine never sends a move node on the stack's own tile (the current position is carried
-    // separately as `start`), so the start tile is dropped below.
+    // Reconstruct the route including the start tile, required by the wire format below.
     std::vector<CMqPoint> route;
     for (int at = destIdx; at != -1; at = parent[at]) {
         CMqPoint p;

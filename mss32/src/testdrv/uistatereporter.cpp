@@ -2,13 +2,13 @@
  * Publishable test/logging system for the Disciples 2 modding toolset.
  * UI-state reporter. See testdrv/uistatereporter.h.
  *
- * Compile-gated by D2_TESTDRV: without the macro the whole file compiles to
- * nothing and the build is byte-identical to vanilla.
+ * Compile-gated by D2_TESTDRV: absent from ordinary Debug and Release builds.
  */
 
 #ifdef D2_TESTDRV
 
 #include "testdrv/uistatereporter.h"
+#include "testdrv/json.h"
 #include "testdrv/autonav.h"
 #include "testdrv/testenv.h"
 #include "testdrv/testdrv.h"
@@ -221,44 +221,8 @@ int enumerateWidgetsRaw(game::CDialogInterf* dlg, WidgetInfo* out, int maxN)
     return n;
 }
 
-// --- JSON building (no SEH; std::string is fine here) -------------------------
-void appendJsonString(std::string& out, const char* s)
-{
-    out += '"';
-    if (s) {
-        for (const unsigned char* p = (const unsigned char*)s; *p; ++p) {
-            const unsigned char c = *p;
-            switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (c < 0x20 || c >= 0x7f) {
-                    // Escape control + non-ASCII bytes as \u00XX (Latin-1 codepoint): always valid
-                    // JSON without a cp1251 table. Names/types are ASCII; only Russian body text hits this.
-                    char buf[8];
-                    wsprintfA(buf, "\\u%04x", (unsigned)c);
-                    out += buf;
-                } else {
-                    out += (char)c;
-                }
-            }
-        }
-    }
-    out += '"';
-}
-
-void appendInt(std::string& out, const char* key, int v)
-{
-    out += '"';
-    out += key;
-    out += "\":";
-    char buf[16];
-    wsprintfA(buf, "%d", v);
-    out += buf;
-}
+using json::appendEscaped;
+using json::kvInt;
 
 // Build the snapshot for the current dialog and publish it if it changed (bumping the epoch).
 // UI-thread only: enumerateWidgetsRaw reads live game UI structures.
@@ -274,14 +238,14 @@ void rebuildSnapshot()
     std::string json;
     json.reserve(128 + (size_t)n * 80);
     json += "{\"dialog\":";
-    appendJsonString(json, dlgName);
+    appendEscaped(json, dlgName);
     json += ",\"widgets\":[";
     for (int i = 0; i < n; ++i) {
         const WidgetInfo& w = s_widgets[i];
         if (i)
             json += ',';
         json += "{\"name\":";
-        appendJsonString(json, w.name);
+        appendEscaped(json, w.name);
         json += ",\"type\":\"";
         json += kindName(w.kind);
         json += "\",\"state\":{";
@@ -291,19 +255,19 @@ void rebuildSnapshot()
             json += (w.i1 == 1) ? "true" : (w.i1 == 0 ? "false" : "null");
             break;
         case WK_listbox:
-            appendInt(json, "selected", w.i1);
+            kvInt(json, "selected", w.i1);
             json += ',';
-            appendInt(json, "total", w.i2);
+            kvInt(json, "total", w.i2);
             break;
         case WK_spin:
-            appendInt(json, "index", w.i1);
+            kvInt(json, "index", w.i1);
             json += ",\"text\":";
-            appendJsonString(json, w.text);
+            appendEscaped(json, w.text);
             break;
         case WK_edit:
         case WK_text:
             json += "\"text\":";
-            appendJsonString(json, w.text);
+            appendEscaped(json, w.text);
             break;
         default:
             break;

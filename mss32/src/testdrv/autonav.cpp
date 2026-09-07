@@ -42,6 +42,8 @@ namespace autonav {
 
 namespace {
 
+void tick();
+
 enum class NavAction
 {
     WaitDialog,   // wait until <dlg> is the current dialog (skips on timeout)
@@ -146,7 +148,7 @@ bool invokeButton(const char* dlgName, const char* btnName, std::uint32_t seq = 
 
 // Toggle a CToggleButton (e.g. DLG_BATTLE_A::TOG_AUTOBATTLE) the way a click does: flip `checked` then
 // fire its onClicked callback. invokeButton's findButton does not match toggles, hence a separate verb.
-bool invokeToggle(const char* dlgName, const char* togName, std::uint32_t seq = kNoSeq)
+void invokeToggle(const char* dlgName, const char* togName, std::uint32_t seq = kNoSeq)
 {
     game::CDialogInterf* dlg = uistatereporter::findDialog(dlgName);
     // The battle viewer (DLG_BATTLE_A) is not assignFunctor-registered, so findDialog misses it; it IS
@@ -164,21 +166,18 @@ bool invokeToggle(const char* dlgName, const char* togName, std::uint32_t seq = 
     }
     reportFound(seq, tog != nullptr);
     if (!tog)
-        return false;
-    bool ok = false;
+        return;
     __try {
         const bool newChecked = tog->data ? !tog->data->checked : true;
         game::CToggleButtonApi::get().setChecked(tog, newChecked);
         if (tog->vftable && tog->vftable->callOnClicked)
             tog->vftable->callOnClicked(tog);
         spdlog::info("[testdrv] nav toggle {}::{} -> {}", dlgName, togName, newChecked);
-        ok = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
-    return ok;
 }
 
-bool setListSelection(const char* dlgName, const char* lbName, int index, std::uint32_t seq = kNoSeq)
+void setListSelection(const char* dlgName, const char* lbName, int index, std::uint32_t seq = kNoSeq)
 {
     game::CDialogInterf* dlg = uistatereporter::findDialog(dlgName);
     game::CListBoxInterf* lb = nullptr;
@@ -189,8 +188,7 @@ bool setListSelection(const char* dlgName, const char* lbName, int index, std::u
     }
     reportFound(seq, lb != nullptr);
     if (!lb)
-        return false;
-    bool ok = false;
+        return;
     __try {
         game::CListBoxInterfApi::get().setSelectedIndex(lb, index);
         // A raw setSelectedIndex does not run the listbox callback that a real click runs. Menus
@@ -201,13 +199,11 @@ bool setListSelection(const char* dlgName, const char* lbName, int index, std::u
             callback->vftable->runCallback(callback, index);
         spdlog::info("[testdrv] nav select {}::{} = {:d} (total={:d})", dlgName, lbName, index,
                      lb->listBoxData ? lb->listBoxData->elementsTotal : -1);
-        ok = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
-    return ok;
 }
 
-bool setSpinOption(const char* dlgName, const char* spinName, int option, std::uint32_t seq = kNoSeq)
+void setSpinOption(const char* dlgName, const char* spinName, int option, std::uint32_t seq = kNoSeq)
 {
     game::CDialogInterf* dlg = uistatereporter::findDialog(dlgName);
     game::CSpinButtonInterf* spin = nullptr;
@@ -226,19 +222,16 @@ bool setSpinOption(const char* dlgName, const char* spinName, int option, std::u
         if (spin)
             spdlog::warn("[testdrv] nav spin {}::{} rejected option {:d} (total={:d})", dlgName,
                          spinName, option, optionsTotal);
-        return false;
+        return;
     }
-    bool ok = false;
     __try {
         game::CSpinButtonInterfApi::get().setSelectedOption(spin, option);
         spdlog::info("[testdrv] nav spin {}::{} = {:d}", dlgName, spinName, option);
-        ok = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
-    return ok;
 }
 
-bool setEditText(const char* dlgName, const char* editName, const char* text, std::uint32_t seq = kNoSeq)
+void setEditText(const char* dlgName, const char* editName, const char* text, std::uint32_t seq = kNoSeq)
 {
     game::CDialogInterf* dlg = uistatereporter::findDialog(dlgName);
     game::CEditBoxInterf* eb = nullptr;
@@ -249,15 +242,12 @@ bool setEditText(const char* dlgName, const char* editName, const char* text, st
     }
     reportFound(seq, eb != nullptr);
     if (!eb)
-        return false;
-    bool ok = false;
+        return;
     __try {
         game::CEditBoxInterfApi::get().setString(eb, text);
         spdlog::info("[testdrv] nav edit {}::{} = '{}'", dlgName, editName, text);
-        ok = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
-    return ok;
 }
 
 // --- dispatcher-driven remote commands ---------------------------------------
@@ -368,52 +358,26 @@ void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size
     g_remoteCmds.push_back(cmd);
 }
 
-// worldactions::moveStack reads live game objects and issues a net message; like safeRebuildWorld it
-// allocates, so it cannot host __try itself (C2712). Guard the call here, in a frame with no unwinding
-// locals, then report the outcome. (A move on the strategic map does not block like a DPlay join, so
-// reporting after the issue is fine.)
-void safeMoveStack(const RemoteCmd& cmd)
+// World actions allocate while reading game objects, so keep SEH in this frame without unwinding
+// locals (MSVC C2712). Unlike UI clicks, these commands report their result after issuing the action.
+void safeWorldCommand(const RemoteCmd& cmd)
 {
     bool ok = false;
     __try {
-        ok = worldactions::moveStack(cmd.dlg, cmd.x, cmd.y);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        ok = false;
-    }
-    reportFound(cmd.seq, ok);
-}
-
-// worldactions::hireMerc sends a client net-message after a group-slot scan; like safeMoveStack it
-// touches game objects, so the __try lives here (a frame with no unwinding locals), not in the action.
-void safeHireMerc(const RemoteCmd& cmd)
-{
-    bool ok = false;
-    __try {
-        ok = worldactions::hireMerc(cmd.dlg, cmd.widget, cmd.value); // dlg=campId, widget=stackId, value=unitId
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        ok = false;
-    }
-    reportFound(cmd.seq, ok);
-}
-
-// worldactions::moveGroupUnit sends a client net-message after a group-slot read; same __try seam.
-void safeMoveGroupUnit(const RemoteCmd& cmd)
-{
-    bool ok = false;
-    __try {
-        ok = worldactions::moveGroupUnit(cmd.dlg, cmd.x, cmd.y); // dlg=stackId, x=sourcePos, y=targetPos
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        ok = false;
-    }
-    reportFound(cmd.seq, ok);
-}
-
-// worldactions::dismissUnit sends a client net-message after a group scan; same __try seam.
-void safeDismissUnit(const RemoteCmd& cmd)
-{
-    bool ok = false;
-    __try {
-        ok = worldactions::dismissUnit(cmd.dlg, cmd.widget); // dlg=stackId, widget=unitId
+        switch (cmd.type) {
+        case 4:
+            ok = worldactions::moveStack(cmd.dlg, cmd.x, cmd.y);
+            break;
+        case 6:
+            ok = worldactions::hireMerc(cmd.dlg, cmd.widget, cmd.value);
+            break;
+        case 7:
+            ok = worldactions::moveGroupUnit(cmd.dlg, cmd.x, cmd.y);
+            break;
+        case 8:
+            ok = worldactions::dismissUnit(cmd.dlg, cmd.widget);
+            break;
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         ok = false;
     }
@@ -443,16 +407,10 @@ void drainRemoteCommands()
             setSpinOption(cmd.dlg, cmd.widget, cmd.param, cmd.seq);
         else if (cmd.type == 3)
             setEditText(cmd.dlg, cmd.widget, cmd.value, cmd.seq);
-        else if (cmd.type == 4)
-            safeMoveStack(cmd);
         else if (cmd.type == 5)
             invokeToggle(cmd.dlg, cmd.widget, cmd.seq);
-        else if (cmd.type == 6)
-            safeHireMerc(cmd);
-        else if (cmd.type == 7)
-            safeMoveGroupUnit(cmd);
-        else if (cmd.type == 8)
-            safeDismissUnit(cmd);
+        else if (cmd.type == 4 || cmd.type == 6 || cmd.type == 7 || cmd.type == 8)
+            safeWorldCommand(cmd);
     }
 }
 
@@ -558,6 +516,8 @@ void onDialogBound()
     spdlog::info("[testdrv] nav armed");
 }
 
+namespace {
+
 // worldreporter::rebuildSnapshot() reads live game objects through ScenarioView (which allocates), so
 // it cannot host __try itself (MSVC C2712). Guard it here, in a frame with no unwinding locals, so a
 // bad read during a scenario load/teardown can never crash the game (reporting is best-effort).
@@ -596,6 +556,8 @@ void tick()
         navStep();
     s_inTick = false;
 }
+
+} // namespace
 
 } // namespace autonav
 } // namespace testdrv

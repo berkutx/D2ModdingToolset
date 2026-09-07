@@ -2,8 +2,7 @@
  * Publishable test/logging system for the Disciples 2 modding toolset.
  * World-state reporter. See testdrv/worldreporter.h.
  *
- * Compile-gated by D2_TESTDRV: without the macro the whole file compiles to
- * nothing and the build is byte-identical to vanilla.
+ * Compile-gated by D2_TESTDRV: absent from ordinary Debug and Release builds.
  *
  * Reuses the mod's own state-surfacing layer (bindings::ScenarioView + the *View
  * wrappers), which are plain pointer wrappers usable from C++ with no Lua VM, so
@@ -15,6 +14,7 @@
 #ifdef D2_TESTDRV
 
 #include "testdrv/worldreporter.h"
+#include "testdrv/json.h"
 #include "testdrv/testdrv.h"
 #include "testdrv/testenv.h"
 #include "testdrv/uistatereporter.h"
@@ -63,33 +63,8 @@ bool g_mapSeen = false;    // latched once the strategic map is up (see the load
 DWORD g_lastBuildTick = 0; // GetTickCount of the last rebuild (the walk is heavier than the UI one)
 constexpr DWORD kThrottleMs = 500;
 
-// JSON helpers (mirror uistatereporter): ASCII keys; \u-escape control + non-ASCII bytes as Latin-1
-// codepoints so the payload is always valid JSON without a cp1251 table.
-void appendEscaped(std::string& out, const char* s)
-{
-    out += '"';
-    if (s) {
-        for (const unsigned char* p = (const unsigned char*)s; *p; ++p) {
-            const unsigned char c = *p;
-            switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (c < 0x20 || c >= 0x7f) {
-                    char buf[8];
-                    wsprintfA(buf, "\\u%04x", (unsigned)c);
-                    out += buf;
-                } else {
-                    out += (char)c;
-                }
-            }
-        }
-    }
-    out += '"';
-}
+using json::appendEscaped;
+using json::kvInt;
 
 void kvStr(std::string& out, const char* key, const char* val)
 {
@@ -97,16 +72,6 @@ void kvStr(std::string& out, const char* key, const char* val)
     out += key;
     out += "\":";
     appendEscaped(out, val);
-}
-
-void kvInt(std::string& out, const char* key, int v)
-{
-    out += '"';
-    out += key;
-    out += "\":";
-    char buf[16];
-    wsprintfA(buf, "%d", v);
-    out += buf;
 }
 
 void kvBool(std::string& out, const char* key, bool v)

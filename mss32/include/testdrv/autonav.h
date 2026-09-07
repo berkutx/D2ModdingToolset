@@ -24,10 +24,6 @@ bool onUiReady();
  * first time the UI exists. */
 void onDialogBound();
 
-/** Advance the nav by one step. Called from the assignFunctor hook so it runs on
- * the dialog-owning thread (safe to invoke functors there). No-op until armed. */
-void tick();
-
 } // namespace autonav
 } // namespace testdrv
 } // namespace hooks

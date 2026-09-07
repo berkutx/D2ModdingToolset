@@ -30,9 +30,8 @@ using CommandCallback = void (*)(std::uint16_t op, const std::uint8_t* payload,
  * the Hello handshake, and streams snapshots/command results. */
 bool start(HMODULE selfModule);
 
-/** Report the outcome of a dispatcher command back to the relay. The relay holds the
- * matching POST open until this arrives, so the test learns whether the addressed dialog
- * and widget were actually found. Sent from the UI thread before the action runs. */
+/** Queue a dispatcher command result for the relay's pending POST. UI commands report
+ * whether the target was found before invoking it; world actions report their outcome. */
 void send_command_result(std::uint32_t seq, bool found);
 
 /** Register a handler for control opcodes the bridge does not own, e.g. the
