@@ -78,6 +78,15 @@ TableActive_3=0 / TableDay_3=0 / TableDuration_3=300
 AlwaysVisible=1
   1 always shows the clock; 0 shows it only after a turn has started.
 
+BlinkSeconds=20
+  Force countdown warning threshold: 10, 15, 20, 25, 30, 35, 40 or 45 seconds.
+  Missing/invalid values use 20, preserving 1.9 behavior. Menu: Force Turn Mode > Blink Warning.
+
+WarningSound=0
+  Optional quiet 300 ms tone at the warning threshold. Only 1 enables it; missing = off.
+  Sounds once while counting, without repeats after pauses. A new turn, Set/Reset, or time
+  restored above the threshold rearms it. Menu: Force Turn Mode > Soft Warning Sound.
+
 AnchorX / AnchorY
   Legacy whole-percent position (0 left/top, 50 centre, 100 right/bottom).
 

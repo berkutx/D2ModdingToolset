@@ -25,6 +25,7 @@ INSTALL
   5. Copy Mods\timer.c4p into the game's Mods\ folder.
      Always update C4dll-R.dll and timer.c4p together; safe tournament Auto Battle needs both.
   6. (Optional) Copy C4plugins.ini next to Discipl2.exe to configure the timer.
+     When upgrading, keep your existing file; missing warning settings use defaults.
      C4PLUGINS.txt explains every key and which changes apply live or need a restart.
   7. (Optional) Keep an existing Imgs\IsoClouds.ff from a DisciplesGL install
      if you want to use Game > Show map clouds. The archive is not redistributed

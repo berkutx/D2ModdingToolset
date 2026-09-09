@@ -14,6 +14,8 @@
 #include <windows.h>
 #include <objidl.h>
 #include <gdiplus.h>
+#include <mmsystem.h>
+#include <cmath>
 #include "../../features/c4plugin.h"
 #include "timer_dlg.h"
 #include <cstdarg>
@@ -23,6 +25,7 @@
 #include <stdint.h>
 
 #pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "winmm.lib")
 
 using namespace Gdiplus;
 
@@ -45,6 +48,50 @@ int g_autoBattle = 1;   // On Elapse -> native Auto Battle in PvP (tournament de
 int g_elapseFired = 0;  // latch: on-elapse action fired once for the current turn
 int g_resetExtra = 0;   // Reset Extra Time
 int g_alwaysVisible = 1;
+int g_blinkSeconds = 20; // preserve the 1.9 warning threshold for existing configs
+int g_warningSound = 0;
+bool g_warningFired = false;
+HWAVEOUT g_warningWave = nullptr;
+WAVEHDR g_warningHeader = {};
+short g_warningSamples[6615] = {}; // 300 ms, mono PCM at 22050 Hz
+
+// Own output handle: never interrupt game audio or change any device/session volume.
+void stopWarningSound()
+{
+    if (!g_warningWave) return;
+    waveOutReset(g_warningWave);
+    waveOutUnprepareHeader(g_warningWave, &g_warningHeader, sizeof(g_warningHeader));
+    waveOutClose(g_warningWave);
+    g_warningWave = nullptr;
+}
+
+void playWarningSound()
+{
+    stopWarningSound();
+    const double pi = 3.141592653589793;
+    for (int i = 0; i < 6615; ++i) {
+        const double envelope = std::sin(pi * i / 6614.0);
+        g_warningSamples[i] = static_cast<short>(1000.0 * envelope * envelope *
+            std::sin(2.0 * pi * 660.0 * i / 22050.0));
+    }
+    WAVEFORMATEX format = {};
+    format.wFormatTag = WAVE_FORMAT_PCM;
+    format.nChannels = 1;
+    format.nSamplesPerSec = 22050;
+    format.wBitsPerSample = 16;
+    format.nBlockAlign = 2;
+    format.nAvgBytesPerSec = 44100;
+    if (waveOutOpen(&g_warningWave, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
+        g_warningWave = nullptr;
+        return; // no device: remain silent, no fallback system beep
+    }
+    g_warningHeader = {};
+    g_warningHeader.lpData = reinterpret_cast<LPSTR>(g_warningSamples);
+    g_warningHeader.dwBufferLength = sizeof(g_warningSamples);
+    if (waveOutPrepareHeader(g_warningWave, &g_warningHeader, sizeof(g_warningHeader)) != MMSYSERR_NOERROR ||
+        waveOutWrite(g_warningWave, &g_warningHeader, sizeof(g_warningHeader)) != MMSYSERR_NOERROR)
+        stopWarningSound();
+}
 int g_durBase = 300;    // TableDuration_0 (seconds): per-turn budget in Force mode (day-1 base)
 // Timetable: up to 3 per-day overrides. From day TableDay_i the budget = TableDuration_i.
 int g_tblActive[3] = {0, 0, 0};
@@ -116,7 +163,8 @@ enum {
     kForceOn = 0xB, kCombatOff = 0xC, kCombatPvP = 0xD, kCombatPvAny = 0xE, kAnimPause = 0xF,
     kElapseEndDay = 0x10, kElapseRetreat = 0x11, kResetExtra = 0x12, kTimetable = 0x13,
     kAlwaysVis = 0x14, kHelp = 0x15, kAbout = 0x16,
-    kElapseDefend = 0x17, kElapseAutoBattle = 0x18
+    kElapseDefend = 0x17, kElapseAutoBattle = 0x18,
+    kWarningSound = 0x19, kBlinkFirst = 0x20, kBlinkLast = kBlinkFirst + 7
 };
 
 // the rendered frame + a change signature (avoid pointless redraws)
@@ -152,8 +200,8 @@ void formatTime(int v9, wchar_t* out)
 }
 
 // On-screen ramp (R/B swapped vs the .mod's surface order): orange within budget -> red blink in the
-// last 20s; white at 00:00 in count-up. No green spare-time branch in v1 (needs carried extra time).
-void pickColors(int v9, int state, int paused, DWORD* text, DWORD* shadow)
+// configured warning interval; white at 00:00 in count-up.
+void pickColors(int v9, int state, int paused, int blinkSeconds, DWORD* text, DWORD* shadow)
 {
     // One presentation rule for every effective pause source: manual, combat, animation,
     // ownership/turn boundary, unknown battle state, and timeout.
@@ -163,7 +211,7 @@ void pickColors(int v9, int state, int paused, DWORD* text, DWORD* shadow)
         return;
     }
     if (state == 2) {
-        const bool blink = (v9 < 0) || (v9 < 20000 && (v9 % 1000) > 500);
+        const bool blink = (v9 < 0) || (v9 <= blinkSeconds * 1000 && (v9 % 1000) > 500);
         *text = blink ? 0xFFFF3300 : 0xFFCC9900;
         *shadow = 0xFF660000;
     } else {
@@ -437,6 +485,10 @@ void readConfig()
     // request and never calls the old timer-event callback or filters player/chat input.
     g_resetExtra = g_host->get_config_int(iniSection(), "ResetExtraTime", 0) ? 1 : 0;
     g_alwaysVisible = g_host->get_config_int(iniSection(), "AlwaysVisible", 1) ? 1 : 0;
+    g_blinkSeconds = g_host->get_config_int(iniSection(), "BlinkSeconds", 20);
+    if (g_blinkSeconds < 10 || g_blinkSeconds > 45 || g_blinkSeconds % 5 != 0)
+        g_blinkSeconds = 20;
+    g_warningSound = g_host->get_config_int(iniSection(), "WarningSound", 0) == 1 ? 1 : 0;
     g_durBase = g_host->get_config_int(iniSection(), "TableDuration_0", 300);
     if (g_durBase < 1) g_durBase = 1;
     for (int i = 0; i < 3; ++i) {
@@ -498,6 +550,8 @@ struct MenuSnapshot
     int autoBattle;
     int resetExtra;
     int alwaysVisible;
+    int blinkSeconds;
+    int warningSound;
 };
 
 void refreshMenu()
@@ -514,6 +568,8 @@ void refreshMenu()
     s.autoBattle = g_autoBattle;
     s.resetExtra = g_resetExtra;
     s.alwaysVisible = g_alwaysVisible;
+    s.blinkSeconds = g_blinkSeconds;
+    s.warningSound = g_warningSound;
     LeaveCriticalSection(&g_lock);
 
     if (!g_menu)
@@ -549,6 +605,9 @@ void refreshMenu()
     chk(kElapseRetreat, false);
     chk(kResetExtra, s.resetExtra != 0);
     chk(kAlwaysVis, s.alwaysVisible != 0);
+    for (int i = 0; i < 8; ++i)
+        chk(kBlinkFirst + i, s.blinkSeconds == 10 + i * 5);
+    chk(kWarningSound, s.warningSound != 0);
 }
 
 // ---- pause helpers (freeze/resume the clock by adjusting baseline) ----
@@ -589,6 +648,7 @@ bool pvpTimeoutLocked()
 
 void restart(DWORD now)
 {
+    g_warningFired = false;
     g_baseline = now;
     g_pausedAt = g_baseline;
     g_extra = 0;
@@ -685,7 +745,7 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
     const int playbackLocal = battleState.playback_local;
     const uint32_t beginTurnAck = hostBeginTurnAckSerial();
     int state, durMs, alwaysVis, paused, userPaused, running, extra, expired;
-    int pvpClampPending, offTurnPvpExhausted;
+    int pvpClampPending, offTurnPvpExhausted, blinkSeconds;
     DWORD baseline, pausedAt;
     EnterCriticalSection(&g_lock);
     // The host timestamp was captured before plugin callbacks and before this lock. A concurrent
@@ -694,6 +754,7 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
     const DWORD tickNow = GetTickCount();
     const uint32_t serial = g_host->get_turn_serial();
     if (!inGame) {
+        g_warningFired = false;
         // Main menu / between games: timer does NOT run. Keep g_lastSerial synced so the first real
         // turn-start inside a game is seen as a change.
         if (g_running || g_elapseFired)
@@ -897,6 +958,7 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
             g_offTurnPvpDay = -1;
             g_running = 1;
             g_lastPlayer = newPlayer;
+            g_warningFired = false;
             g_manualSetPending = 0;
         }
 
@@ -1127,6 +1189,19 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
     }
 
     state = g_state;
+    blinkSeconds = g_blinkSeconds;
+    const int64_t warningRemaining = static_cast<int64_t>(currentDurMs) + g_extra -
+        ((g_paused ? g_pausedAt : tickNow) - g_baseline);
+    if (g_warningWave && (g_warningHeader.dwFlags & WHDR_DONE))
+        stopWarningSound();
+    if (g_state != 2 || !g_running || warningRemaining > g_blinkSeconds * 1000)
+        g_warningFired = false;
+    if (inGame && g_state == 2 && g_running && !g_paused && !g_expired &&
+        !g_pvpClampPending && !g_offTurnPvpExhausted && warningRemaining > 0 &&
+        warningRemaining <= g_blinkSeconds * 1000 && !g_warningFired) {
+        g_warningFired = true; // pause/resume and enabling sound must not repeat the warning
+        if (g_warningSound) playWarningSound();
+    }
     durMs = currentDurMs; // captured-day budget (matches the bank; no mid-turn jump)
     alwaysVis = g_alwaysVisible;
     paused = g_paused;
@@ -1161,7 +1236,7 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         formatTime(v9, text);
         if (paused && userPaused)
             lstrcatW(text, L" (\u043f\u0430\u0443\u0437\u0430)");
-        pickColors(v9, state, paused, &tc, &sc);
+        pickColors(v9, state, paused, blinkSeconds, &tc, &sc);
     }
 
     unsigned sig = visible ? 1u : 0u;
@@ -1342,6 +1417,7 @@ extern "C" int __cdecl c4p_mouse(UINT msg, WPARAM, int x, int y)
 
 extern "C" void __cdecl c4p_shutdown(void)
 {
+    stopWarningSound();
     delete g_font; g_font = nullptr;
     delete g_family; g_family = nullptr;
     delete g_fonts; g_fonts = nullptr;
@@ -1481,6 +1557,7 @@ INT_PTR CALLBACK setDlgProc(HWND h, UINT m, WPARAM w, LPARAM)
                 g_baseline = now;
             }
             g_pausedAt = now;
+            g_warningFired = false;
             g_running = 1; // a set time implies the clock is active
             // Only a local strategic pre-ack Set belongs to the upcoming accepted turn. A Set on
             // somebody else's turn edits the current defensive interval and must still receive the
@@ -1568,6 +1645,14 @@ extern "C" HMENU __cdecl c4p_menu(int base_cmd_id)
     AppendMenuA(force, MF_SEPARATOR, 0, nullptr);
     AppendMenuA(force, MF_STRING, b + kResetExtra, "&Reset Extra Time");
     AppendMenuA(force, MF_STRING, b + kTimetable, "&Timetable ...");
+    HMENU blink = CreatePopupMenu();
+    for (int i = 0; i < 8; ++i) {
+        char label[24];
+        wsprintfA(label, "%d sec", 10 + i * 5);
+        AppendMenuA(blink, MF_STRING, b + kBlinkFirst + i, label);
+    }
+    AppendMenuA(force, MF_POPUP, (UINT_PTR)blink, "Blink &Warning");
+    AppendMenuA(force, MF_STRING, b + kWarningSound, "Soft Warning &Sound");
     AppendMenuA(g_menu, MF_POPUP, (UINT_PTR)force, "&Force Turn Mode");
 
     AppendMenuA(g_menu, MF_SEPARATOR, 0, nullptr);
@@ -1597,6 +1682,10 @@ extern "C" void __cdecl c4p_command(int cmd)
 
     EnterCriticalSection(&g_lock);
     const DWORD commandNow = GetTickCount();
+    if (off >= kBlinkFirst && off <= kBlinkLast) {
+        g_blinkSeconds = 10 + (off - kBlinkFirst) * 5;
+        persist("BlinkSeconds", g_blinkSeconds);
+    }
     switch (off) {
     case kSimpleOn:
     case kForceOn: {
@@ -1688,6 +1777,11 @@ extern "C" void __cdecl c4p_command(int cmd)
         break; // visible placeholders; both are permanently disabled
     case kResetExtra:      g_resetExtra = !g_resetExtra;        persist("ResetExtraTime", g_resetExtra); break;
     case kAlwaysVis:       g_alwaysVisible = !g_alwaysVisible;  persist("AlwaysVisible", g_alwaysVisible); break;
+    case kWarningSound:
+        g_warningSound = !g_warningSound;
+        if (!g_warningSound) stopWarningSound();
+        persist("WarningSound", g_warningSound);
+        break;
     default:
         break;
     }
