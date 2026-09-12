@@ -18,6 +18,7 @@
  */
 
 #include "midobjectlockhooks.h"
+#include "lobbysaveresume.h"
 #include "midcommandqueue2.h"
 #include "originalfunctions.h"
 #include <spdlog/spdlog.h>
@@ -36,6 +37,7 @@ game::CMidObjectLock* __fastcall midObjectLockCtorHooked(game::CMidObjectLock* t
 
 void __fastcall midObjectLockNotify1CallbackHooked(game::CMidObjectLock* thisptr, int /*%edx*/)
 {
+    prepareLobbySaveResumeUi(thisptr);
     ++thisptr->pendingLocalUpdates;
     spdlog::debug(
         __FUNCTION__ ": pendingLocalUpdates incremented to {:d}, processingCommand = {:d}",

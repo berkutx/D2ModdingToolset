@@ -109,6 +109,15 @@ struct CCommandMsg : public CNetMsgT<CCommandMsgVftable>
 
 assert_size(CCommandMsg, 16);
 
+/** Native BeginTurn payload; playerId in the base is the separate recipient. */
+struct CCmdBeginTurnMsg : public CCommandMsg
+{
+    CMidgardID activePlayerId;
+};
+
+assert_size(CCmdBeginTurnMsg, 20);
+assert_offset(CCmdBeginTurnMsg, activePlayerId, 16);
+
 enum class CommandMsgParam : int
 {
     Value0,

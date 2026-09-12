@@ -5,18 +5,26 @@
  */
 
 #include "lobbysaveresume.h"
+#include "commandmsg.h"
+#include "dynamiccast.h"
 #include "gameutils.h"
+#include "midclient.h"
+#include "midgard.h"
 #include "midgardscenariomap.h"
+#include "midobjectlock.h"
 #include "midscenvariables.h"
 #include "midserverlogic.h"
 #include "midstreamenvfile.h"
 #include "netcustomservice.h"
 #include "netplayerinfo.h"
+#include "phasegame.h"
 #include "scenarioheader.h"
 #include "scenarioinfo.h"
 #include "version.h"
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <spdlog/spdlog.h>
@@ -25,6 +33,22 @@ namespace hooks {
 namespace {
 
 constexpr char turnBaseVariable[] = "CONCLAVE_TURN_BASE";
+
+enum class StratWaitMode : int { Initial = 0, Human = 1, Full = 2 };
+
+// Russobit CStratInterf, viewed from its CInterface subobject (+4, 0x405ca5).
+// Constructor 0x48d02c initializes these fields; 0x491637 switches between wait modes.
+struct StratInterfWaitView
+{
+    std::uint8_t unknown[0xf0];
+    int inputLocks;
+    int cursorLocks;
+    StratWaitMode waitMode;
+};
+
+static_assert(offsetof(StratInterfWaitView, inputLocks) == 0xf0);
+static_assert(offsetof(StratInterfWaitView, cursorLocks) == 0xf4);
+static_assert(offsetof(StratInterfWaitView, waitMode) == 0xf8);
 
 // Native race comparator (Russobit 0x42e849), before moving the original host first.
 constexpr std::array<game::RaceId, 6> raceOrder = {
@@ -144,6 +168,63 @@ bool prepareLobbySaveResume(game::CMidServerLogic* logic)
     spdlog::info("Lobby resume: active race={}, origin={}, offset={}, queue={}",
                  static_cast<int>(players->bgn->raceCategory.id), base->value, offset, count);
     return true;
+}
+
+void prepareLobbySaveResumeUi(game::CMidObjectLock* objectLock)
+{
+    using namespace game;
+    if (!resumeSupported()) {
+        return;
+    }
+    const auto message = CMidCommandQueue2Api::get().front(objectLock->commandQueue);
+    if (!message || message->vftable->getId(message) != CommandMsgId::BeginTurn) {
+        return;
+    }
+    const auto midgard = CMidgardApi::get().instance();
+    if (!midgard || !midgard->data || !midgard->data->host || !midgard->data->client) {
+        return;
+    }
+    const auto client = midgard->data->client;
+    if (!client->data || !client->core.data || !client->data->phase
+        || client->core.data->commandQueue != objectLock->commandQueue) {
+        return;
+    }
+    const auto typeIdOperator = RttiApi::get().typeIdOperator;
+    if (!typeIdOperator || !*typeIdOperator) {
+        return;
+    }
+    const auto phaseType = (*typeIdOperator)(client->data->phase);
+    if (!phaseType || std::strcmp(phaseType->name, ".?AVCPhaseGame@@") != 0) {
+        return;
+    }
+    const auto phase = reinterpret_cast<CPhaseGame*>(
+        reinterpret_cast<std::uint8_t*>(client->data->phase) - offsetof(CPhaseGame, phase));
+    if (!phase->data || phase->data->midObjectLock != objectLock
+        || phase->data->clientTakesTurn || !phase->data->currentInterface) {
+        return;
+    }
+    const auto localPlayer = CPhaseApi::get().getCurrentPlayerId(client->data->phase);
+    if (!localPlayer || (message->playerId != emptyId && message->playerId != *localPlayer)
+        || static_cast<const CCmdBeginTurnMsg*>(message)->activePlayerId == *localPlayer) {
+        return;
+    }
+    const auto interfaceType = (*typeIdOperator)(phase->data->currentInterface);
+    if (!interfaceType || std::strcmp(interfaceType->name, ".?AVCStratInterf@@") != 0) {
+        return;
+    }
+    const auto ui = reinterpret_cast<StratInterfWaitView*>(phase->data->currentInterface);
+    if (ui->waitMode != StratWaitMode::Initial || ui->inputLocks <= 0 || ui->cursorLocks <= 0
+        || !findTurnBase(getScenarioVariables(objectLock->dataCache))) {
+        return;
+    }
+
+    // Load initially marks the not-yet-started joiner as AI (0x422d3d, 0x42bc1a).
+    // The constructor already took one full input lock. Leaving mode=Initial would make
+    // the first remote-AI BeginTurn take another, which the host's TurnInfo cannot release.
+    // Describe the existing lock; let native transitions manage all locks and the cursor.
+    ui->waitMode = StratWaitMode::Full;
+    spdlog::info("Lobby resume: initialized host UI wait (input locks={}, cursor locks={})",
+                 ui->inputLocks, ui->cursorLocks);
 }
 
 } // namespace hooks
