@@ -41,6 +41,23 @@ struct CGameVersionMsg;
 
 namespace hooks {
 
+class CMenuCustomLobby;
+
+using RestartJoinCompletion = void (*)(bool success);
+
+/** Creates a message-only lobby menu used while reconnecting to a restarted match. */
+game::CMenuBase* __stdcall createRestartJoinMenu(game::CMenuPhase* menuPhase);
+
+/**
+ * Starts the native session handshake without joining a RoomsPlugin room.
+ * The completion callback is invoked exactly once after a started handshake succeeds or fails.
+ */
+bool beginRestartJoin(CMenuCustomLobby* menu,
+                      const SLNet::RakNetGUID& hostGuid,
+                      const char* roomName,
+                      int maxPlayers,
+                      RestartJoinCompletion completion);
+
 class CMenuCustomLobby
     : public game::CMenuBase
     , public CMenuCustomBase
@@ -114,6 +131,9 @@ protected:
                                            const char* shortenedMark,
                                            int textAreaWidth);
     void joinServer(SLNet::RoomDescriptor* roomDescriptor);
+    bool joinServer(const SLNet::RakNetGUID& hostGuid, const char* roomName, int maxPlayers);
+    RestartJoinCompletion takeRestartJoinCompletion();
+    void completeRestartJoin(bool success);
     void addChatMessage(CNetCustomService::ChatMessage message);
     void sendChatMessage();
     void updateUsers(std::vector<CNetCustomService::UserInfo> users);
@@ -275,6 +295,15 @@ protected:
     assert_offset(CHelpInterf, vftable, 0);
 
 private:
+    CMenuCustomLobby(game::CMenuPhase* menuPhase, bool restartJoin);
+
+    friend game::CMenuBase* __stdcall createRestartJoinMenu(game::CMenuPhase* menuPhase);
+    friend bool beginRestartJoin(CMenuCustomLobby* menu,
+                                 const SLNet::RakNetGUID& hostGuid,
+                                 const char* roomName,
+                                 int maxPlayers,
+                                 RestartJoinCompletion completion);
+
     CHelpInterf* m_helpDialog{};
     PeerCallback m_peerCallback;
     RoomsCallback m_roomsCallback;
@@ -291,6 +320,9 @@ private:
     std::deque<CNetCustomService::ChatMessage> m_chatMessages;
     std::uint32_t m_chatMessageStock;
     game::UiEvent m_chatMessageRegenEvent;
+    bool m_restartJoin;
+    bool m_restartJoinPending;
+    RestartJoinCompletion m_restartJoinCompletion;
 };
 
 assert_offset(CMenuCustomLobby, vftable, 0);

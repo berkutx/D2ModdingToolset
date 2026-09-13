@@ -23,6 +23,7 @@
 #include "dynamiccast.h"
 #include "editboxinterf.h"
 #include "interfmanager.h"
+#include "lobbyrestart.h"
 #include "mempool.h"
 #include "menuflashwait.h"
 #include "menuphase.h"
@@ -104,6 +105,12 @@ void CMenuCustomBase::hideWaitDialog()
 void CMenuCustomBase::onConnectionLost()
 {
     using namespace game;
+
+    // The restart coordinator returns after callback dispatch. Its temporary menu can be
+    // destroyed before a normal back-to-main popup's button handler uses that menu again.
+    if (isLobbyRestartActive()) {
+        return;
+    }
 
     hideWaitDialog();
 

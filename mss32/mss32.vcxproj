@@ -486,6 +486,8 @@ call ..\buildDetours.bat ..\Detours
     <ClCompile Include="src\leaderabilitycat.cpp" />
     <ClCompile Include="src\listbox.cpp" />
     <ClCompile Include="src\lobbysaveexchange.cpp" />
+    <ClCompile Include="src\lobbyrestart.cpp" />
+    <ClCompile Include="src\menurestartnative.cpp" />
     <ClCompile Include="src\lobbysaveresume.cpp" />
     <ClCompile Include="src\idlistutils.cpp" />
     <ClCompile Include="src\lordcat.cpp" />
@@ -1203,6 +1205,8 @@ call ..\buildDetours.bat ..\Detours
     <ClInclude Include="include\d2list.h" />
     <ClInclude Include="include\listbox.h" />
     <ClInclude Include="include\lobbysaveexchange.h" />
+    <ClInclude Include="include\lobbyrestart.h" />
+    <ClInclude Include="include\menurestartnative.h" />
     <ClInclude Include="include\lobbysaveresume.h" />
     <ClInclude Include="include\idlistutils.h" />
     <ClInclude Include="include\lordcat.h" />

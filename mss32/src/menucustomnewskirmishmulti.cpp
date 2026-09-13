@@ -175,6 +175,14 @@ static void setupSimTurnsDaysSpinOptions(game::CSpinButtonInterf* spinButton, in
     stringArray.destructor(&options);
 }
 
+template <typename T>
+static T* findOptionalRoomControl(game::CDialogInterf* dialog, const char* name,
+                                 game::CDialogInterfApi::Api::FindUiElement<T> find)
+{
+    // hideControl removes the control. Typed lookup reports missing names before returning null.
+    return game::CDialogInterfApi::get().findControl(dialog, name) ? find(dialog, name) : nullptr;
+}
+
 void CMenuCustomNewSkirmishMulti::initializeRoomOptionsControls()
 {
     using namespace game;
@@ -202,21 +210,21 @@ void CMenuCustomNewSkirmishMulti::initializeRoomOptionsControls()
         dialogApi.hideControl(dialog, "BTN_SIM_DAYS_DN");
     }
 
-    if (auto toggle = dialogApi.findToggleButton(dialog, "TOG_RANKED")) {
+    if (auto toggle = findOptionalRoomControl(dialog, "TOG_RANKED", dialogApi.findToggleButton)) {
         const bool supported{CPhaseGameApi::nativeSaveSupported()};
         CToggleButtonApi::get().setChecked(toggle, supported && options.ranked);
         toggle->vftable->setEnabled(toggle, supported);
     }
 
-    if (auto toggle = dialogApi.findToggleButton(dialog, "TOG_UNLOCK_GUI")) {
+    if (auto toggle = findOptionalRoomControl(dialog, "TOG_UNLOCK_GUI", dialogApi.findToggleButton)) {
         CToggleButtonApi::get().setChecked(toggle, options.unlockGui);
     }
 
-    if (auto toggle = dialogApi.findToggleButton(dialog, "TOG_SIM_DAYS_LABEL")) {
+    if (auto toggle = findOptionalRoomControl(dialog, "TOG_SIM_DAYS_LABEL", dialogApi.findToggleButton)) {
         CToggleButtonApi::get().setChecked(toggle, options.simultaneousTurnsEnabled);
     }
 
-    if (auto spin = dialogApi.findSpinButton(dialog, "SPIN_SIM_DAYS")) {
+    if (auto spin = findOptionalRoomControl(dialog, "SPIN_SIM_DAYS", dialogApi.findSpinButton)) {
         setupSimTurnsDaysSpinOptions(spin, 30);
         CSpinButtonInterfApi::get().setSelectedOption(spin, options.simultaneousTurnsDays);
     }
@@ -239,24 +247,25 @@ void CMenuCustomNewSkirmishMulti::readRoomOptionsControls()
     // Hidden or absent controls must not reuse values retained from an earlier host dialog.
     options = {};
     if (controls.ranked) {
-        if (auto toggle = dialogApi.findToggleButton(dialog, "TOG_RANKED")) {
+        if (auto toggle = findOptionalRoomControl(dialog, "TOG_RANKED", dialogApi.findToggleButton)) {
             options.ranked = CPhaseGameApi::nativeSaveSupported() && toggle->data->checked;
         }
     }
 
     if (controls.unlockGui) {
-        if (auto toggle = dialogApi.findToggleButton(dialog, "TOG_UNLOCK_GUI")) {
+        if (auto toggle = findOptionalRoomControl(dialog, "TOG_UNLOCK_GUI", dialogApi.findToggleButton)) {
             options.unlockGui = toggle->data->checked;
         }
     }
 
     if (controls.simultaneousTurns) {
-        auto simTurnsToggle = dialogApi.findToggleButton(dialog, "TOG_SIM_DAYS_LABEL");
+        auto simTurnsToggle = findOptionalRoomControl(dialog, "TOG_SIM_DAYS_LABEL",
+                                                     dialogApi.findToggleButton);
         if (simTurnsToggle) {
             options.simultaneousTurnsEnabled = simTurnsToggle->data->checked;
         }
 
-        if (auto spin = dialogApi.findSpinButton(dialog, "SPIN_SIM_DAYS")) {
+        if (auto spin = findOptionalRoomControl(dialog, "SPIN_SIM_DAYS", dialogApi.findSpinButton)) {
             options.simultaneousTurnsDays = spin->data->selectedOption;
             if (!simTurnsToggle) {
                 // Preserve spinner-only semantics for older/custom dialog resources.

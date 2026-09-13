@@ -11,6 +11,7 @@ namespace game {
 struct CMidgardScenarioMap;
 struct CMidStreamEnvFile;
 struct CMidServerLogic;
+struct CMidObjectLock;
 } // namespace game
 
 namespace hooks {
@@ -21,6 +22,9 @@ void captureLobbySaveTurnBase(game::CMidgardScenarioMap* scenarioMap,
 
 /** Restores the full native queue, including AI. Call before loaded-game initialization. */
 bool prepareLobbySaveResume(game::CMidServerLogic* logic);
+
+/** Aligns the loaded host's initial wait mode with its existing native input lock. */
+void prepareLobbySaveResumeUi(game::CMidObjectLock* objectLock);
 
 } // namespace hooks
 

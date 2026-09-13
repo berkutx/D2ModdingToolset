@@ -18,6 +18,7 @@
  */
 
 #include "netcustomplayerclient.h"
+#include "lobbyrestart.h"
 #include "mempool.h"
 #include "mqnetreception.h"
 #include "mqnetsystem.h"
@@ -99,6 +100,12 @@ bool __fastcall CNetCustomPlayerClient::sendMessage(CNetCustomPlayerClient* this
         return false;
     }
 
+    std::vector<unsigned char> replacement;
+    prepareLobbyRestartSetupMessage(message, replacement);
+    if (!replacement.empty()) {
+        message = reinterpret_cast<const game::NetMessageHeader*>(replacement.data());
+    }
+
     if (thisptr->getSession()->isHost()) {
         const bool sentToGame{thisptr->sendHostMessage(message)};
         if (sentToGame) {
@@ -174,6 +181,7 @@ void CNetCustomPlayerClient::PeerCallback::onPacketReceived(DefaultMessageIDType
                         message->messageClassName, getClientId(sender));
             break;
         }
+        observeLobbyRestartSetupInfo(message);
         m_player->postMessageToReceive(message, availableBytes, game::serverNetPlayerId);
         break;
     }
@@ -186,6 +194,7 @@ void CNetCustomPlayerClient::PeerCallback::onPacketReceived(DefaultMessageIDType
             break;
         }
         message->messageType = game::netMessageNormalType; // TODO: any better way to do this?
+        observeLobbyRestartSetupInfo(message);
         m_player->postMessageToReceive(message, availableBytes, game::serverNetPlayerId);
         break;
     }
@@ -193,7 +202,7 @@ void CNetCustomPlayerClient::PeerCallback::onPacketReceived(DefaultMessageIDType
     case ID_DISCONNECTION_NOTIFICATION: {
         m_player->getLogger()->debug(__FUNCTION__ ": server was shut down");
         auto system = m_player->getSystem();
-        if (system) {
+        if (system && !isLobbyRestartActive()) {
             system->vftable->onPlayerDisconnected(system, game::serverNetPlayerId);
         }
         break;
@@ -202,7 +211,7 @@ void CNetCustomPlayerClient::PeerCallback::onPacketReceived(DefaultMessageIDType
     case ID_CONNECTION_LOST: {
         m_player->getLogger()->debug(__FUNCTION__ ": connection with server is lost");
         auto system = m_player->getSystem();
-        if (system) {
+        if (system && !isLobbyRestartActive()) {
             system->vftable->onPlayerDisconnected(system, game::serverNetPlayerId);
         }
         break;
@@ -217,7 +226,9 @@ void CNetCustomPlayerClient::RoomsCallback::RoomDestroyedOnModeratorLeft_Callbac
     // TODO: make sure that the notification only arrives for our room, otherwise check roomId
     m_player->getLogger()->debug(__FUNCTION__);
     auto system = m_player->getSystem();
-    if (system) {
+    // Room destruction may arrive before the lobby's restart Abort. Do not let native
+    // connection UI start a competing transition; the coordinator owns cancellation.
+    if (system && !isLobbyRestartActive()) {
         system->vftable->onPlayerDisconnected(system, game::serverNetPlayerId);
     }
 }
