@@ -56,6 +56,7 @@ $patchLiveResize = Join-Path $root "patches\cnc-ddraw-live-resize.patch"
 $patchSurfacePublish = Join-Path $root "patches\cnc-ddraw-surface-layout-publish.patch"
 $patchWindowStretchFilter = Join-Path $root "patches\cnc-ddraw-window-stretch-filter.patch"
 $patchEventTrace = Join-Path $root "patches\cnc-ddraw-event-trace.patch"
+$patchPaletteColors = Join-Path $root "patches\cnc-ddraw-d2-palette-colors.patch"
 $cb63def = Join-Path $root "forwarder\C4dll-R.cb63.def"
 $out = Join-Path $build "bin\Release\C4dll-R.dll"
 $timerPluginProj = Join-Path $root "plugins\timer\timer.vcxproj"
@@ -165,6 +166,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "git apply (simple-zoom mouse mapping) failed (exit $LASTEXITCODE)" }
     & git -c core.autocrlf=false apply --recount --ignore-whitespace "$patchEventTrace"
     if ($LASTEXITCODE -ne 0) { throw "git apply (opt-in event diagnostics) failed (exit $LASTEXITCODE)" }
+    & git -c core.autocrlf=false apply --ignore-whitespace "$patchPaletteColors"
+    if ($LASTEXITCODE -ne 0) { throw "git apply (D2 texture palette colors) failed (exit $LASTEXITCODE)" }
 }
 finally { Pop-Location }
 if (-not (Select-String -Path (Join-Path $build "src\dllmain.c") -Pattern "c4features_install" -Quiet)) {

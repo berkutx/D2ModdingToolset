@@ -67,6 +67,14 @@ jobs:
           "pre=$pre" | Out-File $env:GITHUB_OUTPUT -Append
           Write-Host "version $ver (tag $tag, prerelease=$pre)"
 
+      - name: Validate texture palette colors
+        run: ./c4ddraw/tests/run-palette-colors-tests.ps1
+
+      - name: Validate timer expiry and post-battle transitions
+        run: |
+          ./c4ddraw/tests/run-timer-end-day-tests.ps1
+          ./c4ddraw/tests/run-timer-post-battle-tests.ps1
+
       - name: Build C4dll-R.dll + timer plugin
         run: |
           # Same released build a dev runs: monolith (steps 1-6) and timer.c4p (7).

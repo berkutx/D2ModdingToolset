@@ -137,6 +137,7 @@ extern "C" int timerhost_retreat(void);
 extern "C" int timerhost_end_day(void);
 extern "C" int timerhost_cancel_elapse(void);
 extern "C" uint32_t timerhost_begin_turn_ack_serial(void);
+extern "C" int timerhost_post_battle_pending(void);
 extern "C" int timerhost_battle_turn_active(void);
 extern "C" int timerhost_force_auto_battle(void);
 extern "C" int timerhost_force_auto_battle_v2(uint32_t expectedBattleInstance);
@@ -228,6 +229,10 @@ int __cdecl host_force_auto_battle_v2(uint32_t expectedBattleInstance)
 int __cdecl host_get_battle_timer_state(C4P_BattleTimerState* out)
 {
     return timerhost_get_battle_timer_state(out);
+}
+int __cdecl host_post_battle_pending(void)
+{
+    return timerhost_post_battle_pending();
 }
 int __cdecl host_server_role(void)
 {
@@ -355,7 +360,7 @@ C4P_Host g_host = {sizeof(C4P_Host),     host_get_hwnd,        host_invalidate,
                    host_battle_turn_active, host_force_auto_battle,
                    host_get_battle_timer_state, host_server_role,
                    host_get_game_size, host_force_auto_battle_v2,
-                   host_get_visible_game_rect};
+                   host_get_visible_game_rect, host_post_battle_pending};
 
 // plugin records
 using C4pQuery = int(__cdecl*)(C4P_Info*);

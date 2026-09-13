@@ -18,6 +18,7 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 | `patches/cnc-ddraw-simple-zoom.patch` | Narrow WndProc + OpenGL/D3D9/GDI integration for wrapper-owned Ctrl+Wheel zoom and address-free editor menu routing | yes |
 | `patches/cnc-ddraw-simple-zoom-mouse.patch` | Keeps polled `GetCursorPos` and `MSG.pt` coordinates inverse-mapped with the same fixed-window stretch used by WndProc mouse messages | yes |
 | `patches/cnc-ddraw-live-resize.patch` | Selective native-Windows OpenGL preview while a normal window edge is being dragged; conservative fallback remains for other render paths | yes |
+| `patches/cnc-ddraw-d2-palette-colors.patch` | Preserves all 256 image colors on D2's 16-bit canvas, including transparent index 255 used by city effects | yes |
 | `patches/cnc-ddraw-system-opengl-fallback.patch`, `cnc-ddraw-gdi-filter.patch`, `cnc-ddraw-d2-cursor-ownership.patch` | OpenGL/GDI fallbacks and D2-specific single-cursor ownership | yes |
 | `patches/cnc-ddraw-decorative-background.patch`, `cnc-ddraw-printscreen-compositor.patch`, `features/decorative.cpp`, `features/decor/` | Presentation-only frame/plugin compositor; PrintScreen captures that same final frame | yes |
 | `features/featuremenu.cpp`, `cursorcapture.cpp`, `fastai.cpp` | The in-game menu, dynamic cursor capture and bounded Fast AI hooks | yes |

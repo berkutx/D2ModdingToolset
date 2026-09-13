@@ -544,6 +544,57 @@ void pressBtn(void* btn)
     }
 }
 
+void pumpStrategicEndDay(int myTurn)
+{
+    // A visible, enabled button can precede command readiness when a garrison closes or a new
+    // day starts. Every END_TURN uses the same native gate, not only timeouts raised in battle.
+    const bool strategicReady = myTurn == 1 && isUserPtr(g.endTurn) &&
+                                btnEnabled(g.endTurn) && interfaceOnTop(g.endTurn);
+    if (!strategicReady) {
+        InterlockedExchange(&g.strategicReadyTicks, 0);
+        InterlockedExchange(&g.endDayLockWaitLogged, 0);
+        return;
+    }
+
+    const PhaseGameLockSnapshot objectLock = phaseGameLockSnapshot();
+    if (!objectLock.available || objectLock.locked) {
+        InterlockedExchange(&g.strategicReadyTicks, 0);
+        if (InterlockedCompareExchange(&g.endDayLockWaitLogged, 1, 0) == 0) {
+            if (objectLock.available) {
+                tlog("[timer] END_TURN deferred by native object lock "
+                     "(postBattle=%ld local=%lu network=%lu special=%u)",
+                     InterlockedExchangeAdd(&g.pendingEndDayBattle, 0),
+                     static_cast<unsigned long>(objectLock.pendingLocalUpdates),
+                     static_cast<unsigned long>(objectLock.pendingNetworkUpdates),
+                     static_cast<unsigned>(objectLock.specialState));
+            } else {
+                tlog("[timer] END_TURN deferred: native object-lock state is not yet available");
+            }
+        }
+        return;
+    }
+    if (InterlockedIncrement(&g.strategicReadyTicks) < 2)
+        return;
+
+    if (InterlockedExchange(&g.endDayLockWaitLogged, 0)) {
+        tlog("[timer] native object lock released (local=%lu network=%lu special=%u)",
+             static_cast<unsigned long>(objectLock.pendingLocalUpdates),
+             static_cast<unsigned long>(objectLock.pendingNetworkUpdates),
+             static_cast<unsigned>(objectLock.specialState));
+    }
+    tlog("[timer] strategic UI and native command gate stably ready; "
+         "pressing END_TURN (postBattle=%ld)",
+         InterlockedExchangeAdd(&g.pendingEndDayBattle, 0));
+    // The native callback at 0x48FDD7 silently returns when CheckObjectLock is true. Only consume
+    // the request once that gate is free; consume before the press so nested WM_TIMER callbacks
+    // cannot duplicate the network command while its acknowledgement is in flight.
+    InterlockedExchange(&g.pendingEndDay, 0);
+    InterlockedExchange(&g.pendingEndDayBattle, 0);
+    InterlockedExchange(&g.suppressEndTurnConfirm, 1);
+    pressBtn(g.endTurn);
+    InterlockedExchange(&g.suppressEndTurnConfirm, 0);
+}
+
 // Verified Russobit/MNS battle layout (Discipl2.exe SHA-256
 // 1375cdef09ec470ee64fe5693fb734d7c69fb215212311d997f792b258a642eb):
 // CBattleViewerInterf embeds IBatViewer at +24, then data/data2 at +28/+32. Keep these raw here so
@@ -1891,6 +1942,13 @@ extern "C" uint32_t timerhost_begin_turn_ack_serial(void)
         : UINT32_MAX;
 }
 
+extern "C" int timerhost_post_battle_pending(void)
+{
+    return g.installed
+        ? static_cast<int>(InterlockedExchangeAdd(&g.postBattleTransition, 0))
+        : -1;
+}
+
 extern "C" void timerhost_pump(void)
 {
     // Load Game restores clientTakesTurn and the strategic interface but never executes the normal
@@ -1982,68 +2040,23 @@ extern "C" void timerhost_pump(void)
                 } else if (g.pendingEndDayBattle) {
                     // Post-battle path is intentionally strict. Victory/defeat screens do not expose
                     // an enabled strategic END_TURN button, and we never press their Continue control.
-                    const bool strategicReady =
-                        myTurn == 1 && isUserPtr(g.endTurn) && btnEnabled(g.endTurn) &&
-                        interfaceOnTop(g.endTurn);
-                    if (!strategicReady) {
-                        InterlockedExchange(&g.strategicReadyTicks, 0);
-                        InterlockedExchange(&g.endDayLockWaitLogged, 0);
-                    } else {
-                        const PhaseGameLockSnapshot objectLock = phaseGameLockSnapshot();
-                        if (!objectLock.available || objectLock.locked) {
-                            InterlockedExchange(&g.strategicReadyTicks, 0);
-                            if (InterlockedCompareExchange(&g.endDayLockWaitLogged, 1, 0) == 0) {
-                                if (objectLock.available) {
-                                    tlog("[timer] post-battle END_TURN deferred by native object lock "
-                                         "(local=%lu network=%lu special=%u)",
-                                         static_cast<unsigned long>(objectLock.pendingLocalUpdates),
-                                         static_cast<unsigned long>(objectLock.pendingNetworkUpdates),
-                                         static_cast<unsigned>(objectLock.specialState));
-                                } else {
-                                    tlog("[timer] post-battle END_TURN deferred: native object-lock "
-                                         "state is not yet available");
-                                }
-                            }
-                        } else if (InterlockedIncrement(&g.strategicReadyTicks) >= 2) {
-                            if (InterlockedExchange(&g.endDayLockWaitLogged, 0)) {
-                                tlog("[timer] native object lock released "
-                                     "(local=%lu network=%lu special=%u)",
-                                     static_cast<unsigned long>(objectLock.pendingLocalUpdates),
-                                     static_cast<unsigned long>(objectLock.pendingNetworkUpdates),
-                                     static_cast<unsigned>(objectLock.specialState));
-                            }
-                            tlog("[timer] strategic UI and native command gate stably ready; "
-                                 "pressing END_TURN after battle");
-                            // The native click is a network submission, not an idempotent poll. Consume
-                            // the request before entering game code so WM_TIMER cannot send it again
-                            // while the turn-info broadcast is in flight.
-                            InterlockedExchange(&g.pendingEndDay, 0);
-                            InterlockedExchange(&g.pendingEndDayBattle, 0);
-                            InterlockedExchange(&g.suppressEndTurnConfirm, 1);
-                            pressBtn(g.endTurn);
-                            InterlockedExchange(&g.suppressEndTurnConfirm, 0);
-                        }
-                    }
+                    pumpStrategicEndDay(myTurn);
                 } else if (myTurn != 0) {
-                    // Preserve the legacy non-battle End Day priority chain for ordinary timeouts.
-                    void* order[4] = {g.briefCont, g.capBack, g.diploBack, g.endTurn};
-                    for (int i = 0; i < 4; ++i) {
+                    // Preserve the ordinary local-dialog priority chain, then apply the same
+                    // strategic readiness checks used after battle before submitting END_TURN.
+                    void* order[3] = {g.briefCont, g.capBack, g.diploBack};
+                    bool closingDialog = false;
+                    for (int i = 0; i < 3; ++i) {
                         if (!isUserPtr(order[i]) || !btnEnabled(order[i]))
                             continue;
-                        const bool endTurn = order[i] == g.endTurn;
-                        if (endTurn && !interfaceOnTop(g.endTurn))
-                            continue;
+                        InterlockedExchange(&g.strategicReadyTicks, 0);
                         tlog("[timer] pressing btn[%d]=%p (WM_TIMER idle)", i, order[i]);
-                        if (endTurn) {
-                            InterlockedExchange(&g.pendingEndDay, 0);
-                            InterlockedExchange(&g.pendingEndDayBattle, 0);
-                            InterlockedExchange(&g.suppressEndTurnConfirm, 1);
-                        }
                         pressBtn(order[i]);
-                        if (endTurn)
-                            InterlockedExchange(&g.suppressEndTurnConfirm, 0);
+                        closingDialog = true;
                         break;
                     }
+                    if (!closingDialog)
+                        pumpStrategicEndDay(myTurn);
                 }
             }
         }

@@ -744,6 +744,8 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
     const int animationActive = battleState.animation_active;
     const int playbackLocal = battleState.playback_local;
     const uint32_t beginTurnAck = hostBeginTurnAckSerial();
+    const int postBattlePending = HOST_HAS(post_battle_pending)
+        ? g_host->post_battle_pending() : -1;
     int state, durMs, alwaysVis, paused, userPaused, running, extra, expired;
     int pvpClampPending, offTurnPvpExhausted, blinkSeconds;
     DWORD baseline, pausedAt;
@@ -785,8 +787,9 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
         g_lastBeginTurnAck = beginTurnAck;
     } else {
         // Battle teardown precedes reward/artifact UI. Keep that interval attached to the already
-        // accepted local turn even if clientTakesTurn briefly drops to zero. A network turn-info
-        // edge is the authoritative end; it prevents this grace state from charging an opponent.
+        // accepted local turn even if clientTakesTurn briefly drops to zero. Retire the grace state
+        // when the host observes stable strategic UI. off6 alone cannot close it: its owner/serial
+        // can remain unchanged across several local days, especially on a joiner.
         if (g_observedBattleKind == 2 && battleKind == 0 &&
             battleState.battle_instance != g_observedBattleInstance) {
             g_postBattleBilling = 1;
@@ -962,6 +965,13 @@ extern "C" void __cdecl c4p_tick(uint32_t now_ms)
             g_manualSetPending = 0;
         }
 
+        // Retire after edge classification: returning from rewards is still the accepted turn,
+        // even if the worker sees strategicActive rise and transition retirement in the same tick.
+        if (g_postBattleBilling && postBattlePending == 0) {
+            g_postBattleBilling = 0;
+            timerTrace("[timer] PvE post-battle billing retired (strategic=%d serial=%u)",
+                       strategicActive, serial);
+        }
         const bool keepAcceptedNonPvpTurn = g_state == 2 && g_turnAccepted &&
             (battleKind == 2 || g_postBattleBilling);
         if (!strategicActive && !keepAcceptedNonPvpTurn)

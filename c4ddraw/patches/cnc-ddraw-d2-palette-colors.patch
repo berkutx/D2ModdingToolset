@@ -1,0 +1,21 @@
+diff --git a/src/ddpalette.c b/src/ddpalette.c
+--- a/src/ddpalette.c
++++ b/src/ddpalette.c
+@@ -115,6 +115,17 @@ HRESULT dd_CreatePalette(
+     if (!lpDDPalette || !lpDDColorArray)
+         return DDERR_INVALIDPARAMS;
+ 
++    /* D2 uses all 256 colors in its offscreen image palettes while requesting
++       only DDPCAPS_8BIT. Reserving entry 255 as white turns transparent city
++       effects into opaque white squares (IsoAnim.ff record 1233).
++       These palettes convert textures into the game's 16-bit canvas; they
++       are not the reserved system palette of an 8-bit primary surface. */
++    if (g_ddraw.bpp == 16 && (dwFlags & DDPCAPS_8BIT) &&
++        !(dwFlags & (DDPCAPS_PRIMARYSURFACE | DDPCAPS_PRIMARYSURFACELEFT)))
++    {
++        dwFlags |= DDPCAPS_ALLOW256;
++    }
++
+     IDirectDrawPaletteImpl* p =
+         (IDirectDrawPaletteImpl*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(IDirectDrawPaletteImpl));
+ 

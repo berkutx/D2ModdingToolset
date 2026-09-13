@@ -130,6 +130,11 @@ typedef struct C4P_Host
     int(__cdecl* get_visible_game_rect)(int32_t* left, int32_t* top,
                                         int32_t* width, int32_t* height,
                                         int32_t* zoom_1000);
+
+    /* Post-battle reward/close transition: 1 pending, 0 retired on stable strategic UI,
+     * -1 unavailable. This is an independent live sample, not a strategic turn serial.
+     * Appended after 1.9.2; old hosts require the usual struct_size guard. */
+    int(__cdecl* post_battle_pending)(void);
 } C4P_Host;
 
 #if defined(__cplusplus) && defined(_WIN32) && !defined(_WIN64)
@@ -144,7 +149,9 @@ static_assert(offsetof(C4P_Host, force_auto_battle_v2) == 96,
               "C4P safe-auto callback offset drift");
 static_assert(offsetof(C4P_Host, get_visible_game_rect) == 100,
               "C4P visible-rect callback offset drift");
-static_assert(sizeof(C4P_Host) == 104, "C4P host ABI drift");
+static_assert(offsetof(C4P_Host, post_battle_pending) == 104,
+              "C4P post-battle callback offset drift");
+static_assert(sizeof(C4P_Host) == 108, "C4P host ABI drift");
 #endif
 
 /* Plugin self-report, queried before init. */
