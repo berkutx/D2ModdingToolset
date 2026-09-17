@@ -97,6 +97,14 @@ struct Lobby
         bool unlockGui{false};
     } controls;
 
+    struct Defaults
+    {
+        bool ranked{false};
+        bool simultaneousTurns{false};
+        bool unlockGui{false};
+        int simultaneousTurnsDays{7};
+    } defaults;
+
     // Stores login information while the game is running,
     // not loaded from userSettings.lua.
     std::string password;

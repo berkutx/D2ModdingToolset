@@ -1026,12 +1026,7 @@ static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /
         thisptr->scenarioTemplateName =
             std::filesystem::path(templates[selectedIndex].filename).filename().string();
 
-        // Record the template identity at the start of generation.
-        if (auto* service = CNetCustomService::get()) {
-            spdlog::info("Starting generation using template '{}'", thisptr->scenarioTemplateName);
-
-            service->setTemplateInfo(thisptr->scenarioTemplateName);
-        }
+        spdlog::info("Starting generation using template '{}'", thisptr->scenarioTemplateName);
 
 
         // TODO: handle this in a better way
@@ -1062,6 +1057,12 @@ static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /
 bool hasRestartScenario()
 {
     return restartScenario.has_value();
+}
+
+const std::string& restartScenarioTemplateName()
+{
+    static const std::string empty;
+    return restartScenario ? restartScenario->templateName : empty;
 }
 
 void clearRestartScenario()

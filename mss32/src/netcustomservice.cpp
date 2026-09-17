@@ -22,6 +22,7 @@
 #include "lobbysaveexchange.h"
 #include "mempool.h"
 #include "menurestartnative.h"
+#include "menurandomscenario.h"
 #include "midgard.h"
 #include "midgardmsgbox.h"
 #include "midmsgboxbuttonhandler.h"
@@ -333,6 +334,14 @@ CNetCustomService::CNetCustomService()
     , m_lobbyCallback(this)
 {
     spdlog::debug(__FUNCTION__);
+
+    // Seed once per lobby session; reopening the host dialog preserves the player's choices.
+    // Visibility/absent-control and native-save checks still apply when the dialog is read.
+    const auto& defaults = userSettings().lobby.defaults;
+    m_roomOptions.ranked = defaults.ranked;
+    m_roomOptions.unlockGui = defaults.unlockGui;
+    m_roomOptions.simultaneousTurnsEnabled = defaults.simultaneousTurns;
+    m_roomOptions.simultaneousTurnsDays = defaults.simultaneousTurnsDays;
 
     vftable = &g_vftable;
 
@@ -772,12 +781,21 @@ bool CNetCustomService::createRoom(const char* gameName,
 
     auto templateHashColumn{
         properties.AddColumn(templateHashColumnName, DataStructures::Table::STRING)};
+    const auto restartReadyColumn{
+        properties.AddColumn("RestartReady", DataStructures::Table::STRING)};
 
     auto rankedColumn{properties.AddColumn(rankedColumnName, DataStructures::Table::STRING)};
     auto simTurnsDaysColumn{
         properties.AddColumn(simultaneousTurnsDaysColumnName, DataStructures::Table::STRING)};
     auto unlockGuiColumn{properties.AddColumn(unlockGuiColumnName, DataStructures::Table::STRING)};
 
+    // The accepted recipe is authoritative even if the service/UI metadata was lost.
+    // A loaded/predefined map clears the recipe before reaching this call.
+    if (hasRestartScenario() && !restartScenarioTemplateName().empty()
+        && getTemplateName() != restartScenarioTemplateName()) {
+        spdlog::warn("Restoring room template identity from the accepted generation recipe");
+        setTemplateInfo(restartScenarioTemplateName());
+    }
     const auto& templateName = getTemplateName();
     const auto& templateHash = getTemplateHash();
     const auto effectiveSimTurnsDays{
@@ -788,6 +806,9 @@ bool CNetCustomService::createRoom(const char* gameName,
     row->UpdateCell(hashColumn, filesHash.c_str());
     row->UpdateCell(templateNameColumn, templateName.c_str());
     row->UpdateCell(templateHashColumn, templateHash.c_str());
+    row->UpdateCell(restartReadyColumn, hasRestartScenario() ? "1" : "0");
+    spdlog::info("Lobby create: template='{}', hash='{}', restartRecipe={}",
+                 templateName, templateHash, hasRestartScenario());
     row->UpdateCell(versionColumn, gameVersion.c_str());
     row->UpdateCell(gameNameColumn, gameName);
     row->UpdateCell(passwordColumn, password);

@@ -28,6 +28,7 @@
 #include "listbox.h"
 #include "mempool.h"
 #include "menuphase.h"
+#include "menurandomscenario.h"
 #include "phasegame.h"
 #include "scenariodata.h"
 #include "scenariodataarray.h"
@@ -147,6 +148,10 @@ void __fastcall CMenuCustomNewSkirmishMulti::loadBtnHandler(CMenuCustomNewSkirmi
 
     auto dialog = CMenuBaseApi::get().getDialogInterface(thisptr);
     thisptr->readRoomOptionsControls();
+    // A file opened from the scenario list has no live generator recipe, even if
+    // it is called Random scenario.sg. Never reuse a previously generated identity.
+    clearRestartScenario();
+    CNetCustomService::get()->setTemplateInfo({});
     thisptr->createRoom(getEditBoxText(dialog, "EDIT_GAME"), scenario->name.string,
                         scenario->description.string, getEditBoxText(dialog, "EDIT_PASSWORD"));
 }

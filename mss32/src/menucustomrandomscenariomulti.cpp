@@ -71,6 +71,8 @@ void CMenuCustomRandomScenarioMulti::createRoomAndServer(CMenuCustomRandomScenar
     using namespace game;
 
     prepareToStartRandomScenario(menu, true);
+    // Publish the accepted map, not transient state from the generation button.
+    CNetCustomService::get()->setTemplateInfo(menu->scenarioTemplateName);
 
     auto dialog = CMenuBaseApi::get().getDialogInterface(menu);
     auto phaseData = menu->menuBaseData->menuPhase->data;

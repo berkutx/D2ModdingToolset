@@ -18,6 +18,7 @@
  */
 
 #include "menucustomloadskirmishmulti.h"
+#include "menurandomscenario.h"
 #include "mempool.h"
 #include "originalfunctions.h"
 #include "textids.h"
@@ -74,6 +75,8 @@ void CMenuCustomLoadSkirmishMulti::createRoomAndServer()
     // The load screen exposes no room-option controls. Do not inherit invisible settings from a
     // previously opened new-game host dialog.
     CNetCustomService::get()->getRoomOptions() = {};
+    clearRestartScenario();
+    CNetCustomService::get()->setTemplateInfo({});
     createRoom(vftable->getGameName(this), phaseData->scenarioName, phaseData->scenarioDescription,
                vftable->getPassword(this));
 }

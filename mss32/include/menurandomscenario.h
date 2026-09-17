@@ -95,6 +95,9 @@ void prepareToStartRandomScenario(CMenuRandomScenario* menu, bool networkGame = 
 /** Returns true when an accepted custom-lobby random scenario can be regenerated. */
 bool hasRestartScenario();
 
+/** Exact file identity retained with the accepted recipe; never inferred from map text. */
+const std::string& restartScenarioTemplateName();
+
 /** Drops the retained scenario template after the real lobby room is left. */
 void clearRestartScenario();
 
