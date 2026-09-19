@@ -57,17 +57,6 @@
 namespace hooks {
 namespace {
 
-// Russobit constructor 0x478428 stores the active player at +0x10;
-// CCommandMsg::playerId is a separate field used to address the message.
-struct CmdBeginTurnMsgView
-{
-    game::CCommandMsg command;
-    game::CMidgardID activePlayerId;
-};
-
-static_assert(sizeof(CmdBeginTurnMsgView) == 20);
-static_assert(offsetof(CmdBeginTurnMsgView, activePlayerId) == 16);
-
 thread_local game::CMidServerLogic* resumingServerLogic{};
 
 struct SaveResumeScope
@@ -638,7 +627,7 @@ bool __fastcall midServerLogicSendPlayerMessageHooked(game::IMidMsgSender* thisp
 
     if (resumingServerLogic == castMidMsgSenderToMidServerLogic(thisptr)
         && message->vftable->getId(message) == CommandMsgId::BeginTurn) {
-        auto* beginTurn = reinterpret_cast<CmdBeginTurnMsgView*>(message);
+        auto* beginTurn = static_cast<CCmdBeginTurnMsg*>(message);
         beginTurn->activePlayerId = resumingServerLogic->coreData->players->bgn->playerId;
     }
 

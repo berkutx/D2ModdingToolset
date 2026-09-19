@@ -76,4 +76,21 @@ CNetMsgVftable* getMenusReqInfoVftable()
     return vftables[static_cast<int>(hooks::gameVersion())];
 }
 
+CNetMsgVftable* getMenusReqStartInfoVftable()
+{
+    static std::array<CNetMsgVftable*, 3> vftables = {{
+        // Akella: not verified for coordinated restart.
+        nullptr,
+        // Russobit: CMenuLobby constructor sends this empty request at 0x4e25df.
+        (CNetMsgVftable*)0x6d081c,
+        // Gog: not verified for coordinated restart.
+        nullptr,
+    }};
+
+    const auto version = static_cast<int>(hooks::gameVersion());
+    return version >= 0 && version < static_cast<int>(vftables.size())
+               ? vftables[version]
+               : nullptr;
+}
+
 } // namespace game::NetMessagesApi

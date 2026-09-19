@@ -28,9 +28,9 @@
 #include "generatorsettings.h"
 #include "globaldata.h"
 #include "image2outline.h"
+#include "interfaceutils.h"
 #include "listbox.h"
 #include "mapgenerator.h"
-#include "maptemplatereader.h"
 #include "mempool.h"
 #include "menuphase.h"
 #include "multilayerimg.h"
@@ -44,13 +44,14 @@
 #include "utils.h"
 #include "waitgenerationinterf.h"
 #include <chrono>
+#include <optional>
 #include <set>
-#include <sol/sol.hpp>
 #include <spdlog/spdlog.h>
 
 namespace hooks {
 
 static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /*%edx*/);
+static void startRestartScenarioGeneration(CMenuRandomScenario* menu);
 
 static const char templatesListName[] = "TLBOX_TEMPLATES";
 static const char sizeSpinName[] = "SPIN_SIZE";
@@ -69,6 +70,19 @@ static const int manaSpinStep{50};
 static game::RttiInfo<game::CMenuBaseVftable> menuRttiInfo;
 
 static std::unique_ptr<NativeGameInfo> gameInfo;
+
+struct RestartScenarioSnapshot
+{
+    ScenarioTemplateRecipe recipe;
+    std::string templateName;
+    std::string roomName;
+    std::string password;
+    std::string playerName;
+    std::time_t lastSeed{};
+};
+
+static std::optional<RestartScenarioSnapshot> restartScenario;
+static RestartScenarioCompletion pendingRestartCompletion{};
 
 /** Maximum number of attempts to generate scenario map. */
 static constexpr const std::uint32_t generationAttemptsMax{50};
@@ -405,6 +419,15 @@ static void removePopup(CMenuRandomScenario* menu)
     }
 }
 
+static void completeRestartScenarioGeneration(CMenuRandomScenario* menu,
+                                              RestartScenarioGenerationResult result)
+{
+    auto completion = std::exchange(menu->restartCompletion, nullptr);
+    if (completion) {
+        completion(menu, result);
+    }
+}
+
 /** Updates menu UI according to selected index in templates list box. */
 static void updateMenuUi(CMenuRandomScenario* menu, int selectedIndex)
 {
@@ -665,6 +688,7 @@ static void generateScenario(CMenuRandomScenario* menu, std::time_t seed)
             }
 
             // Successfully generated, save results
+            menu->generatedSeed = seed;
             menu->scenario = std::move(scenario);
             menu->generator = std::make_unique<rsg::MapGenerator>(std::move(generator));
 
@@ -698,6 +722,20 @@ static void onGenerationResultAccepted(CMenuRandomScenario* menu)
     // Player is satisfied with generation results, start scenario
     removePopup(menu);
 
+    if (menu->restartGeneration) {
+        try {
+            prepareToStartRandomScenario(menu, true);
+        } catch (const std::exception& e) {
+            spdlog::error(e.what());
+            showMessageBox(e.what());
+            completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Error);
+            return;
+        }
+
+        completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Success);
+        return;
+    }
+
     if (menu->startScenario) {
         menu->startScenario(menu);
     }
@@ -710,7 +748,12 @@ static void onGenerationResultRejected(CMenuRandomScenario* menu)
     menu->generator.reset(nullptr);
 
     removePopup(menu);
-    buttonGenerateHandler(menu, 0);
+    if (menu->restartGeneration) {
+        // Keep the accepted template, spins and resolved races; only roll a new map seed.
+        startRestartScenarioGeneration(menu);
+    } else {
+        buttonGenerateHandler(menu, 0);
+    }
 }
 
 static void onGenerationResultCanceled(CMenuRandomScenario* menu)
@@ -720,6 +763,9 @@ static void onGenerationResultCanceled(CMenuRandomScenario* menu)
     menu->generator.reset(nullptr);
 
     removePopup(menu);
+    if (menu->restartGeneration) {
+        completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Canceled);
+    }
 }
 
 static void __fastcall waitGenerationResults(CMenuRandomScenario* menu, int /*%edx*/)
@@ -743,6 +789,9 @@ static void __fastcall waitGenerationResults(CMenuRandomScenario* menu, int /*%e
         if (!menu->scenario) {
             // This should never happen
             showMessageBox("BUG!\nGeneration completed, but no scenario was created");
+            if (menu->restartGeneration) {
+                completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Error);
+            }
             return;
         }
 
@@ -761,6 +810,9 @@ static void __fastcall waitGenerationResults(CMenuRandomScenario* menu, int /*%e
         }
 
         showMessageBox(message);
+        if (menu->restartGeneration) {
+            completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Error);
+        }
         return;
     }
 
@@ -775,7 +827,15 @@ static void __fastcall waitGenerationResults(CMenuRandomScenario* menu, int /*%e
         }
 
         showMessageBox(message);
+        if (menu->restartGeneration) {
+            completeRestartScenarioGeneration(menu,
+                                              RestartScenarioGenerationResult::LimitExceeded);
+        }
         return;
+    }
+
+    if (status == GenerationStatus::Canceled && menu->restartGeneration) {
+        completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Canceled);
     }
 }
 
@@ -791,6 +851,31 @@ static void onGenerationCanceled(CMenuRandomScenario* menu)
     game::CDialogInterfApi::get().hideControl(dialog, "BTN_CANCEL");
 
     menu->cancelGeneration = true;
+}
+
+static void startRestartScenarioGeneration(CMenuRandomScenario* menu)
+{
+    std::time_t seed{std::time(nullptr)};
+    if (seed <= menu->generatedSeed) {
+        seed = menu->generatedSeed + 1;
+    }
+
+    menu->popup = createWaitGenerationInterf(menu, onGenerationCanceled);
+    showInterface(menu->popup);
+
+    menu->generationStatus = GenerationStatus::NotStarted;
+    menu->cancelGeneration = false;
+    createTimerEvent(&menu->uiEvent, menu, waitGenerationResults, 50);
+
+    try {
+        // Re-run Lua for each preview, not each internal geometry attempt. Keep the
+        // accepted settings/races and source, but never reuse already rolled contents.
+        menu->scenarioTemplate = instantiateScenarioTemplate(menu->scenarioRecipe, seed);
+        menu->generatorThread = std::thread([menu, seed]() { generateScenario(menu, seed); });
+    } catch (const std::exception& e) {
+        spdlog::error(e.what());
+        menu->generationStatus = GenerationStatus::Error;
+    }
 }
 
 static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /*%edx*/)
@@ -934,30 +1019,24 @@ static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /
         rsg::RandomGenerator rnd;
 
         std::time_t seed{std::time(nullptr)};
+        if (seed <= thisptr->generatedSeed) {
+            seed = thisptr->generatedSeed + 1;
+        }
         rnd.setSeed(static_cast<std::size_t>(seed));
 
         // Roll actual races instead of random
         settings.replaceRandomRaces(rnd);
 
-        // Capture the template at the start of generation.
-        if (auto* service = CNetCustomService::get()) {
-            const auto templateName = std::filesystem::path(templates[selectedIndex].filename)
-                                          .filename()
-                                          .string();
+        thisptr->scenarioTemplateName =
+            std::filesystem::path(templates[selectedIndex].filename).filename().string();
 
-            spdlog::info("Starting generation using template '{}'", templateName);
-
-            service->setTemplateInfo(templateName);
-        }
+        spdlog::info("Starting generation using template '{}'", thisptr->scenarioTemplateName);
 
 
-        // TODO: handle this in a better way
-        sol::state lua;
-        rsg::bindLuaApi(lua);
-        rsg::readTemplateSettings(templates[selectedIndex].filename, lua);
-
-        // Create template contents depending on size and races
-        rsg::readTemplateContents(thisptr->scenarioTemplate, lua);
+        // Capture the exact source being executed and the player's settings before
+        // getContents can override them. Accept retains these inputs for 111/Retry.
+        thisptr->scenarioRecipe = {settings, readFile(templates[selectedIndex].filename)};
+        thisptr->scenarioTemplate = instantiateScenarioTemplate(thisptr->scenarioRecipe, seed);
 
         thisptr->popup = createWaitGenerationInterf(thisptr, onGenerationCanceled);
         showInterface(thisptr->popup);
@@ -974,6 +1053,59 @@ static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /
         showMessageBox(e.what());
         return;
     }
+}
+
+bool hasRestartScenario()
+{
+    return restartScenario.has_value();
+}
+
+const std::string& restartScenarioTemplateName()
+{
+    static const std::string empty;
+    return restartScenario ? restartScenario->templateName : empty;
+}
+
+void clearRestartScenario()
+{
+    pendingRestartCompletion = nullptr;
+    restartScenario.reset();
+}
+
+bool prepareRestartScenarioGeneration(RestartScenarioCompletion completion)
+{
+    if (!restartScenario || !completion || pendingRestartCompletion) {
+        return false;
+    }
+
+    pendingRestartCompletion = completion;
+    return true;
+}
+
+bool startPreparedRestartScenarioGeneration(CMenuRandomScenario* menu)
+{
+    if (!menu || !restartScenario || !pendingRestartCompletion
+        || menu->generatorThread.joinable()) {
+        return false;
+    }
+
+    menu->scenarioRecipe = restartScenario->recipe;
+    menu->scenarioTemplateName = restartScenario->templateName;
+
+    auto dialog = game::CMenuBaseApi::get().getDialogInterface(menu);
+    setEditBoxText(dialog, "EDIT_GAME", restartScenario->roomName.c_str(), false);
+    setEditBoxText(dialog, "EDIT_PASSWORD", restartScenario->password.c_str(), false);
+    setEditBoxText(dialog, "EDIT_NAME", restartScenario->playerName.c_str(), false);
+
+    menu->restartCompletion = std::exchange(pendingRestartCompletion, nullptr);
+    menu->restartGeneration = true;
+    menu->startScenario = nullptr;
+    menu->scenario.reset(nullptr);
+    menu->generator.reset(nullptr);
+    menu->generatedSeed = restartScenario->lastSeed;
+    startRestartScenarioGeneration(menu);
+
+    return true;
 }
 
 static void setupMenuUi(CMenuRandomScenario* menu, const char* dialogName)
@@ -1152,6 +1284,27 @@ void prepareToStartRandomScenario(CMenuRandomScenario* menu, bool networkGame)
     const auto scenarioFilePath{exportsFolder() / "Random scenario.sg"};
     // Serialize scenario so it can be read from disk later by game
     menu->scenario->serialize(scenarioFilePath);
+
+    if (networkGame) {
+        if (menu->restartGeneration) {
+            if (restartScenario) {
+                restartScenario->lastSeed = menu->generatedSeed;
+            }
+        } else if (CNetCustomService::get()) {
+            auto dialog = game::CMenuBaseApi::get().getDialogInterface(menu);
+            const auto copyEditText = [dialog](const char* control) {
+                const auto text = getEditBoxText(dialog, control);
+                return std::string{text ? text : ""};
+            };
+
+            restartScenario = RestartScenarioSnapshot{menu->scenarioRecipe,
+                                                      menu->scenarioTemplateName,
+                                                      copyEditText("EDIT_GAME"),
+                                                      copyEditText("EDIT_PASSWORD"),
+                                                      copyEditText("EDIT_NAME"),
+                                                      menu->generatedSeed};
+        }
+    }
 
     using namespace game;
 

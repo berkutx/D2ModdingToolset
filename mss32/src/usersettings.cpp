@@ -304,6 +304,7 @@ static void readLobbySettings(const sol::table& table, Lobby& value)
     value.server.port = def.server.port;
     value.client.port = def.client.port;
     value.controls = def.controls;
+    value.defaults = def.defaults;
 
     auto lobby = table.get<sol::optional<sol::table>>("lobby");
     if (!lobby.has_value())
@@ -330,6 +331,17 @@ static void readLobbySettings(const sol::table& table, Lobby& value)
         value.controls.simultaneousTurns = readSetting(controls.value(), "simultaneousTurns",
                                                        def.controls.simultaneousTurns);
         value.controls.unlockGui = readSetting(controls.value(), "unlockGui", def.controls.unlockGui);
+    }
+
+    auto defaults = lobby.value().get<sol::optional<sol::table>>("defaults");
+    if (defaults.has_value()) {
+        value.defaults.ranked = readSetting(defaults.value(), "ranked", def.defaults.ranked);
+        value.defaults.simultaneousTurns = readSetting(defaults.value(), "simultaneousTurns",
+                                                       def.defaults.simultaneousTurns);
+        value.defaults.unlockGui = readSetting(defaults.value(), "unlockGui", def.defaults.unlockGui);
+        value.defaults.simultaneousTurnsDays = std::clamp(
+            readSetting(defaults.value(), "simultaneousTurnsDays", def.defaults.simultaneousTurnsDays),
+            0, 30);
     }
 }
 static void readUserSettings(const sol::table& table, UserSettings& settings)

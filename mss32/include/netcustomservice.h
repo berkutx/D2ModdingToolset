@@ -101,11 +101,13 @@ enum LobbyMessageId
     ID_LOBBY_SAVE_STORED_ACK = ID_USER_PACKET_ENUM + 13,
     /** Host -> core: native-save result and actual collision-safe basename. */
     ID_LOBBY_SAVE_NATIVE_RESULT = ID_USER_PACKET_ENUM + 14,
+    /** Coordinated same-room random-map restart; negotiated by ClientCapabilities. */
+    ID_LOBBY_RESTART = ID_USER_PACKET_ENUM + 15,
     ID_GAME_MESSAGE = game::netMessageNormalType & 0xff,
 };
 
 static_assert(ID_GAME_MESSAGE == 255);
-static_assert(ID_LOBBY_SAVE_NATIVE_RESULT < ID_GAME_MESSAGE);
+static_assert(ID_LOBBY_RESTART < ID_GAME_MESSAGE);
 
 /** Lobby-specific wire protocol. Values are serialized field-by-field with SLNet::BitStream;
  * these structures are logical payloads, not packed wire images. Keep in sync with the lobby
@@ -270,6 +272,9 @@ public:
     void sendChatMessage(const char* text);
     ChatMessage readChatMessage(const SLNet::Packet* packet);
 
+    /** Shows a game-encoded notice after pending native transitions have finished. */
+    void enqueueSystemNotice(std::string notice);
+
     /** Requests online user list. Handle ID_LOBBY_GET_ONLINE_USERS_RESPONSE in peer callback. */
     void queryOnlineUsers();
     std::vector<UserInfo> readOnlineUsers(const SLNet::Packet* packet);
@@ -422,7 +427,6 @@ private:
                          LobbyProtocol::SaveRequest& request) const;
     bool readSaveStoredAck(const SLNet::Packet* packet, std::uint64_t& saveId) const;
     bool readSystemNotice(const SLNet::Packet* packet, std::string& notice) const;
-    void enqueueSystemNotice(std::string notice);
     void processDeferredLobbyState();
     void processPendingMatchEnd();
     void processPendingSystemNotices();
