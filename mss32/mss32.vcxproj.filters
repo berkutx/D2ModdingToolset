@@ -1112,6 +1112,9 @@
     <ClCompile Include="src\scenariotemplates.cpp">
       <Filter>features\random scenario generator</Filter>
     </ClCompile>
+    <ClCompile Include="src\scenariotemplaterecipe.cpp">
+      <Filter>features\random scenario generator</Filter>
+    </ClCompile>
     <ClCompile Include="src\encparambase.cpp">
       <Filter>game</Filter>
     </ClCompile>
@@ -3528,6 +3531,9 @@
       <Filter>hooks</Filter>
     </ClInclude>
     <ClInclude Include="include\scenariotemplates.h">
+      <Filter>features\random scenario generator</Filter>
+    </ClInclude>
+    <ClInclude Include="include\scenariotemplaterecipe.h">
       <Filter>features\random scenario generator</Filter>
     </ClInclude>
     <ClInclude Include="include\nativegameinfo.h">

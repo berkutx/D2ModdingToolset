@@ -24,6 +24,7 @@
 #include "mapgenerator.h"
 #include "maptemplate.h"
 #include "menubase.h"
+#include "scenariotemplaterecipe.h"
 #include <array>
 #include <ctime>
 #include <string>
@@ -73,6 +74,7 @@ struct CMenuRandomScenario : public game::CMenuBase
     game::UiEvent uiEvent{};
     std::thread generatorThread;
     rsg::MapTemplate scenarioTemplate;
+    ScenarioTemplateRecipe scenarioRecipe;
     std::string scenarioTemplateName;
     rsg::MapPtr scenario;
     std::unique_ptr<rsg::MapGenerator> generator;

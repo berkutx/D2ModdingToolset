@@ -31,7 +31,6 @@
 #include "interfaceutils.h"
 #include "listbox.h"
 #include "mapgenerator.h"
-#include "maptemplatereader.h"
 #include "mempool.h"
 #include "menuphase.h"
 #include "multilayerimg.h"
@@ -47,7 +46,6 @@
 #include <chrono>
 #include <optional>
 #include <set>
-#include <sol/sol.hpp>
 #include <spdlog/spdlog.h>
 
 namespace hooks {
@@ -75,7 +73,7 @@ static std::unique_ptr<NativeGameInfo> gameInfo;
 
 struct RestartScenarioSnapshot
 {
-    rsg::MapTemplate scenarioTemplate;
+    ScenarioTemplateRecipe recipe;
     std::string templateName;
     std::string roomName;
     std::string password;
@@ -870,6 +868,9 @@ static void startRestartScenarioGeneration(CMenuRandomScenario* menu)
     createTimerEvent(&menu->uiEvent, menu, waitGenerationResults, 50);
 
     try {
+        // Re-run Lua for each preview, not each internal geometry attempt. Keep the
+        // accepted settings/races and source, but never reuse already rolled contents.
+        menu->scenarioTemplate = instantiateScenarioTemplate(menu->scenarioRecipe, seed);
         menu->generatorThread = std::thread([menu, seed]() { generateScenario(menu, seed); });
     } catch (const std::exception& e) {
         spdlog::error(e.what());
@@ -1018,6 +1019,9 @@ static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /
         rsg::RandomGenerator rnd;
 
         std::time_t seed{std::time(nullptr)};
+        if (seed <= thisptr->generatedSeed) {
+            seed = thisptr->generatedSeed + 1;
+        }
         rnd.setSeed(static_cast<std::size_t>(seed));
 
         // Roll actual races instead of random
@@ -1029,13 +1033,10 @@ static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /
         spdlog::info("Starting generation using template '{}'", thisptr->scenarioTemplateName);
 
 
-        // TODO: handle this in a better way
-        sol::state lua;
-        rsg::bindLuaApi(lua);
-        rsg::readTemplateSettings(templates[selectedIndex].filename, lua);
-
-        // Create template contents depending on size and races
-        rsg::readTemplateContents(thisptr->scenarioTemplate, lua);
+        // Capture the exact source being executed and the player's settings before
+        // getContents can override them. Accept retains these inputs for 111/Retry.
+        thisptr->scenarioRecipe = {settings, readFile(templates[selectedIndex].filename)};
+        thisptr->scenarioTemplate = instantiateScenarioTemplate(thisptr->scenarioRecipe, seed);
 
         thisptr->popup = createWaitGenerationInterf(thisptr, onGenerationCanceled);
         showInterface(thisptr->popup);
@@ -1088,7 +1089,7 @@ bool startPreparedRestartScenarioGeneration(CMenuRandomScenario* menu)
         return false;
     }
 
-    menu->scenarioTemplate = restartScenario->scenarioTemplate;
+    menu->scenarioRecipe = restartScenario->recipe;
     menu->scenarioTemplateName = restartScenario->templateName;
 
     auto dialog = game::CMenuBaseApi::get().getDialogInterface(menu);
@@ -1296,7 +1297,7 @@ void prepareToStartRandomScenario(CMenuRandomScenario* menu, bool networkGame)
                 return std::string{text ? text : ""};
             };
 
-            restartScenario = RestartScenarioSnapshot{menu->scenarioTemplate,
+            restartScenario = RestartScenarioSnapshot{menu->scenarioRecipe,
                                                       menu->scenarioTemplateName,
                                                       copyEditText("EDIT_GAME"),
                                                       copyEditText("EDIT_PASSWORD"),
