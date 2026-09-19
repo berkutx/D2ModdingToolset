@@ -138,6 +138,7 @@ extern "C" int timerhost_auto_battle_message(UINT msg); // queued native TOG_AUT
 extern bool g_dragScrollActive;
 extern bool g_dragMoved;
 void dragScrollWndMove(int gameX, int gameY);
+void resetEdgeScrollCadence();
 void cancelDragScroll();
 
 namespace {
@@ -1089,6 +1090,7 @@ enum : UINT
     kIdCloudsInfo = 0xA1F9, // disabled active -> requested / asset-status line
     kIdNetTrace = 0xA1FA, // optional diagnostic recorder, restart by closing client
     kIdNetTraceInfo = 0xA1FB,
+    kIdEdgeScroll = 0xA1FC, // independent live toggle for scrolling at the screen edge
     kIdLocaleNone = 0xA200, // disable wrapper OEM/ANSI recoding
     kIdLocaleBase = 0xA201, // + index into installed Windows locales
     kIdLast = 0xA2FF, // upper bound of our WM_COMMAND id block
@@ -1336,6 +1338,7 @@ bool g_maintas = false, g_vsync = false, g_boxing = false;
 char g_aspectRatio[32] = {}; // non-empty overrides native aspect and forces maintas in cnc-ddraw
 bool g_singlecpu = true; // ddraw.ini singlecpu stability mode (cnc-ddraw default true)
 bool g_dragScroll = true; // grab+drag map panning (ini [menu] dragScroll, default on)
+bool g_edgeScroll = true; // independent edge-scroll preference; existing configs default to on
 bool g_dialogVoSkip = false; // auto-close voiced event popups after VO + log their text (default off)
 bool g_autoConfirmUnitHire = false; // skip X005TA0285 through BTN_YES (default on for validated MNS)
 int g_editorDatabase = 0; // ScenEditDatabase: 0=scenarios, 1=campaigns (restart required)
@@ -1354,6 +1357,7 @@ int g_windowStretchPercent = 100; // legacy centred fixed-window crop, 0=off, de
 HMENU g_bar = nullptr;
 UINT g_relayoutMsg = 0; // registered msg: marshal menu/fullscreen chrome sync onto the GUI thread
 HMENU g_gameMenu = nullptr, g_videoMenu = nullptr, g_perfMenu = nullptr; // top-level bar menus
+HMENU g_mnsMenu = nullptr; // exact-build gameplay settings, absent in the scenario editor
 HMENU g_technicalMenu = nullptr; // technical diagnostics live one level below ordinary settings
 HMENU g_battleAnimMenu = nullptr, g_mapAnimMenu = nullptr, g_battleAtkMenu = nullptr;
 HMENU g_rendMenu = nullptr, g_shaderMenu = nullptr;
@@ -1650,8 +1654,11 @@ void seedConfigFirstRun()
         "battleAttackSpeed=5\r\n"
         "\r\n"
         "; Grab and drag the strategic map with the left mouse button. A normal click is preserved.\r\n"
-        "; Native window-edge scrolling remains available.  0 = off, 1 = on (default).\r\n"
+        "; Independent of edgeScroll.  0 = off, 1 = on (default).\r\n"
         "dragScroll=1\r\n"
+        "; Scroll the map when the pointer reaches a screen edge. Changes apply immediately.\r\n"
+        "; 0 = off, 1 = on (default); independent of dragScroll.\r\n"
+        "edgeScroll=1\r\n"
         "\r\n"
         "; Show both unit panels at once in battle (validated Disciples II layout, logical width 990+).\r\n"
         "; The choice is latched when the next battle opens.  0 = off, 1 = on (default).\r\n"
@@ -4310,7 +4317,7 @@ void refreshWindowStretchInfo()
 
 void refreshCloudItem()
 {
-    if (!g_gameMenu)
+    if (!g_mnsMenu)
         return;
 
     const int status = clouds_get_status();
@@ -4324,26 +4331,26 @@ void refreshCloudItem()
     const wchar_t* label = nullptr;
     switch (status) {
     case 1:
-        label = L(L"(MNS/SMNS) Map clouds (requires reviewed Imgs\\IsoClouds.ff)",
-                  L"(MNS/SMNS) Облака на карте (нужен проверенный Imgs\\IsoClouds.ff)");
+        label = L(L"Map clouds (requires Imgs\\IsoClouds.ff)",
+                  L"Облака на карте (нужен Imgs\\IsoClouds.ff)");
         break;
     case 2:
-        label = L(L"(MNS/SMNS) Show map clouds (after restart)",
-                  L"(MNS/SMNS) Показывать облака на карте (после перезапуска)");
+        label = L(L"Map clouds (after restart)",
+                  L"Облака на карте (после перезапуска)");
         break;
     case 3:
-        label = L(L"(MNS/SMNS) Map clouds (archive or hook failed)",
-                  L"(MNS/SMNS) Облака на карте (ошибка архива или хука)");
+        label = L(L"Map clouds (unavailable)",
+                  L"Облака на карте (недоступны)");
         break;
     default:
-        label = L(L"(MNS/SMNS) Map clouds (unsupported executable)",
-                  L"(MNS/SMNS) Облака на карте (exe не поддерживается)");
+        label = L(L"Map clouds (unsupported game version)",
+                  L"Облака на карте (версия игры не поддерживается)");
         break;
     }
-    ModifyMenuW(g_gameMenu, kIdClouds,
+    ModifyMenuW(g_mnsMenu, kIdClouds,
                 MF_BYCOMMAND | MF_STRING | (canToggle ? MF_ENABLED : MF_GRAYED),
                 kIdClouds, label);
-    CheckMenuItem(g_gameMenu, kIdClouds,
+    CheckMenuItem(g_mnsMenu, kIdClouds,
                   MF_BYCOMMAND | (requested ? MF_CHECKED : MF_UNCHECKED));
 
     wchar_t info[224] = {};
@@ -4375,7 +4382,7 @@ void refreshCloudItem()
                     L"    Доступно только для проверенного exe MNS/SMNS"),
                   static_cast<int>(sizeof(info) / sizeof(info[0])));
     }
-    ModifyMenuW(g_gameMenu, kIdCloudsInfo, MF_BYCOMMAND | MF_STRING | MF_GRAYED,
+    ModifyMenuW(g_mnsMenu, kIdCloudsInfo, MF_BYCOMMAND | MF_STRING | MF_GRAYED,
                 kIdCloudsInfo, info);
 }
 
@@ -4450,8 +4457,10 @@ void refreshChecks()
     // Game
     CheckMenuItem(g_gameMenu, kIdAlwaysActive,
                   MF_BYCOMMAND | (g_alwaysActive ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(g_gameMenu, kIdDragScroll,
+    CheckMenuItem(g_mnsMenu, kIdDragScroll,
                   MF_BYCOMMAND | (g_dragScroll ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(g_mnsMenu, kIdEdgeScroll,
+                  MF_BYCOMMAND | (g_edgeScroll ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(g_gameMenu, kIdWideBattle,
                    MF_BYCOMMAND |
                        ((widebattle_is_available() && widebattle_get_enabled())
@@ -4461,9 +4470,9 @@ void refreshChecks()
                    MF_BYCOMMAND |
                        (widebattle_is_available() ? MF_ENABLED : MF_GRAYED));
     refreshCloudItem();
-    CheckMenuItem(g_gameMenu, kIdDialogVo,
+    CheckMenuItem(g_mnsMenu, kIdDialogVo,
                   MF_BYCOMMAND | (g_dialogVoSkip ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(g_gameMenu, kIdAutoConfirmUnitHire,
+    CheckMenuItem(g_mnsMenu, kIdAutoConfirmUnitHire,
                   MF_BYCOMMAND | (g_autoConfirmUnitHire ? MF_CHECKED : MF_UNCHECKED));
     if (g_menuLanguageMenu)
         CheckMenuRadioItem(g_menuLanguageMenu, kIdMenuLanguageAuto, kIdMenuLanguageRu,
@@ -4829,7 +4838,8 @@ void onMenuCommand(UINT id)
          (id >= kIdMap1 && id <= kIdMap3) ||
          (id >= kIdAnimMapOff && id <= kIdAnimMap6) ||
          (id >= kIdDragScroll && id <= kIdDialogVoInfo) ||
-         id == kIdAutoConfirmUnitHire || id == kIdClouds || id == kIdFastAi)) {
+         id == kIdAutoConfirmUnitHire || id == kIdClouds || id == kIdFastAi ||
+         id == kIdEdgeScroll)) {
         // Disabled menu items normally cannot generate WM_COMMAND, but never
         // let a synthetic command reach an exact-address MNS/SMNS path.
         return;
@@ -4992,6 +5002,13 @@ void onMenuCommand(UINT id)
         g_dragScroll = !g_dragScroll; // live: the detour reads this flag (persist() saves it)
         if (!g_dragScroll)
             cancelDragScroll();
+    } else if (id == kIdEdgeScroll) {
+        g_edgeScroll = !g_edgeScroll;
+        resetEdgeScrollCadence();
+        // Multiple clients share this INI: this action changes only its own preference.
+        WritePrivateProfileStringA("menu", "edgeScroll", g_edgeScroll ? "1" : "0", iniFile());
+        refreshChecks();
+        return;
     } else if (id == kIdWideBattle && widebattle_is_available()) {
         // Hook state is read only while constructing the next battle; never mutate a live dialog.
         widebattle_set_enabled(!widebattle_get_enabled());
@@ -5935,31 +5952,35 @@ void buildMenu()
     } else {
         // ===== "Game" - gameplay / animation =====
         g_gameMenu = CreatePopupMenu();
+        g_mnsMenu = CreatePopupMenu();
+        AppendMenuW(g_gameMenu, MF_POPUP | mnsDisabled,
+                    reinterpret_cast<UINT_PTR>(g_mnsMenu), L"MNS/SMNS");
     // Keep the existing alwaysActive config/patch path intact, but do not expose it in the menu
     // until its game-side behavior is verified.
-    AppendMenuW(g_gameMenu, MF_STRING | mnsDisabled, kIdDragScroll,
-                L(L"(MNS/SMNS) Map drag-scroll - hold left button to pan the map",
-                  L"(MNS/SMNS) Перетаскивание карты - зажать левую кнопку и тянуть"));
+    AppendMenuW(g_mnsMenu, MF_STRING, kIdEdgeScroll,
+                L(L"Scroll at screen edges", L"Прокрутка у края экрана"));
+    AppendMenuW(g_mnsMenu, MF_STRING, kIdDragScroll,
+                L(L"Drag map with the left mouse button",
+                  L"Перетаскивание карты левой кнопкой"));
     // WideBattle remains installed and enabled by its existing default/config path, but is not
     // exposed in the 1.5 menu until the user-facing switch semantics are ready.
-    AppendMenuW(g_gameMenu,
+    AppendMenuW(g_mnsMenu,
                 MF_STRING |
                     ((g_ver == VerRussobit &&
                       (clouds_is_available() || clouds_get_enabled()))
                          ? 0u
                          : MF_GRAYED),
-                kIdClouds, L(L"(MNS/SMNS) Show map clouds (after restart)",
-                             L"(MNS/SMNS) Показывать облака на карте (после перезапуска)"));
-    AppendMenuW(g_gameMenu, MF_STRING | MF_GRAYED, kIdCloudsInfo, L"...");
-    AppendMenuW(g_gameMenu, MF_STRING | mnsDisabled, kIdDialogVo,
-                L(L"(MNS/SMNS) Skip voiced event dialogs - auto-close after the voiceover",
-                  L"(MNS/SMNS) Пропускать озвученные диалоги - авто-закрытие после озвучки"));
-    AppendMenuW(g_gameMenu, MF_STRING | MF_GRAYED, kIdDialogVoInfo,
-                L(L"    (their text is saved to dialog-vo-log.txt in the game folder)",
-                  L"    (их текст пишется в dialog-vo-log.txt в папке игры)"));
-    AppendMenuW(g_gameMenu, MF_STRING | mnsDisabled, kIdAutoConfirmUnitHire,
-                L(L"(MNS/SMNS) Auto-confirm unit hire - skip the confirmation question",
-                  L"(MNS/SMNS) Автоподтверждать найм воинов - не задавать вопрос"));
+                kIdClouds, L(L"Map clouds (after restart)",
+                             L"Облака на карте (после перезапуска)"));
+    AppendMenuW(g_mnsMenu, MF_STRING | MF_GRAYED, kIdCloudsInfo, L"...");
+    AppendMenuW(g_mnsMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(g_mnsMenu, MF_STRING, kIdDialogVo,
+                L(L"Close dialogs after the voiceover",
+                  L"Закрывать диалоги после озвучки"));
+    AppendMenuW(g_mnsMenu, MF_STRING, kIdAutoConfirmUnitHire,
+                L(L"Confirm unit hire automatically",
+                  L"Подтверждать найм автоматически"));
+    AppendMenuW(g_mnsMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(g_gameMenu, MF_SEPARATOR, 0, nullptr);
     g_menuLanguageMenu = CreatePopupMenu();
     AppendMenuW(g_menuLanguageMenu, MF_STRING, kIdMenuLanguageAuto,
@@ -5984,6 +6005,12 @@ void buildMenu()
                   L"Пишет [Wrapper] Locale в Disciple.ini; применяется сразу"));
     AppendMenuW(g_gameMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_localeMenu),
                 L(L"Game text locale", L"Локализация текста игры"));
+    HMENU animationMenu = CreatePopupMenu();
+    HMENU nativeSpeedMenu = CreatePopupMenu();
+    AppendMenuW(g_mnsMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(animationMenu),
+                L(L"Animation speed-up", L"Ускорение анимаций"));
+    AppendMenuW(g_mnsMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(nativeSpeedMenu),
+                L(L"Game speed settings", L"Скорость в настройках игры"));
     g_battleAnimMenu = CreatePopupMenu();
     AppendMenuW(g_battleAnimMenu, MF_STRING, kIdAnimOff, L(L"Off (vanilla)", L"Выкл (оригинал)"));
     AppendMenuW(g_battleAnimMenu, MF_STRING, kIdAnim1, L"1.5x");
@@ -5997,10 +6024,9 @@ void buildMenu()
     AppendMenuW(g_battleAnimMenu, MF_STRING | MF_GRAYED, 0,
                 L(L"Ctrl +/- adjusts the current battle value by 0.1x.",
                   L"Ctrl +/- меняет текущую скорость боя с шагом 0,1x."));
-    AppendMenuW(g_gameMenu, MF_POPUP | mnsDisabled,
+    AppendMenuW(animationMenu, MF_POPUP,
                 reinterpret_cast<UINT_PTR>(g_battleAnimMenu),
-                L(L"(MNS/SMNS) Battle speed (whole battle)",
-                  L"(MNS/SMNS) Скорость боя (весь бой)"));
+                L(L"Whole battle", L"Бой целиком"));
     g_battleAtkMenu = CreatePopupMenu();
     AppendMenuW(g_battleAtkMenu, MF_STRING, kIdAtkOff, L(L"Off", L"Выкл"));
     AppendMenuW(g_battleAtkMenu, MF_STRING, kIdAtk1, L"1.5x");
@@ -6014,10 +6040,9 @@ void buildMenu()
     AppendMenuW(g_battleAtkMenu, MF_STRING | MF_GRAYED, 0,
                 L(L"Extra speed only while a hit plays; waiting units stay calm.",
                   L"Доп. ускорение только на время удара; ожидающие юниты спокойны."));
-    AppendMenuW(g_gameMenu, MF_POPUP | mnsDisabled,
+    AppendMenuW(animationMenu, MF_POPUP,
                 reinterpret_cast<UINT_PTR>(g_battleAtkMenu),
-                L(L"(MNS/SMNS) Attack speed-up (burst on each hit)",
-                  L"(MNS/SMNS) Ускорение атак (рывок на каждый удар)"));
+                L(L"Extra speed during attacks", L"Дополнительное ускорение ударов"));
     g_mapAnimMenu = CreatePopupMenu();
     AppendMenuW(g_mapAnimMenu, MF_STRING, kIdAnimMapOff, L(L"Off (vanilla)", L"Выкл (оригинал)"));
     AppendMenuW(g_mapAnimMenu, MF_STRING, kIdAnimMap1, L"1.5x");
@@ -6031,10 +6056,9 @@ void buildMenu()
     AppendMenuW(g_mapAnimMenu, MF_STRING | MF_GRAYED, 0,
                 L(L"Ctrl +/- adjusts the current map value by 0.1x.",
                   L"Ctrl +/- меняет текущую скорость карты с шагом 0,1x."));
-    AppendMenuW(g_gameMenu, MF_POPUP | mnsDisabled,
+    AppendMenuW(animationMenu, MF_POPUP,
                 reinterpret_cast<UINT_PTR>(g_mapAnimMenu),
-                L(L"(MNS/SMNS) Map animation speed",
-                  L"(MNS/SMNS) Скорость анимаций карты"));
+                L(L"Map", L"Карта"));
     g_battleMenu = CreatePopupMenu();
     AppendMenuW(g_battleMenu, MF_STRING, kIdBattle1, L(L"Slow", L"Медленно"));
     AppendMenuW(g_battleMenu, MF_STRING, kIdBattle2, L(L"Normal", L"Нормально"));
@@ -6044,10 +6068,9 @@ void buildMenu()
     AppendMenuW(g_battleMenu, MF_STRING | MF_GRAYED, 0,
                 L(L"The game's own option; applies from the next battle.",
                   L"Родная опция игры; действует со следующего боя."));
-    AppendMenuW(g_gameMenu, MF_POPUP | mnsDisabled,
+    AppendMenuW(nativeSpeedMenu, MF_POPUP,
                 reinterpret_cast<UINT_PTR>(g_battleMenu),
-                L(L"(MNS/SMNS) Battle speed (game option)",
-                  L"(MNS/SMNS) Скорость боя (опция игры)"));
+                L(L"Battle", L"Бой"));
     g_mapMenu = CreatePopupMenu();
     AppendMenuW(g_mapMenu, MF_STRING, kIdMap1, L(L"Normal", L"Нормально"));
     AppendMenuW(g_mapMenu, MF_STRING, kIdMap2, L(L"Fast", L"Быстро"));
@@ -6056,10 +6079,9 @@ void buildMenu()
     AppendMenuW(g_mapMenu, MF_STRING | MF_GRAYED, 0,
                 L(L"Walk speed of your and enemy stacks (the game's own option).",
                   L"Скорость шага ваших и вражеских отрядов (родная опция игры)."));
-    AppendMenuW(g_gameMenu, MF_POPUP | mnsDisabled,
+    AppendMenuW(nativeSpeedMenu, MF_POPUP,
                 reinterpret_cast<UINT_PTR>(g_mapMenu),
-                L(L"(MNS/SMNS) Map movement speed (game option)",
-                  L"(MNS/SMNS) Скорость передвижения на карте (опция игры)"));
+                L(L"Map movement", L"Передвижение по карте"));
     }
 
     AppendMenuW(g_gameMenu, MF_SEPARATOR, 0, nullptr);
@@ -6710,6 +6732,10 @@ void* g_origScrollDir = nullptr; // trampoline to the game's directional map scr
 int g_scrollDirDiag = 0;         // first-N diagnostic counter for the edge-scroll hook
 DWORD g_edgeScrollRealTick = 0;  // unscaled wall-clock time of the last successful native step
 bool g_edgeScrollRealTickValid = false;
+void resetEdgeScrollCadence()
+{
+    g_edgeScrollRealTickValid = false;
+}
 volatile LONG g_edgeScrollNativeDelay = 0; // Disciple.ini ScrollSpeed: 0/50/100
 volatile LONG g_edgeScrollStepX = 32;
 volatile LONG g_edgeScrollStepY = 16;
@@ -7095,9 +7121,9 @@ char __fastcall scrollDirHook(void* self, void* /*edx*/, int dir)
         mlog("[edge] scrollDir dir=%d dragging=%d inactive=%d", dir,
              g_dragScrollActive ? 1 : 0, inactive ? 1 : 0);
     }
-    if (g_dragScrollActive || inactive) {
+    if (!g_edgeScroll || g_dragScrollActive || inactive) {
         g_edgeScrollRealTickValid = false;
-        return 0; // avoid fighting grab-pan and never move a background client's map
+        return 0; // honour the preference, avoid fighting grab-pan, keep background maps still
     }
 
     // g_realTimeGetTime is the original WINMM import saved before the game's IAT slot is redirected
@@ -7310,6 +7336,7 @@ extern "C" void featuremenu_install(void)
     if (g_battleAttackSpeed > 6)
         g_battleAttackSpeed = 6;
     g_dragScroll = GetPrivateProfileIntA("menu", "dragScroll", 1, f) != 0;
+    g_edgeScroll = GetPrivateProfileIntA("menu", "edgeScroll", 1, f) != 0;
     widebattle_set_enabled(GetPrivateProfileIntA("menu", "wideBattle", 1, f) != 0);
     g_dialogVoSkip = GetPrivateProfileIntA("menu", "dialogVoSkip", 0, f) != 0;
     g_autoConfirmUnitHire =

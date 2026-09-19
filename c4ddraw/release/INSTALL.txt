@@ -10,7 +10,7 @@ REQUIREMENTS
   - Disciples II. Renderer, video/performance menu, language and locale work on
     other builds too. Game resolution and Widescreen Battle recognize the nine
     original game layouts (D2 2.00-3.01). Remaining exact-address options are
-    labelled (MNS/SMNS) and disabled elsewhere; MNS/SMNS means the validated
+    grouped under Game > MNS/SMNS and disabled elsewhere; MNS/SMNS means the validated
     4,187,648-byte and 4,214,272-byte Discipl2.exe layouts.
   - The game's existing CB63.dll, Mss23.dll and mss32.dll stay as they are.
 
@@ -28,7 +28,7 @@ INSTALL
      When upgrading, keep your existing file; missing warning settings use defaults.
      C4PLUGINS.txt explains every key and which changes apply live or need a restart.
   7. (Optional) Keep an existing Imgs\IsoClouds.ff from a DisciplesGL install
-     if you want to use Game > Show map clouds. The archive is not redistributed
+     if you want to use Game > MNS/SMNS > Show map clouds. The archive is not redistributed
      in this package. The required 30393-byte file has SHA-256:
      962F334E1CFA3226AF27B953AF0F6EBA6C1F82EF708A948C0D4C2A76FF804EE6
      If it is absent or its exact hash differs, clouds cannot be enabled. An
@@ -85,18 +85,20 @@ USING IT
   - On a validated widescreen game resolution, the decorative background/frame
     around fixed-size screens is always active and has no menu switch. An obsolete
     decorativeBackground value in C4menu.ini is ignored and removed on startup.
-  - Game > (MNS/SMNS) Auto-confirm unit hire is ON by default only for the
+  - Game > MNS/SMNS > Auto-confirm unit hire is ON by default only for the
     signature-validated Russobit/MNS executable. Explicit settings in an existing
     C4menu.ini remain authoritative.
   - If the game randomly crashes or freezes on any map, enable
     Performance > 1 CPU stability (restart). It is ON by default; changing it
     requires a full game restart.
-  - Entries labelled (MNS/SMNS) are exact-address gameplay options: Battle animation and Map animation
+  - Game > MNS/SMNS groups the exact-address gameplay options: Battle animation and Map animation
      (live x1.5..x5 speed-up),
      map drag-scroll (ON by default; exact button-down anchor, movement starts on
-     the first changed game pixel; native edge-scroll remains available and follows
-     the game's Fast/Normal/Slow setting live through the resolution-scaled
-     DisciplesGL cadence, while held-button drag remains 1:1),
+     the first changed game pixel; held-button drag remains 1:1),
+     edge scrolling (ON by default, independently switchable from the same submenu;
+     applies live and is saved as [menu] edgeScroll in C4menu.ini, defaulting to 1
+     when missing; when enabled it follows the game's Fast/Normal/Slow setting live
+     through the resolution-scaled DisciplesGL cadence),
      plus Battle speed / Map turn speed (engine presets, saved per game) and
      restart-only Show map clouds (the game's native option; requires external IsoClouds.ff).
   - Video > Resolution is one direct list. Auto is first; all 13 manual game
@@ -190,7 +192,7 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
   - Disciples II. Рендерер, меню видео/производительности, язык и локаль работают
     и на других сборках. Разрешение игры и «Широкий бой» распознают девять
     исходных игровых layout’ов D2 2.00–3.01. Остальные точные адресные опции
-    помечены (MNS/SMNS) и заблокированы на других exe; MNS/SMNS означает две
+    собраны в «Игра > MNS/SMNS» и заблокированы на других exe; MNS/SMNS означает две
     проверенные раскладки Discipl2.exe размером 4 187 648 и 4 214 272 байта.
   - Имеющиеся CB63.dll, Mss23.dll и mss32.dll игры остаются как есть.
 
@@ -209,7 +211,7 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
      таймера. Все ключи и различие между живыми изменениями и рестартом
      описаны в C4PLUGINS.txt.
   7. (Необязательно) Сохраните имеющийся Imgs\IsoClouds.ff от установки
-     DisciplesGL, если хотите использовать «Игра > Показывать облака». Этот архив не
+     DisciplesGL, если хотите использовать «Игра > MNS/SMNS > Показывать облака». Этот архив не
      распространяется в комплекте. SHA-256 нужного файла размером 30393 байта:
      962F334E1CFA3226AF27B953AF0F6EBA6C1F82EF708A948C0D4C2A76FF804EE6
      Если файла нет или точный хеш отличается, включить облака нельзя. Уже
@@ -266,18 +268,22 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
   - На проверенном широком разрешении декоративный фон/рамка вокруг фиксированных
     экранов всегда активен и не имеет пункта меню. Устаревшее значение
     decorativeBackground в C4menu.ini игнорируется и удаляется при запуске.
-  - «Игра > (MNS/SMNS) Автоподтверждение найма» включено по умолчанию только
+  - «Игра > MNS/SMNS > Автоподтверждение найма» включено по умолчанию только
     для exe Russobit/MNS с совпавшими сигнатурами. Явные значения существующего
     C4menu.ini сохраняются.
   - Если игра случайно вылетает или зависает на любой карте, включите
     Производительность > 1 CPU: стабильность (рестарт). По умолчанию режим уже
     включён; после изменения полностью перезапустите игру.
-  - Пункты с пометкой (MNS/SMNS) — точные адресные игровые опции: Battle animation и Map animation
+  - В «Игра > MNS/SMNS» собраны точные адресные игровые опции: Battle animation и Map animation
      (живое ускорение x1.5..x5),
      перетаскивание карты (включено по умолчанию; точка нажатия сохраняется без
-     стартового рывка; штатный краевой скролл остаётся и сразу следует игровой
-     настройке Быстро/Нормально/Медленно через масштабируемый по разрешению такт
-     DisciplesGL 100%/75%/50%, а drag остаётся 1:1), а также Battle speed / Map turn speed (пресеты движка,
+     стартового рывка, движение остаётся 1:1),
+     прокрутка карты у края экрана (включена по умолчанию и переключается независимо
+     в том же подменю; изменение применяется сразу и сохраняется как edgeScroll
+     в секции [menu] файла C4menu.ini; если ключа нет, используется 1).
+     Включённая краевая прокрутка сразу следует игровой настройке
+     Быстро/Нормально/Медленно через масштабируемый по разрешению такт
+     DisciplesGL 100%/75%/50%. Здесь же находятся Battle speed / Map turn speed (пресеты движка,
      хранятся в сейве), и restart-only «Показывать облака» (штатная опция игры;
      нужен внешний IsoClouds.ff).
   - Видео > Разрешение — один прямой список. Сначала идёт «Авто», затем все 13
