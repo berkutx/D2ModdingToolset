@@ -9,6 +9,8 @@ struct Button { bool enabled, top; } endButton, closeButton, backButton, continu
 static PhaseGameLockSnapshot nativeLock;
 static int replayMyTurn, attempts, submissions, intermediatePresses, checks, failures;
 static bool dragging, nestedPump, consumedBeforePress;
+static bool nativeSource, inputAvailable, nativeDispatchBusy, cursorBusy, cancelClearsRequest;
+static int dragCancels;
 extern "C" void timerhost_pump(void);
 static bool isUserPtr(void* p) { return p != nullptr; }
 static bool btnEnabled(void* p) { return p && static_cast<Button*>(p)->enabled; }
@@ -17,6 +19,21 @@ static int featuremenu_my_turn() { return replayMyTurn; }
 static PhaseGameLockSnapshot phaseGameLockSnapshot() { return nativeLock; }
 static void dispatchForcedAutoBattle() {}
 static void tlog(const char*, ...) {}
+static int featuremenu_native_dispatch_active() { return nativeDispatchBusy; }
+static int cursorcapture_draw_active() { return cursorBusy; }
+static bool prepareTimeoutInput(void* anchor)
+{
+    if (!anchor || !inputAvailable || nativeDispatchBusy || cursorBusy) return false;
+    if (nativeSource) {
+        nativeSource = false;
+        ++dragCancels;
+        ++g.dragCancelSerial;
+        if (cancelClearsRequest) g.pendingEndDay = 0;
+        if (nestedPump) timerhost_pump();
+        return false;
+    }
+    return !dragging;
+}
 static SHORT testAsyncKeyState(int key) { return key == VK_LBUTTON && dragging ? SHORT(0x8000) : 0; }
 static void pressBtn(void* button)
 {
@@ -52,6 +69,9 @@ static void reset()
     replayMyTurn = 1;
     attempts = submissions = intermediatePresses = 0;
     dragging = nestedPump = false;
+    nativeSource = nativeDispatchBusy = cursorBusy = cancelClearsRequest = false;
+    inputAvailable = true;
+    dragCancels = 0;
     consumedBeforePress = true;
 }
 static void queue() { timerhost_end_day(); }
@@ -99,6 +119,34 @@ int main()
     check(g.pendingEndDay && attempts == 0, "dragging defers destructive UI transition");
     dragging = false; idle(2); check(submissions == 1, "mouse release allows queued timeout");
 
+    reset(); nativeSource = dragging = nestedPump = true; queue(); idle();
+    check(dragCancels == 1 && g.pendingEndDay && attempts == 0,
+          "timeout cancels native drag while mouse is held and survives nested pump");
+    idle(3);
+    check(dragCancels == 1 && attempts == 0, "held mouse defers transition without repeating cancellation");
+    dragging = false; idle(2);
+    check(submissions == 1 && !g.pendingEndDay, "cancelled drag submits once after release");
+
+    reset(); nativeSource = true; queue(); idle();
+    check(dragCancels == 1 && attempts == 0 && g.pendingEndDay,
+          "native drag left after physical release is cancelled before End Day");
+    idle(2); check(submissions == 1, "fresh captures after cancellation permit End Day");
+
+    reset(); nativeSource = nativeDispatchBusy = true; queue(); idle(3);
+    check(dragCancels == 0 && attempts == 0 && g.pendingEndDay,
+          "nested native input processing cannot cancel or consume timeout");
+    nativeDispatchBusy = false; cursorBusy = true; idle(3);
+    check(dragCancels == 0 && attempts == 0, "active cursor draw cannot be invalidated by timeout");
+    cursorBusy = false; idle(3); check(submissions == 1, "timeout resumes after native callbacks finish");
+
+    reset(); nativeSource = cancelClearsRequest = true; queue(); idle(5);
+    check(dragCancels == 1 && attempts == 0 && !g.pendingEndDay,
+          "cancellation callback which retires the turn cannot press a stale button");
+
+    reset(); inputAvailable = false; queue(); idle(3);
+    check(g.pendingEndDay && attempts == 0, "unknown native drag state preserves timeout safely");
+    inputAvailable = true; idle(2); check(submissions == 1, "available input state resumes timeout");
+
     reset(); queue(); replayMyTurn = 0; idle(4);
     check(!g.pendingEndDay && attempts == 0, "ended local turn discards stale timeout");
     reset(); queue(); timerhost_cancel_elapse(); idle(4);
@@ -106,9 +154,20 @@ int main()
 
     reset(); g.capBack = &backButton; nativeLock.locked = true; queue(); idle();
     check(intermediatePresses == 1 && g.pendingEndDay && attempts == 0,
-          "ordinary timeout preserves capital Back priority without consuming End Day");
+          "capital Back can release its UI while final End Day still waits on native lock");
     nativeLock.locked = false; idle(2);
     check(submissions == 1, "return from capital uses the shared strategic command gate");
+
+    reset(); g.capBack = &backButton; backButton.top = endButton.top = false; queue(); idle(4);
+    check(intermediatePresses == 0 && g.pendingEndDay, "covered capital Back is never pressed");
+    backButton.top = true; idle(); endButton.top = true; idle(2);
+    check(intermediatePresses == 1 && submissions == 1, "uncovered capital resumes pending timeout");
+
+    reset(); g.btnClose = &closeButton; closeButton.top = false; queue(); idle(3);
+    check(intermediatePresses == 0 && !g.battleClosePressed && g.pendingEndDay,
+          "covered battle Close is not consumed");
+    closeButton.top = true; idle(3);
+    check(intermediatePresses == 1 && g.battleClosePressed, "topmost battle Close remains one-shot");
 
     reset(); g.postBattleTransition = 1; endButton.top = false;
     g.briefCont = &continueButton; queue(); idle(4);

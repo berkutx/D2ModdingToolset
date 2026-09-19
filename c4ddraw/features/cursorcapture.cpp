@@ -175,6 +175,7 @@ using ComputeTileFn = BOOL(__stdcall*)(MqPoint* sourcePosition,
                                        const MqRect* tileArea);
 
 CursorDrawFn g_originalCursorDraw = reinterpret_cast<CursorDrawFn>(kCursorDrawEntry);
+volatile LONG g_cursorDrawDepth = 0;
 DrawTextureFn g_originalDrawTexture = reinterpret_cast<DrawTextureFn>(kRendererDrawTexture);
 FindTextureSurfaceFn g_findTextureSurface =
     reinterpret_cast<FindTextureSurfaceFn>(kFindTextureSurface);
@@ -623,9 +624,7 @@ void __fastcall captureDrawTextureThunk(Renderer* renderer,
         g_originalDrawTexture(renderer, textureHandle, start, offset, size, area);
 }
 
-void __fastcall cursorDrawThunk(void* presentationThis,
-                                void* /*edx*/,
-                                Renderer* renderer)
+void cursorDrawBody(void* presentationThis, Renderer* renderer)
 {
     CaptureContext* context = captureContext();
     if (!context || context->active || !renderer) {
@@ -703,6 +702,20 @@ void __fastcall cursorDrawThunk(void* presentationThis,
     }
 }
 
+void __fastcall cursorDrawThunk(void* presentationThis,
+                                void* /*edx*/,
+                                Renderer* renderer)
+{
+    // Cover every forwarding path, including recursive draws and unavailable capture contexts.
+    // Timeout actions must not destroy the native drag source while cursor drawing references it.
+    InterlockedIncrement(&g_cursorDrawDepth);
+    __try {
+        cursorDrawBody(presentationThis, renderer);
+    } __finally {
+        InterlockedDecrement(&g_cursorDrawDepth);
+    }
+}
+
 void writeDestinationPixel(std::uint8_t* destination, int bpp, int rgb555,
                            std::uint32_t colour)
 {
@@ -729,6 +742,11 @@ void writeDestinationPixel(std::uint8_t* destination, int bpp, int rgb555,
 }
 
 } // namespace
+
+extern "C" int cursorcapture_draw_active(void)
+{
+    return InterlockedCompareExchange(&g_cursorDrawDepth, 0, 0) != 0 ? 1 : 0;
+}
 
 extern "C" int cursorcapture_install(void)
 {

@@ -1378,6 +1378,7 @@ volatile LONG g_shaderAssetsWarningShown = 0;
 
 using WndProcFn = LRESULT(CALLBACK*)(HWND, UINT, WPARAM, LPARAM);
 WndProcFn g_origWndProc = nullptr;
+volatile LONG g_nativeWndProcDepth = 0;
 HWND g_gameHwnd = nullptr; // game window (drag-scroll SetCapture target); set in wndProcHook
 const UINT_PTR kPressTimerId = 0xC4D7; // our WM_TIMER source: on-elapse END_TURN press fires ONLY on
                                        // WM_TIMER (idle-gated), like legacy SetTimer(hWnd,0,0x20,0)
@@ -5615,6 +5616,18 @@ bool handleAnimSpeedHotkey(WPARAM key)
     return true;
 }
 
+LRESULT callNativeGameWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    // Native input can pump messages while a drag source or its cursor is still in use. A timeout
+    // received by that nested pump must wait until every native dispatch has returned.
+    InterlockedIncrement(&g_nativeWndProcDepth);
+    __try {
+        return g_origWndProc(hwnd, msg, wParam, lParam);
+    } __finally {
+        InterlockedDecrement(&g_nativeWndProcDepth);
+    }
+}
+
 LRESULT dispatchGameWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     // Russobit's native WM_MOUSEMOVE helper rejects the event when its WM_ACTIVATEAPP byte is 0.
@@ -5625,7 +5638,7 @@ LRESULT dispatchGameWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     if (msg != WM_MOUSEMOVE ||
         classifyPhysicalPointer(hwnd) != PhysicalPointerRegion::NativeViewport) {
         eventtrace_message(C4TRACE_NATIVE_WND_ENTER, hwnd, msg, wParam, lParam);
-        const LRESULT result = g_origWndProc(hwnd, msg, wParam, lParam);
+        const LRESULT result = callNativeGameWndProc(hwnd, msg, wParam, lParam);
         eventtrace_message(C4TRACE_NATIVE_WND_RETURN, hwnd, msg, wParam, lParam);
         // A no-move press is deliberately forwarded so the native iso handler can replay it as a
         // click. If the release landed on another panel/outside the iso view, that handler is not
@@ -5668,7 +5681,7 @@ LRESULT dispatchGameWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 mlog("[cursor] native inactive-hover focus gate bypassed per WM_MOUSEMOVE");
         }
 
-        return g_origWndProc(hwnd, msg, wParam, lParam);
+        return callNativeGameWndProc(hwnd, msg, wParam, lParam);
     } __finally {
         if (changed && activeFlag)
             *activeFlag = previous;
@@ -6536,6 +6549,11 @@ void installWndProcDetour()
 }
 
 } // namespace
+
+extern "C" int featuremenu_native_dispatch_active(void)
+{
+    return InterlockedCompareExchange(&g_nativeWndProcDepth, 0, 0) != 0 ? 1 : 0;
+}
 
 /*
  * Address-free renderer message bridge. cnc-ddraw's fake WndProc calls this before forwarding to

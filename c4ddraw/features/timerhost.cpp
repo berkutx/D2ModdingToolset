@@ -33,6 +33,8 @@ extern "C" int timerhost_get_battle_timer_state(C4P_BattleTimerState* out);
 extern "C" HWND pluginhost_game_hwnd(void);
 // Shared diagnostics gate ([menu] debugLog / C4DLL_DEBUG): OFF by default in release.
 extern "C" int featuremenu_debug_enabled(void);
+extern "C" int featuremenu_native_dispatch_active(void);
+extern "C" int cursorcapture_draw_active(void);
 
 namespace {
 
@@ -175,6 +177,8 @@ struct State
     LONG volatile postBattleTransition; // battle UI ended; reward/result UI may still cover strategy
     LONG volatile postBattleReadyTicks; // stable strategic proof used to retire that transition
     LONG volatile inAction;       // local re-entry guard around the game-thread press
+    LONG volatile dragCancelAvailable; // exact native RTTI/drop-manager layout validated
+    LONG volatile dragCancelSerial; // cancellation invalidates all UI captures in this pump
     // Original timer.mod's separate one-shot off[13] flag: consumed only by the END_TURN
     // confirmation-query callsite, so an automatic timeout never opens X005TA0000.
     LONG volatile suppressEndTurnConfirm;
@@ -689,6 +693,8 @@ bool executableAddress(const void* address)
            protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
 }
 
+#include "timerdrag.h"
+
 void* autoBattleToggle(void* batViewer)
 {
     if (!InterlockedExchangeAdd(&g.forceAutoUiAvailable, 0))
@@ -995,14 +1001,8 @@ bool postForcedAutoBattleIfReady()
     return true;
 }
 
-int dispatchForcedAutoBattle()
+int dispatchForcedAutoBattleReady()
 {
-    if (!InterlockedExchangeAdd(&g.forceAutoRequested, 0) ||
-        !InterlockedExchangeAdd(&g.forceAutoUiAvailable, 0) ||
-        InterlockedCompareExchange(&g.forceAutoDispatching, 1, 0) != 0)
-        return 0;
-
-    InterlockedExchange(&g.forceAutoMessagePosted, 0);
     void* viewer = nullptr;
     LONG instance = -1;
     LONG generation = -1;
@@ -1024,8 +1024,18 @@ int dispatchForcedAutoBattle()
 
     int result = kNativeAutoDeferred;
     int appliedSideOffset = -1;
-    if (eligible)
-        result = invokeNativeAutoBattle(viewer, &appliedSideOffset);
+    if (eligible && prepareTimeoutInput(battleInterf(viewer))) {
+        // Runtime interface queries/callbacks can re-enter the game. Never use a selection snapshot
+        // whose viewer, ownership or timeout request changed while preparing the input state.
+        AcquireSRWLockShared(&g_battleStateLock);
+        const bool stillEligible = g.forceAutoRequested && g.battleViewer == viewer &&
+            g.battleInstance == instance && g.battleStateSeq == generation &&
+            g.battleKindPublished == 1 && g.battleTurnActive == 1 &&
+            g.battleSelectionOpen == 1 && g.battlePlaybackLocal < 0;
+        ReleaseSRWLockShared(&g_battleStateLock);
+        if (stillEligible)
+            result = invokeNativeAutoBattle(viewer, &appliedSideOffset);
+    }
     if (eligible && result != kNativeAutoDeferred) {
         // Only an actual callback attempt consumes this generation. A covered battle control is a
         // normal transient state (for example chat/modal UI) and must retry after it becomes topmost.
@@ -1071,8 +1081,28 @@ int dispatchForcedAutoBattle()
         tlog("[timer] forced Auto Battle native toggle %s (viewer=%p instance=%ld generation=%ld)",
              result == kNativeAutoApplied ? "APPLIED" : "REJECTED",
              viewer, instance, generation);
-    InterlockedExchange(&g.forceAutoDispatching, 0);
     return result == kNativeAutoApplied ? 1 : 0;
+}
+
+int dispatchForcedAutoBattle()
+{
+    // A consumed private message must remain retryable even when delivered in a nested UI stack.
+    InterlockedExchange(&g.forceAutoMessagePosted, 0);
+    if (!InterlockedExchangeAdd(&g.forceAutoRequested, 0) ||
+        !InterlockedExchangeAdd(&g.forceAutoUiAvailable, 0) ||
+        featuremenu_native_dispatch_active() || cursorcapture_draw_active() ||
+        InterlockedCompareExchange(&g.inAction, 1, 0) != 0)
+        return 0;
+    if (InterlockedCompareExchange(&g.forceAutoDispatching, 1, 0) != 0) {
+        InterlockedExchange(&g.inAction, 0);
+        return 0;
+    }
+    __try {
+        return dispatchForcedAutoBattleReady();
+    } __finally {
+        InterlockedExchange(&g.forceAutoDispatching, 0);
+        InterlockedExchange(&g.inAction, 0);
+    }
 }
 
 int nativeBattleAnimationState(void* batViewer)
@@ -1951,6 +1981,9 @@ extern "C" int timerhost_post_battle_pending(void)
 
 extern "C" void timerhost_pump(void)
 {
+    if (featuremenu_native_dispatch_active() || cursorcapture_draw_active())
+        return;
+    const LONG dragCancelBefore = InterlockedExchangeAdd(&g.dragCancelSerial, 0);
     // Load Game restores clientTakesTurn and the strategic interface but never executes the normal
     // DLG_BEGIN_TURN/BTN_OK callback. Publish the same readiness serial after two 32-ms GUI ticks
     // prove that the ordinary END_TURN control is enabled and genuinely topmost. During a normal
@@ -1977,6 +2010,8 @@ extern "C" void timerhost_pump(void)
     if (InterlockedExchangeAdd(&g.forceAutoRequested, 0) &&
         !InterlockedExchangeAdd(&g.forceAutoMessagePosted, 0))
         dispatchForcedAutoBattle();
+    if (InterlockedExchangeAdd(&g.dragCancelSerial, 0) != dragCancelBefore)
+        return; // Auto cancelled a drag: reacquire End Day captures on the next GUI dispatch
 
     // Retire post-battle provenance only after the ordinary strategic END_TURN control is topmost
     // for two idle ticks. Until then a reward/artifact/modal interface must keep End Day on the
@@ -1993,26 +2028,28 @@ extern "C" void timerhost_pump(void)
         }
     }
 
-    // Called ONLY on WM_TIMER (featuremenu's 32ms timer), outside the live mouse/key callback stack.
-    // That is necessary for UI lifetime safety but does not prove command readiness: after combat the
-    // strategic interface can already be visible while CPhaseGame's object lock is still held below.
+    // Callback-depth guards reject nested WM_TIMER entry. Command readiness still needs its own
+    // checks: visible strategy can precede the release of CPhaseGame's object lock.
     if (!g.pendingEndDay)
-        return;
-    // The button press tears down strategic UI and is unsafe in the middle of a drag. Keep this
-    // request queued until the mouse is released.
-    const bool endDayBlockedByDrag =
-        (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-    if (endDayBlockedByDrag)
         return;
     if (InterlockedCompareExchange(&g.inAction, 1, 0) != 0)
         return; // re-entry guard: the press pumps messages; never recurse into a second press
     __try {
-        if (g.pendingEndDay && !endDayBlockedByDrag) {
+        void* anchor = isUserPtr(g.btnClose) ? g.btnClose :
+            isUserPtr(g.btnDefend) ? g.btnDefend :
+            isUserPtr(g.capBack) ? g.capBack :
+            isUserPtr(g.diploBack) ? g.diploBack :
+            isUserPtr(g.briefCont) ? g.briefCont : g.endTurn;
+        const bool inputReady = prepareTimeoutInput(anchor);
+        if (!inputReady)
+            InterlockedExchange(&g.strategicReadyTicks, 0);
+        if (g.pendingEndDay && inputReady) {
             const bool battleUi = isUserPtr(g.btnRetreat) || isUserPtr(g.btnDefend) ||
                                   isUserPtr(g.btnClose);
             if (battleUi) {
                 // Never retreat. Wait for the resolved state, then use the ordinary BTN_CLOSE once.
-                if (!g.battleClosePressed && isUserPtr(g.btnClose) && btnEnabled(g.btnClose)) {
+                if (!g.battleClosePressed && isUserPtr(g.btnClose) && btnEnabled(g.btnClose) &&
+                    interfaceOnTop(g.btnClose)) {
                     InterlockedExchange(&g.battleClosePressed, 1);
                     InterlockedExchange(&g.strategicReadyTicks, 0);
                     InterlockedExchange(&g.postBattleTransition, 1);
@@ -2047,12 +2084,13 @@ extern "C" void timerhost_pump(void)
                     void* order[3] = {g.briefCont, g.capBack, g.diploBack};
                     bool closingDialog = false;
                     for (int i = 0; i < 3; ++i) {
-                        if (!isUserPtr(order[i]) || !btnEnabled(order[i]))
+                        if (!isUserPtr(order[i]) || !btnEnabled(order[i]) ||
+                            !interfaceOnTop(order[i]))
                             continue;
                         InterlockedExchange(&g.strategicReadyTicks, 0);
+                        closingDialog = true;
                         tlog("[timer] pressing btn[%d]=%p (WM_TIMER idle)", i, order[i]);
                         pressBtn(order[i]);
-                        closingDialog = true;
                         break;
                     }
                     if (!closingDialog)
@@ -2080,6 +2118,10 @@ extern "C" void timerhost_install(void)
     InterlockedExchange(&g.forceAutoLastGeneration, -1);
     InterlockedExchange(&g.forceAutoLatchedInstance, -1);
     InterlockedExchange(&g.forceAutoLatchedSideOffset, -1);
+
+    InterlockedExchange(&g.dragCancelAvailable, validateNativeDragLayout() ? 1 : 0);
+    tlog("[timer] native drag cancellation %s",
+         g.dragCancelAvailable ? "validated" : "unavailable; timeout actions deferred");
 
     const bool localPlayerAccessorValid = validateLocalNetworkPlayerIdAccessor();
     InterlockedExchange(&g_localNetworkPlayerIdAccessorAvailable,

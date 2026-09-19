@@ -327,6 +327,7 @@ Copy-Item (Join-Path $root "features\pluginhost.cpp") (Join-Path $build "src\plu
 Copy-Item (Join-Path $root "features\localization.cpp") (Join-Path $build "src\localization.cpp") -Force
 Copy-Item (Join-Path $root "features\savelogic.cpp") (Join-Path $build "src\savelogic.cpp") -Force
 Copy-Item (Join-Path $root "features\timerhost.cpp") (Join-Path $build "src\timerhost.cpp") -Force
+Copy-Item (Join-Path $root "features\timerdrag.h") (Join-Path $build "src\timerdrag.h") -Force
 Copy-Item (Join-Path $root "features\fastai.cpp") (Join-Path $build "src\fastai.cpp") -Force
 Copy-Item (Join-Path $root "features\headless.cpp") (Join-Path $build "src\headless.cpp") -Force
 Copy-Item (Join-Path $root "features\c4plugin.h") (Join-Path $build "src\c4plugin.h") -Force

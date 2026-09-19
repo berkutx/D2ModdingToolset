@@ -57,6 +57,8 @@ jobs:
 
       - name: Validate timer expiry and post-battle transitions
         run: |
+          ./c4ddraw/tests/run-timer-drag-tests.ps1
+          ./c4ddraw/tests/run-timer-auto-drag-tests.ps1
           ./c4ddraw/tests/run-timer-end-day-tests.ps1
           ./c4ddraw/tests/run-timer-post-battle-tests.ps1
 
