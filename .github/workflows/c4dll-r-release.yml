@@ -184,7 +184,9 @@ jobs:
           } else {
             # The release already exists (e.g. a real tag push after an earlier manual prerelease
             # created the same tag): make the prerelease flag match THIS run.
-            gh release edit $tag --title "C4dll-R $ver" --notes-file $notesPath --target $env:GITHUB_SHA --prerelease=$("$pre".ToLower())
+            # Its tag already identifies the source commit. Supplying target_commitish again
+            # needlessly requests workflow scope when that commit includes workflow changes.
+            gh release edit $tag --title "C4dll-R $ver" --notes-file $notesPath --prerelease=$("$pre".ToLower())
             if ($LASTEXITCODE -ne 0) { Write-Error "gh release edit failed"; exit 1 }
           }
 
