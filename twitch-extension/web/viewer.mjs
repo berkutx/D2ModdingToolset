@@ -19,6 +19,16 @@ function appendRuns(parent, runs, start = 0, end = Infinity) {
   }
 }
 function formattedRows(unit, key) { return parseGameText(unit.formatted?.[key] ?? unit[key] ?? ''); }
+function prioritizeRows(rows, secondaryLabels, priorityLabels) {
+  const label = runs => runs.map(run => run.text).join('').split(':', 1)[0].trim().toLowerCase();
+  const secondary = new Set(secondaryLabels);
+  const primary = rows.filter(runs => !secondary.has(label(runs)));
+  const rank = runs => { const at = priorityLabels.indexOf(label(runs)); return at < 0 ? priorityLabels.length : at; };
+  // Unknown mod-specific rows stay visible. Values remain complete text runs:
+  // target counts can say "2 in one row", and perks can live in attack text.
+  primary.sort((a, b) => rank(a) - rank(b));
+  return {primary, secondary: rows.filter(runs => secondary.has(label(runs)))};
+}
 function renderStats(rows, parent) {
   const list = content('dl', '', parent); list.className = 'stat-list';
   for (const runs of rows) {
@@ -71,35 +81,50 @@ function openCard(unitIndex, button) {
   content('h2', unit.name, header);
   const close = content('button', '×', header); close.type = 'button'; close.className = 'card-close';
   close.setAttribute('aria-label', 'Закрыть карточку'); close.addEventListener('click', closeCard);
-  if (unit.leader) {
-    const leader = content('div', ''); leader.className = 'leader-line';
-    renderLines(formattedRows(unit, 'leader'), leader, true);
-  }
-  const columns = content('div', ''); columns.className = 'stat-columns';
-  for (const key of ['stats', 'attack']) {
-    const column = content('section', '', columns);
-    const title = key === 'stats' ? 'Параметры' : 'Атака';
-    column.setAttribute('aria-label', title); content('h3', title, column);
-    renderStats(formattedRows(unit, key), column);
-  }
-  if (unit.upgrade) {
-    const upgrade = content('div', ''); upgrade.className = 'upgrade-info';
-    renderLines(formattedRows(unit, 'upgrade'), upgrade);
+  const stats = prioritizeRows(formattedRows(unit, 'stats'),
+    ['уровень', 'опыт', 'здоровье', 'защита', 'level', 'experience', 'health', 'armor'],
+    ['иммунитет', 'стойкость', 'immunity', 'wards']);
+  const attack = prioritizeRows(formattedRows(unit, 'attack'),
+    ['точность', 'источник', 'accuracy', 'source'],
+    ['инициатива', 'кол-во целей', 'зона действия', 'тип оружия', 'повреждения', 'initiative', 'targets', 'reach', 'attack type', 'damage']);
+  const priority = content('section', ''); priority.className = 'combat-priority';
+  priority.setAttribute('aria-label', 'Главное в бою');
+  const columns = content('div', '', priority); columns.className = 'stat-columns';
+  for (const [title, rows] of [['Действие', attack.primary], ['Защита от эффектов', stats.primary]]) {
+    if (!rows.some(runs => runs.some(run => run.text.trim()))) continue;
+    const column = content('section', '', columns); column.setAttribute('aria-label', title);
+    content('h3', title, column); renderStats(rows, column);
   }
   if (unit.effects.length) {
-    const effects = content('section', ''); effects.className = 'effects'; effects.setAttribute('aria-label', 'Действующие эффекты');
+    const effects = content('section', ''); effects.className = 'effects'; effects.setAttribute('aria-label', 'Навыки и эффекты');
+    content('h3', 'Навыки и эффекты', effects);
     for (let i = 0; i < unit.effects.length; i++) {
       const effect = content('div', '', effects); effect.className = 'effect';
       renderLines(parseGameText(unit.formatted?.effects?.[i] ?? unit.effects[i]), effect, true);
     }
   }
+  if (unit.stats_extra || unit.formatted?.stats_extra) {
+    const extra = content('section', ''); extra.className = 'unit-properties';
+    extra.setAttribute('aria-label', 'Свойства отряда'); content('h3', 'Свойства отряда', extra);
+    renderStats(formattedRows(unit, 'stats_extra'), extra);
+  }
   function disclosure(key, label) {
     const detail = content('details', ''); detail.dataset.section = key; detail.open = expanded.has(key);
     content('summary', label, detail); detail.addEventListener('toggle', positionCard); return detail;
   }
-  if (unit.stats_extra || unit.formatted?.stats_extra) {
-    const extra = disclosure('extra', 'Дополнительные параметры');
-    renderStats(formattedRows(unit, 'stats_extra'), extra);
+  const more = disclosure('more', 'Остальные параметры');
+  if (unit.leader) {
+    const leader = content('div', '', more); leader.className = 'leader-line';
+    renderLines(formattedRows(unit, 'leader'), leader, true);
+  }
+  const remaining = content('div', '', more); remaining.className = 'stat-columns';
+  for (const [title, rows] of [['Параметры', stats.secondary], ['Атака', attack.secondary]]) {
+    const column = content('section', '', remaining); column.setAttribute('aria-label', title);
+    content('h3', title, column); renderStats(rows, column);
+  }
+  if (unit.upgrade) {
+    const upgrade = content('div', '', more); upgrade.className = 'upgrade-info';
+    renderLines(formattedRows(unit, 'upgrade'), upgrade);
   }
   if (unit.description) {
     const description = disclosure('description', 'Описание');
