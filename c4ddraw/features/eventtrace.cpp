@@ -6,6 +6,8 @@
 #include <cstring>
 #include "c4trace.h"
 #include "eventtrace.h"
+#include "netboundarytrace.h"
+#include "netturntrace.h"
 #pragma intrinsic(_ReturnAddress)
 
 extern "C" void inventorytrace_install(void);
@@ -27,6 +29,30 @@ __declspec(thread) DWORD lastWait;
 __declspec(thread) unsigned waitCount;
 __declspec(thread) unsigned long long waitTotal;
 __declspec(thread) unsigned long long waitMaximum;
+volatile LONG uiDispatches;
+volatile LONG registeredDispatches;
+volatile LONG heartbeatTick;
+volatile LONG turnCoverage = -1;
+
+void networkHeartbeat(HWND hwnd, UINT msg)
+{
+    InterlockedIncrement(&uiDispatches);
+    if (msg >= 0xC000) InterlockedIncrement(&registeredDispatches);
+    const DWORD now = GetTickCount();
+    const LONG previous = InterlockedCompareExchange(&heartbeatTick, 0, 0);
+    if (previous && now - static_cast<DWORD>(previous) < 5000) return;
+    if (InterlockedCompareExchange(&heartbeatTick, static_cast<LONG>(now), previous) != previous)
+        return;
+    const LONG turn = exactExe ? timerhost_turn_trace_available() : 0;
+    if (InterlockedExchange(&turnCoverage, turn) != turn)
+        c4trace_event(C4TRACE_TURN_INFO_COVERAGE, 0x48A680, turn, exactExe, 0, 0);
+    // No additional network calls or private queue reads: cumulative counters
+    // come solely from game calls already passing through the observers.
+    c4trace_event(C4TRACE_NET_HEARTBEAT, reinterpret_cast<uintptr_t>(hwnd),
+                  InterlockedCompareExchange(&uiDispatches, 0, 0),
+                  InterlockedCompareExchange(&registeredDispatches, 0, 0), turn, exactExe);
+    netboundarytrace_sample();
+}
 
 bool interesting(UINT msg)
 {
@@ -144,12 +170,14 @@ extern "C" void eventtrace_install(void)
         c4trace_init(); // first GUI dispatch, not DllMain
         if (c4trace_enabled()) {
             QueryPerformanceFrequency(&frequency);
-            inventorytrace_install();
+            if (c4trace_detailed()) inventorytrace_install();
             exactExe = inventorytrace_exact_exe() != 0;
-            const bool post = patchImport("PostMessageA", reinterpret_cast<void*>(tracedPost),
-                                         reinterpret_cast<void**>(&originalPost));
-            const bool reg = patchImport("RegisterWindowMessageA", reinterpret_cast<void*>(tracedRegister),
-                                        reinterpret_cast<void**>(&originalRegister));
+            netboundarytrace_install();
+            netturntrace_install();
+            const bool post = c4trace_detailed() && patchImport("PostMessageA", reinterpret_cast<void*>(tracedPost),
+                                                               reinterpret_cast<void**>(&originalPost));
+            const bool reg = c4trace_detailed() && patchImport("RegisterWindowMessageA", reinterpret_cast<void*>(tracedRegister),
+                                                              reinterpret_cast<void**>(&originalRegister));
             c4trace_event(C4TRACE_HOOK, 0, post, reg, exactExe, 0);
         }
     }
@@ -158,7 +186,7 @@ extern "C" void eventtrace_install(void)
 
 extern "C" void eventtrace_mark_input(void)
 {
-    if (!c4trace_enabled()) return;
+    if (!c4trace_enabled() || !c4trace_detailed()) return;
     const DWORD saved = GetLastError();
     InterlockedExchange(&inputTick, static_cast<LONG>(GetTickCount()));
     SetLastError(saved);
@@ -166,7 +194,11 @@ extern "C" void eventtrace_mark_input(void)
 
 extern "C" void eventtrace_message(unsigned stage, HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
-    if (!c4trace_enabled() || !interesting(msg) ||
+    if (!c4trace_enabled()) return;
+    const DWORD entryError = GetLastError();
+    if (stage == C4TRACE_FEATURE_WND) networkHeartbeat(hwnd, msg);
+    SetLastError(entryError);
+    if (!c4trace_detailed() || !interesting(msg) ||
         (msg == WM_KEYDOWN && wp != 'A' && wp != VK_F8)) return;
     const DWORD saved = GetLastError();
     if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_LBUTTONDBLCLK ||
@@ -178,7 +210,7 @@ extern "C" void eventtrace_message(unsigned stage, HWND hwnd, UINT msg, WPARAM w
 
 extern "C" void eventtrace_pulled(unsigned stage, const MSG* msg, int result, unsigned remove)
 {
-    if (!c4trace_enabled()) return;
+    if (!c4trace_enabled() || !c4trace_detailed()) return;
     if (result < 0) { c4trace_event(stage, 0, 0, result, remove, GetLastError()); return; }
     if (!result || !msg || !interesting(msg->message) ||
         (msg->message == WM_KEYDOWN && msg->wParam != 'A' && msg->wParam != VK_F8)) return;
@@ -191,7 +223,7 @@ extern "C" void eventtrace_pulled(unsigned stage, const MSG* msg, int result, un
 
 extern "C" void eventtrace_clock(DWORD realTick, DWORD virtualTick, DWORD factor, uintptr_t caller)
 {
-    if (!c4trace_enabled()) return;
+    if (!c4trace_enabled() || !c4trace_detailed()) return;
     const DWORD saved = GetLastError();
     if (factor != lastFactor || realTick - lastClock >= 250 || hot()) {
         lastFactor = factor; lastClock = realTick;
@@ -202,7 +234,7 @@ extern "C" void eventtrace_clock(DWORD realTick, DWORD virtualTick, DWORD factor
 
 extern "C" unsigned long long eventtrace_wait_begin(void)
 {
-    if (!c4trace_enabled()) return 0;
+    if (!c4trace_enabled() || !c4trace_detailed()) return 0;
     const DWORD saved = GetLastError();
     LARGE_INTEGER stamp; QueryPerformanceCounter(&stamp);
     SetLastError(saved);
@@ -211,7 +243,7 @@ extern "C" unsigned long long eventtrace_wait_begin(void)
 
 extern "C" void eventtrace_wait_end(unsigned long long start, unsigned tickLength)
 {
-    if (!start || !c4trace_enabled()) return;
+    if (!start || !c4trace_enabled() || !c4trace_detailed()) return;
     const DWORD saved = GetLastError();
     LARGE_INTEGER stamp; QueryPerformanceCounter(&stamp);
     const unsigned long long duration = stamp.QuadPart - start;
@@ -230,7 +262,7 @@ extern "C" void eventtrace_wait_end(unsigned long long start, unsigned tickLengt
 
 extern "C" void eventtrace_frame(unsigned stage, uintptr_t surface)
 {
-    if (!c4trace_enabled()) return;
+    if (!c4trace_enabled() || !c4trace_detailed()) return;
     const DWORD saved = GetLastError();
     if (stage == C4TRACE_RENDER_START || hot()) c4trace_event(stage, surface, 0, 0, 0, 0);
     SetLastError(saved);
@@ -239,7 +271,7 @@ extern "C" void eventtrace_frame(unsigned stage, uintptr_t surface)
 extern "C" void eventtrace_surface(unsigned stage, uintptr_t surface, unsigned caps,
                                     unsigned flags, DWORD lastFlip, DWORD lastBlt)
 {
-    if (!c4trace_enabled()) return;
+    if (!c4trace_enabled() || !c4trace_detailed()) return;
     const DWORD saved = GetLastError();
     if (hot()) c4trace_event(stage, surface, caps, flags, lastFlip, lastBlt);
     SetLastError(saved);

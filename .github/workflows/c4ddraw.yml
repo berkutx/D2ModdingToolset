@@ -116,6 +116,15 @@ jobs:
             throw 'Build artifacts must contain exactly timer.c4p and twitchstat.c4p.'
           }
 
+      - name: Validate minimal network diagnostics
+        run: |
+          ./c4ddraw/tests/test-netboundarytrace.ps1
+          ./c4ddraw/tests/run-net-turn-trace-tests.ps1
+          ./c4ddraw/tests/run-nettraceframe-tests.ps1
+          ./c4ddraw/tests/test-c4trace.ps1
+          python -m unittest discover -s c4ddraw/tests -p test_analyze_event_trace.py
+          if ($LASTEXITCODE -ne 0) { throw 'Network trace analyzer tests failed' }
+
       - name: Upload C4dll-R.dll
         if: success()
         uses: actions/upload-artifact@v7

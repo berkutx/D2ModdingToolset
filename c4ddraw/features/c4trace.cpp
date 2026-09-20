@@ -30,6 +30,7 @@ unsigned g_active = 0;
 SRWLOCK g_lock = SRWLOCK_INIT;
 volatile LONG g_initialized = 0;
 volatile LONG g_enabled = 0;
+volatile LONG g_detailed = 0;
 __declspec(align(8)) volatile LONG64 g_sequence = 0;
 __declspec(align(8)) volatile LONG64 g_lockDrops = 0;
 __declspec(align(8)) volatile LONG64 g_bufferDrops = 0;
@@ -187,12 +188,13 @@ DWORD WINAPI writerMain(void*)
             "#schema,C4trace,1\n#pid,%lu\n#qpc_frequency,%lld\n"
             "#start_utc,%04u-%02u-%02uT%02u:%02u:%02u.%03uZ\n"
             "#start_qpc,%lld\n#record_capacity,16384\n#file_cap_bytes,%llu\n"
+            "#mode,%s\n"
             "#warning,diagnostics_perturb_scheduling_and_may_drop_records\n"
             "seq,qpc,tick,tid,event,object,a,b,c,d\n",
             g_processId, g_frequency.QuadPart, g_startedUtc.wYear, g_startedUtc.wMonth,
             g_startedUtc.wDay, g_startedUtc.wHour, g_startedUtc.wMinute,
             g_startedUtc.wSecond, g_startedUtc.wMilliseconds, g_startedQpc.QuadPart,
-            fileCap());
+            fileCap(), g_detailed ? "detailed" : "network-minimal");
         healthy = size > 0 && writeBytes(file, chunk, static_cast<DWORD>(size), &bytes, &error);
     }
     LONG64 lastLockDrops = 0, lastBufferDrops = 0;
@@ -311,6 +313,9 @@ extern "C" void c4trace_init(void)
     if (!slash) return;
     slash[1] = 0;
     if (!requested()) return;
+    wchar_t detail[4] = {};
+    const DWORD detailLength = GetEnvironmentVariableW(L"C4DLL_NETTRACE_DETAIL", detail, 4);
+    InterlockedExchange(&g_detailed, detailLength == 1 && detail[0] == L'1');
     DWORD error = 0;
     if (!enoughDisk(&error) || !QueryPerformanceFrequency(&g_frequency) ||
         g_frequency.QuadPart <= 0 || !QueryPerformanceCounter(&g_startedQpc)) return;
@@ -332,6 +337,13 @@ extern "C" int c4trace_enabled(void)
 {
     LastErrorGuard preserve;
     return InterlockedCompareExchange(&g_enabled, 0, 0) != 0;
+}
+
+extern "C" int c4trace_detailed(void)
+{
+    LastErrorGuard preserve;
+    return InterlockedCompareExchange(&g_enabled, 0, 0) != 0 &&
+           InterlockedCompareExchange(&g_detailed, 0, 0) != 0;
 }
 
 extern "C" int c4trace_configured(const char* iniPath)
@@ -356,6 +368,10 @@ extern "C" void c4trace_event(unsigned event, uintptr_t object, uintptr_t a, uin
 {
     LastErrorGuard preserve;
     if (!InterlockedCompareExchange(&g_enabled, 0, 0)) return;
+    // Apply the volume policy before QPC, sequence allocation and buffering.
+    // Unknown/high-frequency legacy emitters cannot fill a minimal match log.
+    if (!InterlockedCompareExchange(&g_detailed, 0, 0) &&
+        event != 1 && event != 102 && (event < 200 || event > 239)) return;
     Record record = {};
     LARGE_INTEGER counter;
     if (!QueryPerformanceCounter(&counter)) return;

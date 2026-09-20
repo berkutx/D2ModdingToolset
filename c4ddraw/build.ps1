@@ -288,7 +288,7 @@ if (-not (Select-String -LiteralPath (Join-Path $build "src\rendererbridge.c") -
 Copy-Item (Join-Path $root "features\featuremenu.cpp") (Join-Path $build "src\featuremenu.cpp") -Force
 Copy-Item (Join-Path $root "features\inisettingsreset.h") (Join-Path $build "src\inisettingsreset.h") -Force
 Copy-Item (Join-Path $root "features\wrapperdefaults.h") (Join-Path $build "src\wrapperdefaults.h") -Force
-foreach ($traceFile in @('c4trace.cpp', 'c4trace.h', 'eventtrace.cpp', 'eventtrace.h', 'inventorytrace.cpp', 'inventorytrace.h', 'messagebatch.cpp', 'messagebatch.h')) {
+foreach ($traceFile in @('c4trace.cpp', 'c4trace.h', 'eventtrace.cpp', 'eventtrace.h', 'inventorytrace.cpp', 'inventorytrace.h', 'messagebatch.cpp', 'messagebatch.h', 'netboundarytrace.cpp', 'netboundarytrace.h', 'nettraceframe.h', 'netturntrace.cpp', 'netturntrace.h')) {
     Copy-Item -LiteralPath (Join-Path $root "features\$traceFile") -Destination (Join-Path $build "src\$traceFile") -Force
 }
 Copy-Item (Join-Path $root "features\featuremenu_resources.h") (Join-Path $build "src\featuremenu_resources.h") -Force
@@ -365,11 +365,13 @@ $traceProject = Get-Content -LiteralPath $vcx -Raw
 $traceEntries = '    <ClCompile Include="src\c4trace.cpp" />' + "`r`n" +
     '    <ClCompile Include="src\eventtrace.cpp" />' + "`r`n" +
     '    <ClCompile Include="src\inventorytrace.cpp" />' + "`r`n" +
+    '    <ClCompile Include="src\netboundarytrace.cpp" />' + "`r`n" +
+    '    <ClCompile Include="src\netturntrace.cpp" />' + "`r`n" +
     '    <ClCompile Include="src\messagebatch.cpp" />' + "`r`n"
 $traceProject = $traceProject.Replace('    <ClCompile Include="src\featuremenu.cpp" />',
     $traceEntries + '    <ClCompile Include="src\featuremenu.cpp" />')
 Set-Content -LiteralPath $vcx -Value $traceProject -Encoding UTF8
-foreach ($src in @('rendererbridge\.c', 'c4features\.cpp', 'featuremenu\.cpp', 'horplus\.cpp', 'widebattle\.cpp', 'decorative\.cpp', 'cursorcapture\.cpp', 'clouds\.cpp', 'pluginhost\.cpp', 'localization\.cpp', 'savelogic\.cpp', 'timerhost\.cpp', 'fastai\.cpp', 'headless\.cpp', 'c4trace\.cpp', 'eventtrace\.cpp', 'inventorytrace\.cpp', 'messagebatch\.cpp')) {
+foreach ($src in @('rendererbridge\.c', 'c4features\.cpp', 'featuremenu\.cpp', 'horplus\.cpp', 'widebattle\.cpp', 'decorative\.cpp', 'cursorcapture\.cpp', 'clouds\.cpp', 'pluginhost\.cpp', 'localization\.cpp', 'savelogic\.cpp', 'timerhost\.cpp', 'fastai\.cpp', 'headless\.cpp', 'c4trace\.cpp', 'eventtrace\.cpp', 'inventorytrace\.cpp', 'messagebatch\.cpp', 'netboundarytrace\.cpp', 'netturntrace\.cpp')) {
     if (-not (Select-String -Path $vcx -Pattern $src -Quiet)) {
         throw "vcxproj retarget failed: $src not added to the project"
     }

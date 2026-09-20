@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$BuildDirectory,
-    [ValidatePattern('^v[0-9][0-9A-Za-z.-]{0,79}$')][string]$Version = 'v2.0',
+    [ValidatePattern('^v[0-9][0-9A-Za-z.-]{0,79}$')][string]$Version = 'v2.1.0',
     [string]$OutputRoot = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent)
 )
 # Offline packaging only. Existing output is an error; partial output is never removed.
@@ -30,6 +30,7 @@ $files = [ordered]@{
     'LICENSE' = "$repo/LICENSE"
     'MESSAGE_BATCHING.md' = "$repo/c4ddraw/MESSAGE_BATCHING.md"
     'NETWORK_TRACE.md' = "$repo/c4ddraw/NETWORK_TRACE.md"
+    'Tools/analyze-event-trace.py' = "$repo/c4ddraw/tools/analyze-event-trace.py"
 }
 $symbols = [ordered]@{
     'C4dll-R.pdb' = "$build/bin/Release/C4dll-R.pdb"

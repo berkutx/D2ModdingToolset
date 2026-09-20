@@ -16,7 +16,173 @@ import sys
 COLUMNS = "seq qpc tick tid event object a b c d".split()
 PAIRS = {3: (4, "post"), 22: (23, "native"), 110: (111, "send"),
          118: (119, "apply"), 120: (121, "notify")}
-RETURNS = {end: (start, name) for start, (end, name) in PAIRS.items()}
+NETWORK_PAIRS = {202: (203, "network_send"), 220: (221, "turn_info"),
+                 223: (224, "disconnect")}
+ALL_PAIRS = dict(PAIRS)
+ALL_PAIRS.update(NETWORK_PAIRS)
+RETURNS = {end: (start, name) for start, (end, name) in ALL_PAIRS.items()}
+FRAME_KINDS = {0: "none", 1: "BeginTurn", 2: "EndTurn", 3: "TurnInfo"}
+FRAME_STATUS = {0: "empty", 1: "incomplete_header", 2: "invalid_header", 3: "unselected",
+                4: "selected_incomplete", 5: "selected_too_large", 6: "selected_complete"}
+SITES = {1: "client_send", 2: "server_send", 4: "client_receive", 8: "server_receive",
+         16: "client_count", 32: "server_count"}
+
+
+def signed32(value):
+    value &= 0xFFFFFFFF
+    return value - 0x100000000 if value & 0x80000000 else value
+
+
+def site_names(mask):
+    return [name for bit, name in SITES.items() if mask & bit]
+
+
+def decode_network(rows, warn):
+    """Decode one process only. An ordinal relates local records, never peers."""
+    events, coverage, calls = [], [], []
+    latest_counters = {}
+    frames = collections.defaultdict(list)
+    calls_by_key = collections.defaultdict(list)
+    for row in rows:
+        event = row["event"]
+        if not 200 <= event <= 239:
+            continue
+        item = {key: row[key] for key in ("seq", "qpc", "tick", "tid", "event", "object")}
+        a, b, c, d = (row[key] for key in ("a", "b", "c", "d"))
+        role = {0: "client", 1: "server"}.get(b, "unknown_{}".format(b))
+        if event == 200:
+            item.update(name="network_boundary_coverage", installed_mask=a,
+                        installed_sites=site_names(a))
+            coverage.append(item)
+        elif event == 201:
+            item.update(name="network_boundary_unavailable", reason_code=a,
+                        reason={1: "unsupported_exe", 2: "changed_callsite", 3: "detour_transaction",
+                                4: "unsupported_architecture"}.get(a, "unknown"),
+                        site_mask=b, sites=site_names(b), error=c)
+            coverage.append(item)
+        elif event in (202, 204):
+            item.update(name="send_enter" if event == 202 else "receive_success",
+                        ordinal=a, role=role, target=d)
+            if event == 202:
+                item["recipient"] = c
+            else:
+                item.update(sender_raw=c, sender=None, sender_available=None)
+            calls.append(item)
+            calls_by_key[(row["tid"], row["object"], a)].append(item)
+        elif event == 203:
+            item.update(name="send_result", ordinal=a, role=role,
+                        accepted=bool(c), result_raw=c, last_error=d)
+        elif event == 205:
+            # Two records describe one frame on a 32-bit process. Do not infer a
+            # digest from a lost half or from an incomplete/oversized frame.
+            frames[(row["tid"], row["object"], a)].append(row)
+            continue
+        elif event == 208:
+            item.update(name="network_exception", ordinal=a, role=role,
+                        operation={0: "send", 1: "receive", 2: "count"}.get(c, "unknown"), target=d)
+        elif event in (210, 211, 212):
+            counter_role = {0: "client", 1: "server"}.get(row["object"], "unknown_{}".format(row["object"]))
+            if event == 210:
+                group = "calls"
+                item.update(name="network_call_counters", sends=a, send_failures=b,
+                            receives=c, receive_success=d)
+            elif event == 211:
+                group = "receives"
+                item.update(name="network_receive_counters", receive_empty=a, receive_failures=b,
+                            count_calls=c, last_observed_count=signed32(d))
+            else:
+                group = "observer"
+                item.update(name="network_observer_counters", active_calls=a, exceptions=b,
+                            selected=c, malformed=d)
+            item["role"] = counter_role
+            latest_counters.setdefault(counter_role, {})[group] = item
+        elif event in (220, 221):
+            item.update(name="turn_info_enter" if event == 220 else "turn_info_return",
+                        native_message=a, ordinal=d)
+            if event == 220:
+                item.update(native_owner=b, native_message_vtable=c)
+            else:
+                item.update(result=signed32(b), normal_return=bool(c))
+        elif event == 222:
+            item.update(name="turn_info_coverage", available=bool(a), exact_exe=bool(b))
+            coverage.append(item)
+        elif event in (223, 224):
+            item.update(name="disconnect_enter" if event == 223 else "disconnect_return",
+                        net_player_id=a, ordinal=d)
+            if event == 224:
+                item["normal_return"] = bool(c)
+        elif event == 225:
+            status = signed32(a)
+            item.update(name="disconnect_coverage", status=status, available=status == 1,
+                        vtable_slot=b, reason={0: "not_attempted", 1: "installed", -1: "unsupported_exe",
+                        -2: "changed_entry_or_vtable", -3: "detour_failed"}.get(status, "unknown"))
+            coverage.append(item)
+        elif event == 230:
+            item.update(name="ui_heartbeat", ui_dispatches=a, registered_message_dispatches=b,
+                        turn_info_available=bool(c), exact_exe=bool(d))
+            latest_counters["ui"] = item
+        else:
+            item.update(name="unknown_network_event", a=a, b=b, c=c, d=d)
+        events.append(item)
+
+    unmatched_frames = []
+    for key, fragments in frames.items():
+        candidates = calls_by_key.get(key, [])
+        classification = [fragment for fragment in fragments if fragment["b"] != 0x80000000]
+        fingerprints = [fragment for fragment in fragments if fragment["b"] == 0x80000000]
+        if len(candidates) != 1 or len(classification) != 1 or len(fingerprints) > 1:
+            warn("ambiguous_network_frame_records", tid=key[0], object=key[1], ordinal=key[2],
+                 boundaries=len(candidates), classifications=len(classification), fingerprints=len(fingerprints))
+            unmatched_frames.extend(fragments)
+            continue
+        frame = classification[0]
+        kind, status = frame["b"] & 0xFF, (frame["b"] >> 8) & 0xFF
+        decoded = {"kind": FRAME_KINDS.get(kind, "unknown"), "kind_code": kind,
+                   "status": FRAME_STATUS.get(status, "unknown"), "status_code": status,
+                   "length": frame["c"], "fingerprint": None,
+                   "classification_seq": frame["seq"], "fingerprint_seq": None,
+                   "sender_status": frame["d"]}
+        if kind not in FRAME_KINDS or status not in FRAME_STATUS or frame["b"] >> 16:
+            warn("unknown_network_frame_classification", seq=frame["seq"], classification=frame["b"])
+        if fingerprints:
+            fingerprint = fingerprints[0]
+            decoded["fingerprint_seq"] = fingerprint["seq"]
+            if fingerprint["c"] > 0xFFFFFFFF or fingerprint["d"] > 0xFFFFFFFF:
+                warn("invalid_network_fingerprint_halves", seq=fingerprint["seq"])
+            elif status == 6 and kind in (1, 2, 3):
+                decoded["fingerprint"] = "{:016x}".format((fingerprint["d"] << 32) | fingerprint["c"])
+        elif status == 6:
+            warn("missing_network_fingerprint", seq=frame["seq"], ordinal=key[2])
+        candidates[0]["frame"] = decoded
+        if candidates[0]["event"] == 204:
+            candidates[0]["sender_available"] = frame["d"] == 1
+            if frame["d"] == 1:
+                candidates[0]["sender"] = candidates[0]["sender_raw"]
+    for key, candidates in calls_by_key.items():
+        if key not in frames:
+            for item in candidates:
+                warn("missing_network_frame_records", seq=item["seq"], ordinal=item["ordinal"])
+
+    # A send's accepted result is useful beside its fingerprint. Only join one
+    # exact same-process invocation; a repeated/wrapped ordinal remains ambiguous.
+    for item in events:
+        if item["event"] != 203:
+            continue
+        candidates = calls_by_key.get((item["tid"], item["object"], item["ordinal"]), [])
+        if len(candidates) == 1 and candidates[0]["event"] == 202 and candidates[0]["role"] == item["role"]:
+            target = candidates[0]
+            if "send_result" in target:
+                target["send_result"] = None
+                warn("ambiguous_network_send_result", seq=item["seq"], ordinal=item["ordinal"])
+            else:
+                target["send_result"] = {key: item[key] for key in ("seq", "accepted", "result_raw", "last_error")}
+
+    return {"events": events, "coverage": coverage, "selected_calls": calls,
+            "latest_counters": latest_counters, "unmatched_frame_records": unmatched_frames,
+            "interpretation": "Local call ordinals and fingerprints correlate observations, not delivery. "
+            "send accepted is not a transport acknowledgement. No cross-PC clock matching is performed. "
+            "Counters wrap at 2^32 and are sampled independently; last_observed_count is not a live queue probe. "
+            "Missing receive leaves sending MSS, transport/lobby and receiving MSS unresolved."}
 
 
 def number(value):
@@ -149,8 +315,8 @@ def analyze(lines, source="<stream>"):
     # Check preserved argument identity, never infer missing scopes or item joins.
     for row in sorted_rows:
         event = row["event"]
-        if event in PAIRS:
-            _, name = PAIRS[event]
+        if event in ALL_PAIRS:
+            _, name = ALL_PAIRS[event]
             stacks[(row["tid"], name)].append(row)
         elif event in RETURNS:
             _, name = RETURNS[event]
@@ -164,16 +330,31 @@ def analyze(lines, source="<stream>"):
                 matching = matching and entered["a"] == row["a"] # message ID
             elif name in ("send", "notify"):
                 matching = matching and all(entered[key] == row[key] for key in ("a", "b", "c", "d"))
+            elif name == "network_send":
+                matching = matching and all(entered[key] == row[key] for key in ("a", "b"))
+            elif name in ("turn_info", "disconnect"):
+                matching = matching and all(entered[key] == row[key] for key in ("a", "d"))
             if not matching:
                 unpaired.append({"kind": "return_identity_mismatch", "family": name, **row})
                 continue # do not guess a deeper match across a missing event
             stack.pop()
             delta = row["qpc"] - entered["qpc"]
-            spans.append({"family": name, "tid": row["tid"], "object": row["object"],
+            span = {"family": name, "tid": row["tid"], "object": row["object"],
                           "enter_seq": entered["seq"], "return_seq": row["seq"],
                           "enter_qpc": entered["qpc"], "return_qpc": row["qpc"],
                           "qpc_ticks": delta,
-                          "milliseconds": delta * 1000.0 / frequency if frequency else None})
+                          "milliseconds": delta * 1000.0 / frequency if frequency else None}
+            if name == "network_send":
+                span.update(ordinal=row["a"], role=entered["b"], recipient=entered["c"],
+                            accepted=bool(row["c"]), last_error=row["d"])
+            elif name in ("turn_info", "disconnect"):
+                span.update(ordinal=row["d"], normal_return=bool(row["c"]))
+                if name == "turn_info":
+                    span.update(native_message=entered["a"], native_owner=entered["b"],
+                                result=signed32(row["b"]))
+                else:
+                    span["net_player_id"] = entered["a"]
+            spans.append(span)
     for (_, name), stack in sorted(stacks.items()):
         unpaired.extend({"kind": "enter_without_return", "family": name, **row} for row in stack)
     if unpaired:
@@ -191,6 +372,7 @@ def analyze(lines, source="<stream>"):
             summary.update({key.replace("qpc_ticks", "ms"): summary[key] * 1000.0 / frequency
                             for key in ("min_qpc_ticks", "median_qpc_ticks", "max_qpc_ticks")})
         summaries.append(summary)
+    network = decode_network(sorted_rows, warn)
     partial = bool(warnings)
     return {"source": source, "metadata": metadata, "records": len(rows),
             "qpc_frequency": frequency, "sorted_by": ["qpc", "tid", "seq"],
@@ -199,6 +381,7 @@ def analyze(lines, source="<stream>"):
             "footer_present": bool(stops), "partial_or_ambiguous": partial,
             "warnings": warnings, "duration_summaries": summaries, "observed_spans": spans,
             "unpaired_boundaries": unpaired,
+            "network": network,
             "interpretation": "Observed same-thread call spans only; not a causal diagnosis, "
                               "network delivery measurement, item latency, or proof of callback reset. "
                               "No warning means internally consistent observed data, not full session coverage."}
@@ -227,6 +410,16 @@ def main(argv=None):
             else:
                 print("TID {tid} {family}: n={count} min/median/max="
                       "{min_qpc_ticks}/{median_qpc_ticks}/{max_qpc_ticks} QPC ticks".format(**group))
+        network = result["network"]
+        if network["events"]:
+            for coverage in network["coverage"]:
+                print("COVERAGE " + json.dumps(coverage, sort_keys=True))
+            for call in network["selected_calls"][-20:]:
+                print("NETWORK " + json.dumps(call, sort_keys=True))
+            if len(network["selected_calls"]) > 20:
+                print("Showing last 20 selected calls; --json includes all observed calls.")
+            print("LATEST COUNTERS " + json.dumps(network["latest_counters"], sort_keys=True))
+            print(network["interpretation"])
         for warning in result["warnings"]:
             print("WARNING " + json.dumps(warning, sort_keys=True))
         print(result["interpretation"])

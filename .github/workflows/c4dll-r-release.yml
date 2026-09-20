@@ -89,6 +89,15 @@ jobs:
           if (-not (Test-Path "c4ddraw/plugins/timer/bin/Release/timer.c4p")) { Write-Error "timer.c4p missing"; exit 1 }
           if (-not (Test-Path "c4ddraw/plugins/unitinfo/bin/Release/twitchstat.c4p")) { Write-Error "twitchstat.c4p missing"; exit 1 }
 
+      - name: Validate minimal network diagnostics
+        run: |
+          ./c4ddraw/tests/test-netboundarytrace.ps1
+          ./c4ddraw/tests/run-net-turn-trace-tests.ps1
+          ./c4ddraw/tests/run-nettraceframe-tests.ps1
+          ./c4ddraw/tests/test-c4trace.ps1
+          python -m unittest discover -s c4ddraw/tests -p test_analyze_event_trace.py
+          if ($LASTEXITCODE -ne 0) { throw 'Network trace analyzer tests failed' }
+
       - name: Validate Twitch protocol and embedded transport
         run: |
           node --test twitch-extension/test/*.test.mjs
@@ -111,6 +120,8 @@ jobs:
           Copy-Item "c4ddraw/release/INSTALL.txt" "$stage/INSTALL.txt"
           Copy-Item "c4ddraw/MESSAGE_BATCHING.md" "$stage/MESSAGE_BATCHING.md"
           Copy-Item "c4ddraw/NETWORK_TRACE.md" "$stage/NETWORK_TRACE.md"
+          New-Item -ItemType Directory -Force -Path "$stage/Tools" | Out-Null
+          Copy-Item "c4ddraw/tools/analyze-event-trace.py" "$stage/Tools/analyze-event-trace.py"
           # Resolve once: the archive and GitHub page must carry identical notes.
           $notes = (Get-Content "c4ddraw/release/RELEASE_NOTES.md" -Raw -Encoding utf8).Replace('__VER__', $ver).Replace('__ZIP__', $zip)
           if ($notes -match '__(VER|ZIP)__') { throw 'Unresolved release-note tokens' }
@@ -133,7 +144,7 @@ jobs:
             $archiveFiles = @($runtimeArchive.Entries | Where-Object { -not $_.FullName.EndsWith('/') } |
               ForEach-Object { $_.FullName.Replace('\', '/') })
             $expectedFiles = @('C4dll-R.dll', 'Mods/timer.c4p', 'Mods/twitchstat.c4p',
-              'TWITCH-STREAMER-RU.md', 'INSTALL.txt', 'MESSAGE_BATCHING.md', 'NETWORK_TRACE.md',
+              'TWITCH-STREAMER-RU.md', 'INSTALL.txt', 'MESSAGE_BATCHING.md', 'NETWORK_TRACE.md', 'Tools/analyze-event-trace.py',
               'RELEASE_NOTES.md', 'C4PLUGINS.txt', 'C4plugins.ini', 'ddraw.ini',
               'THIRD_PARTY_NOTICES.txt', 'LICENSE')
             $shaderRoot = (Resolve-Path 'c4ddraw/release/Shaders').Path

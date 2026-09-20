@@ -24,7 +24,7 @@ $testBuildStart.EnvironmentVariables['TMP'] = $testTemp.FullName
 $testBuildProcess = [Diagnostics.Process]::Start($testBuildStart)
 $testBuildProcess.WaitForExit()
 if ($testBuildProcess.ExitCode -ne 0) { throw 'Synthetic test build failed' }
-foreach ($testMode in @('config', 'off', 'invalid', 'lowdisk', 'on', 'ini', 'cap', 'concurrent', 'iofailure')) {
+foreach ($testMode in @('config', 'off', 'invalid', 'lowdisk', 'minimal', 'detail-invalid', 'on', 'ini', 'cap', 'concurrent', 'iofailure')) {
     $testCase = New-Item -ItemType Directory -Path (Join-Path $testRun $testMode)
     $testExe = Join-Path $testCase.FullName 'c4trace_synthetic.exe'
     Copy-Item -LiteralPath (Join-Path $testOutput 'bin\c4trace_synthetic.exe') -Destination $testExe

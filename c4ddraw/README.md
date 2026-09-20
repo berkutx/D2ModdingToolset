@@ -88,14 +88,14 @@ mss32 mod, so the two are versioned and released independently (their version nu
 cut a release, push a tag:
 
 ```sh
-git tag c4dll-r-v2.0
-git push origin c4dll-r-v2.0
+git tag c4dll-r-v2.1.0
+git push origin c4dll-r-v2.1.0
 ```
 
 `.github/workflows/c4dll-r-release.yml` then builds `C4dll-R.dll`, `Mods/timer.c4p` and
 `Mods/twitchstat.c4p`, packages them with `Shaders`, `INSTALL.txt`, the `C4PLUGINS.txt` key guide,
 `TWITCH-STREAMER-RU.md`, a sample `C4plugins.ini`, `ddraw.ini`, `LICENSE` and third-party notices
-into `C4dll-R-v2.0.zip`, and publishes one ready-to-use GitHub Release archive. Matching PDBs and
+into `C4dll-R-v2.1.0.zip`, and publishes one ready-to-use GitHub Release archive. Matching PDBs and
 loose binaries are retained by the separate technical `c4ddraw` Actions workflow. The release version is stamped into the DLL version
 resource (`build.ps1 -Version`), so a build is identifiable from file properties. Running the
 workflow manually (workflow_dispatch) publishes a **prerelease** tagged `c4dll-r-dev-<sha>` (or
@@ -114,6 +114,20 @@ For streaming setup, follow [the streamer guide](../twitch-extension/STREAMER-RU
 as `TWITCH-STREAMER-RU.md` in the release archive. The Twitch extension itself needs Twitch approval
 and release before arbitrary streamers can install it.
 To A/B test our-vs-stock, swap `C4dll-R.dll` only.
+
+## Collect a network trace
+
+Tracing is OFF by default. Save the game, then enable **Performance > Technical settings >
+Network/timing diagnostics (restart)...**. Confirmation saves the setting and closes that client;
+launch it again manually. Enable tracing on both host and joiner before the match and collect each
+process's `C4trace-*.csv` file from its game folder.
+
+The normal mode records BeginTurn, EndTurn and TurnInfo sends/receives, TurnInfo handling,
+disconnects, and network/UI counters every five seconds. Other packet contents are not saved.
+The existing detailed timing mode additionally requires `C4DLL_NETTRACE_DETAIL=1` before launch;
+that variable alone does not enable tracing. See [NETWORK_TRACE.md](NETWORK_TRACE.md) for the
+capture procedure and [the offline analyzer](tools/analyze-event-trace.py) for reading CSV files.
+These observations support diagnosis; they do not establish that a network issue has been fixed.
 
 ## Updating cnc-ddraw
 
@@ -725,14 +739,14 @@ C4dll-R публикуется в GitHub Releases в **собственном т
 выпустить релиз, запушьте тег:
 
 ```sh
-git tag c4dll-r-v2.0
-git push origin c4dll-r-v2.0
+git tag c4dll-r-v2.1.0
+git push origin c4dll-r-v2.1.0
 ```
 
 `.github/workflows/c4dll-r-release.yml` соберёт `C4dll-R.dll`, `Mods/timer.c4p` и
 `Mods/twitchstat.c4p`, упакует их с `Shaders`, `INSTALL.txt`, инструкциями `C4PLUGINS.txt` и
 `TWITCH-STREAMER-RU.md`, примером `C4plugins.ini`, `ddraw.ini`, `LICENSE` и notices в
-`C4dll-R-v2.0.zip` и опубликует один готовый архив в GitHub Release. Соответствующие PDB и
+`C4dll-R-v2.1.0.zip` и опубликует один готовый архив в GitHub Release. Соответствующие PDB и
 отдельные бинарные файлы сохраняются в техническом workflow `c4ddraw` в Actions.
 Версия релиза зашивается в ресурс версии DLL (`build.ps1 -Version`),
 так что сборка опознаётся по свойствам файла. Ручной запуск workflow (workflow_dispatch) публикует
@@ -752,6 +766,21 @@ git push origin c4dll-r-v2.0
 его как Overlay 1, включает Twitch Stat в меню игры и нажимает «Подключить игру» в панели
 расширения. Панель и окно соединения должны оставаться открытыми на время эфира.
 Для сравнения наш/сток меняйте только `C4dll-R.dll`.
+
+## Собрать сетевой журнал
+
+Диагностика по умолчанию выключена. Сохраните игру, затем включите **Производительность >
+Технические настройки > Диагностика сети и задержек (рестарт)...**. Подтверждение сохраняет
+настройку и закрывает этот клиент; запустите его снова вручную. Включите журнал у хоста
+и джойнера до матча, затем соберите `C4trace-*.csv` каждого процесса из его папки игры.
+
+Обычный режим записывает отправку и получение BeginTurn, EndTurn и TurnInfo, обработку TurnInfo,
+отключение и сводку сетевых вызовов и работы интерфейса раз в пять секунд. Содержимое остальных
+пакетов не сохраняется. Для прежнего подробного режима дополнительно задайте перед запуском
+`C4DLL_NETTRACE_DETAIL=1`; сама по себе эта переменная диагностику не включает.
+Порядок сбора описан в [NETWORK_TRACE.md](NETWORK_TRACE.md); для чтения CSV есть
+[анализатор](tools/analyze-event-trace.py). Журналы помогают установить причину, но сами по себе
+не подтверждают исправление сетевой проблемы.
 
 ## Обновление cnc-ddraw
 

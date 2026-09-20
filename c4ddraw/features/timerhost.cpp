@@ -18,6 +18,7 @@ extern "C" void pluginhost_turn_reset(void);
 extern "C" void pluginhost_queue_battle_state(int active);
 #include "c4trace.h"
 #include "eventtrace.h"
+#include "inventorytrace.h"
 
 // Client-valid scenario-day source (featuremenu.cpp); logged per turn edge to verify the per-day budget.
 extern "C" int featuremenu_current_day(void);
@@ -37,6 +38,10 @@ extern "C" int featuremenu_native_dispatch_active(void);
 extern "C" int cursorcapture_draw_active(void);
 
 namespace {
+
+// Installation success is separate from State::installed, which also covers a failed attempt.
+volatile LONG g_turnInfoTraceAvailable = 0;
+volatile LONG g_turnInfoTraceSerial = 0;
 
 // C4menu-<pid>.log next to the exe (featuremenu.cpp's mlog writes the same file).
 const char* exeDirFile(const char* leaf)
@@ -407,14 +412,17 @@ int __fastcall hook_midClientDestroy(void* self, void* /*edx*/, int a2)
 // mark in-game, then chain to original. __thiscall(this, a2) -> __fastcall trick.
 int __fastcall hook_turnInfo(void* self, void* /*edx*/, int a2)
 {
-    // a2 is the broadcast CCmdTurnInfoMsg. Its serialized owner at +0x18 is authoritative on both
+    // a2 is the decoded native CCmdTurnInfoMsg object, not a serialized network buffer. Its owner
+    // at +0x18 is authoritative on both
     // host and joiner; the local-player accessor is constant for the lifetime of a client and was
     // therefore incapable of detecting later turn transfers.
     int rawOwner = -1;
+    uintptr_t messageVtable = 0;
     __try {
         const char* message = reinterpret_cast<const char*>(a2);
-        if (isUserPtr(message) &&
-            *reinterpret_cast<void* const*>(message) == reinterpret_cast<void*>(0x6D4B14))
+        if (isUserPtr(message))
+            messageVtable = *reinterpret_cast<const uintptr_t*>(message);
+        if (messageVtable == 0x6D4B14)
             rawOwner = *reinterpret_cast<const int*>(message + 0x18);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         rawOwner = -1;
@@ -442,7 +450,30 @@ int __fastcall hook_turnInfo(void* self, void* /*edx*/, int a2)
             tlog("[timer] turn-info off6 owner=%08X player=%d (serial bump)",
                  static_cast<unsigned>(rawOwner), player);
     }
-    return reinterpret_cast<int(__fastcall*)(void*, void*, int)>(g.g_orig_turnInfo)(self, nullptr, a2);
+    // Record every native invocation, including repeated owners. The timer's own debounce and
+    // log limit above must not obscure delivery diagnostics. The record never claims wire data.
+    const DWORD incomingError = GetLastError();
+    const LONG traceSerial = g_turnInfoTraceAvailable && c4trace_enabled()
+        ? InterlockedIncrement(&g_turnInfoTraceSerial) : 0;
+    if (traceSerial)
+        c4trace_event(C4TRACE_TURN_INFO_ENTER, reinterpret_cast<uintptr_t>(self),
+                      static_cast<uintptr_t>(a2), static_cast<uintptr_t>(rawOwner),
+                      messageVtable, static_cast<uintptr_t>(traceSerial));
+    SetLastError(incomingError);
+    int result = 0;
+    bool completed = false;
+    __try {
+        result = reinterpret_cast<int(__fastcall*)(void*, void*, int)>(g.g_orig_turnInfo)(self, nullptr, a2);
+        completed = true;
+    } __finally {
+        const DWORD nativeError = GetLastError();
+        if (traceSerial)
+            c4trace_event(C4TRACE_TURN_INFO_RETURN, reinterpret_cast<uintptr_t>(self),
+                          static_cast<uintptr_t>(a2), static_cast<uintptr_t>(result),
+                          completed ? 1u : 0u, static_cast<uintptr_t>(traceSerial));
+        SetLastError(nativeError);
+    }
+    return result;
 }
 
 // CButtonInterf enabled flag (legacy *([btn+8]+4) != 0), SEH-guarded.
@@ -2104,6 +2135,11 @@ extern "C" void timerhost_pump(void)
 }
 
 // Install (called from featuremenu_install on Russobit, after installBattleDiscriminator).
+extern "C" int timerhost_turn_trace_available(void)
+{
+    return static_cast<int>(InterlockedCompareExchange(&g_turnInfoTraceAvailable, 0, 0));
+}
+
 extern "C" void timerhost_install(void)
 {
     if (g.installed)
@@ -2147,11 +2183,16 @@ extern "C" void timerhost_install(void)
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(&g.g_orig_dlgCreate, reinterpret_cast<void*>(hook_dlgCreate));
-    DetourAttach(&g.g_orig_turnInfo, reinterpret_cast<void*>(hook_turnInfo));
+    const LONG turnInfoAttachResult =
+        DetourAttach(&g.g_orig_turnInfo, reinterpret_cast<void*>(hook_turnInfo));
     if (DetourTransactionCommit() != NO_ERROR) {
         g.g_orig_dlgCreate = reinterpret_cast<void*>(0x5C93D6);
         g.g_orig_turnInfo = reinterpret_cast<void*>(0x48A680);
         tlog("[timer] keystone off[9]/off[6] detour FAILED");
+    } else if (turnInfoAttachResult == NO_ERROR && c4_exact_game_exe()) {
+        // The timer hook already exists independently of timer.c4p. Only claim native-layout
+        // diagnostic coverage after successful installation on the exact supported executable.
+        InterlockedExchange(&g_turnInfoTraceAvailable, 1);
     }
 
     // off[8] CButtonInterf::vftable[0] destructor -> null captured buttons on destroy.

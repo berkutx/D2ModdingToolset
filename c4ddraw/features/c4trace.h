@@ -20,6 +20,9 @@ extern "C" {
  */
 void c4trace_init(void);
 int c4trace_enabled(void);
+/* Minimal network diagnostics by default. C4DLL_NETTRACE_DETAIL=1 opts into
+ * the legacy high-volume timing/render trace as well (read once at init). */
+int c4trace_detailed(void);
 /* Read-only requested-state queries; neither initializes nor changes recording.
  * configured reads only the given INI (NULL/empty -> off), not the environment.
  * environment_forced is true only for the exact environment string "1".

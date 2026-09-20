@@ -98,6 +98,9 @@ int main(int argc, char** argv)
 {
     if (argc != 2) return 2;
     const std::string mode = argv[1];
+    const bool minimal = mode == "minimal" || mode == "detail-invalid";
+    SetEnvironmentVariableA("C4DLL_NETTRACE_DETAIL",
+                           minimal ? (mode == "detail-invalid" ? "1junk" : NULL) : "1");
     char executable[MAX_PATH] = {};
     GetModuleFileNameA(NULL, executable, MAX_PATH);
     const std::string directory = std::string(executable).substr(0, std::string(executable).find_last_of('\\') + 1);
@@ -126,6 +129,7 @@ int main(int argc, char** argv)
     check((c4trace_enabled() != 0) == !off, "expected initial enabled state");
     check(GetLastError() == 0xC4DE0002, "enabled preserves last error");
     c4trace_init(); // Idempotent, never a second writer.
+    check((c4trace_detailed() != 0) == (!off && !minimal), "trace detail opt-in");
     if (mode == "on") {
         SetEnvironmentVariableA("C4DLL_NETTRACE", NULL);
         WritePrivateProfileStringA("menu", "netTrace", "0", ini.c_str());
@@ -134,7 +138,18 @@ int main(int argc, char** argv)
         c4trace_init();
         check(c4trace_enabled() != 0, "requested off does not detach/reinitialize a running recorder");
     }
-    if (mode == "concurrent") {
+    if (minimal) {
+        SetEnvironmentVariableA("C4DLL_NETTRACE_DETAIL", "1");
+        check(!c4trace_detailed(), "detail mode is latched for this launch");
+        for (unsigned i = 0; i != 100000; ++i) {
+            c4trace_event(30, 0, 0, 0, 0, 0); // clock flood is filtered
+            c4trace_event(70, 0, 0, 0, 0, 0); // hidden-server timer flood too
+        }
+        SetLastError(0xC4DE0006);
+        c4trace_event(230, 0x12345678, 1, 2, 3, 4);
+        c4trace_event(200, 0x12345678, 5, 6, 7, 8);
+        check(GetLastError() == 0xC4DE0006, "minimal filter/emitter preserves LastError");
+    } else if (mode == "concurrent") {
         g_staggerEmitters = true;
         HANDLE workers[8] = {};
         for (unsigned i = 0; i != 8; ++i)
@@ -169,7 +184,15 @@ int main(int argc, char** argv)
         check(text.find("#start_utc,") != std::string::npos, "UTC metadata");
         check(text.find("seq,qpc,tick,tid,event,object,a,b,c,d\n") != std::string::npos, "CSV columns");
         if (mode != "iofailure") {
-            check(text.find(",101,0x12345678,") != std::string::npos, "event payload present");
+            check(text.find(minimal ? ",230,0x12345678," : ",101,0x12345678,") != std::string::npos, "event payload present");
+            if (minimal) {
+                check(text.find("#mode,network-minimal\n") != std::string::npos, "minimal mode metadata");
+                check(text.find(",30,") == std::string::npos && text.find(",70,") == std::string::npos,
+                      "legacy traffic suppressed");
+                check(text.find("accepted=2,written=2,unwritten=0") != std::string::npos,
+                      "filtered flood does not consume recorder capacity or sequences");
+                check(text.size() < 2048, "minimal output stays small under legacy flood");
+            }
             check(text.find("#stop,") != std::string::npos, "final status recorded");
         } else check(c4trace_test_last_error() == ERROR_WRITE_FAULT,
                      "IO failure reported out-of-band when disk writes fail");

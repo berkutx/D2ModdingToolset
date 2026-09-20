@@ -40,6 +40,8 @@ Check (@($runtime | Where-Object { $_ -match '\.c4p$' }).Count -eq 2) 'Runtime a
 Check ($runtime -contains 'C4dll-R-v2.0-test-bundle/Mods/timer.c4p') 'Timer is bundled'
 Check ($runtime -contains 'C4dll-R-v2.0-test-bundle/Mods/twitchstat.c4p') 'Twitch Stat is bundled'
 Check ($runtime -contains 'C4dll-R-v2.0-test-bundle/TWITCH-STREAMER-RU.md') 'Streamer instructions are bundled'
+Check ($runtime -contains 'C4dll-R-v2.0-test-bundle/NETWORK_TRACE.md' -and
+       $runtime -contains 'C4dll-R-v2.0-test-bundle/Tools/analyze-event-trace.py') 'Network diagnostics guide and optional analyzer are bundled'
 $expectedShaders = @(
     'Shaders/interpolation/lanczos2-sharp.glsl',
     'Shaders/xbrz/xbrz-freescale-multipass.glsl',
