@@ -431,6 +431,31 @@ std::string computeHash(std::vector<std::filesystem::path> filenames)
     return hash;
 }
 
+std::string computeDataHash(const std::string& bytes)
+{
+    HCRYPTPROV provider{};
+    HCRYPTHASH hash{};
+    if (!CryptAcquireContext(&provider, nullptr, nullptr, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT))
+        return {};
+    if (!CryptCreateHash(provider, CALG_MD5, 0, 0, &hash)) {
+        CryptReleaseContext(provider, 0);
+        return {};
+    }
+    unsigned char digest[16]{};
+    DWORD length = sizeof(digest);
+    const bool ok = bytes.size() <= MAXDWORD
+        && CryptHashData(hash, reinterpret_cast<const BYTE*>(bytes.data()),
+                         static_cast<DWORD>(bytes.size()), 0)
+        && CryptGetHashParam(hash, HP_HASHVAL, digest, &length, 0);
+    CryptDestroyHash(hash);
+    CryptReleaseContext(provider, 0);
+    if (!ok) return {};
+    std::string result;
+    static constexpr char hex[] = "0123456789abcdef";
+    for (auto b : digest) { result += hex[b >> 4]; result += hex[b & 15]; }
+    return result;
+}
+
 void forEachScenarioObject(const game::IMidgardObjectMap* objectMap,
                            game::IdType idType,
                            const std::function<void(const game::IMidScenarioObject*)>& func)

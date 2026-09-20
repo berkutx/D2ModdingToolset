@@ -36,6 +36,7 @@
 #include "multilayerimg.h"
 #include "nativegameinfo.h"
 #include "netcustomservice.h"
+#include "preparedmatch.h"
 #include "scenariotemplates.h"
 #include "spinbuttoninterf.h"
 #include "stringarray.h"
@@ -748,7 +749,7 @@ static void onGenerationResultRejected(CMenuRandomScenario* menu)
     menu->generator.reset(nullptr);
 
     removePopup(menu);
-    if (menu->restartGeneration) {
+    if (menu->restartGeneration || menu->preparedMatchGeneration) {
         // Keep the accepted template, spins and resolved races; only roll a new map seed.
         startRestartScenarioGeneration(menu);
     } else {
@@ -766,11 +767,13 @@ static void onGenerationResultCanceled(CMenuRandomScenario* menu)
     if (menu->restartGeneration) {
         completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Canceled);
     }
+    if (menu->preparedMatchGeneration)
+        preparedMatchGenerationEnded(RestartScenarioGenerationResult::Canceled);
 }
 
 static void __fastcall waitGenerationResults(CMenuRandomScenario* menu, int /*%edx*/)
 {
-    const auto status{menu->generationStatus};
+    const auto status = menu->generationStatus.load(std::memory_order_acquire);
     if (status == GenerationStatus::NotStarted || status == GenerationStatus::InProcess) {
         return;
     }
@@ -785,6 +788,15 @@ static void __fastcall waitGenerationResults(CMenuRandomScenario* menu, int /*%e
 
     removePopup(menu);
 
+    if (menu->preparedMatchGeneration && menu->cancelGeneration) {
+        preparedMatchGenerationEnded(RestartScenarioGenerationResult::Canceled);
+        return;
+    }
+
+    if (menu->preparedMatchGeneration && status != GenerationStatus::Done)
+        preparedMatchGenerationEnded(status == GenerationStatus::Canceled
+            ? RestartScenarioGenerationResult::Canceled : RestartScenarioGenerationResult::Error);
+
     if (status == GenerationStatus::Done) {
         if (!menu->scenario) {
             // This should never happen
@@ -792,6 +804,8 @@ static void __fastcall waitGenerationResults(CMenuRandomScenario* menu, int /*%e
             if (menu->restartGeneration) {
                 completeRestartScenarioGeneration(menu, RestartScenarioGenerationResult::Error);
             }
+            if (menu->preparedMatchGeneration)
+                preparedMatchGenerationEnded(RestartScenarioGenerationResult::Error);
             return;
         }
 
@@ -880,6 +894,7 @@ static void startRestartScenarioGeneration(CMenuRandomScenario* menu)
 
 static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /*%edx*/)
 {
+    if (thisptr->preparedMatchGeneration) return; // Only the agreed preview's Retry can regenerate.
     using namespace game;
 
     const auto& menuBase{CMenuBaseApi::get()};
@@ -1035,7 +1050,7 @@ static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /
 
         // Capture the exact source being executed and the player's settings before
         // getContents can override them. Accept retains these inputs for 111/Retry.
-        thisptr->scenarioRecipe = {settings, readFile(templates[selectedIndex].filename)};
+        thisptr->scenarioRecipe = {settings, templates[selectedIndex].source};
         thisptr->scenarioTemplate = instantiateScenarioTemplate(thisptr->scenarioRecipe, seed);
 
         thisptr->popup = createWaitGenerationInterf(thisptr, onGenerationCanceled);
@@ -1058,6 +1073,39 @@ static void __fastcall buttonGenerateHandler(CMenuRandomScenario* thisptr, int /
 bool hasRestartScenario()
 {
     return restartScenario.has_value();
+}
+
+bool startPreparedMatchScenarioGeneration(CMenuRandomScenario* menu,
+                                          const ScenarioTemplateRecipe& recipe,
+                                          const std::string& templateName)
+{
+    if (!menu || menu->generatorThread.joinable()) return false;
+    try {
+        if (!gameInfo) {
+            gameInfo = std::make_unique<NativeGameInfo>(gameFolder());
+            rsg::setGameInfo(gameInfo.get());
+        }
+        menu->scenarioRecipe = recipe;
+        menu->scenarioTemplateName = templateName;
+        menu->preparedMatchGeneration = true;
+        startRestartScenarioGeneration(menu);
+        return true;
+    } catch (const std::exception& e) {
+        spdlog::error("Prepared match generation: {}", e.what());
+        return false;
+    }
+}
+
+void cancelPreparedMatchScenarioGeneration(CMenuRandomScenario* menu)
+{
+    if (!menu || !menu->preparedMatchGeneration) return;
+    menu->cancelGeneration = true;
+    // The timer joins a worker and completes cancellation. Once the preview is
+    // displayed the timer is gone, so dismiss it here at the service safe point.
+    if (!menu->generatorThread.joinable()) {
+        removePopup(menu);
+        preparedMatchGenerationEnded(RestartScenarioGenerationResult::Canceled);
+    }
 }
 
 const std::string& restartScenarioTemplateName()
@@ -1260,6 +1308,8 @@ CMenuRandomScenario::CMenuRandomScenario(game::CMenuPhase* menuPhase,
 
 CMenuRandomScenario::~CMenuRandomScenario()
 {
+    preparedMatchMenuDestroyed(this);
+    cancelGeneration = true;
     if (generatorThread.joinable()) {
         generatorThread.join();
     }

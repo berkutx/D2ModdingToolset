@@ -33,6 +33,9 @@ struct ScenarioTemplate
     { }
 
     std::string filename;
+    // Immutable startup snapshot: generation and prepared offers never reopen Lua files.
+    std::string source;
+    std::string md5;
     rsg::MapTemplateSettings settings;
 };
 

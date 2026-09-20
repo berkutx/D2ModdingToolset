@@ -23,6 +23,8 @@
 #include "mempool.h"
 #include "menurestartnative.h"
 #include "menurandomscenario.h"
+#include "preparedmatch.h"
+#include "scenariotemplates.h"
 #include "midgard.h"
 #include "midgardmsgbox.h"
 #include "midmsgboxbuttonhandler.h"
@@ -370,6 +372,7 @@ CNetCustomService::CNetCustomService()
 
 CNetCustomService::~CNetCustomService()
 {
+    resetPreparedMatch();
     resetLobbyRestart();
     spdlog::debug(__FUNCTION__);
 
@@ -702,11 +705,7 @@ void CNetCustomService::setTemplateInfo(const std::string& name)
         return;
     }
 
-    const auto templatePath = templatesFolder() / name;
-
-    if (std::filesystem::exists(templatePath)) {
-        m_templateHash = computeHash({templatePath});
-    }
+    m_templateHash = computeTemplateHash(name);
 }
 
 const std::string& CNetCustomService::getTemplateName() const
@@ -725,12 +724,9 @@ const std::string& CNetCustomService::getTemplateHash()
 
 std::string CNetCustomService::computeTemplateHash(const std::string& templateName) const
 {
-    auto file = templatesFolder() / templateName;
-
-    if (!std::filesystem::exists(file))
-        return {};
-
-    return computeHash({file});
+    for (const auto& item : getScenarioTemplates())
+        if (std::filesystem::path(item.filename).filename().string() == templateName) return item.md5;
+    return {};
 }
 
 bool CNetCustomService::createRoom(const char* gameName,
@@ -818,6 +814,18 @@ bool CNetCustomService::createRoom(const char* gameName,
     row->UpdateCell(rankedColumn, ranked ? "1" : "0");
     row->UpdateCell(simTurnsDaysColumn, simTurnsDays.c_str());
     row->UpdateCell(unlockGuiColumn, m_roomOptions.unlockGui ? "1" : "0");
+
+    if (const auto* binding = preparedMatchRoomIdentity()) {
+        const auto prep = properties.AddColumn("PreparationId", DataStructures::Table::STRING);
+        const auto game = properties.AddColumn("GameId", DataStructures::Table::STRING);
+        const auto attempt = properties.AddColumn("PreparationAttemptId", DataStructures::Table::STRING);
+        const auto revision = properties.AddColumn("PreparationRevision", DataStructures::Table::STRING);
+        row = properties.GetRowByID(0);
+        row->UpdateCell(prep, binding->preparationId.c_str());
+        row->UpdateCell(game, binding->gameId.c_str());
+        row->UpdateCell(attempt, binding->attemptId.c_str());
+        row->UpdateCell(revision, std::to_string(binding->revision).c_str());
+    }
 
     m_roomsClient.ExecuteFunc(&room);
     return true;
@@ -1246,7 +1254,7 @@ void CNetCustomService::processDeferredLobbyState()
         return;
     }
 
-    processPendingSystemNotices();
+    if (!processPreparedMatch()) processPendingSystemNotices();
 }
 
 void CNetCustomService::processPendingMatchEnd()
@@ -1382,12 +1390,14 @@ void CNetCustomService::PeerCallback::onPacketReceived(DefaultMessageIDTypes typ
         spdlog::debug(__FUNCTION__ ": server is full");
         break;
     case ID_DISCONNECTION_NOTIFICATION:
+        resetPreparedMatch();
         spdlog::debug(__FUNCTION__ ": server was shut down");
         m_service->m_connected = false;
         m_service->m_userName.clear();
         m_service->clearLobbyMatchState();
         break;
     case ID_CONNECTION_LOST:
+        resetPreparedMatch();
         spdlog::debug(__FUNCTION__ ": connection with server is lost");
         m_service->m_connected = false;
         m_service->m_userName.clear();
@@ -1425,6 +1435,11 @@ void CNetCustomService::PeerCallback::onPacketReceived(DefaultMessageIDTypes typ
         if (m_service->readSystemNotice(packet, notice)) {
             m_service->enqueueSystemNotice(std::move(notice));
         }
+        break;
+    }
+    case ID_LOBBY_PREPARED_MATCH: {
+        if (isAuthenticatedLobbyPacket(m_service, packet) && packet->data && packet->length > 1)
+            receivePreparedMatch(packet->data + 1, packet->length - 1);
         break;
     }
     case ID_LOBBY_RESTART: {
@@ -1498,6 +1513,7 @@ void CNetCustomService::LobbyCallback::MessageResult(SLNet::Client_Login* messag
 void CNetCustomService::LobbyCallback::MessageResult(SLNet::Client_Logoff* message)
 {
     if (message->resultCode == SLNet::L2RC_SUCCESS) {
+        resetPreparedMatch();
         m_service->m_userName.clear();
         m_service->clearLobbyMatchState();
     }
@@ -1510,6 +1526,7 @@ void CNetCustomService::LobbyCallback::MessageResult(
 {
     if (message->resultCode == SLNet::L2RC_SUCCESS) {
         if (m_service->m_userName == message->handle.C_String()) {
+            resetPreparedMatch();
             // The same account is remotely logged-in, means that we are now logged out
             m_service->m_userName.clear();
             m_service->clearLobbyMatchState();

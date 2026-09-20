@@ -21,13 +21,24 @@
 #include "maptemplatereader.h"
 #include "utils.h"
 #include <sol/sol.hpp>
+#include <fstream>
 
 namespace hooks {
 
 static ScenarioTemplates scenarioTemplates;
+static bool catalogLoaded{};
+
+static std::string readTemplateBytes(const std::filesystem::path& path)
+{
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) throw std::runtime_error("Cannot read template");
+    return {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
+}
 
 bool loadScenarioTemplates()
 {
+    if (catalogLoaded) return true;
+    catalogLoaded = true;
     namespace fs = std::filesystem;
 
     const auto& folder{templatesFolder()};
@@ -54,8 +65,16 @@ bool loadScenarioTemplates()
             sol::state lua;
             rsg::bindLuaApi(lua);
 
-            scenarioTemplates.emplace_back(templateFile.string(),
-                                           rsg::readTemplateSettings(templateFile, lua));
+            // The dependency only exposes a path-based settings reader. Reject a file
+            // changed while loading, then retain the source and hash for this process.
+            auto source = readTemplateBytes(templateFile);
+            auto settings = rsg::readTemplateSettings(templateFile, lua);
+            if (source != readTemplateBytes(templateFile)) continue;
+            auto md5 = computeDataHash(source);
+            if (md5.empty()) continue;
+            scenarioTemplates.emplace_back(templateFile.string(), std::move(settings));
+            scenarioTemplates.back().source = std::move(source);
+            scenarioTemplates.back().md5 = std::move(md5);
         } catch (const std::exception&) {
             // Silently ignore lua files that are not templates
         }

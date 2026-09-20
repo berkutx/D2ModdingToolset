@@ -103,6 +103,7 @@ enum LobbyMessageId
     ID_LOBBY_SAVE_NATIVE_RESULT = ID_USER_PACKET_ENUM + 14,
     /** Coordinated same-room random-map restart; negotiated by ClientCapabilities. */
     ID_LOBBY_RESTART = ID_USER_PACKET_ENUM + 15,
+    ID_LOBBY_PREPARED_MATCH = ID_USER_PACKET_ENUM + 16,
     ID_GAME_MESSAGE = game::netMessageNormalType & 0xff,
 };
 
