@@ -1,0 +1,15 @@
+#include <windows.h>
+
+// Keep resource IDs aligned with bridgeassets.cpp. Files are embedded verbatim;
+// the installed plugin needs no separate frontend files or JavaScript runtime.
+101 RCDATA "../../../twitch-extension/bridge/relay.html"
+102 RCDATA "../../../twitch-extension/bridge/relay.mjs"
+103 RCDATA "../../../twitch-extension/web/broadcaster.mjs"
+104 RCDATA "../../../twitch-extension/web/config.html"
+105 RCDATA "../../../twitch-extension/web/control.css"
+106 RCDATA "../../../twitch-extension/web/game-text.mjs"
+107 RCDATA "../../../twitch-extension/web/live_config.html"
+108 RCDATA "../../../twitch-extension/web/overlay.css"
+109 RCDATA "../../../twitch-extension/web/protocol.mjs"
+110 RCDATA "../../../twitch-extension/web/video_overlay.html"
+111 RCDATA "../../../twitch-extension/web/viewer.mjs"

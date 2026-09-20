@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Disciples II — соединение с Twitch</title><link rel="stylesheet" href="/control.css"></head>
+<body><main><h1>Соединение с игрой</h1><p id="status" role="status">Подключаем игру…</p><p id="game" hidden></p>
+<p>Оставьте это окно и панель управления расширением открытыми. Зрителям передаются только карточки юнитов текущего боя.</p>
+<p>Захват OBS должен показывать только подключённое окно игры. Если запущены несколько клиентов, проверьте PID.</p><p>Нет связи — запустите игру, включите Twitch Stat в меню плагинов и подключитесь заново из Twitch.</p><button id="close" type="button">Отключить</button></main>
+<script type="module" src="/relay.mjs"></script></body></html>

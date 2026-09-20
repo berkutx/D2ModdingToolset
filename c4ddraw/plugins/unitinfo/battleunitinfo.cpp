@@ -21,6 +21,11 @@
 #include <string>
 #include <vector>
 
+#include "snapshotprofile.h"
+#include "gametext.h"
+#include "slicedcapture.h"
+#include "slicedguard.h"
+
 namespace {
 
 constexpr std::uintptr_t kRussobitManagerDataRva = 0x437CE4;
@@ -48,6 +53,7 @@ constexpr std::uintptr_t kEncParamSetStatus = 0x574314;
 constexpr std::uintptr_t kEncParamSetData = 0x574342;
 constexpr std::uintptr_t kEncParamAddBattleInfo = 0x63B1A1;
 constexpr std::uintptr_t kBatEncyclopediaCtor = 0x65A7A0;
+constexpr std::uintptr_t kFindControl = 0x50C206;
 constexpr std::uintptr_t kFindTextBox = 0x50BB0F;
 constexpr std::uintptr_t kFindListBox = 0x50BACF;
 constexpr std::uintptr_t kGetBattleUnitInfo = 0x622EF5;
@@ -173,6 +179,17 @@ struct NativeEncyclopedia
     char effects[32][4096];
 };
 
+struct FormattedUnitText
+{
+    std::string description;
+    std::string stats;
+    std::string statsExtra;
+    std::string leader;
+    std::string attack;
+    std::string upgrade;
+    std::vector<std::string> effects;
+};
+
 struct UnitPublic
 {
     int internalId;
@@ -184,9 +201,50 @@ struct UnitPublic
     std::string attack;
     std::string upgrade;
     std::vector<std::string> effects;
+    FormattedUnitText formatted;
 };
 
 struct SlotSnapshot { int unitIndex; };
+
+struct SlicedJob
+{
+    twitchstat::SlicedGuard guard;
+    DWORD firstCardStarted;
+    std::uint32_t stepCount;
+    int ids[12];
+    int total;
+    SlotSnapshot slots[12];
+    std::vector<UnitPublic> units;
+    NativeSnapshotProfile profile;
+};
+
+struct SlicedCache
+{
+    twitchstat::SlicedGuard guard;
+    DWORD firstCardStarted;
+    int total;
+    std::uint32_t stepCount;
+};
+
+// UI-thread state only. A generation also fences a lifecycle callback pumped from a native call.
+// Neither job nor cache owns/dereferences a game pointer; only the current step has a context.
+std::unique_ptr<SlicedJob> g_slicedJob;
+std::unique_ptr<SlicedCache> g_slicedCache;
+std::uint64_t g_slicedGeneration = 0;
+bool g_slicedInFlight = false;
+
+void cancelSlicedCapture()
+{
+    ++g_slicedGeneration;
+    g_slicedJob.reset();
+    g_slicedCache.reset();
+}
+
+struct SlicedInFlight
+{
+    SlicedInFlight() { g_slicedInFlight = true; }
+    ~SlicedInFlight() { g_slicedInFlight = false; }
+};
 
 bool g_cleanupFault = false; // UI-thread only; a structural mismatch disables extraction safely
 char g_lastDiagnostic[320] = "not-called"; // UI-thread only; consumed immediately by unitinfo.cpp
@@ -361,9 +419,9 @@ bool hasOpenUnitEncyclopedia(const BattleContext& context)
     return found;
 }
 
-int displayedUnitAt(const BattleContext& context, int localX, int localY)
+bool tryDisplayedUnitAt(const BattleContext& context, int localX, int localY, int* result)
 {
-    int result = 0;
+    *result = 0;
     __try {
         const NativePoint point = {localX, localY};
         using GetSelectedUnitId = int*(__thiscall*)(const void*, int*, const NativePoint*);
@@ -374,14 +432,141 @@ int displayedUnitAt(const BattleContext& context, int localX, int localY)
             int candidate = kEmptyId;
             reinterpret_cast<GetSelectedUnitId>(0x64E04C)(group, &candidate, &point);
             if (candidate && candidate != kEmptyId) {
-                result = candidate;
+                *result = candidate;
                 break;
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        result = 0;
+        *result = 0;
+        return false;
     }
+    return true;
+}
+
+int displayedUnitAt(const BattleContext& context, int localX, int localY)
+{
+    int result = 0;
+    tryDisplayedUnitAt(context, localX, localY, &result);
     return result;
+}
+
+std::array<std::uint32_t, 8> slicedStateValues(const SlicedBattleState& state)
+{
+    return {{state.instance, state.generation, static_cast<std::uint32_t>(state.kind),
+             static_cast<std::uint32_t>(state.localActive),
+             static_cast<std::uint32_t>(state.selectionOpen),
+             static_cast<std::uint32_t>(state.continuation),
+             static_cast<std::uint32_t>(state.animationActive),
+             static_cast<std::uint32_t>(state.playbackLocal)}};
+}
+
+bool tryReadSlicedState(ReadSlicedBattleState readState, SlicedBattleState* state)
+{
+    if (!readState)
+        return false;
+    __try {
+        return readState(state);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool tryCopyBattleFields(const BattleContext& context, twitchstat::SlicedGuard* guard)
+{
+    __try {
+        twitchstat::copyBattleFields(reinterpret_cast<const unsigned char*>(context.battle), guard);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool captureSlicedProbe(int width, int height, ReadSlicedBattleState readState,
+                        twitchstat::SlicedGuard* guard, BattleContext* context)
+{
+    if (g_cleanupFault) {
+        setDiagnostic("cleanup-quarantine");
+        return false;
+    }
+    if (width <= 0 || height <= 0) {
+        setDiagnostic("sliced-invalid-frame-size");
+        return false;
+    }
+    SlicedBattleState before = {}, after = {};
+    if (!tryReadSlicedState(readState, &before)) {
+        setDiagnostic("sliced-state-unavailable");
+        return false;
+    }
+    // Ready remote turns and confirmed local choices are eligible; lifecycle changes invalidate the batch.
+    if (!slicedStateEligible(before)) {
+        setDiagnostic("sliced-state-ineligible kind=%d animation=%d local=%d selection=%d playback=%d",
+                      before.kind, before.animationActive, before.localActive,
+                      before.selectionOpen, before.playbackLocal);
+        return false;
+    }
+    void* viewer = findWideBattleViewer();
+    if (!viewer || !captureBattleContext(viewer, context)) {
+        if (viewer)
+            setDiagnostic("sliced-context-invalid");
+        return false;
+    }
+    if (hasOpenUnitEncyclopedia(*context)) {
+        setDiagnostic("native-encyclopedia-open");
+        return false;
+    }
+    *guard = {};
+    guard->lifecycle = slicedStateValues(before);
+    guard->identity = {{reinterpret_cast<std::uintptr_t>(context->viewer),
+                         reinterpret_cast<std::uintptr_t>(context->batViewer),
+                         reinterpret_cast<std::uintptr_t>(context->data),
+                         reinterpret_cast<std::uintptr_t>(context->data2),
+                         reinterpret_cast<std::uintptr_t>(context->battle),
+                         reinterpret_cast<std::uintptr_t>(context->objectMap)}};
+    guard->geometry = {{width, height, context->area.left, context->area.top,
+                         context->area.right, context->area.bottom}};
+    if (!tryCopyBattleFields(*context, guard)) {
+        setDiagnostic("sliced-battle-read-failed");
+        return false;
+    }
+    bool any = false;
+    for (int i = 0; i < 12; ++i) {
+        const auto& slot = kSlots[i];
+        int unitId = 0;
+        if (!tryDisplayedUnitAt(*context, (slot.left + slot.right) / 2,
+                               (slot.top + slot.bottom) / 2, &unitId)) {
+            setDiagnostic("sliced-roster-read-failed slot=%d", i);
+            return false;
+        }
+        guard->roster[i] = unitId;
+        any = any || unitId != 0;
+    }
+    if (!any) {
+        setDiagnostic("sliced-empty-roster");
+        return false;
+    }
+    if (!tryReadSlicedState(readState, &after) || guard->lifecycle != slicedStateValues(after)) {
+        setDiagnostic("sliced-state-changed-during-probe");
+        return false;
+    }
+    return true;
+}
+
+void initializeSlicedRoster(SlicedJob* job)
+{
+    job->total = 0;
+    for (int slot = 0; slot < 12; ++slot) {
+        job->slots[slot].unitIndex = -1;
+        const int id = job->guard.roster[slot];
+        if (!id)
+            continue;
+        int index = 0;
+        while (index < job->total && job->ids[index] != id)
+            ++index;
+        if (index == job->total)
+            job->ids[job->total++] = id;
+        job->slots[slot].unitIndex = index;
+    }
+    job->units.reserve(static_cast<std::size_t>(job->total));
 }
 
 int slotAtPoint(int localX, int localY)
@@ -417,6 +602,12 @@ bool copyTextBox(void* dialog, const char* controlName, char* destination, size_
     destination[0] = 0;
     if (!dialog)
         return false;
+    // Typed lookup reports AUTODIALOG errors before returning null for an absent control.
+    // Probe optional controls with CDialogInterf::findControl (__thiscall), matching the
+    // Russobit mapping in mss32/src/dialoginterf.cpp, then retain the native type check.
+    using FindControl = NativeInterface*(__thiscall*)(void*, const char*);
+    if (!reinterpret_cast<FindControl>(kFindControl)(dialog, controlName))
+        return true;
     using FindTextBox = NativeUiControl*(__stdcall*)(void*, const char*);
     NativeUiControl* box = reinterpret_cast<FindTextBox>(kFindTextBox)(dialog, controlName);
     if (!box || !box->data)
@@ -466,6 +657,9 @@ bool captureVisibleEffects(NativeEncLayout* layout, NativeEncyclopedia* output)
 
     int total = 0;
     __try {
+        using FindControl = NativeInterface*(__thiscall*)(void*, const char*);
+        if (!reinterpret_cast<FindControl>(kFindControl)(layout->dialog, "LBOX_MODIFIERS"))
+            return true;
         using FindListBox = NativeUiControl*(__stdcall*)(void*, const char*);
         NativeUiControl* list =
             reinterpret_cast<FindListBox>(kFindListBox)(layout->dialog, "LBOX_MODIFIERS");
@@ -497,7 +691,7 @@ bool captureVisibleEffects(NativeEncLayout* layout, NativeEncyclopedia* output)
 }
 
 bool captureHiddenEncyclopedia(const BattleContext& context, int unitId,
-                               NativeEncyclopedia* output)
+                               NativeEncyclopedia* output, UnitSnapshotTiming* timing)
 {
     g_hiddenStage = "arguments";
     g_hiddenExceptionStage = "none";
@@ -516,6 +710,8 @@ bool captureHiddenEncyclopedia(const BattleContext& context, int unitId,
     bool wrapperConstructed = false;
     NativeEncLayout* layout = nullptr;
     bool captured = false;
+    LONGLONG phaseStarted = timing ? snapshotProfileCounter() : 0;
+    LONGLONG* phaseElapsed = timing ? &timing->prep : nullptr;
 
     __try {
         g_hiddenStage = "unit-info";
@@ -578,8 +774,12 @@ bool captureHiddenEncyclopedia(const BattleContext& context, int unitId,
             NativeBatEncyclopedia*, const NativeEncParamIdPlayer*, const void*,
             const NativeCallbackHandle*, bool);
         wrapperCtorEntered = true;
+        snapshotProfileFinish(phaseElapsed, &phaseStarted);
+        phaseElapsed = timing ? &timing->constructor : nullptr;
         NativeBatEncyclopedia* constructed = reinterpret_cast<WrapperCtor>(
             kBatEncyclopediaCtor)(wrapper, &param, context.objectMap, &emptyCallback, true);
+        snapshotProfileFinish(phaseElapsed, &phaseStarted);
+        phaseElapsed = timing ? &timing->controls : nullptr;
         if (!constructed)
             __leave;
         wrapper = constructed;
@@ -619,6 +819,7 @@ bool captureHiddenEncyclopedia(const BattleContext& context, int unitId,
         captured = false;
         g_hiddenStage = g_hiddenExceptionStage;
     }
+    snapshotProfileFinish(phaseElapsed, &phaseStarted);
 
     if (wrapperAllocated && wrapper) {
         bool destroyed = false;
@@ -658,6 +859,7 @@ bool captureHiddenEncyclopedia(const BattleContext& context, int unitId,
     }
     if (captured)
         g_hiddenStage = "success";
+    snapshotProfileFinish(timing ? &timing->destructor : nullptr, &phaseStarted);
     return captured;
 }
 
@@ -690,101 +892,23 @@ UINT configuredAnsiCodePage()
     return GetACP();
 }
 
-std::string stripGameMarkup(const char* source)
+std::string ansiTextToUtf8(const std::string& source, UINT codePage)
 {
-    if (!source)
+    if (source.empty())
         return {};
-    std::string result;
-    result.reserve(strlen(source));
-    for (size_t i = 0; source[i];) {
-        const unsigned char ch = static_cast<unsigned char>(source[i]);
-        if (ch != '\\') {
-            result.push_back(static_cast<char>(ch));
-            ++i;
-            continue;
-        }
-
-        const char next = source[i + 1];
-        if (next == 'n' || next == 'N') {
-            result.push_back('\n');
-            i += 2;
-            continue;
-        }
-        if (next == 'r' || next == 'R') {
-            i += 2;
-            continue;
-        }
-        if (next == 't' || next == 'T') {
-            result.push_back('\t');
-            i += 2;
-            continue;
-        }
-        if (next == '\\') {
-            result.push_back('\\');
-            i += 2;
-            continue;
-        }
-
-        size_t end = i + 1;
-        while (source[end] && source[end] != ';' && end - i <= 48)
-            ++end;
-        if (source[end] == ';') {
-            i = end + 1;
-            continue;
-        }
-        result.push_back('\\');
-        ++i;
-    }
-
-    std::string normalized;
-    normalized.reserve(result.size());
-    bool lineStart = true;
-    int consecutiveNewlines = 0;
-    for (char ch : result) {
-        if (ch == '\r')
-            continue;
-        if (ch == '\n') {
-            while (!normalized.empty() &&
-                   (normalized.back() == ' ' || normalized.back() == '\t'))
-                normalized.pop_back();
-            if (consecutiveNewlines < 2)
-                normalized.push_back('\n');
-            ++consecutiveNewlines;
-            lineStart = true;
-            continue;
-        }
-        if (lineStart && (ch == ' ' || ch == '\t'))
-            continue;
-        normalized.push_back(ch);
-        lineStart = false;
-        consecutiveNewlines = 0;
-    }
-    while (!normalized.empty() &&
-           (normalized.back() == ' ' || normalized.back() == '\t' ||
-            normalized.back() == '\n'))
-        normalized.pop_back();
-    return normalized;
-}
-
-std::string gameTextToUtf8(const char* source)
-{
-    const std::string plain = stripGameMarkup(source);
-    if (plain.empty())
-        return {};
-    UINT codePage = configuredAnsiCodePage();
     if (!codePage)
         codePage = GetACP();
     int wideLength = MultiByteToWideChar(
-        codePage, 0, plain.c_str(), static_cast<int>(plain.size()), nullptr, 0);
+        codePage, 0, source.c_str(), static_cast<int>(source.size()), nullptr, 0);
     if (wideLength <= 0 && codePage != 1251) {
         codePage = 1251;
         wideLength = MultiByteToWideChar(
-            codePage, 0, plain.c_str(), static_cast<int>(plain.size()), nullptr, 0);
+            codePage, 0, source.c_str(), static_cast<int>(source.size()), nullptr, 0);
     }
     if (wideLength <= 0)
         return {};
     std::wstring wide(static_cast<size_t>(wideLength), L'\0');
-    if (!MultiByteToWideChar(codePage, 0, plain.c_str(), static_cast<int>(plain.size()),
+    if (!MultiByteToWideChar(codePage, 0, source.c_str(), static_cast<int>(source.size()),
                              &wide[0], wideLength))
         return {};
     const int utf8Length = WideCharToMultiByte(
@@ -792,26 +916,42 @@ std::string gameTextToUtf8(const char* source)
     if (utf8Length <= 0)
         return {};
     std::string utf8(static_cast<size_t>(utf8Length), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, wide.data(), wideLength,
-                        &utf8[0], utf8Length, nullptr, nullptr);
+    if (!WideCharToMultiByte(CP_UTF8, 0, wide.data(), wideLength,
+                             &utf8[0], utf8Length, nullptr, nullptr))
+        return {};
     return utf8;
 }
 
-UnitPublic makePublicUnit(int unitId, const NativeEncyclopedia& source)
+std::string gameTextToUtf8(const char* source, UINT codePage)
+{
+    return ansiTextToUtf8(twitchstat::stripGameMarkup(source), codePage);
+}
+
+UnitPublic makePublicUnit(int unitId, const NativeEncyclopedia& source, UINT codePage)
 {
     UnitPublic result = {};
     result.internalId = unitId; // extraction-only dedupe key; never serialized
-    result.name = gameTextToUtf8(source.name);
-    result.description = gameTextToUtf8(source.description);
-    result.stats = gameTextToUtf8(source.stats);
-    result.statsExtra = gameTextToUtf8(source.statsExtra);
-    result.leader = gameTextToUtf8(source.leader);
-    result.attack = gameTextToUtf8(source.attack);
-    result.upgrade = gameTextToUtf8(source.upgrade);
+    result.name = gameTextToUtf8(source.name, codePage);
+    result.description = gameTextToUtf8(source.description, codePage);
+    result.stats = gameTextToUtf8(source.stats, codePage);
+    result.statsExtra = gameTextToUtf8(source.statsExtra, codePage);
+    result.leader = gameTextToUtf8(source.leader, codePage);
+    result.attack = gameTextToUtf8(source.attack, codePage);
+    result.upgrade = gameTextToUtf8(source.upgrade, codePage);
+    // Additive companion fields retain native layout/font/RGB tags. The frontend interprets only
+    // known formatting as text runs; these are neither HTML nor additional native UI calls.
+    result.formatted.description = ansiTextToUtf8(source.description, codePage);
+    result.formatted.stats = ansiTextToUtf8(source.stats, codePage);
+    result.formatted.statsExtra = ansiTextToUtf8(source.statsExtra, codePage);
+    result.formatted.leader = ansiTextToUtf8(source.leader, codePage);
+    result.formatted.attack = ansiTextToUtf8(source.attack, codePage);
+    result.formatted.upgrade = ansiTextToUtf8(source.upgrade, codePage);
     for (int i = 0; i < source.effectCount; ++i) {
-        std::string text = gameTextToUtf8(source.effects[i]);
-        if (!text.empty())
+        std::string text = gameTextToUtf8(source.effects[i], codePage);
+        if (!text.empty()) {
             result.effects.push_back(std::move(text));
+            result.formatted.effects.push_back(ansiTextToUtf8(source.effects[i], codePage));
+        }
     }
     return result;
 }
@@ -927,10 +1067,14 @@ std::string buildJson(const BattleContext& context, int frameWidth, int frameHei
     json += "    \"bounds\": ";
     appendBounds(json, context.area);
     json += "\n  },\n";
-    json += "  \"selection\": {\n";
-    appendStringField(json, "    ", "side", selectedSlot < 6 ? "left" : "right");
-    appendIntField(json, "    ", "index", selectedSlot % 6, false);
-    json += "  },\n";
+    if (selectedSlot >= 0) {
+        json += "  \"selection\": {\n";
+        appendStringField(json, "    ", "side", selectedSlot < 6 ? "left" : "right");
+        appendIntField(json, "    ", "index", selectedSlot % 6, false);
+        json += "  },\n";
+    } else {
+        json += "  \"selection\": null,\n";
+    }
     json += "  \"slots\": [\n";
     for (int i = 0; i < 12; ++i) {
         const bool left = i < 6;
@@ -981,7 +1125,20 @@ std::string buildJson(const BattleContext& context, int frameWidth, int frameHei
                 json += ", ";
             appendEscaped(json, unit.effects[effect]);
         }
-        json += "]\n    }";
+        json += "],\n      \"formatted\": {\n";
+        appendStringField(json, "        ", "description", unit.formatted.description);
+        appendStringField(json, "        ", "stats", unit.formatted.stats);
+        appendStringField(json, "        ", "stats_extra", unit.formatted.statsExtra);
+        appendStringField(json, "        ", "leader", unit.formatted.leader);
+        appendStringField(json, "        ", "attack", unit.formatted.attack);
+        appendStringField(json, "        ", "upgrade", unit.formatted.upgrade);
+        json += "        \"effects\": [";
+        for (size_t effect = 0; effect < unit.formatted.effects.size(); ++effect) {
+            if (effect)
+                json += ", ";
+            appendEscaped(json, unit.formatted.effects[effect]);
+        }
+        json += "]\n      }\n    }";
         json += i + 1 < units.size() ? ",\n" : "\n";
     }
     json += "  ]\n";
@@ -995,6 +1152,7 @@ std::string buildJson(const BattleContext& context, int frameWidth, int frameHei
 // offscreen child and destroys it on teardown; the next battle starts with a fresh UI tree.
 extern "C" void battleunitinfo_reset_battle(void)
 {
+    cancelSlicedCapture();
     g_cleanupFault = false;
     setDiagnostic("battle-reset");
 }
@@ -1005,10 +1163,12 @@ extern "C" const char* battleunitinfo_last_diagnostic(void)
 }
 
 // Coordinates and frame size use the same logical-game space as C4P_Canvas/c4p_mouse.
-extern "C" int battleunitinfo_get_json_at(int x, int y, int frameWidth, int frameHeight,
+static int battleunitinfo_snapshot(bool automatic, int x, int y, int frameWidth, int frameHeight,
                                             char* utf8Json, std::uint32_t capacity,
-                                            std::uint32_t* required)
+                                            std::uint32_t* required,
+                                            NativeSnapshotProfile* profile)
 {
+    LONGLONG profileStarted = profile ? snapshotProfileCounter() : 0;
     if (required)
         *required = 0;
     if (g_cleanupFault) {
@@ -1044,8 +1204,8 @@ extern "C" int battleunitinfo_get_json_at(int x, int y, int frameWidth, int fram
     // CBatUnitGroup2::getSelectedUnitId. The group's base point and portrait offsets are therefore
     // DLG_BATTLE_B-local, just like kSlots. This native hit-test is authoritative: a large unit is
     // one 150x85 portrait, while kSlots describes two 70x85 logical cells separated by a 10px seam.
-    const int clickedUnitId = displayedUnitAt(context, localX, localY);
-    if (!clickedUnitId) {
+    const int clickedUnitId = automatic ? 0 : displayedUnitAt(context, localX, localY);
+    if (!automatic && !clickedUnitId) {
         if (hintedSlot < 0) {
             setDiagnostic("outside-unit click=%d,%d local=%d,%d battle=%d,%d,%d,%d",
                           x, y, localX, localY, context.area.left, context.area.top,
@@ -1115,19 +1275,23 @@ extern "C" int battleunitinfo_get_json_at(int x, int y, int frameWidth, int fram
         }
     }
 
-    if (selectedSlot < 0 || uniqueCount == 0) {
+    if ((!automatic && selectedSlot < 0) || uniqueCount == 0) {
         setDiagnostic("clicked-unit-not-in-roster hint=%d unit=%08X unique=%d",
                       hintedSlot, static_cast<unsigned>(clickedUnitId), uniqueCount);
         return 0;
     }
 
     try {
+        snapshotProfileFinish(profile ? &profile->preflight : nullptr, &profileStarted);
         std::vector<UnitPublic> units;
         units.reserve(static_cast<size_t>(uniqueCount));
         // Keep the ~180 KiB native text scratch area off the game's already-deep UI-thread stack.
         std::unique_ptr<NativeEncyclopedia> encyclopedia(new NativeEncyclopedia());
         for (int i = 0; i < uniqueCount; ++i) {
-            if (!captureHiddenEncyclopedia(context, uniqueIds[i], encyclopedia.get())) {
+            UnitSnapshotTiming* timing = profile ? &profile->unit[i] : nullptr;
+            if (profile)
+                profile->units = i + 1;
+            if (!captureHiddenEncyclopedia(context, uniqueIds[i], encyclopedia.get(), timing)) {
                 setDiagnostic("hidden-capture-failed unit-index=%d unit-id=%08X stage=%s "
                               "seh=%08lX@%p quarantine=%d",
                               i, static_cast<unsigned>(uniqueIds[i]), g_hiddenStage,
@@ -1135,9 +1299,12 @@ extern "C" int battleunitinfo_get_json_at(int x, int y, int frameWidth, int fram
                               g_hiddenExceptionAddress, g_cleanupFault ? 1 : 0);
                 return 0; // do not publish a mixed/partial battle snapshot
             }
-            units.push_back(makePublicUnit(uniqueIds[i], *encyclopedia));
+            profileStarted = profile ? snapshotProfileCounter() : 0;
+            units.push_back(makePublicUnit(uniqueIds[i], *encyclopedia, configuredAnsiCodePage()));
+            snapshotProfileFinish(timing ? &timing->text : nullptr, &profileStarted);
         }
 
+        profileStarted = profile ? snapshotProfileCounter() : 0;
         const std::string json = buildJson(
             context, frameWidth, frameHeight, selectedSlot, slots, units);
         const size_t bytes = json.size() + 1;
@@ -1150,6 +1317,7 @@ extern "C" int battleunitinfo_get_json_at(int x, int y, int frameWidth, int fram
             return -1;
         }
         memcpy(utf8Json, json.c_str(), bytes);
+        snapshotProfileFinish(profile ? &profile->json : nullptr, &profileStarted);
         setDiagnostic("success slot=%d hint=%d remapped=%d units=%d bytes=%lu",
                       selectedSlot, hintedSlot, selectedSlot != hintedSlot ? 1 : 0,
                       uniqueCount, static_cast<unsigned long>(bytes));
@@ -1157,5 +1325,228 @@ extern "C" int battleunitinfo_get_json_at(int x, int y, int frameWidth, int fram
     } catch (...) {
         setDiagnostic("cpp-exception");
         return 0;
+    }
+}
+
+extern "C" int battleunitinfo_get_json_at(int x, int y, int frameWidth, int frameHeight,
+                                          char* json, std::uint32_t capacity,
+                                          std::uint32_t* required)
+{
+    return battleunitinfo_snapshot(false, x, y, frameWidth, frameHeight, json, capacity, required,
+                                   nullptr);
+}
+
+// Called on the game UI thread by the plugin's timer, never by the render/transport worker.
+extern "C" int battleunitinfo_get_json(int frameWidth, int frameHeight, char* json,
+                                      std::uint32_t capacity, std::uint32_t* required,
+                                      NativeSnapshotProfile* profile)
+{
+    return battleunitinfo_snapshot(true, 0, 0, frameWidth, frameHeight, json, capacity, required,
+                                   profile);
+}
+
+extern "C" void battleunitinfo_cancel_sliced(void)
+{
+    cancelSlicedCapture();
+}
+
+extern "C" bool battleunitinfo_preview_hit(int x, int y)
+{
+    BattleContext context = {};
+    void* viewer = findWideBattleViewer();
+    if (!viewer || !captureBattleContext(viewer, &context))
+        return false;
+    int id = 0;
+    return tryDisplayedUnitAt(context, x - context.area.left, y - context.area.top, &id) && id != 0;
+}
+
+// One indivisible native card per UI message. The copied guard is deliberately conservative and
+// cannot detect arbitrary Lua state; even a matching cache forces a new sweep after 1000 ms.
+extern "C" int battleunitinfo_step_json(int width, int height, char* json,
+                                        std::uint32_t capacity, std::uint32_t* required,
+                                        ReadSlicedBattleState readState, SlicedCaptureInfo* info)
+{
+    SlicedCaptureInfo unused = {};
+    if (!info)
+        info = &unused;
+    *info = {};
+    info->capturedUnit = -1;
+    if (required)
+        *required = 0;
+    if (g_slicedInFlight) {
+        cancelSlicedCapture();
+        setDiagnostic("sliced-reentrant-cancel");
+        return SliceUnavailable;
+    }
+    SlicedInFlight inFlight;
+    const std::uint64_t generation = g_slicedGeneration;
+    try {
+        LONGLONG phaseStarted = snapshotProfileCounter();
+        twitchstat::SlicedGuard before = {};
+        BattleContext context = {};
+        if (!captureSlicedProbe(width, height, readState, &before, &context)) {
+            cancelSlicedCapture();
+            return SliceUnavailable;
+        }
+        if (generation != g_slicedGeneration) {
+            setDiagnostic("sliced-lifecycle-during-probe");
+            return SliceUnavailable;
+        }
+        const DWORD now = GetTickCount();
+        if (g_slicedCache) {
+            if (g_slicedCache->guard != before) {
+                cancelSlicedCapture();
+                setDiagnostic("sliced-cached-state-changed");
+                return SliceUnavailable;
+            }
+            if (!twitchstat::slicedRefreshDue(now, g_slicedCache->firstCardStarted)) {
+                info->totalUnits = g_slicedCache->total;
+                info->stepCount = g_slicedCache->stepCount;
+                info->oldestAgeMs = twitchstat::slicedAge(now, g_slicedCache->firstCardStarted);
+                setDiagnostic("sliced-cached age=%lu", static_cast<unsigned long>(info->oldestAgeMs));
+                return SliceCached; // no write to JSON and no renewed capture timestamp
+            }
+            g_slicedCache.reset();
+        }
+        if (g_slicedJob) {
+            if (g_slicedJob->guard != before ||
+                twitchstat::slicedBatchExpired(now, g_slicedJob->firstCardStarted)) {
+                const bool expired = twitchstat::slicedBatchExpired(
+                    now, g_slicedJob->firstCardStarted);
+                cancelSlicedCapture();
+                setDiagnostic(expired ? "sliced-batch-expired" : "sliced-batch-state-changed");
+                return SliceUnavailable;
+            }
+        } else {
+            std::unique_ptr<SlicedJob> job(new SlicedJob());
+            job->guard = before;
+            job->firstCardStarted = GetTickCount();
+            initializeSlicedRoster(job.get());
+            g_slicedJob.swap(job);
+        }
+
+        const int index = static_cast<int>(g_slicedJob->units.size());
+        const int total = g_slicedJob->total;
+        const int unitId = g_slicedJob->ids[index];
+        const DWORD firstCardStarted = g_slicedJob->firstCardStarted;
+        NativeSnapshotProfile profile = g_slicedJob->profile;
+        snapshotProfileFinish(&profile.preflight, &phaseStarted);
+        profile.units = index + 1;
+        const std::uint32_t stepCount = g_slicedJob->stepCount + 1;
+        std::unique_ptr<NativeEncyclopedia> encyclopedia(new NativeEncyclopedia());
+
+        // Native code may dispatch lifecycle callbacks. All storage passed across that boundary
+        // belongs to this stack/local allocation, not g_slicedJob (which cancellation destroys).
+        info->capturedUnit = index;
+        info->totalUnits = total;
+        info->stepCount = stepCount;
+        const bool captured = captureHiddenEncyclopedia(context, unitId, encyclopedia.get(),
+                                                         &profile.unit[index]);
+        info->profile = profile;
+        info->oldestAgeMs = twitchstat::slicedAge(GetTickCount(), firstCardStarted);
+        if (generation != g_slicedGeneration) {
+            setDiagnostic("sliced-lifecycle-during-card unit-index=%d", index);
+            return SliceUnavailable;
+        }
+        if (!captured) {
+            cancelSlicedCapture();
+            setDiagnostic("sliced-card-failed unit-index=%d unit-id=%08X stage=%s "
+                          "seh=%08lX@%p quarantine=%d", index, static_cast<unsigned>(unitId),
+                          g_hiddenStage, static_cast<unsigned long>(g_hiddenExceptionCode),
+                          g_hiddenExceptionAddress, g_cleanupFault ? 1 : 0);
+            return SliceUnavailable;
+        }
+
+        phaseStarted = snapshotProfileCounter();
+        twitchstat::SlicedGuard after = {};
+        BattleContext freshContext = {};
+        const bool probeValid = captureSlicedProbe(width, height, readState, &after, &freshContext);
+        snapshotProfileFinish(&profile.preflight, &phaseStarted);
+        info->profile = profile;
+        if (generation != g_slicedGeneration) {
+            setDiagnostic("sliced-lifecycle-after-card unit-index=%d", index);
+            return SliceUnavailable;
+        }
+        if (!probeValid || before != after ||
+            twitchstat::slicedBatchExpired(GetTickCount(), firstCardStarted)) {
+            cancelSlicedCapture();
+            if (probeValid)
+                setDiagnostic("sliced-after-card-changed-or-expired unit-index=%d", index);
+            return SliceUnavailable;
+        }
+
+        g_slicedJob->units.push_back(makePublicUnit(unitId, *encyclopedia, configuredAnsiCodePage()));
+        snapshotProfileFinish(&profile.unit[index].text, &phaseStarted);
+        g_slicedJob->profile = profile;
+        g_slicedJob->stepCount = stepCount;
+        info->profile = profile;
+        info->oldestAgeMs = twitchstat::slicedAge(GetTickCount(), firstCardStarted);
+        if (info->oldestAgeMs >= 2500) {
+            cancelSlicedCapture();
+            setDiagnostic("sliced-text-copy-expired unit-index=%d", index);
+            return SliceUnavailable;
+        }
+        if (index + 1 < total) {
+            setDiagnostic("sliced-pending captured=%d total=%d age=%lu", index + 1, total,
+                          static_cast<unsigned long>(info->oldestAgeMs));
+            return SlicePending;
+        }
+
+        // JSON only consumes copied strings/geometry. Re-probe after serialization, immediately
+        // before committing the complete frame, so none of the intermediate roster is published.
+        BattleContext geometry = {};
+        geometry.area = {before.geometry[2], before.geometry[3],
+                         before.geometry[4], before.geometry[5]};
+        const std::string completed = buildJson(geometry, width, height, -1,
+                                                 g_slicedJob->slots, g_slicedJob->units);
+        snapshotProfileFinish(&profile.json, &phaseStarted);
+        twitchstat::SlicedGuard finalGuard = {};
+        const bool finalValid = captureSlicedProbe(width, height, readState, &finalGuard, &freshContext);
+        snapshotProfileFinish(&profile.preflight, &phaseStarted);
+        info->profile = profile;
+        info->oldestAgeMs = twitchstat::slicedAge(GetTickCount(), firstCardStarted);
+        if (generation != g_slicedGeneration) {
+            setDiagnostic("sliced-lifecycle-before-commit");
+            return SliceUnavailable;
+        }
+        if (!finalValid || before != finalGuard || info->oldestAgeMs >= 2500) {
+            cancelSlicedCapture();
+            if (finalValid)
+                setDiagnostic("sliced-commit-changed-or-expired");
+            return SliceUnavailable;
+        }
+        const size_t bytes = completed.size() + 1;
+        if (required)
+            *required = bytes > UINT32_MAX ? UINT32_MAX : static_cast<std::uint32_t>(bytes);
+        if (!json || bytes > capacity) {
+            cancelSlicedCapture();
+            setDiagnostic("sliced-buffer-too-small capacity=%lu required=%lu",
+                          static_cast<unsigned long>(capacity), static_cast<unsigned long>(bytes));
+            return SliceUnavailable;
+        }
+        std::unique_ptr<SlicedCache> cache(new SlicedCache());
+        cache->guard = finalGuard;
+        cache->firstCardStarted = firstCardStarted;
+        cache->total = total;
+        cache->stepCount = stepCount;
+        info->oldestAgeMs = twitchstat::slicedAge(GetTickCount(), firstCardStarted);
+        if (info->oldestAgeMs >= 2500) {
+            cancelSlicedCapture();
+            setDiagnostic("sliced-cache-allocation-expired");
+            return SliceUnavailable;
+        }
+        // This is the only write to the caller's JSON buffer in the entire sliced path.
+        memcpy(json, completed.c_str(), bytes);
+        g_slicedCache.swap(cache);
+        g_slicedJob.reset();
+        info->oldestAgeMs = twitchstat::slicedAge(GetTickCount(), firstCardStarted);
+        setDiagnostic("sliced-complete units=%d age=%lu bytes=%lu", total,
+                      static_cast<unsigned long>(info->oldestAgeMs),
+                      static_cast<unsigned long>(bytes));
+        return SliceComplete;
+    } catch (...) {
+        cancelSlicedCapture();
+        setDiagnostic("sliced-cpp-exception");
+        return SliceUnavailable;
     }
 }

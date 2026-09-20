@@ -1,0 +1,8 @@
+{
+  "name": "disciples-2-battle-info",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": { "test": "node --test test/*.test.mjs", "bridge": "node bridge/server.mjs" },
+  "engines": { "node": ">=22" }
+}

@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$BuildDirectory,
-    [ValidatePattern('^v[0-9][0-9A-Za-z.-]{0,79}$')][string]$Version = 'v1.9-20260904',
+    [ValidatePattern('^v[0-9][0-9A-Za-z.-]{0,79}$')][string]$Version = 'v2.0',
     [string]$OutputRoot = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent)
 )
 # Offline packaging only. Existing output is an error; partial output is never removed.
@@ -20,6 +20,8 @@ foreach ($target in @($stage, $zip, $symzip, $checksums)) { if (Test-Path -Liter
 $files = [ordered]@{
     'C4dll-R.dll' = "$build/bin/Release/C4dll-R.dll"
     'Mods/timer.c4p' = "$build/plugins/timer/bin/timer.c4p"
+    'Mods/twitchstat.c4p' = "$build/plugins/unitinfo/bin/twitchstat.c4p"
+    'TWITCH-STREAMER-RU.md' = "$repo/twitch-extension/STREAMER-RU.md"
     'INSTALL.txt' = "$repo/c4ddraw/release/INSTALL.txt"
     'C4PLUGINS.txt' = "$repo/c4ddraw/release/C4PLUGINS.txt"
     'C4plugins.ini' = "$repo/c4ddraw/release/C4plugins.ini"
@@ -32,6 +34,7 @@ $files = [ordered]@{
 $symbols = [ordered]@{
     'C4dll-R.pdb' = "$build/bin/Release/C4dll-R.pdb"
     'timer.pdb' = "$build/plugins/timer/bin/timer.pdb"
+    'twitchstat.pdb' = "$build/plugins/unitinfo/bin/twitchstat.pdb"
 }
 $shaderRoot = "$repo/c4ddraw/release/Shaders"
 $shaderContract = & "$repo/c4ddraw/tools/validate-shader-bundle.ps1" `
@@ -50,6 +53,10 @@ $head = Commit 'HEAD'
 if (-not $head) { throw 'Cannot resolve workspace HEAD' }
 $sourceHashes = [ordered]@{}
 $sources = @(Get-ChildItem -LiteralPath "$repo/c4ddraw/features", "$repo/c4ddraw/patches" -Recurse -File) + @(Get-Item -LiteralPath $PSCommandPath, "$repo/c4ddraw/build.ps1", "$repo/c4ddraw/tools/validate-shader-bundle.ps1")
+$sources += @(Get-ChildItem -LiteralPath "$repo/c4ddraw/plugins/timer", "$repo/c4ddraw/plugins/unitinfo" -File |
+    Where-Object { $_.Extension -in @('.cpp', '.h', '.def', '.rc', '.vcxproj') })
+$sources += @(Get-ChildItem -LiteralPath "$repo/twitch-extension/web" -File)
+$sources += @(Get-Item -LiteralPath "$repo/twitch-extension/bridge/relay.html", "$repo/twitch-extension/bridge/relay.mjs", "$repo/twitch-extension/STREAMER-RU.md")
 foreach ($source in $sources | Sort-Object FullName -Unique) { $sourceHashes[$source.FullName.Substring($repo.Length + 1).Replace('\', '/')] = Hash $source.FullName }
 $fileHashes = [ordered]@{}; foreach ($entry in $files.GetEnumerator()) { $fileHashes[$entry.Key] = Hash $entry.Value }
 $symbolHashes = [ordered]@{}; foreach ($entry in $symbols.GetEnumerator()) { $symbolHashes[$entry.Key] = Hash $entry.Value }
@@ -58,7 +65,7 @@ $info = [ordered]@{
     BaselineTags = [ordered]@{ 'c4dll-r-v1.8' = (Commit 'c4dll-r-v1.8'); 'c4dll-r-v1.9' = (Commit 'c4dll-r-v1.9') }
     WorkingTreeStatus = @(& git -C $repo status --porcelain --untracked-files=normal 2>$null)
     SourceNote = 'Source hashes describe the working tree at packaging; dirty changes are not represented by HEAD alone.'
-    Scope = 'Stable wrapper and timer only. Experimental Twitch/UnitInfo and MSS are not included; no game instance is changed.'
+    Scope = 'C4dll-R wrapper with Timer and Twitch Stat, including its embedded loopback bridge and streamer guide. MSS is not included; no game instance is changed.'
     SymbolEvidence = 'Adjacent DLL/plugin and PDB from the supplied isolated build directory; SHA256 below. PDB GUID/age validation is separate.'
     SourceSHA256 = $sourceHashes; PackageFileSHA256 = $fileHashes; SymbolSHA256 = $symbolHashes
 }
@@ -86,8 +93,8 @@ function Validate-Zip([string]$Path, [string]$Prefix, $Expected) {
             if ($entryName.EndsWith('/')) { continue }
             if (-not $entryName.StartsWith($Prefix, [StringComparison]::Ordinal) -or $entry.Length -eq 0) { throw "Invalid/empty ZIP entry: $entryName" }
             $relative = $entryName.Substring($Prefix.Length)
-            if ($relative -match '(?i)(^|/)(twitchstat|unitinfo)\.(c4p|pdb)$' -or
-                ($relative -match '(?i)\.c4p$' -and $relative -cne 'Mods/timer.c4p')) { throw "Non-release plugin in ZIP: $relative" }
+            if ($relative -match '(?i)\.c4p$' -and
+                $relative -cnotin @('Mods/timer.c4p', 'Mods/twitchstat.c4p')) { throw "Non-release plugin in ZIP: $relative" }
             if ($relative -match '(?i)(^|/)mss32\.dll$|\.(exe|log|csv|dmp)$' -or -not $Expected.Contains($relative) -or $seen.ContainsKey($relative)) { throw "Unexpected/duplicate ZIP entry: $relative" }
             $stream = $entry.Open(); $sha = [Security.Cryptography.SHA256]::Create()
             try { $actual = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() } finally { $stream.Dispose(); $sha.Dispose() }

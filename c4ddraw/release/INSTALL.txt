@@ -4,7 +4,8 @@
 
 WHAT THIS IS
   C4dll-R.dll embeds cnc-ddraw in one drop-in DirectDraw wrapper.
-  Included plugin: Mods\timer.c4p is the reconstructed turn timer.
+  Included plugins: Mods\timer.c4p is the reconstructed turn timer;
+  Mods\twitchstat.c4p provides battle data for the Twitch viewer extension.
 
 REQUIREMENTS
   - Disciples II. Renderer, video/performance menu, language and locale work on
@@ -15,17 +16,19 @@ REQUIREMENTS
   - The game's existing CB63.dll, Mss23.dll and mss32.dll stay as they are.
 
 INSTALL
-  1. Make a backup of your current C4dll-R.dll (if you have one).
+  1. Close every game client. Back up your current C4dll-R.dll and plugins (if present).
   2. Copy C4dll-R.dll next to Discipl2.exe (replace the existing one).
   3. Copy ddraw.ini next to Discipl2.exe - these are the recommended renderer
      defaults (windowed with the menu bar, OpenGL, game speed cap 180).
      Upgrading and already tuned your ddraw.ini? Keep yours.
   4. Copy the Shaders\ folder next to Discipl2.exe. It contains the exact eight
      OpenGL filters shown by the Video menu, including required multipass files.
-  5. Copy Mods\timer.c4p into the game's Mods\ folder.
-     Always update C4dll-R.dll and timer.c4p together; safe tournament Auto Battle needs both.
-  6. (Optional) Copy C4plugins.ini next to Discipl2.exe to configure the timer.
-     When upgrading, keep your existing file; missing warning settings use defaults.
+  5. Copy Mods\timer.c4p and Mods\twitchstat.c4p into the game's Mods\ folder.
+     Update both plugins and C4dll-R.dll from the same archive; safe tournament Auto Battle
+     needs the matching wrapper and timer plugin.
+  6. For a new installation, copy C4plugins.ini next to Discipl2.exe to configure the plugins.
+     When upgrading, keep your existing C4plugins.ini, C4menu.ini and ddraw.ini.
+     Missing settings use defaults; an existing explicit setting is not reset.
      C4PLUGINS.txt explains every key and which changes apply live or need a restart.
   7. (Optional) Keep an existing Imgs\IsoClouds.ff from a DisciplesGL install
      if you want to use Game > MNS/SMNS > Show map clouds. The archive is not redistributed
@@ -172,8 +175,25 @@ USING IT
     only an explicit user Pause adds "(пауза)". Other executable
     layouts keep the active-turn-edge fallback.
 
+TWITCH STAT
+  - Twitch Stat is enabled by default for a new installation. Plugins > Twitch Stat > Enabled
+    switches it live and saves the choice to [TwitchStat] Enabled in C4plugins.ini.
+    Existing explicit settings are preserved. See C4PLUGINS.txt for legacy fallback details.
+  - The plugin starts its own loopback connection at 127.0.0.1:8765. No Node.js installation,
+    separate bridge process or administrator setup is required. Disabling it closes the connection.
+    This switch does not start a stream or publish to Twitch by itself.
+  - Install and activate Disciples II Battle Info separately on Twitch. Hosted Test access currently
+    requires the testing allowlist; public installation follows Twitch approval and release.
+    Open Live Configuration, click Connect game and keep both the panel and connection popup open.
+  - Only one game client can own port 8765. If it is busy, stop the previous bridge or disable
+    Twitch Stat in the other game, then disable and re-enable it in the intended client.
+    The plugin never silently takes over another game's connection.
+  - Use a compatible Russobit/MNS battle interface and capture the complete game image in OBS.
+    Viewers need no local installation. See TWITCH-STREAMER-RU.md in this archive for the detailed guide.
+
 UNINSTALL / REVERT
-  - Restore your backed-up C4dll-R.dll and remove Mods\timer.c4p.
+  - Close the game, restore your backed-up C4dll-R.dll and restore or remove this package's
+    Mods\timer.c4p and Mods\twitchstat.c4p. Keep unrelated plugins and your saved configuration.
 
 This package is independent of the mss32 mod and is versioned separately.
 It is distributed under GPL-3.0; see LICENSE. Use the exact package version/tag
@@ -186,7 +206,8 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
 
 ЧТО ЭТО
   C4dll-R.dll встраивает cnc-ddraw в одну подключаемую DirectDraw-DLL.
-  В комплекте один плагин: Mods\timer.c4p — воссозданный таймер хода.
+  В комплекте два плагина: Mods\timer.c4p — воссозданный таймер хода;
+  Mods\twitchstat.c4p — данные боя для зрительского расширения Twitch.
 
 ТРЕБОВАНИЯ
   - Disciples II. Рендерер, меню видео/производительности, язык и локаль работают
@@ -197,19 +218,21 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
   - Имеющиеся CB63.dll, Mss23.dll и mss32.dll игры остаются как есть.
 
 УСТАНОВКА
-  1. Сделайте резервную копию текущего C4dll-R.dll (если он есть).
+  1. Закройте все клиенты игры. Сохраните резервную копию текущего C4dll-R.dll
+     и плагинов, если они уже установлены.
   2. Скопируйте C4dll-R.dll рядом с Discipl2.exe (заменив существующий).
   3. Скопируйте ddraw.ini рядом с Discipl2.exe - это рекомендованные настройки
      рендерера (окно с меню-баром, OpenGL, кап скорости игры 180).
      Обновляетесь и уже настроили свой ddraw.ini? Оставьте свой.
   4. Скопируйте папку Shaders\ рядом с Discipl2.exe. В ней находятся ровно восемь
      OpenGL-фильтров из меню Video и необходимые файлы multipass.
-  5. Скопируйте Mods\timer.c4p в папку Mods\ игры.
-     C4dll-R.dll и timer.c4p всегда обновляйте вместе: безопасному турнирному
-     автобою нужны обе актуальные части.
-  6. (Необязательно) Скопируйте C4plugins.ini рядом с Discipl2.exe для настройки
-     таймера. Все ключи и различие между живыми изменениями и рестартом
-     описаны в C4PLUGINS.txt.
+  5. Скопируйте Mods\timer.c4p и Mods\twitchstat.c4p в папку Mods\ игры.
+     Обновляйте оба плагина и C4dll-R.dll из одного архива: безопасному турнирному
+     автобою нужны совместимые актуальные врапер и плагин таймера.
+  6. При новой установке скопируйте C4plugins.ini рядом с Discipl2.exe для настройки
+     плагинов. При обновлении сохраните свои C4plugins.ini, C4menu.ini и ddraw.ini.
+     Отсутствующие ключи получают значения по умолчанию; явные настройки не сбрасываются.
+     Все ключи и различие между живыми изменениями и рестартом описаны в C4PLUGINS.txt.
   7. (Необязательно) Сохраните имеющийся Imgs\IsoClouds.ff от установки
      DisciplesGL, если хотите использовать «Игра > MNS/SMNS > Показывать облака». Этот архив не
      распространяется в комплекте. SHA-256 нужного файла размером 30393 байта:
@@ -360,8 +383,29 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
     любой паузе часы белые; «(пауза)» появляется только после явной команды игрока.
     На других exe сохраняется прежний сигнал активного хода.
 
+TWITCH STAT
+  - При новой установке Twitch Stat включён. Plugins > Twitch Stat > Enabled переключает его
+    сразу и сохраняет выбор в [TwitchStat] Enabled файла C4plugins.ini. Явные настройки старого
+    конфига сохраняются; совместимость с прежней секцией UnitInfo описана в C4PLUGINS.txt.
+  - Плагин сам запускает локальное соединение на 127.0.0.1:8765. Устанавливать Node.js,
+    запускать отдельный мост или настраивать права администратора не требуется.
+    При выключении соединение закрывается. Сам переключатель не запускает трансляцию
+    и не публикует данные на Twitch.
+  - Расширение Disciples II Battle Info нужно отдельно установить и активировать на Twitch.
+    Пока версия находится в Hosted Test, нужен доступ тестера; общедоступная установка
+    появится после проверки Twitch и выпуска расширения. Откройте Live Configuration,
+    нажмите «Подключить игру» и оставьте панель и окно соединения открытыми.
+  - Порт 8765 может принадлежать только одному клиенту. Если он занят, закройте прежний мост
+    или выключите Twitch Stat в другой игре, затем выключите и включите его в нужном клиенте.
+    Плагин не перехватывает соединение другого игрового процесса автоматически.
+  - Нужен совместимый боевой интерфейс Russobit/MNS; в OBS показывайте игровое изображение
+    целиком. Зрителям ничего устанавливать на компьютер не нужно.
+    Подробная инструкция находится в TWITCH-STREAMER-RU.md в корне этого архива.
+
 УДАЛЕНИЕ / ОТКАТ
-  - Верните сохранённый C4dll-R.dll и удалите Mods\timer.c4p.
+  - Закройте игру, верните сохранённый C4dll-R.dll и восстановите прежние либо удалите
+    установленные из этого пакета Mods\timer.c4p и Mods\twitchstat.c4p.
+    Остальные плагины и свои конфиги сохраняйте.
 
 Пакет независим от мода mss32 и версионируется отдельно. Лицензия — GPL-3.0,
 см. LICENSE. Исходники выбирайте по точной версии/тегу пакета.

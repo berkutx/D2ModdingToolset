@@ -5,16 +5,19 @@
 QUICK START (EN)
 
 1. Put C4plugins.ini next to Discipl2.exe, not in Mods\.
-2. Put timer.c4p in Mods\.
+2. Put timer.c4p and twitchstat.c4p in Mods\.
 3. Missing keys are safe: the defaults printed in the bundled C4plugins.ini are used.
-4. Update C4dll-R.dll and Mods\timer.c4p as a pair. With an older host DLL the tournament-safe
-   Auto Battle API is unavailable and the plugin shows that menu item disabled.
+4. Update C4dll-R.dll and both plugins from the same archive. With an older host DLL the
+   tournament-safe Auto Battle API is unavailable and the timer shows that menu item disabled.
+5. When upgrading, keep your existing configuration files. No reset is needed.
+   TWITCH-STREAMER-RU.md in the archive root explains the separate Twitch extension setup.
 
 WHEN A RESTART IS NEEDED
 
 - Changes made through Plugins > Timer apply immediately and are saved
   to C4plugins.ini. No restart is needed.
 - Ctrl+Alt+left-drag of the timer applies immediately and saves its position. No restart is needed.
+- Plugins > Twitch Stat > Enabled starts/stops its local connection immediately and saves the choice.
 - Manual edits made in a text editor are read when the plugin is loaded. Fully exit and restart the
   game after such edits.
 
@@ -98,10 +101,35 @@ FontSize=28
 
 Defend and Retreat are not timer timeout actions in this build.
 
+[TwitchStat]
+
+Enabled=1
+  1 enables capture and the built-in loopback bridge; 0 disables them. No Node.js or separate
+  bridge program is needed. The endpoint is http://127.0.0.1:8765 and is local to this computer.
+  Existing explicit TwitchStat settings are preserved. When Enabled is missing, a legacy
+  [UnitInfo] Enabled is used if present; otherwise the default is 1. This does not start OBS
+  streaming or authorize publication to Twitch: connect separately through Live Configuration.
+
+Preview=0
+  Keep 0 for streaming. Value 1 enables the optional local JSON diagnostic preview gesture;
+  viewers receive cards without this preview. Missing = 0.
+
+Profile=0
+  Keep 0 for continuous streaming. Diagnostic value 1 measures twenty completed captures;
+  value 2 also stops capture after those twenty until the game restarts. Missing = 0.
+
+  Install and activate Disciples II Battle Info separately on Twitch. During Hosted Test,
+  the account needs testing access; public installation follows Twitch approval and release.
+  Keep Live Configuration and its connection popup open during the stream. Viewers need no
+  game plugin or local software. Full setup and supported capture geometry: TWITCH-STREAMER-RU.md.
+
 TROUBLESHOOTING
 
 - Confirm that C4plugins.ini is beside Discipl2.exe and the .c4p files are in Mods\.
 - Confirm that Plugins > Timer appears in the game menu.
+- For Twitch, confirm that Plugins > Twitch Stat is enabled and its local connection is ready.
+  Port busy: disable Twitch Stat in the other game or stop the old diagnostic bridge, then
+  disable and re-enable it in the intended game. It never automatically switches game clients.
 - For diagnostic logs, set [menu] debugLog=1 in C4menu.ini, reproduce once, then inspect
   C4menu-<process-id>.log and C4plugins.log beside Discipl2.exe. Turn logging off afterward.
 
@@ -110,16 +138,19 @@ TROUBLESHOOTING
 БЫСТРЫЙ СТАРТ (RU)
 
 1. Положите C4plugins.ini рядом с Discipl2.exe, а не в Mods\.
-2. Положите timer.c4p в Mods\.
+2. Положите timer.c4p и twitchstat.c4p в Mods\.
 3. Отсутствующие ключи безопасны: используются значения по умолчанию из комплектного примера.
-4. Обновляйте C4dll-R.dll и Mods\timer.c4p вместе. Со старым host DLL безопасный турнирный API
-   Auto Battle недоступен, и соответствующий пункт меню плагина будет заблокирован.
+4. Обновляйте C4dll-R.dll и оба плагина из одного архива. Со старым host DLL безопасный турнирный
+   API Auto Battle недоступен, и соответствующий пункт меню таймера будет заблокирован.
+5. При обновлении сохраняйте существующие конфиги. Сбрасывать настройки не нужно.
+   Отдельная настройка расширения Twitch описана в TWITCH-STREAMER-RU.md в корне архива.
 
 КОГДА НУЖЕН ПЕРЕЗАПУСК
 
 - Изменения через Plugins > Timer применяются сразу и сохраняются в
   C4plugins.ini. Перезапуск не нужен.
 - Положение таймера через Ctrl+Alt+перетаскивание ЛКМ меняется и сохраняется сразу.
+- Plugins > Twitch Stat > Enabled сразу запускает/останавливает локальное соединение и сохраняет выбор.
 - Ручные правки файла в текстовом редакторе читаются при загрузке плагина. После них полностью
   закройте и снова запустите игру.
 
@@ -194,9 +225,35 @@ FontSize=28
 
 Defend и Retreat в этой сборке не являются действиями таймера по истечении времени.
 
+[TwitchStat]
+
+Enabled=1
+  1 включает сбор данных и встроенный локальный мост; 0 выключает их. Установка Node.js
+  и отдельная программа соединения не нужны. Адрес http://127.0.0.1:8765 доступен только
+  на этом компьютере. Явная настройка TwitchStat старого конфига сохраняется. Если ключа нет,
+  читается прежний [UnitInfo] Enabled; если нет и его, используется 1. Это не запускает эфир OBS
+  и не разрешает публикацию на Twitch: соединение включается отдельно через Live Configuration.
+
+Preview=0
+  Для трансляции оставьте 0. Значение 1 включает необязательный жест открытия локального
+  диагностического JSON-просмотра; зрительские карточки работают без него. Отсутствует = 0.
+
+Profile=0
+  Для непрерывной трансляции оставьте 0. Диагностическое значение 1 измеряет двадцать полных
+  снимков; 2 дополнительно останавливает сбор после них до перезапуска игры. Отсутствует = 0.
+
+  Disciples II Battle Info отдельно устанавливается и активируется на Twitch. В Hosted Test
+  аккаунту нужен доступ тестера; общедоступная установка появится после проверки и выпуска
+  расширения Twitch. Во время эфира оставьте Live Configuration и окно соединения открытыми.
+  Зрителю плагин игры и другое локальное ПО не нужны. Порядок подключения и поддерживаемая
+  геометрия захвата описаны в TWITCH-STREAMER-RU.md.
+
 ДИАГНОСТИКА
 
 - Проверьте, что C4plugins.ini лежит рядом с Discipl2.exe, а файлы .c4p — в Mods\.
 - Проверьте наличие Plugins > Timer в меню игры.
+- Для Twitch проверьте, что Plugins > Twitch Stat включён и локальное соединение готово.
+  Порт занят: выключите Twitch Stat в другой игре или закройте прежний диагностический мост,
+  затем выключите и включите плагин в нужной игре. Автоматического выбора другого клиента нет.
 - Для логов задайте [menu] debugLog=1 в C4menu.ini, один раз воспроизведите проблему и посмотрите
   C4menu-<id-процесса>.log и C4plugins.log рядом с Discipl2.exe. Затем выключите логирование.

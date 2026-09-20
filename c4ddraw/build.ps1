@@ -61,6 +61,8 @@ $cb63def = Join-Path $root "forwarder\C4dll-R.cb63.def"
 $out = Join-Path $build "bin\Release\C4dll-R.dll"
 $timerPluginProj = Join-Path $root "plugins\timer\timer.vcxproj"
 $timerPluginOut = Join-Path $root "plugins\timer\bin\Release\timer.c4p"
+$twitchStatPluginProj = Join-Path $root "plugins\unitinfo\unitinfo.vcxproj"
+$twitchStatPluginOut = Join-Path $root "plugins\unitinfo\bin\Release\twitchstat.c4p"
 $shaderValidator = Join-Path $root "tools\validate-shader-bundle.ps1"
 
 # Locate MSBuild robustly (works on a dev box AND on GitHub windows-latest, where VS is Enterprise).
@@ -96,11 +98,11 @@ if ($Restore) {
     Start-Sleep -Milliseconds 600
     if (Test-Path $bC4) { Copy-Item $bC4 (Join-Path $Game "C4dll-R.dll") -Force; [System.IO.File]::Delete($bC4) }
     if (Test-Path $dOff) { Move-Item $dOff (Join-Path $Game "ddraw.dll") -Force }
-    foreach ($pluginLeaf in @("timer.c4p")) {
+    foreach ($pluginLeaf in @("timer.c4p", "twitchstat.c4p")) {
         $depC4p = Join-Path $Game "Mods\$pluginLeaf"
         if (Test-Path $depC4p) { [System.IO.File]::Delete($depC4p) }
     }
-    Write-Host "Restored vanilla baseline (C4dll-R = CB63 copy, standalone ddraw.dll back, bundled timer removed)." -ForegroundColor Cyan
+    Write-Host "Restored vanilla baseline (C4dll-R = CB63 copy, standalone ddraw.dll back, bundled plugins removed)." -ForegroundColor Cyan
     return
 }
 
@@ -456,7 +458,7 @@ if ($WrapperOnly) {
 
 # Build the native timer plugin (timer.c4p). Self-contained Win32 DLL (GDI+, static CRT, system-font
 # fallback); on MNS/SMNS the host drives its turn reset and timeout actions.
-Write-Host "[7/7] build timer.c4p plugin" -ForegroundColor Cyan
+Write-Host "[7/7] build timer.c4p and twitchstat.c4p plugins" -ForegroundColor Cyan
 $pbArgs = @($timerPluginProj, '/t:Rebuild', '/p:Configuration=Release', '/p:Platform=Win32',
     "/p:PlatformToolset=$Toolset", '/nologo', '/v:minimal')
 if ($SdkVersion) { $pbArgs += "/p:WindowsTargetPlatformVersion=$SdkVersion" }
@@ -464,8 +466,16 @@ if ($SdkVersion) { $pbArgs += "/p:WindowsTargetPlatformVersion=$SdkVersion" }
 if ($LASTEXITCODE -ne 0) { throw "timer.c4p build failed" }
 Write-Host ("BUILT -> {0} ({1:n0} bytes)" -f $timerPluginOut, (Get-Item $timerPluginOut).Length) -ForegroundColor Green
 
-# Experimental plugins remain source-only and can be built manually from their project.
-# Do not build or distribute them in the default wrapper release/deployment.
+# Twitch Stat carries its loopback bridge and web assets inside the .c4p. It requires no Node
+# runtime in the release package and does not change or build the MSS mod.
+$twitchArgs = @($twitchStatPluginProj, '/t:Rebuild', '/p:Configuration=Release', '/p:Platform=Win32',
+    "/p:PlatformToolset=$Toolset", '/nologo', '/v:minimal')
+if ($SdkVersion) { $twitchArgs += "/p:WindowsTargetPlatformVersion=$SdkVersion" }
+& $ms @twitchArgs
+if ($LASTEXITCODE -ne 0) { throw "twitchstat.c4p build failed" }
+Write-Host ("BUILT -> {0} ({1:n0} bytes)" -f $twitchStatPluginOut, (Get-Item $twitchStatPluginOut).Length) -ForegroundColor Green
+Copy-Item -LiteralPath (Join-Path $root '..\twitch-extension\STREAMER-RU.md') `
+          -Destination (Join-Path (Split-Path $out -Parent) 'TWITCH-STREAMER-RU.md') -Force
 
 if ($Deploy) {
     # Validate the target before stopping the game or replacing anything. Deployment never owns
@@ -481,6 +491,7 @@ if ($Deploy) {
     $modsDir = Join-Path $Game "Mods"
     if (-not (Test-Path $modsDir)) { New-Item -ItemType Directory -Force -Path $modsDir | Out-Null }
     Copy-Item $timerPluginOut (Join-Path $modsDir "timer.c4p") -Force                      # native timer plugin
-    Write-Host "Deployed C4dll-R.dll + timer.c4p after validating the complete target Shaders menu bundle; standalone ddraw.dll parked." -ForegroundColor Green
-    Write-Host "(.\build.ps1 -Restore restores the previous wrapper and removes the bundled timer)" -ForegroundColor Green
+    Copy-Item $twitchStatPluginOut (Join-Path $modsDir "twitchstat.c4p") -Force
+    Write-Host "Deployed C4dll-R.dll + timer.c4p + twitchstat.c4p after validating the complete target Shaders menu bundle; standalone ddraw.dll parked." -ForegroundColor Green
+    Write-Host "(.\build.ps1 -Restore restores the previous wrapper and removes the bundled plugins)" -ForegroundColor Green
 }

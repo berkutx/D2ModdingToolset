@@ -77,7 +77,9 @@ generates `C4dll-R.def` (the CB63 forwards plus the two exports), retargets the 
 strips the upstream PreBuildEvent that regenerated `git.h` as UNKNOWN), and runs MSBuild (Release,
 Win32, v143, static CRT).
 MSBuild is located via `vswhere`, so it works both on a dev box and on CI. The CI workflow
-`.github/workflows/c4ddraw.yml` runs the same `build.ps1` and uploads `C4dll-R.dll` and `timer.c4p`.
+`.github/workflows/c4ddraw.yml` runs the same `build.ps1` and uploads `C4dll-R.dll`, `timer.c4p`,
+`twitchstat.c4p`, the streamer guide and matching symbols. Twitch Stat embeds its loopback bridge
+and web files; Node is not a runtime dependency.
 
 ## Releases
 
@@ -86,14 +88,15 @@ mss32 mod, so the two are versioned and released independently (their version nu
 cut a release, push a tag:
 
 ```sh
-git tag c4dll-r-v1.0
-git push origin c4dll-r-v1.0
+git tag c4dll-r-v2.0
+git push origin c4dll-r-v2.0
 ```
 
-`.github/workflows/c4dll-r-release.yml` then builds `C4dll-R.dll` plus `Mods/timer.c4p`, packages them
-with `Shaders`, `INSTALL.txt`, the `C4PLUGINS.txt` key guide, a sample `C4plugins.ini`, `ddraw.ini`, `LICENSE` and third-party notices into `C4dll-R-v1.0.zip`, and publishes a GitHub
-Release with that zip, a `-symbols.zip` (the matching PDBs for crash triage) and the loose
-`C4dll-R.dll` and `timer.c4p` attached. The release version is stamped into the DLL version
+`.github/workflows/c4dll-r-release.yml` then builds `C4dll-R.dll`, `Mods/timer.c4p` and
+`Mods/twitchstat.c4p`, packages them with `Shaders`, `INSTALL.txt`, the `C4PLUGINS.txt` key guide,
+`TWITCH-STREAMER-RU.md`, a sample `C4plugins.ini`, `ddraw.ini`, `LICENSE` and third-party notices
+into `C4dll-R-v2.0.zip`, and publishes one ready-to-use GitHub Release archive. Matching PDBs and
+loose binaries are retained by the separate technical `c4ddraw` Actions workflow. The release version is stamped into the DLL version
 resource (`build.ps1 -Version`), so a build is identifiable from file properties. Running the
 workflow manually (workflow_dispatch) publishes a **prerelease** tagged `c4dll-r-dev-<sha>` (or
 your label); versions containing `rc` / `alpha` / `beta` / `dev` are always marked prerelease. The
@@ -106,7 +109,10 @@ is copied into the archive by the workflow.
 Put `C4dll-R.dll` next to `Discipl2.exe` (replacing the CodeBase copy), keep `CB63.dll` and
 `ddraw.ini` there. If the folder also contains a standalone `ddraw.dll` from another wrapper,
 rename or remove that file; a clean installation normally has none, so otherwise do nothing.
-Copy `Mods/timer.c4p` into the game's `Mods\` folder.
+Copy both `Mods/timer.c4p` and `Mods/twitchstat.c4p` into the game's `Mods\` folder.
+For streaming setup, follow [the streamer guide](../twitch-extension/STREAMER-RU.md), included
+as `TWITCH-STREAMER-RU.md` in the release archive. The Twitch extension itself needs Twitch approval
+and release before arbitrary streamers can install it.
 To A/B test our-vs-stock, swap `C4dll-R.dll` only.
 
 ## Updating cnc-ddraw
@@ -129,8 +135,8 @@ One binary, three layers:
 | C4dll-R layer | `features/rendererbridge.c`, `c4features.cpp`, `featuremenu.cpp`, `cursorcapture.cpp`, `fastai.cpp`, `decorative.cpp`, `horplus.cpp`, `widebattle.cpp`, `clouds.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `localization.cpp`, `savelogic.cpp`, `headless.cpp` | wrapper integration, menu, presentation-only decorative background, true Hor+ game canvas, wide battle, external cloud archive pipeline, plugins, locale conversion, save/archive logic, D2 cursor ownership and headless windowing |
 
 Exports: the 483 CodeBase forwards (`name=CB63.name`) plus `DDReloadConfig` (live settings
-reload) and `DDTakeScreenshot`. `Mods\timer.c4p` is built separately from `plugins/timer/` and is not
-inside the DLL.
+reload) and `DDTakeScreenshot`. `Mods\timer.c4p` and `Mods\twitchstat.c4p` are built separately
+from `plugins/timer/` and `plugins/unitinfo/`; neither is linked into the wrapper DLL.
 
 Why one DLL: the game already imports a library named `C4dll-R` (the CodeBase copy), so a single
 file swap delivers the renderer, the menu and the plugin host, with no separate `ddraw.dll` that
@@ -535,8 +541,13 @@ to follow the desktop.
 
 ### Plugins
 
-Loads only native `Mods\*.c4p` plugins and grafts each plugin directly under **Plugins**. The stable
-package includes only the Timer plugin.
+Loads only native `Mods\*.c4p` plugins and grafts each plugin directly under **Plugins**. The 2.0
+package includes Timer and Twitch Stat. Twitch Stat lets Twitch viewers hover over battle units
+to read their current parameters and effects. Its loopback server and local browser files are
+embedded in the plugin; streamers need no separate Node process. Enable it in the game instance
+being streamed, activate the Twitch extension as Overlay 1, then connect the game from its live
+control panel. Keep that panel and its connection popup open throughout the stream. See the
+[streamer guide](../twitch-extension/STREAMER-RU.md) for the complete installation and daily steps.
 
 The bundled Timer is configured via `C4plugins.ini`; its countdown uses `TableDuration_0`. Hold **Ctrl+Alt** and
 drag the clock with LMB to reposition it. On the exact Russobit/MNS layout, Force mode starts only
@@ -703,8 +714,9 @@ C4dll-R.
 PreBuildEvent, который перегенерировал `git.h` в UNKNOWN) и запускает MSBuild (Release, Win32,
 v143, статический CRT). MSBuild ищется
 через `vswhere`, поэтому работает и на машине разработчика, и на CI. Workflow
-`.github/workflows/c4ddraw.yml` запускает тот же `build.ps1` и выгружает `C4dll-R.dll` и
-`timer.c4p`.
+`.github/workflows/c4ddraw.yml` запускает тот же `build.ps1` и выгружает `C4dll-R.dll`,
+`timer.c4p`, `twitchstat.c4p`, инструкцию стримера и соответствующие PDB. Локальный сервер и
+его веб-файлы встроены в Twitch Stat; устанавливать Node для игры не нужно.
 
 ## Релизы
 
@@ -713,14 +725,16 @@ C4dll-R публикуется в GitHub Releases в **собственном т
 выпустить релиз, запушьте тег:
 
 ```sh
-git tag c4dll-r-v1.0
-git push origin c4dll-r-v1.0
+git tag c4dll-r-v2.0
+git push origin c4dll-r-v2.0
 ```
 
-`.github/workflows/c4dll-r-release.yml` соберёт `C4dll-R.dll` и `Mods/timer.c4p`, упакует их с
-`Shaders`, `INSTALL.txt`, инструкцией `C4PLUGINS.txt`, примером `C4plugins.ini`, `ddraw.ini`, `LICENSE` и notices в `C4dll-R-v1.0.zip` и опубликует GitHub Release с этим
-архивом, `-symbols.zip` (соответствующие PDB для разбора крашей) и отдельными файлами
-`C4dll-R.dll` и `timer.c4p`. Версия релиза зашивается в ресурс версии DLL (`build.ps1 -Version`),
+`.github/workflows/c4dll-r-release.yml` соберёт `C4dll-R.dll`, `Mods/timer.c4p` и
+`Mods/twitchstat.c4p`, упакует их с `Shaders`, `INSTALL.txt`, инструкциями `C4PLUGINS.txt` и
+`TWITCH-STREAMER-RU.md`, примером `C4plugins.ini`, `ddraw.ini`, `LICENSE` и notices в
+`C4dll-R-v2.0.zip` и опубликует один готовый архив в GitHub Release. Соответствующие PDB и
+отдельные бинарные файлы сохраняются в техническом workflow `c4ddraw` в Actions.
+Версия релиза зашивается в ресурс версии DLL (`build.ps1 -Version`),
 так что сборка опознаётся по свойствам файла. Ручной запуск workflow (workflow_dispatch) публикует
 **пре-релиз** с тегом `c4dll-r-dev-<sha>` (или вашей меткой); версии, содержащие `rc` / `alpha` /
 `beta` / `dev`, всегда помечаются пре-релизом. Исходники пакета — в `c4ddraw/release/`
@@ -732,7 +746,11 @@ git push origin c4dll-r-v1.0
 Положите `C4dll-R.dll` рядом с `Discipl2.exe` (заменив копию CodeBase), оставьте `CB63.dll` и
 `ddraw.ini`. Если в папке есть отдельный `ddraw.dll` от другого врапера, переименуйте или удалите
 его; в чистой установке такого файла обычно нет, и тогда ничего делать не нужно.
-Скопируйте `Mods/timer.c4p` в папку `Mods\` игры.
+Скопируйте `Mods/timer.c4p` и `Mods/twitchstat.c4p` в папку `Mods\` игры. Для эфира откройте
+[инструкцию стримера](../twitch-extension/STREAMER-RU.md), которая также лежит в архиве релиза
+под именем `TWITCH-STREAMER-RU.md`. После публикации расширения в Twitch стример устанавливает
+его как Overlay 1, включает Twitch Stat в меню игры и нажимает «Подключить игру» в панели
+расширения. Панель и окно соединения должны оставаться открытыми на время эфира.
 Для сравнения наш/сток меняйте только `C4dll-R.dll`.
 
 ## Обновление cnc-ddraw
@@ -755,8 +773,8 @@ git push origin c4dll-r-v1.0
 | Слой C4dll-R | `features/rendererbridge.c`, `c4features.cpp`, `featuremenu.cpp`, `cursorcapture.cpp`, `fastai.cpp`, `decorative.cpp`, `horplus.cpp`, `widebattle.cpp`, `clouds.cpp`, `pluginhost.cpp`, `timerhost.cpp`, `localization.cpp`, `savelogic.cpp`, `headless.cpp` | интеграция врапера, меню, декоративный фон только на этапе вывода, настоящий Hor+ кадр, широкий бой, pipeline внешнего архива облаков, плагины, локаль, сейвы/архив, владение курсором D2 и headless-окна |
 
 Экспорты: 483 форварда CodeBase (`name=CB63.name`) плюс `DDReloadConfig` (живое перечтение
-настроек) и `DDTakeScreenshot`. `Mods\timer.c4p` собирается отдельно из `plugins/timer/` и не входит
-в DLL.
+настроек) и `DDTakeScreenshot`. `Mods\timer.c4p` и `Mods\twitchstat.c4p` собираются отдельно из
+`plugins/timer/` и `plugins/unitinfo/`; оба плагина лежат рядом с враппером и не входят в его DLL.
 
 Почему одна DLL: игра уже импортирует библиотеку с именем `C4dll-R` (копию CodeBase), поэтому
 замена одного файла даёт рендерер, меню и хост плагинов сразу, без отдельного `ddraw.dll`,

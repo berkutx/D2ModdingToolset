@@ -5,7 +5,7 @@ name: c4dll-r release
 # mod: it has its own tag namespace (c4dll-r-v*), so the renderer and the mod are versioned and
 # released separately - it is fine for their version numbers to diverge.
 #
-#   Cut a release:  git tag c4dll-r-v1.0 && git push origin c4dll-r-v1.0
+#   Cut a release:  git tag c4dll-r-v2.0 && git push origin c4dll-r-v2.0
 #   Test build:     run this workflow manually (Actions -> "c4dll-r release" -> Run workflow);
 #                   it publishes a *prerelease* tagged c4dll-r-dev-<sha> (or your label).
 
@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Label for a manual prerelease (e.g. v1.0-rc1); blank = dev-<sha>"
+        description: "Label for a manual prerelease (e.g. v2.0-rc1); blank = dev-<sha>"
         required: false
         default: ""
 
@@ -77,10 +77,9 @@ jobs:
           ./c4ddraw/tests/run-timer-end-day-tests.ps1
           ./c4ddraw/tests/run-timer-post-battle-tests.ps1
 
-      - name: Build C4dll-R.dll + timer plugin
+      - name: Build C4dll-R.dll + Timer + Twitch Stat
         run: |
-          # Same released build a dev runs: monolith (steps 1-6) and timer.c4p (7).
-          # Experimental plugin sources are not built or included in release assets.
+          # Same released build a dev runs: monolith (steps 1-6), Timer and Twitch Stat (7).
           # -Version stamps the release version into the DLL version resource (res.rc + git.h).
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
@@ -88,6 +87,14 @@ jobs:
           ./c4ddraw/build.ps1 -Version "${{ steps.ver.outputs.ver }}"
           if (-not (Test-Path "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll")) { Write-Error "C4dll-R.dll missing"; exit 1 }
           if (-not (Test-Path "c4ddraw/plugins/timer/bin/Release/timer.c4p")) { Write-Error "timer.c4p missing"; exit 1 }
+          if (-not (Test-Path "c4ddraw/plugins/unitinfo/bin/Release/twitchstat.c4p")) { Write-Error "twitchstat.c4p missing"; exit 1 }
+
+      - name: Validate Twitch protocol and embedded transport
+        run: |
+          node --test twitch-extension/test/*.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Twitch web tests failed' }
+          ./twitch-extension/tools/test-native-bridge.ps1
+          ./c4ddraw/tests/test-stable-release.ps1
 
       - name: Package drop-in zip
         id: pkg
@@ -99,6 +106,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$stage/Mods" | Out-Null
           Copy-Item "c4ddraw/build/cnc-ddraw/bin/Release/C4dll-R.dll" "$stage/C4dll-R.dll"
           Copy-Item "c4ddraw/plugins/timer/bin/Release/timer.c4p" "$stage/Mods/timer.c4p"
+          Copy-Item "c4ddraw/plugins/unitinfo/bin/Release/twitchstat.c4p" "$stage/Mods/twitchstat.c4p"
+          Copy-Item "twitch-extension/STREAMER-RU.md" "$stage/TWITCH-STREAMER-RU.md"
           Copy-Item "c4ddraw/release/INSTALL.txt" "$stage/INSTALL.txt"
           Copy-Item "c4ddraw/MESSAGE_BATCHING.md" "$stage/MESSAGE_BATCHING.md"
           Copy-Item "c4ddraw/NETWORK_TRACE.md" "$stage/NETWORK_TRACE.md"
@@ -123,11 +132,25 @@ jobs:
           try {
             $archiveFiles = @($runtimeArchive.Entries | Where-Object { -not $_.FullName.EndsWith('/') } |
               ForEach-Object { $_.FullName.Replace('\', '/') })
-            $plugins = @($runtimeArchive.Entries | Where-Object { $_.FullName -match '(?i)\.c4p$' })
-            $expectedPlugin = "C4dll-R-$ver/Mods/timer.c4p"
-            if ($plugins.Count -ne 1 -or $plugins[0].FullName.Replace('\', '/') -ine $expectedPlugin) {
-              throw 'Runtime ZIP must contain exactly Mods/timer.c4p and no other plugins.'
+            $expectedFiles = @('C4dll-R.dll', 'Mods/timer.c4p', 'Mods/twitchstat.c4p',
+              'TWITCH-STREAMER-RU.md', 'INSTALL.txt', 'MESSAGE_BATCHING.md', 'NETWORK_TRACE.md',
+              'RELEASE_NOTES.md', 'C4PLUGINS.txt', 'C4plugins.ini', 'ddraw.ini',
+              'THIRD_PARTY_NOTICES.txt', 'LICENSE')
+            $shaderRoot = (Resolve-Path 'c4ddraw/release/Shaders').Path
+            $expectedFiles += @(Get-ChildItem -LiteralPath $shaderRoot -Recurse -File |
+              ForEach-Object { 'Shaders/' + $_.FullName.Substring($shaderRoot.Length + 1).Replace('\', '/') })
+            $expectedFiles = @($expectedFiles | ForEach-Object { "C4dll-R-$ver/$_" })
+            if ($archiveFiles.Count -ne $expectedFiles.Count -or
+                @(Compare-Object $expectedFiles $archiveFiles).Count -ne 0) {
+              throw 'Runtime ZIP has missing or unexpected files outside the release allowlist.'
             }
+            $plugins = @($runtimeArchive.Entries | Where-Object { $_.FullName -match '(?i)\.c4p$' })
+            $expectedPlugins = @("C4dll-R-$ver/Mods/timer.c4p", "C4dll-R-$ver/Mods/twitchstat.c4p")
+            $actualPlugins = @($plugins | ForEach-Object { $_.FullName.Replace('\', '/') })
+            if ($actualPlugins.Count -ne 2 -or @(Compare-Object $expectedPlugins $actualPlugins).Count -ne 0) {
+              throw 'Runtime ZIP must contain exactly Mods/timer.c4p and Mods/twitchstat.c4p.'
+            }
+            if ($archiveFiles -notcontains "C4dll-R-$ver/TWITCH-STREAMER-RU.md") { throw 'Twitch streamer instructions missing from runtime ZIP.' }
             $expectedShaders = @($shaderContract.RequiredPaths | ForEach-Object {
               "C4dll-R-$ver/" + $_.Replace('\', '/')
             })
