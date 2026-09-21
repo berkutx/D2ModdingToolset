@@ -14,9 +14,11 @@ extern "C" void clouds_install(void);
 extern "C" void featuremenu_install(void);
 extern "C" void pluginhost_install(void);
 extern "C" void headless_install(void);
+extern "C" void netnotify_bootstrap(void);
 
 extern "C" void c4features_install(void)
 {
+    netnotify_bootstrap(); // inert loop-depth observer, before the EXE can enter its UI loop
     localization_install();
     savelogic_install();
     // Signature-gated game hooks must publish their availability before the menu reads its config.
