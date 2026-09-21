@@ -20,6 +20,7 @@
 #ifndef NETCUSTOMSERVICE_H
 #define NETCUSTOMSERVICE_H
 
+#include "clientcompatibility.h"
 #include "mqnetservice.h"
 #include "netmsg.h"
 #include "uievent.h"
@@ -104,11 +105,13 @@ enum LobbyMessageId
     /** Coordinated same-room random-map restart; negotiated by ClientCapabilities. */
     ID_LOBBY_RESTART = ID_USER_PACKET_ENUM + 15,
     ID_LOBBY_PREPARED_MATCH = ID_USER_PACKET_ENUM + 16,
+    /** Authenticated client -> core: one cached FilesHash, independent of room membership. */
+    ID_LOBBY_CLIENT_COMPATIBILITY = ID_USER_PACKET_ENUM + 17,
     ID_GAME_MESSAGE = game::netMessageNormalType & 0xff,
 };
 
 static_assert(ID_GAME_MESSAGE == 255);
-static_assert(ID_LOBBY_RESTART < ID_GAME_MESSAGE);
+static_assert(ID_LOBBY_CLIENT_COMPATIBILITY < ID_GAME_MESSAGE);
 
 /** Lobby-specific wire protocol. Values are serialized field-by-field with SLNet::BitStream;
  * these structures are logical payloads, not packed wire images. Keep in sync with the lobby
@@ -419,7 +422,7 @@ private:
                                                      int /*%edx*/,
                                                      unsigned int,
                                                      long);
-    /** Expires local save deadlines and drains deferred UI state; it never resends network data. */
+    /** Expires local deadlines, polls the FilesHash worker and drains deferred UI state. */
     static void __fastcall lobbyMaintenanceTimerEventCallback(CNetCustomService* thisptr,
                                                                int /*%edx*/);
     std::vector<NetPeerCallback*> getPeerCallbacks() const;
@@ -429,6 +432,8 @@ private:
     bool readSaveStoredAck(const SLNet::Packet* packet, std::uint64_t& saveId) const;
     bool readSystemNotice(const SLNet::Packet* packet, std::string& notice) const;
     void processDeferredLobbyState();
+    void startGameFilesHash();
+    void processClientCompatibility();
     void processPendingMatchEnd();
     void processPendingSystemNotices();
     /** Drops the current match transfer/terminal state while retaining global system notices. */
@@ -457,7 +462,9 @@ private:
     bool m_systemNoticeModalActive{};
     std::shared_ptr<NativeGameMessageTracker> m_nativeGameMessageTracker{
         std::make_shared<NativeGameMessageTracker>()};
-    std::string m_gameFilesHash;
+    compatibility::FilesHashCache m_gameFilesHash;
+    compatibility::Publication m_compatibilityPublication;
+    SLNet::RakNetGUID m_compatibilityLobbyGuid{SLNet::UNASSIGNED_RAKNET_GUID};
     std::string m_templateName;
     std::string m_templateHash;
     RoomOptions m_roomOptions;

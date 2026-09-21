@@ -251,11 +251,11 @@ void receivePreparedMatch(const unsigned char* bytes, std::size_t size) {
         if (prior != seen.end()) sendStatus(cancel, prior->second == State::RoomCreated ? State::RoomCreated : State::Canceled);
         return;
     }
-    active->canceled = true;
     // The outgoing RoomsPlugin request and Status use RELIABLE_ORDERED channel 0.
     // Once CreateRoom was sent, wait for its actual result; do not falsely ACK
     // cancellation or unbind a room that already exists on the server.
-    const auto action = cancelAction(active->stage, active->status == State::RoomCreated);
+    const auto action = requestCancellation(active->stage, active->status == State::RoomCreated,
+                                             active->canceled);
     if (action == CancelAction::AwaitSafePoint) return;
     if (action == CancelAction::PreserveRoom) {
         status(State::RoomCreated); return;
@@ -397,8 +397,12 @@ bool preparePreparedMatchRoom(CMenuRandomScenario* menu) {
 const Identity* preparedMatchRoomIdentity() { return active && active->stage == Stage::Creating && !active->canceled ? &active->offer.identity : nullptr; }
 void preparedMatchRoomCreated(bool success) {
     if (!active || active->stage != Stage::Creating) return;
-    if (!success) { status(State::Error, "room-creation-failed"); active->stage = Stage::Returning; return; }
-    status(State::RoomCreated); active->stage = Stage::Setup;
+    if (!success) {
+        status(State::Error, "room-creation-failed");
+        active->stage = stageAfterRoomCreationResult(false, active->canceled); return;
+    }
+    status(State::RoomCreated);
+    active->stage = stageAfterRoomCreationResult(true, active->canceled);
     active->setupDeadline = Clock::now() + std::chrono::seconds(15); active->nextQuery = Clock::now() + std::chrono::milliseconds(500);
 }
 void preparedMatchMenuDestroyed(CMenuRandomScenario* menu) {
