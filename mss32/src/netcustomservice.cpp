@@ -1054,6 +1054,16 @@ std::vector<NetPeerCallback*> CNetCustomService::getPeerCallbacks() const
 
 const std::string& CNetCustomService::getGameFilesHash()
 {
+    // Preserve the old explicit host/join retry after a transient read failure.
+    // A pending computation or a valid cache is never reset; background login/poll
+    // stays one-shot and cannot create an automatic file-read retry loop.
+    if (m_gameFilesHash.retryUnavailable() && loggedIn()) {
+        const auto lobbyGuid = getLobbyGuid();
+        if (lobbyGuid != SLNet::UNASSIGNED_RAKNET_GUID) {
+            m_compatibilityLobbyGuid = lobbyGuid;
+            m_compatibilityPublication.begin();
+        }
+    }
     startGameFilesHash();
     // Host/join already display their native wait dialog. Consume exactly the worker
     // started at login; never race it with another computation or read a partial result.

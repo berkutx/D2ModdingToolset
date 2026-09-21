@@ -27,6 +27,7 @@ int main()
         std::promise<void> release;
         auto gate = release.get_future().share();
         FilesHashCache cache;
+        require(!cache.retryUnavailable(), "unused cache reported a retry");
         cache.start([gate, &calls, mainThread] {
             ++calls;
             if (std::this_thread::get_id() == mainThread) throw std::runtime_error("hash ran on UI thread");
@@ -35,9 +36,12 @@ int main()
         });
         cache.start([&calls] { ++calls; return std::string("duplicate computation"); });
         const bool polling = cache.value().empty() && cache.pending();
+        const bool pendingNotReset = !cache.retryUnavailable() && cache.started() && cache.pending();
         release.set_value(); // Always release the worker before an assertion can unwind its future.
         require(polling, "poll blocked or published before completion");
+        require(pendingNotReset, "explicit retry reset a pending worker");
         require(cache.value(true) == digest && !cache.pending(), "host/join did not consume the login future");
+        require(!cache.retryUnavailable(), "explicit retry reset a valid cache");
         cache.start([&calls] { ++calls; return std::string("changed"); });
         require(cache.value() == digest && calls == 1, "login/host/join recomputed the cache");
 
@@ -53,6 +57,32 @@ int main()
         unavailable.unavailable();
         unavailable.start([&calls] { ++calls; return digest; });
         require(unavailable.value(true).empty() && calls == 1, "enumeration failure retried");
+
+        Publication retryPublication;
+        retryPublication.begin(); retryPublication.stop(); // Background saw an unknown hash.
+        const bool manualRetry = failing.retryUnavailable();
+        if (manualRetry) retryPublication.begin(); // Same rearm used by authenticated host/join.
+        require(manualRetry && !failing.started() && !failing.pending(), "manual retry did not reset failure");
+        failing.start([&calls] { ++calls; return digest; });
+        require(failing.value(true) == digest && calls == 2 && retryPublication.due(0),
+                "failure -> manual retry did not recover/publicize the same hash");
+        require(!failing.retryUnavailable(), "successful manual retry lost its cache");
+        require(unavailable.retryUnavailable(), "explicit retry did not reset enumeration failure");
+        unavailable.start([] { return digest; });
+        require(unavailable.value(true) == digest, "enumeration failure did not recover");
+
+        // Do not pre-consume this future: retryUnavailable must itself notice and
+        // consume a ready exception, while never blocking on a pending worker.
+        FilesHashCache readyFailure;
+        readyFailure.start([]() -> std::string { throw std::runtime_error("ready failure"); });
+        bool resetReadyFailure = false;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!(resetReadyFailure = readyFailure.retryUnavailable())
+               && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        require(resetReadyFailure && !readyFailure.started() && !readyFailure.pending(),
+                "explicit retry did not consume a ready exception");
+        readyFailure.start([] { return digest; });
+        require(readyFailure.value(true) == digest, "ready failure did not recover");
         std::atomic<bool> finished{};
         {
             FilesHashCache owned;
@@ -75,7 +105,7 @@ int main()
         publication.begin(); publication.stop();
         require(!publication.due(200000), "logout/disconnect retained a send");
 
-        std::cout << "client compatibility: exact wire, one asynchronous cache, errors, teardown and bounded publication passed\n";
+        std::cout << "client compatibility: exact wire, one asynchronous cache, manual-only error retry, teardown and bounded publication passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

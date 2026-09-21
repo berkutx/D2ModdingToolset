@@ -63,6 +63,17 @@ public:
         return hash_;
     }
 
+    /** Only an explicit host/join retry may restart a completed, unavailable result.
+     * Poll first so a ready exception/empty result is consumed without blocking.
+     * Login and background publication deliberately never call this method. */
+    bool retryUnavailable() noexcept
+    {
+        value();
+        if (!started_ || future_.valid() || !hash_.empty()) return false;
+        started_ = false;
+        return true;
+    }
+
 private:
     bool started_{};
     std::string hash_;
