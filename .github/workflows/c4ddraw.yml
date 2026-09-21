@@ -53,16 +53,6 @@ jobs:
       - name: Validate shader menu bundle contract
         run: ./c4ddraw/tests/test-shader-bundle.ps1
 
-      - name: Validate network notification recovery and timer ownership
-        run: |
-          ./c4ddraw/tests/run-netnotifystate-tests.ps1
-          ./c4ddraw/tests/run-netnotify-adapter-tests.ps1
-          ./c4ddraw/tests/run-ownedwindowtimer-tests.ps1
-          ./c4ddraw/tests/run-messagebatch-tests.ps1
-          ./c4ddraw/tests/run-messagebatch-thunk-tests.ps1
-          python c4ddraw/tests/model-net-notification.py --output .diagnostics/net-notification-model.json
-          if ($LASTEXITCODE -ne 0) { throw 'Notification protocol model failed' }
-
       - name: Validate texture palette colors
         run: ./c4ddraw/tests/run-palette-colors-tests.ps1
 

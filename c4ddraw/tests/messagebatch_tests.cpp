@@ -14,11 +14,6 @@
 #define C4_MESSAGEBATCH_TESTING
 #include "../features/messagebatch.cpp"
 
-// Recovery is tested with the real adapter in netnotify_adapter_tests.cpp.
-// This suite keeps its original focus on extra-batch FIFO and mapping.
-extern "C" LRESULT netnotify_dispatch(const MSG* msg, LRESULT(WINAPI* original)(const MSG*), void*)
-{ return original(msg); }
-
 struct CapturedTrace { unsigned id; uintptr_t object, a, b, c, d; };
 static std::vector<CapturedTrace> traceEvents;
 extern "C" void c4trace_event(unsigned id, uintptr_t object, uintptr_t a, uintptr_t b,

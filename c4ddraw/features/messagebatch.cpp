@@ -7,7 +7,6 @@
 #include <stdint.h>
 #include <cstring>
 #include "messagebatch.h"
-#include "netnotify.h"
 #include "c4trace.h"
 #ifndef C4_MESSAGEBATCH_TESTING
 #include <detours.h>
@@ -32,6 +31,7 @@ BatchOps g_ops = {&DDMessageBatchPeekRaw, &QueryPerformanceCounter, &DDMessageBa
 #endif
 volatile LONG g_enabled = 0;
 volatile LONG g_dispatchReady = 0;
+MessageBatchSelectedDispatch g_selectedDispatch = nullptr;
 DWORD g_uiThread = 0;
 HWND g_mainHwnd = nullptr;
 UINT g_netMessage = 0, g_queueMessage = 0;
@@ -136,7 +136,9 @@ int __stdcall messagebatch_dispatch(MSG* first, DispatchFn original, void* kerne
     bool measured = false;
     __try {
         SetLastError(entryError);
-        netnotify_dispatch(first, original, kernel); // exactly once; recovery uses only this selected slot
+        // Exactly once; optional recovery owns only this selected slot.
+        if (g_selectedDispatch) g_selectedDispatch(first, original, kernel);
+        else original(first);
         firstError = GetLastError();
         if (enabled)
             c4trace_event(BatchNativeFirst, reinterpret_cast<uintptr_t>(kernel),
@@ -272,7 +274,9 @@ bool exactSites()
 }
 }
 
-extern "C" void messagebatch_install(HWND hwnd, const char* iniPath)
+extern "C" void messagebatch_install(HWND hwnd, const char* iniPath,
+                                     MessageBatchRecoveryRequested recoveryRequested,
+                                     MessageBatchSelectedDispatch recoveryDispatch)
 {
     const DWORD savedError = GetLastError();
     if (InterlockedCompareExchange(&g_installState, 1, 0) != 0) { SetLastError(savedError); return; }
@@ -280,7 +284,7 @@ extern "C" void messagebatch_install(HWND hwnd, const char* iniPath)
     char value[16] = {};
     GetPrivateProfileStringA("menu", "messageBatching", "1", value, sizeof(value), iniPath);
     on = !strcmp(value, "1"); // default ON; explicit 0/invalid OFF; restart-latched
-    const bool recovery = netnotify_requested(iniPath) != 0;
+    const bool recovery = recoveryDispatch && recoveryRequested && recoveryRequested(iniPath) != 0;
     if (!on && !recovery) { InterlockedExchange(&g_installState, 2); SetLastError(savedError); return; }
 #if defined(_M_IX86)
     DWORD pid = 0;
@@ -318,6 +322,7 @@ extern "C" void messagebatch_install(HWND hwnd, const char* iniPath)
         else DetourTransactionAbort();
     }
     if (error == NO_ERROR) {
+        g_selectedDispatch = recovery ? recoveryDispatch : nullptr;
         InterlockedExchange(&g_enabled, on ? 1 : 0);
         InterlockedExchange(&g_dispatchReady, 1);
         c4trace_event(BatchReady, 0x562972, g_netMessage, g_queueMessage, kExtraLimit, kBudgetUs);

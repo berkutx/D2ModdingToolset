@@ -5728,7 +5728,7 @@ void pumpPressTimer(HWND hwnd)
 LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     eventtrace_install();
-    messagebatch_install(hwnd, iniFile());
+    messagebatch_install(hwnd, iniFile(), netnotify_requested, netnotify_dispatch);
     netnotify_install(hwnd, iniFile());
     if (netnotify_window_event(hwnd, msg, wParam, lParam)) return 0;
     messagebatch_window_event(hwnd, msg, wParam);
@@ -6590,7 +6590,7 @@ extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, 
                                             LRESULT* result)
 {
     eventtrace_install();
-    messagebatch_install(hwnd, iniFile());
+    messagebatch_install(hwnd, iniFile(), netnotify_requested, netnotify_dispatch);
     netnotify_install(hwnd, iniFile());
     if (netnotify_window_event(hwnd, msg, wParam, lParam)) {
         if (result) *result = 0;

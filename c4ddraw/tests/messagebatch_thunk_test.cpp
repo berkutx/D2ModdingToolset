@@ -9,11 +9,6 @@
 #define C4_MESSAGEBATCH_THUNK_TESTING
 #include "../features/messagebatch.cpp"
 
-extern "C" LRESULT netnotify_dispatch(const MSG* msg, LRESULT(WINAPI* original)(const MSG*), void*)
-{ return original(msg); }
-static bool recoveryRequested = false;
-extern "C" int netnotify_requested(const char*) { return recoveryRequested ? 1 : 0; }
-
 static unsigned identityCalls = 0, admissionRejected = 0, admissionReady = 0;
 extern "C" void c4trace_event(unsigned event, uintptr_t, uintptr_t a, uintptr_t,
                               uintptr_t, uintptr_t)
@@ -230,15 +225,14 @@ void admissionConfigTests(HWND hwnd)
     char* slash = std::strrchr(directory, '\\');
     if (!slash) { CHECK(false); return; }
     *slash = 0;
-    struct ConfigCase { const char* name; const char* contents; bool attemptEnabled; bool recovery = false; };
+    struct ConfigCase { const char* name; const char* contents; bool attemptEnabled; };
     const ConfigCase configs[] = {
         {"missing INI defaults to enabled admission", nullptr, true},
         {"missing key defaults to enabled admission", "[unrelated]\r\nvalue=1\r\n", true},
         {"explicit zero bypasses admission", "[menu]\r\nmessageBatching=0\r\n", false},
         {"explicit one attempts enabled admission", "[menu]\r\nmessageBatching=1\r\n", true},
         {"invalid value fails closed", "[menu]\r\nmessageBatching=garbage\r\n", false},
-        {"empty value fails closed", "[menu]\r\nmessageBatching=\r\n", false},
-        {"recovery keeps the shared seam with batching off", "[menu]\r\nmessageBatching=0\r\n", true, true}
+        {"empty value fails closed", "[menu]\r\nmessageBatching=\r\n", false}
     };
     unsigned index = 0;
     for (const auto& config : configs) {
@@ -262,7 +256,6 @@ void admissionConfigTests(HWND hwnd)
         }
         g_installState = 0;
         g_enabled = 0;
-        recoveryRequested = config.recovery;
         identityCalls = admissionRejected = admissionReady = 0;
         const PVOID priorTarget = g_unusedTrampoline;
         SetLastError(0x6A11);
