@@ -25,8 +25,10 @@ static const Setting menu[] = {
     {"battleAnimEnabled", "1"}, {"battleAnimSpeed", "2"}, {"battleAnimFactor", "20"},
     {"mapAnimEnabled", "0"}, {"mapAnimSpeed", "2"}, {"mapAnimFactor", "10"},
     {"battleAttackEnabled", "1"}, {"battleAttackSpeed", "5"}, {"perUnitBurst", "0"},
-    {"dragScroll", "1"}, {"edgeScroll", "1"}, {"wideBattle", "1"}, {"dialogVoSkip", "0"},
+    {"dragScroll", "1"}, {"dragScrollLeft", "1"}, {"dragScrollMiddle", "1"},
+    {"edgeScroll", "1"}, {"wideBattle", "1"}, {"dialogVoSkip", "0"},
     {"fastAI", "0"}, {"stretchWindows", "100"}, {"messageBatching", "1"},
+    {"networkWakeRecovery", "1"},
     {"debugLog", "0"}, {"netTrace", "0"}
 };
 static const Setting wrapper[] = {
