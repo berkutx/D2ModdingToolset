@@ -1,6 +1,6 @@
 # Сетевое уведомление: причина остановки и границы исправления
 
-Дата анализа: 2026-09-21. Здесь описаны проверенный дефект протокола, сравнение с оригинальным GL и предлагаемое исправление во врапере. Анализ не устанавливает причину каждого чужого зависшего матча. Реализация проверена изолированными тестами и сборкой; живого сетевого прогона новой DLL пока не было.
+Дата анализа: 2026-09-21. Здесь описаны проверенный дефект протокола и предлагаемое исправление во врапере. Анализ не устанавливает причину каждого чужого зависшего матча. Реализация проверена изолированными тестами и сборкой; живого сетевого прогона новой DLL пока не было.
 
 ## 1. Как очередь останавливается при работающем UI
 
@@ -36,25 +36,7 @@ m_packetNotificationSent = uiManagerApi.postMessage(...);
 
 Конечная модель подтверждала контрпримеры для N=0/1/2/3/5/10 и отсутствие устойчивой недоставки при возобновляемом сигнале и явных условиях прогресса. Это проверка редуцированной модели; приведённый аргумент не зависит от выбранных этих шести значений N.
 
-## 3. Почему старый GL мог вести себя иначе
-
-Проверен [исходник HSerg/DisciplesGL, commit 308eda9c848129703299dbaee4b81fd17289429a](https://github.com/HSerg/DisciplesGL/tree/308eda9c848129703299dbaee4b81fd17289429a), **1.90**: [версия ресурса](https://github.com/HSerg/DisciplesGL/blob/308eda9c848129703299dbaee4b81fd17289429a/src/DisciplesGL/module.rc#L506-L508). Это не доказанная реализация исторической пользовательской DLL 2.0.2. Сравнение ниже относится к исходникам; A/B запусков не было.
-
-| Различие | Подтверждение и значение |
-|---|---|
-| GL обычно меньше задерживает UI в графических вызовах | [ColdCPU default OFF](https://github.com/HSerg/DisciplesGL/blob/308eda9c848129703299dbaee4b81fd17289429a/src/DisciplesGL/Config.cpp#L545-L548); [isSync](https://github.com/HSerg/DisciplesGL/blob/308eda9c848129703299dbaee4b81fd17289429a/src/DisciplesGL/OpenDrawSurface.cpp#L465-L478) и [Sleep/input gate](https://github.com/HSerg/DisciplesGL/blob/308eda9c848129703299dbaee4b81fd17289429a/src/DisciplesGL/OpenDrawSurface.cpp#L541-L557). C4 [задаёт maxgameticks=180](../features/wrapperdefaults.h), а [upstream limiter](https://github.com/FunkyFr3sh/cnc-ddraw/blob/a0b81b11553e1af358396f15ed7f30b9674c390e/src/utils.c#L471-L550) ждёт на GUI thread без этой busy/input проверки. Это различие мест ожидания, не измеренная частота native updates |
-| GL знает busy UI | [Wait-диалог](https://github.com/HSerg/DisciplesGL/blob/308eda9c848129703299dbaee4b81fd17289429a/src/DisciplesGL/Hooks.cpp#L4083-L4095) и [wait-курсор](https://github.com/HSerg/DisciplesGL/blob/308eda9c848129703299dbaee4b81fd17289429a/src/DisciplesGL/Hooks.cpp#L4134-L4148) задают `waiting`. Это не проверка socket/RakPeer/ожидания другого игрока |
-| GL FastAI чаще выполняет серверные таймеры | [Цикл](https://github.com/HSerg/DisciplesGL/blob/308eda9c848129703299dbaee4b81fd17289429a/src/DisciplesGL/Hooks.cpp#L850-L878), [привязка к ThreadWindowClass](https://github.com/HSerg/DisciplesGL/blob/308eda9c848129703299dbaee4b81fd17289429a/src/DisciplesGL/Hooks.cpp#L913-L922). Это другой HWND; custom-lobby UI-уведомление не синтезируется. C4 [FastAI](../features/fastai.cpp) ограничивает число обработок в одном заходе |
-| Affinity/приоритеты отличаются | GL [расширяет process affinity](https://github.com/HSerg/DisciplesGL/blob/308eda9c848129703299dbaee4b81fd17289429a/src/DisciplesGL/Config.cpp#L825-L850) и [отключает EXE SetThreadPriority](https://github.com/HSerg/DisciplesGL/blob/308eda9c848129703299dbaee4b81fd17289429a/src/DisciplesGL/Hooks.cpp#L7692-L7695) через [no-op](https://github.com/HSerg/DisciplesGL/blob/308eda9c848129703299dbaee4b81fd17289429a/src/DisciplesGL/Hooks.cpp#L4078-L4081). C4 default [singlecpu=true](../features/wrapperdefaults.h). Порядок producer/UI/render может меняться; число кадров его не описывает |
-| Частые UI updates не восстанавливают потерянный post | GL [регистрационный hook](https://github.com/HSerg/DisciplesGL/blob/308eda9c848129703299dbaee4b81fd17289429a/src/DisciplesGL/Hooks.cpp#L883-L889) отслеживает AIMESSAGE. В проверенном GL не найден повтор custom-lobby event или нижний Receive fallback. C4 [messagebatch](../features/messagebatch.cpp) обслуживает уже существующие сообщения, а не создаёт потерянные |
-
-Обозначим публикацию сообщения P, запись отправителем `sent=true` — S, завершение receiver и сброс — R. Ошибка требует **P < R < S**, нормальное исполнение — P < S < R. Более быстрый UI при неизменном ходе отправителя может приблизить R и как раз попасть в ошибочный порядок. Поэтому «чаще тикал → меньше этой гонки» не является верным общим правилом. Изменение расписания могло скрывать дефект; направление изменения вероятности для конкретных DLL из среднего FPS не выводится.
-
-После достижения плохого состояния даже непрерывные UI updates сами не вызывают нужный Receive. В текущем [конструкторе MSS](../../mss32/src/netcustomservice.cpp) прежний timer polling закомментирован (73–79); [processPeerMessages](../../mss32/src/netcustomservice.cpp) (721–724) вызывается из [midgardClearNetworkStateHooked](../../mss32/src/midgardhooks.cpp) (109–122), при очистке сетевого состояния, а не каждый кадр. Нет основания считать, что старый GL включал этот закомментированный timer.
-
-Таким образом, реальные различия расписания совместимы с наблюдением «при том же MSS проявляется на C4». Они не устанавливают единственную причину различия частоты. Возврат старого Sleep/FPS/priority не доказывает устранение замкнутого состояния; независимый источник уведомления устраняет именно эту зависимость.
-
-## 4. Требования к wrapper-only восстановлению
+## 3. Требования к wrapper-only восстановлению
 
 - Отслеживать настоящую регистрацию/удаление `MIDGARD CUSTOM LOBBY NETMSG` через проверенный EXE; не зашивать адрес callback или private layout пересобираемого MSS.
 - Не активировать защиту только по имени сообщения: MSS регистрирует listener до создания peer. Начинать после завершённого настоящего matching callback при живом поколении регистрации, наблюдая завершение в том числе во вложенном окне.
@@ -65,7 +47,7 @@ m_packetNotificationSent = uiManagerApi.postMessage(...);
 
 Эти требования задают границы предлагаемой реализации, а не утверждают, что произвольная интеграция hooks автоматически им соответствует.
 
-## 5. Отдельный конфликт таймеров C4
+## 4. Отдельный конфликт таймеров C4
 
 До правки C4 устанавливал `SetTimer(gameHwnd, 0xC4D7, 32, nullptr)` и поглощал WM_TIMER с ID 50391: [исходная featuremenu.cpp](https://github.com/berkutx/D2ModdingToolset/blob/4757790b27f029f5e2f5f5ae33937a8f79fed055/c4ddraw/features/featuremenu.cpp). Исследованный EXE начинает timer ID с 1 (`00562755`) и увеличивает после успешного SetTimer (`00562CF8`), без исключения для C4.
 
@@ -75,7 +57,7 @@ m_packetNotificationSent = uiManagerApi.postMessage(...);
 
 Native сведения получены через IDA Pro MCP для EXE SHA-256 `1375CDEF09EC470EE64FE5693FB734D7C69FB215212311D997F792B258A642EB`; соответствие исследованных диапазонов проверено байтами. Это анализ конкретного EXE, не обещание работы на любом бинарнике игры.
 
-## 6. Реализация и проверка предлагаемой правки
+## 5. Реализация и проверка предлагаемой правки
 
 [netnotify.cpp](../features/netnotify.cpp) наблюдает native регистрацию, удаление и завершение callback. После настоящего сетевого callback отдельный worker раз в секунду пытается поставить один частный запрос. [WakeState](../features/netnotifystate.h) резервирует token до PostMessage и отсеивает старые поколения. Накопления повторов нет. Во вложенном loop запрос откладывается; общий внешний путь возвращает его в обычную очередь с новым token. [messagebatch.cpp](../features/messagebatch.cpp) преобразует только выбранное сообщение на штатной внешней границе DispatchMessage. Это работает и при `messageBatching=0`. Владелец меню явно передаёт функцию проверки recovery-настройки и обработчик выбранного сообщения при установке общего hook; настройка читается однократно, batching не связан напрямую с модулем восстановления.
 
