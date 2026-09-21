@@ -36,8 +36,8 @@ function Expect-SourceFailure([string]$Source, [string]$ExpectedText) {
 }
 
 $result = & $validator -BundleRoot $complete -RequireExactShaderSet
-Check ($result.Valid -and $result.MenuEntries -eq 8 -and $result.RequiredFileCount -eq 10) `
-      'Complete bundle maps eight menu filters to ten required files'
+Check ($result.Valid -and $result.MenuEntries -eq 9 -and $result.RequiredFileCount -eq 11) `
+      'Complete bundle maps nine menu filters to eleven required files'
 
 $missingIndex = 0
 foreach ($relative in $result.RequiredPaths) {

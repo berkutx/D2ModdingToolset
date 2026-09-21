@@ -35,8 +35,8 @@ $entryPattern = '(?s)\{\s*L"[^"]*"\s*,\s*L"[^"]*"\s*,\s*"(?<primary>Shaders\\\\[
 $entries = @([regex]::Matches($tableBody, $entryPattern))
 $unparsed = [regex]::Replace($tableBody, $entryPattern, '')
 $unparsed = [regex]::Replace($unparsed, '[\s,]', '')
-if ($entries.Count -ne 8 -or $unparsed.Length) {
-    throw "Each of the 8 kShaders rows must structurally declare one primary file and a nullable requiredPass1 (rows=$($entries.Count), unparsed='$unparsed')"
+if ($entries.Count -ne 9 -or $unparsed.Length) {
+    throw "Each of the 9 kShaders rows must structurally declare one primary file and a nullable requiredPass1 (rows=$($entries.Count), unparsed='$unparsed')"
 }
 
 $required = [Collections.Generic.List[string]]::new()
@@ -73,10 +73,10 @@ $primary = @($required | Where-Object { -not $_.EndsWith('.pass1', [StringCompar
 $companions = @($required | Where-Object { $_.EndsWith('.pass1', [StringComparison]::OrdinalIgnoreCase) })
 $literalCount = 0
 $hasLiteralCount = [int]::TryParse($countExpression, [ref]$literalCount)
-if ($primary.Count -ne 8 -or
+if ($primary.Count -ne 9 -or
     ($hasLiteralCount -and $literalCount -ne $primary.Count) -or
     (-not $hasLiteralCount -and $countExpression -notmatch 'sizeof\s*\(\s*kShaders\s*\)')) {
-    throw "Shader menu contract must declare 8 unique primary files (table=$countExpression, files=$($primary.Count))"
+    throw "Shader menu contract must declare 9 unique primary files (table=$countExpression, files=$($primary.Count))"
 }
 $declaredCount = $primary.Count
 if ($companions.Count -ne 2 -or

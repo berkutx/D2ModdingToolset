@@ -42,15 +42,15 @@ shader = re.findall(r'^\s*GET_STRING\("shader",[^\n]+', config, re.M)
 portable = re.findall(r'^\s*GET_INT\(g_config\.d3d9_filter,[^\n]+', config, re.M)
 if len(shader) != 1 or len(portable) != 1:
     raise SystemExit('Filter cfg_load expressions are ambiguous')
-if 'lanczos2-sharp.glsl' not in shader[0] or 'FILTER_LANCZOS' not in portable[0]:
-    raise SystemExit('Patched runtime defaults are not Lanczos')
+if 'lanczos-bicubic.glsl' not in shader[0] or 'FILTER_LANCZOS' not in portable[0]:
+    raise SystemExit('Patched defaults must be the OpenGL hybrid with portable Lanczos fallback')
 menu = (a.workspace / 'c4ddraw/features/featuremenu.cpp').read_text(encoding='utf-8-sig')
 for expected in ('int g_d3dFilter = 3;', 'readDdrawStr("shader", kShaders[0].value, sh,',
                  'g_d3dFilter = readDdrawInt("d3d9_filter", 3);'):
     if expected not in menu:
         raise SystemExit('Menu fallback mismatch: ' + expected)
 release = (a.workspace / 'c4ddraw/release/ddraw.ini').read_text(encoding='utf-8-sig')
-for expected in ('shader=Shaders\\interpolation\\lanczos2-sharp.glsl', 'd3d9_filter=3'):
+for expected in ('shader=Shaders\\interpolation\\lanczos-bicubic.glsl', 'd3d9_filter=3'):
     if expected not in release:
         raise SystemExit('Packaged defaults mismatch: ' + expected)
 chunks += ['#define FILTER_LANCZOS 3',

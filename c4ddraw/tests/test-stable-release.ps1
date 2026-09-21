@@ -43,6 +43,7 @@ Check ($runtime -contains 'C4dll-R-v2.0-test-bundle/TWITCH-STREAMER-RU.md') 'Str
 Check ($runtime -contains 'C4dll-R-v2.0-test-bundle/NETWORK_TRACE.md' -and
        $runtime -contains 'C4dll-R-v2.0-test-bundle/Tools/analyze-event-trace.py') 'Network diagnostics guide and optional analyzer are bundled'
 $expectedShaders = @(
+    'Shaders/interpolation/lanczos-bicubic.glsl',
     'Shaders/interpolation/lanczos2-sharp.glsl',
     'Shaders/xbrz/xbrz-freescale-multipass.glsl',
     'Shaders/xbrz/xbrz-freescale-multipass.glsl.pass1',

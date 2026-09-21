@@ -465,7 +465,7 @@ index 1fe7cd7..13a4ddf 100644
      g_ogl.got_error = g_ogl.use_opengl = FALSE;
      GLenum err = GL_NO_ERROR;
      BOOL made_current = FALSE;
-@@ -356,7 +616,7 @@ static void ogl_build_programs()
+@@ -356,7 +616,8 @@ static void ogl_build_programs()
                  //g_config.shader[0] = 0;
              }
  
@@ -473,6 +473,7 @@ index 1fe7cd7..13a4ddf 100644
 +            /* Detect common upscalers for per-frame 1:1/downscale bypass. */
  
              BOOL is_upscaler =
++                strstr(g_config.shader, "lanczos-bicubic.glsl") != NULL ||
                  strstr(g_config.shader, "fsr.glsl") != NULL ||
 @@ -366,41 +626,40 @@ static void ogl_build_programs()
                  strstr(g_config.shader, "xbrz-freescale-multipass.glsl") != NULL ||

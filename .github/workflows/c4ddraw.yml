@@ -56,6 +56,11 @@ jobs:
       - name: Validate texture palette colors
         run: ./c4ddraw/tests/run-palette-colors-tests.ps1
 
+      - name: Validate native window sizing and filter defaults
+        run: |
+          ./c4ddraw/tests/run-native-window-tests.ps1
+          ./c4ddraw/tests/run-filter-defaults-tests.ps1
+
       - name: Validate timer expiry and post-battle transitions
         run: |
           ./c4ddraw/tests/run-timer-drag-tests.ps1

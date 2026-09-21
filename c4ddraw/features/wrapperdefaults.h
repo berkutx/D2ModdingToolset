@@ -5,7 +5,7 @@
 namespace c4defaults {
 struct Setting { const char* key; const char* value; };
 static const Setting renderer[] = {
-    {"renderer", "opengl"}, {"shader", "Shaders\\interpolation\\lanczos2-sharp.glsl"},
+    {"renderer", "opengl"}, {"shader", "Shaders\\interpolation\\lanczos-bicubic.glsl"},
     {"d3d9_filter", "3"}, {"width", "0"}, {"height", "0"},
     {"posX", "-32000"}, {"posY", "-32000"},
     {"windowed", "true"}, {"fullscreen", "false"},

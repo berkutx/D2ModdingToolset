@@ -107,6 +107,9 @@ The Shaders directory contains the exact presets exposed by the C4dll-R menu,
 from the cnc-ddraw/libretro GLSL shader package:
 https://github.com/libretro/glsl-shaders
 
+The Lanczos + Bicubic preset combines the bundled Lanczos2 and Catmull-Rom
+filters; its source retains the original shader notices.
+
 Copyright and license notices are retained inside the individual shader files.
 Most selected presets use MIT or Unlicense terms. The xBRZ multipass preset
 also contains GPL-3.0 code and is distributed under GPL-3.0, consistently with

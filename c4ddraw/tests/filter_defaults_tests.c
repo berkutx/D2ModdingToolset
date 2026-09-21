@@ -12,6 +12,7 @@
 static int failures;
 static int cases;
 static const char* lanczos = "Shaders\\interpolation\\lanczos2-sharp.glsl";
+static const char* hybrid = "Shaders\\interpolation\\lanczos-bicubic.glsl";
 static const char* bicubic = "Shaders\\interpolation\\catmull-rom-bilinear.glsl";
 static const char* nearest = "Shaders\\nearest-neighbor.glsl";
 
@@ -50,17 +51,19 @@ static void check(const char* name, const char* text, const char* profile,
 
 int main(void)
 {
-    check("missing keys", "[ddraw]\r\nwidth=0\r\n", "", lanczos, 3);
+    check("missing keys", "[ddraw]\r\nwidth=0\r\n", "", hybrid, 3);
+    check("explicit Lanczos preserved on upgrade", "[ddraw]\r\nshader=Shaders\\interpolation\\lanczos2-sharp.glsl\r\nd3d9_filter=3\r\n", "", lanczos, 3);
+    check("explicit hybrid", "[ddraw]\r\nshader=Shaders\\interpolation\\lanczos-bicubic.glsl\r\nd3d9_filter=3\r\n", "", hybrid, 3);
     check("explicit None", "[ddraw]\r\nshader=Shaders\\nearest-neighbor.glsl\r\nd3d9_filter=0\r\n", "", nearest, 0);
     check("explicit Bicubic", "[ddraw]\r\nshader=Shaders\\interpolation\\catmull-rom-bilinear.glsl\r\nd3d9_filter=2\r\n", "", bicubic, 2);
     check("profile override", "[ddraw]\r\nshader=Shaders\\interpolation\\lanczos2-sharp.glsl\r\nd3d9_filter=3\r\n[Discipl2]\r\nshader=Shaders\\nearest-neighbor.glsl\r\nd3d9_filter=0\r\n", "Discipl2", nearest, 0);
     check("profile inherits explicit values", "[ddraw]\r\nshader=Shaders\\interpolation\\catmull-rom-bilinear.glsl\r\nd3d9_filter=2\r\n[Discipl2/2]\r\nwidth=1000\r\n", "Discipl2/2", bicubic, 2);
-    check("profile and global missing", "[ddraw]\r\nwidth=0\r\n[Discipl2/2]\r\nheight=0\r\n", "Discipl2/2", lanczos, 3);
+    check("profile and global missing", "[ddraw]\r\nwidth=0\r\n[Discipl2/2]\r\nheight=0\r\n", "Discipl2/2", hybrid, 3);
     check("explicit global empty preserved", "[ddraw]\r\nshader=\r\nd3d9_filter=\r\n", "", "", 0);
     check("empty profile still inherits", "[ddraw]\r\nshader=Shaders\\interpolation\\catmull-rom-bilinear.glsl\r\nd3d9_filter=2\r\n[Discipl2]\r\nshader=\r\nd3d9_filter=\r\n", "Discipl2", bicubic, 2);
     check("custom shader preserved", "[ddraw]\r\nshader=MyShaders\\custom.glsl\r\n", "", "MyShaders\\custom.glsl", 3);
-    check("explicit portable without shader", "[ddraw]\r\nd3d9_filter=0\r\n", "", lanczos, 0);
-    check("invalid explicit integer unchanged", "[ddraw]\r\nd3d9_filter=99\r\n", "", lanczos, 99);
+    check("explicit portable without shader", "[ddraw]\r\nd3d9_filter=0\r\n", "", hybrid, 0);
+    check("invalid explicit integer unchanged", "[ddraw]\r\nd3d9_filter=99\r\n", "", hybrid, 99);
     printf("%d cases; %d failures; fixtures retained; no input INI writes by parser\n", cases, failures);
     return failures ? 1 : 0;
 }

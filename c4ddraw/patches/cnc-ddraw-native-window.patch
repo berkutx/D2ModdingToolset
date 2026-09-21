@@ -1,0 +1,267 @@
+diff --git a/src/dd.c b/src/dd.c
+--- a/src/dd.c
++++ b/src/dd.c
+@@ -715,8 +715,54 @@
+     }
+ }
+ 
++/* DisciplesGL lets Windows own maximize/restore/Snap. Resize only the renderer;
++ * the logical DirectDraw canvas and Windows' saved normal placement stay intact. */
++void dd_ResizeWindowOutput(int width, int height, BOOL restore_request)
++{
++    static BOOL resizing = FALSE;
++    RECT saved_request;
++    POINT origin = { 0, 0 };
++    BOOL maximized;
++
++    if (resizing || !g_config.windowed || g_config.fullscreen || !g_config.resizable || !g_config.border ||
++        !g_ddraw.width || !g_ddraw.render.thread || width <= 0 || height <= 0 ||
++        (width == g_ddraw.render.width && height == g_ddraw.render.height))
++        return;
++
++    resizing = TRUE;
++    saved_request = g_config.window_rect;
++    maximized = IsZoomed(g_ddraw.hwnd);
++    g_config.window_rect.right = width;
++    g_config.window_rect.bottom = height;
++    if (!maximized && real_ClientToScreen(g_ddraw.hwnd, &origin))
++    {
++        g_config.window_rect.left = origin.x;
++        g_config.window_rect.top = origin.y;
++    }
++
++    dd_SetDisplayMode(0, 0, 0, SDM_KEEP_WINDOW);
++    /* Maximizing is temporary. Do not save the monitor's client dimensions over
++     * an explicit output request or width=0/height=0 automatic sizing. */
++    if (maximized || restore_request)
++        g_config.window_rect = saved_request;
++    resizing = FALSE;
++}
++
+ HRESULT dd_SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwFlags)
+ {
++    RECT native_client = { 0 };
++    /* Keep native placement during shader/backend reloads, including Snap.
++     * A changed output request still resizes a normal window. The caption check
++     * excludes the borderless window on the return to windowed. */
++    BOOL keep_native_window = g_config.windowed && !g_config.fullscreen &&
++        g_config.border && g_config.resizable && g_ddraw.hwnd && g_ddraw.width &&
++        real_GetClientRect(g_ddraw.hwnd, &native_client) &&
++        native_client.right > 0 && native_client.bottom > 0 &&
++        (real_GetWindowLongA(g_ddraw.hwnd, GWL_STYLE) & WS_CAPTION) == WS_CAPTION &&
++        ((dwFlags & SDM_KEEP_WINDOW) ||
++            IsZoomed(g_ddraw.hwnd) ||
++            (g_config.window_rect.right == native_client.right &&
++             g_config.window_rect.bottom == native_client.bottom));
+     InterlockedExchange(&g_ddraw.render.live_resize_active, FALSE);
+ 
+     if (!dwWidth)
+@@ -774,7 +820,7 @@
+     g_ddraw.render.height = g_config.window_rect.bottom;
+ 
+     /* temporary fix: center window for games that keep changing their resolution */
+-    if (g_config.center_window &&
++    if (!keep_native_window && g_config.center_window &&
+         (g_ddraw.width || g_config.infantryhack || g_config.center_window == CENTER_WINDOW_ALWAYS) &&
+         (g_ddraw.width != dwWidth || g_ddraw.height != dwHeight) &&
+         (
+@@ -835,7 +881,15 @@
+         g_config.hotkeys.toggle_fullscreen = 0;
+     }
+ 
+-    if (!zooming || g_config.fullscreen)
++    if (keep_native_window)
++    {
++        g_ddraw.render.width = native_client.right;
++        g_ddraw.render.height = native_client.bottom;
++        if (g_ddraw.render.width < g_ddraw.width || g_ddraw.render.height < g_ddraw.height)
++            g_config.adjmouse = TRUE;
++    }
++
++    if (!keep_native_window && (!zooming || g_config.fullscreen))
+     {
+         if (g_ddraw.render.width < g_ddraw.width)
+         {
+@@ -1075,7 +1129,8 @@
+             real_SetWindowLongA(
+                 g_ddraw.hwnd,
+                 GWL_STYLE,
+-                (real_GetWindowLongA(g_ddraw.hwnd, GWL_STYLE) | WS_OVERLAPPEDWINDOW) & ~(WS_MAXIMIZE));
++                (real_GetWindowLongA(g_ddraw.hwnd, GWL_STYLE) | WS_OVERLAPPEDWINDOW) &
++                    ~(keep_native_window ? 0 : WS_MAXIMIZE));
+ 
+             DWORD class_sytle = GetClassLongA(g_ddraw.hwnd, GCL_STYLE);
+             if (class_sytle & CS_NOCLOSE)
+@@ -1139,14 +1194,17 @@
+ 
+         AdjustWindowRectEx(&dst, style, GetMenu(g_ddraw.hwnd) != NULL, exstyle);
+ 
+-        real_SetWindowPos(
+-            g_ddraw.hwnd, 
+-            HWND_NOTOPMOST, 
+-            dst.left, 
+-            dst.top, 
+-            (dst.right - dst.left), 
+-            (dst.bottom - dst.top), 
+-            SWP_SHOWWINDOW | SWP_FRAMECHANGED);
++        if (!keep_native_window)
++        {
++            real_SetWindowPos(
++                g_ddraw.hwnd,
++                HWND_NOTOPMOST,
++                dst.left,
++                dst.top,
++                (dst.right - dst.left),
++                (dst.bottom - dst.top),
++                SWP_SHOWWINDOW | SWP_FRAMECHANGED);
++        }
+ 
+ 
+         BOOL d3d9_active = FALSE;
+diff --git a/src/wndproc.c b/src/wndproc.c
+--- a/src/wndproc.c
++++ b/src/wndproc.c
+@@ -45,6 +45,7 @@
+ #endif
+ 
+     static BOOL in_size_move = FALSE;
++    static BOOL native_restore_requested = FALSE;
+     static BOOL live_size_move = FALSE;
+     static BOOL size_move_changed = FALSE;
+     static int redraw_count = 0;
+@@ -353,6 +354,13 @@
+ 
+             if (commit_live_resize || !g_ddraw.render.thread)
+                 dd_SetDisplayMode(0, 0, 0, 0);
++            else if (!IsWine())
++            {
++                /* Snap can finish a move without entering WM_SIZING. */
++                RECT clientrc = { 0 };
++                if (real_GetClientRect(hWnd, &clientrc))
++                    dd_ResizeWindowOutput(clientrc.right, clientrc.bottom, FALSE);
++            }
+         }
+         break;
+     }
+@@ -531,6 +539,13 @@
+             WORD width = LOWORD(lParam);
+             WORD height = HIWORD(lParam);
+ 
++            /* A native maximize/restore or Aero Snap has no WM_SIZING loop.
++             * Preserve the OS placement and update the renderer to its actual
++             * client size, as DisciplesGL does in WM_SIZE. */
++            if (!in_size_move && !IsWine() &&
++                (wParam == SIZE_RESTORED || wParam == SIZE_MAXIMIZED))
++                dd_ResizeWindowOutput(width, height, native_restore_requested);
++
+             if (wParam == SIZE_RESTORED)
+             {
+                 /* macOS maximize hack */
+@@ -644,43 +659,27 @@
+         return real_DefWindowProcA(hWnd, uMsg, wParam, lParam); /* Carmageddon fix */
+     }
+     case WM_RESTORE_STYLE:
+-    {
+-        if (!IsWine()) /* hack: disable aero snap */
+-        {
+-            LONG style = real_GetWindowLongA(g_ddraw.hwnd, GWL_STYLE);
+-
+-            if (!(style & WS_MAXIMIZEBOX))
+-            {
+-                real_SetWindowLongA(g_ddraw.hwnd, GWL_STYLE, style | WS_MAXIMIZEBOX);
+-            }
+-        }
+-        return 0;
+-    }
++        return 0; /* compatibility with an already queued legacy message */
+     case WM_SYSCOMMAND:
+     {
+-        if ((wParam & ~0x0F) == SC_MOVE && !IsWine()) /* hack: disable aero snap */
+-        {
+-            LONG style = real_GetWindowLongA(g_ddraw.hwnd, GWL_STYLE);
+-
+-            if ((style & WS_MAXIMIZEBOX))
+-            {
+-                real_SetWindowLongA(g_ddraw.hwnd, GWL_STYLE, style & ~WS_MAXIMIZEBOX);
+-                PostMessageA(g_ddraw.hwnd, WM_RESTORE_STYLE, 0, 0);
+-            }
+-        }
+-
+-        if (wParam == SC_MAXIMIZE)
+-        {
+-            if (IsWine())
+-                return real_DefWindowProcA(hWnd, uMsg, wParam, lParam);
+-
+-            if (g_config.resizable)
+-            {
+-                util_toggle_maximize();
+-            }
+-
++        /* Match DisciplesGL: Windows owns native maximize/restore and Snap.
++         * The old cnc toggle guessed state from client size versus game canvas,
++         * so a custom-sized window could shrink when the user pressed maximize. */
++        if ((wParam & 0xFFF0) == SC_MAXIMIZE && !g_config.resizable)
+             return 0;
+-        }
++        if ((wParam & 0xFFF0) == SC_RESTORE)
++        {
++            /* An explicit Restore keeps the user's normal output request.
++             * Snap after maximize also sends SIZE_RESTORED, but must retain its
++             * new actual client size for subsequent shader/backend reloads. */
++            BOOL previous_restore = native_restore_requested;
++            native_restore_requested = TRUE;
++            LRESULT result = real_DefWindowProcA(hWnd, uMsg, wParam, lParam);
++            native_restore_requested = previous_restore;
++            return result;
++        }
++        if ((wParam & 0xFFF0) == SC_MAXIMIZE)
++            return real_DefWindowProcA(hWnd, uMsg, wParam, lParam);
+ 
+         if (wParam == SC_CLOSE && !GameHandlesClose)
+         {
+@@ -900,21 +899,15 @@
+     }
+     case WM_TOGGLE_MAXIMIZE:
+     {
+-        if (g_config.resizable)
+-        {
+-            util_toggle_maximize();
+-        }
+-
++        if (g_config.resizable && g_config.windowed && !g_config.fullscreen)
++            SendMessageA(hWnd, WM_SYSCOMMAND, IsZoomed(hWnd) ? SC_RESTORE : SC_MAXIMIZE, 0);
+         return 0;
+     }
+     case WM_NCLBUTTONDBLCLK:
+     {
+-        if (g_config.resizable)
+-        {
+-            util_toggle_maximize();
+-        }
+-
+-        return 0;
++        if (!g_config.resizable)
++            return 0;
++        return real_DefWindowProcA(hWnd, uMsg, wParam, lParam);
+     }
+     case WM_SYSKEYDOWN:
+     {
+diff --git a/inc/dd.h b/inc/dd.h
+--- a/inc/dd.h
++++ b/inc/dd.h
+@@ -22,6 +22,7 @@
+ HRESULT dd_RestoreDisplayMode();
+ HRESULT dd_SetCooperativeLevel(HWND hwnd, DWORD dwFlags);
+ HRESULT dd_SetDisplayMode(DWORD dwWidth, DWORD dwHeight, DWORD dwBPP, DWORD dwFlags);
++void dd_ResizeWindowOutput(int width, int height, BOOL restore_request);
+ void dd_CalcViewport(int render_width, int render_height, int* x, int* y, int* width, int* height);
+ HRESULT dd_WaitForVerticalBlank(DWORD dwFlags, HANDLE hEvent);
+ HRESULT dd_GetAvailableVidMem(LPDDSCAPS lpDDCaps, LPDWORD lpdwTotal, LPDWORD lpdwFree);
+@@ -47,6 +48,7 @@
+ #define SDM_MODE_SET_BY_GAME 0x00000001l
+ #define SDM_LEAVE_WINDOWED   0x00000002l
+ #define SDM_LEAVE_FULLSCREEN 0x00000004l
++#define SDM_KEEP_WINDOW      0x00000008l /* native maximize/restore/Snap: output only */
+ 
+ #define LIMIT_AUTO 0
+ #define LIMIT_TESTCOOP 1

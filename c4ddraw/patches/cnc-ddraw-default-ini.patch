@@ -7,7 +7,7 @@ index 18cfacdd..c37086c8 100644
      GET_BOOL(g_config.vsync, "vsync", FALSE);
      GET_BOOL(g_config.adjmouse, "adjmouse", TRUE);
 -    GET_STRING("shader", "Shaders\\interpolation\\catmull-rom-bilinear.glsl", g_config.shader, sizeof(g_config.shader));
-+    GET_STRING("shader", "Shaders\\interpolation\\lanczos2-sharp.glsl", g_config.shader, sizeof(g_config.shader));
++    GET_STRING("shader", "Shaders\\interpolation\\lanczos-bicubic.glsl", g_config.shader, sizeof(g_config.shader));
      GET_INT(g_config.window_rect.left, "posX", -32000);
      GET_INT(g_config.window_rect.top, "posY", -32000);
      GET_STRING("renderer", "auto", g_config.renderer, sizeof(g_config.renderer));
@@ -196,7 +196,7 @@ index 18cfacdd..c37086c8 100644
 +            "aspect_ratio=\n"
 +            "; scale mouse to the window; required for correct filtered downscaling\n"
 +            "adjmouse=true\n"
-+            "; image filter / upscaling - cnc-ddraw's equivalent of DisciplesGL's options.\n"
++            "; OpenGL default: 50/50 Lanczos + Bicubic for balanced sharpness.\n"
 +            "; All presets work in OpenGL; portable choices also set the D3D9/GDI fallback.\n"
 +            "; Alternatives (paste over the active line):\n"
 +            ";   Shaders\\interpolation\\catmull-rom-bilinear.glsl   cubic (cnc default, softer)\n"
@@ -205,7 +205,7 @@ index 18cfacdd..c37086c8 100644
 +            ";   Shaders\\interpolation\\lanczos2-sharp.glsl         lanczos (sharper)\n"
 +            ";   Shaders\\interpolation\\fsr.glsl                    AMD FSR (modern, crisp)\n"
 +            ";   Shaders\\xbr\\xbr-lv2-noblend.glsl                  xBR-lv2\n"
-+            "shader=Shaders\\interpolation\\lanczos2-sharp.glsl\n"
++            "shader=Shaders\\interpolation\\lanczos-bicubic.glsl\n"
 +            "; portable fallback: 0 nearest, 1 linear, 2 cubic, 3 Lanczos\n"
 +            "d3d9_filter=3\n"
 +            "savesettings=0\n"

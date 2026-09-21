@@ -1023,7 +1023,7 @@ enum : UINT
     kIdRendAuto = 0xA132,
     kIdRendererActive = 0xA133, // disabled diagnostic: actual backend, not persisted request
     kIdShaderBase = 0xA140, // + index into kShaders[]
-    kIdShaderStatus = 0xA148, // disabled diagnostic: packaged OpenGL shader assets
+    kIdShaderStatus = 0xA149, // disabled diagnostic: packaged OpenGL shader assets
     kIdMaintas = 0xA150,
     kIdVsync = 0xA151,
     kIdBoxing = 0xA152,
@@ -1170,10 +1170,13 @@ const NameVal kRenderers[] = {
     {L"Auto - picks D3D9 first (basic filters)",
      L"Auto - сам выберет D3D9 (основные фильтры)", "auto"}};
 const int kRendererCount = 3;
-// Image filters, ranked best->basic for D2's hand-painted art.
+// Image filters: the balanced default first, followed by the existing alternatives.
 const ShaderOption kShaders[] = {
-    {L"Lanczos - sharp, detailed (best for D2 art)",
-     L"Lanczos - чёткий, детальный (лучший для графики D2)",
+    {L"Lanczos + Bicubic - balanced (default)",
+     L"Lanczos + Bicubic - сбалансированный (по умолчанию)",
+     "Shaders\\interpolation\\lanczos-bicubic.glsl", nullptr},
+    {L"Lanczos - sharp, detailed",
+     L"Lanczos - чёткий, детальный",
      "Shaders\\interpolation\\lanczos2-sharp.glsl", nullptr},
     {L"xBRZ - pixel-art scaler, clean sprite edges",
      L"xBRZ - пиксель-арт скейлер, чистые края спрайтов",
@@ -1198,19 +1201,21 @@ const ShaderOption kShaders[] = {
     {L"CRT - retro scanlines (style, not sharper)",
      L"CRT - ретро-развёртка (стиль, не чёткость)",
      "Shaders\\crt\\crt-lottes-fast-no-warp-bilinear.glsl", nullptr}};
-const int kShaderCount = 8;
+const int kShaderCount = 9;
 static_assert(sizeof(kShaders) / sizeof(kShaders[0]) == kShaderCount,
-              "the Filter menu must expose the eight packaged shaders");
+              "the Filter menu must expose all packaged shaders");
+static_assert(kIdShaderBase + kShaderCount <= kIdShaderStatus,
+              "filter command IDs must not overlap the asset status row");
 
 // cnc-ddraw's Direct3D 9 filter values. GDI maps every non-nearest value to HALFTONE; OpenGL uses
 // the full shader path above. A negative result means that filter genuinely requires OpenGL.
 int portableFilterForShader(int shaderIndex)
 {
     switch (shaderIndex) {
-    case 0: return 3; // Lanczos
-    case 2: return 2; // Catmull-Rom cubic
-    case 5: return 1; // bilinear
-    case 6: return 0; // nearest
+    case 1: return 3; // Lanczos
+    case 3: return 2; // Catmull-Rom cubic
+    case 6: return 1; // bilinear
+    case 7: return 0; // nearest
     default: return -1;
     }
 }
@@ -1218,11 +1223,11 @@ int portableFilterForShader(int shaderIndex)
 int shaderForPortableFilter(int filter)
 {
     switch (filter) {
-    case 3: return 0;
-    case 2: return 2;
-    case 1: return 5;
-    case 0: return 6;
-    default: return 2;
+    case 3: return 1;
+    case 2: return 3;
+    case 1: return 6;
+    case 0: return 7;
+    default: return 3;
     }
 }
 // -1 = limiter fully off (cnc-ddraw treats 0 as "emulate 60hz flip", not off)
@@ -4685,8 +4690,8 @@ void verifyPendingRenderer()
          activeName);
     MessageBoxW(
         g_gameHwnd,
-        L(L"OpenGL loaded, but its runtime rendering test failed and the wrapper switched to a safe backend. This commonly means an incomplete local Mesa package or an RDP OpenGL 1.1 driver. The Renderer status row shows what is active. The Lanczos setting also drives the portable Auto/Direct3D 9 filter and GDI smoothing fallback.",
-          L"OpenGL загрузился, но не прошёл runtime-проверку рендера, поэтому враппер включил безопасный fallback. Обычные причины — неполный локальный комплект Mesa или OpenGL 1.1 в RDP. Фактический backend показан в строке статуса. Lanczos также выбирает переносимый фильтр Auto/Direct3D 9 и сглаживающий fallback GDI."),
+        L(L"OpenGL loaded, but its runtime rendering test failed and the wrapper switched to a safe backend. This commonly means an incomplete local Mesa package or an RDP OpenGL 1.1 driver. The Renderer status row shows what is active. The saved portable filter is used on Auto/Direct3D 9; GDI uses smoothing. The Lanczos + Bicubic blend requires OpenGL.",
+          L"OpenGL загрузился, но не прошёл runtime-проверку рендера, поэтому враппер включил безопасный fallback. Обычные причины — неполный локальный комплект Mesa или OpenGL 1.1 в RDP. Фактический backend показан в строке статуса. Auto/Direct3D 9 использует сохранённый переносимый фильтр; GDI — сглаживание. Смесь Lanczos + Bicubic требует OpenGL."),
         L(L"OpenGL runtime fallback", L"Runtime-fallback OpenGL"),
         MB_OK | MB_ICONWARNING);
 }
@@ -4695,8 +4700,8 @@ void resetWrapperSettings()
 {
     if (MessageBoxW(
             g_gameHwnd,
-            L(L"Restore all wrapper defaults and CLOSE THE CLIENT NOW?\n\nTimer/plugin configuration and the game's own gameplay options will NOT be reset. The current multiplayer connection will end. Unsaved progress is NOT saved automatically.\n\nAfter the client closes, launch it again to apply all defaults together, including OpenGL + Lanczos, scaling, CPU affinity, animation speeds and message batching.",
-              L"Вернуть все стандартные настройки враппера и СЕЙЧАС ЗАКРЫТЬ КЛИЕНТ?\n\nНастройки таймера, плагинов и родные игровые параметры НЕ сбрасываются. Текущее сетевое соединение завершится. Несохранённый прогресс автоматически НЕ сохраняется.\n\nПосле закрытия запустите клиент снова: все стандартные настройки применятся вместе, включая OpenGL + Lanczos, масштаб, число CPU, скорости анимаций и обработку очереди."),
+            L(L"Restore all wrapper defaults and CLOSE THE CLIENT NOW?\n\nTimer/plugin configuration and the game's own gameplay options will NOT be reset. The current multiplayer connection will end. Unsaved progress is NOT saved automatically.\n\nAfter the client closes, launch it again to apply all defaults together, including OpenGL + Lanczos/Bicubic, scaling, CPU affinity, animation speeds and message batching.",
+              L"Вернуть все стандартные настройки враппера и СЕЙЧАС ЗАКРЫТЬ КЛИЕНТ?\n\nНастройки таймера, плагинов и родные игровые параметры НЕ сбрасываются. Текущее сетевое соединение завершится. Несохранённый прогресс автоматически НЕ сохраняется.\n\nПосле закрытия запустите клиент снова: все стандартные настройки применятся вместе, включая OpenGL + Lanczos/Bicubic, масштаб, число CPU, скорости анимаций и обработку очереди."),
             L(L"Reset wrapper settings", L"Сброс настроек враппера"),
             MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
         return;

@@ -25,7 +25,7 @@ in-game **menu** is included. It does **not** depend on, modify, or require the
 | `features/widebattle.cpp`, `DLG_BATTLE_B.dlg` | Signature-gated Widescreen Battle hooks for the original D2 2.00-3.01 layout table + embedded 990-wide dialog, derived from DisciplesGL under MIT | yes |
 | `features/horplus.cpp` | Signature-gated true Hor+ game-canvas presets reconstructed from the legacy wrapper | yes |
 | `features/clouds.cpp` | Signature-gated loader, archive lookup and update pipeline for an external `Imgs\IsoClouds.ff` | yes |
-| `release/Shaders/` | The eight OpenGL presets exposed by the menu, including their multipass files and retained license headers | yes |
+| `release/Shaders/` | The nine OpenGL presets exposed by the menu, including their multipass files and retained license headers | yes |
 | `features/rendererbridge.c` | Wrapper-owned adapters to cnc-ddraw internals: live reload, screenshot, coordinate mapping, fixed-window stretch and simple-zoom state/formulae | yes |
 | `features/localization.cpp` | Locale/encoding bridge modelled after the legacy wrapper; no hard-coded Russian code pages | yes |
 | `features/savelogic.cpp` | Version-independent save/archive hooks | yes |
@@ -88,14 +88,14 @@ mss32 mod, so the two are versioned and released independently (their version nu
 cut a release, push a tag:
 
 ```sh
-git tag c4dll-r-v2.1.0
-git push origin c4dll-r-v2.1.0
+git tag c4dll-r-v2.2.0
+git push origin c4dll-r-v2.2.0
 ```
 
 `.github/workflows/c4dll-r-release.yml` then builds `C4dll-R.dll`, `Mods/timer.c4p` and
 `Mods/twitchstat.c4p`, packages them with `Shaders`, `INSTALL.txt`, the `C4PLUGINS.txt` key guide,
 `TWITCH-STREAMER-RU.md`, a sample `C4plugins.ini`, `ddraw.ini`, `LICENSE` and third-party notices
-into `C4dll-R-v2.1.0.zip`, and publishes one ready-to-use GitHub Release archive. Matching PDBs and
+into `C4dll-R-v2.2.0.zip`, and publishes one ready-to-use GitHub Release archive. Matching PDBs and
 loose binaries are retained by the separate technical `c4ddraw` Actions workflow. The release version is stamped into the DLL version
 resource (`build.ps1 -Version`), so a build is identifiable from file properties. Running the
 workflow manually (workflow_dispatch) publishes a **prerelease** tagged `c4dll-r-dev-<sha>` (or
@@ -175,17 +175,27 @@ carries over as is; old `animationSpeedEnabled=1` maps to battle speed 1.5x, oth
 If `ddraw.ini` is missing entirely, the generated default is no longer the upstream stock one:
 `cfg_create_ini` writes a Disciples II tuned config (`patches/cnc-ddraw-default-ini.patch`) -
 `fake_mode=1024x768x16`, `renderer=opengl`, windowed with a real title bar (`windowed=true`,
-`border=true`, `resizable=true`), `width=0`/`height=0` (follow the active game resolution), `maintas=true`, the Lanczos
+`border=true`, `resizable=true`), `width=0`/`height=0` (follow the active game resolution), `maintas=true`, the Lanczos + Bicubic
 shader, `devmode=true`, `singlecpu=true`, `nonexclusive=true`, `noactivateapp=true`, `maxfps=144`,
 `maxgameticks=180`, `vsync=true`, the usual renderer hotkeys, and `savesettings=0` so cnc-ddraw never
 rewrites the file and strips its comments. The comments are carried in the file and explain every
 choice; the ini parser takes everything after `=` as the value, so all comments sit on their own
 lines. The zip still ships the recommended `ddraw.ini` (native resolution, resizable window,
-Lanczos shader, `savesettings=1`) - delete it to compare against the generated one.
+Lanczos + Bicubic shader, `savesettings=1`) - delete it to compare against the generated one.
+
+Lanczos + Bicubic is an equal blend of the existing two filters, selected for missing filter
+settings and after a wrapper reset. Existing explicit shader choices are preserved on upgrade.
+The blend runs in OpenGL; D3D9 retains its Lanczos fallback and GDI retains smoothing.
 
 `F4` is handled by C4dll-R itself: it switches a normal window to the last selected fullscreen kind
 (borderless on the first use), and either fullscreen kind back to a normal window. `Alt+Enter`
 retains cnc-ddraw's configured window/fullscreen toggle; `Alt+F4` still closes the game.
+
+Window maximize/restore now follows DisciplesGL's use of Windows' standard button, title-bar
+double-click and Snap placement. A selected 1600x900 game canvas stays 1600x900; the completed
+frame scales to the window's client area, with Fit preserving its aspect ratio. Changing the
+filter preserves maximized or snapped placement. Manual frame resizing and its size limits
+remain unchanged.
 
 This is not a 1:1 copy of the old adapter's fullscreen path. C4dll-R exposes three output modes:
 normal window, adaptive borderless fullscreen, and true exclusive fullscreen. All three enter the
@@ -401,7 +411,7 @@ next game start.
 | `maintas` | `true` | fit while preserving the selected game resolution's aspect, with letter/pillar-boxing as needed | live |
 | `boxing` | `false` | largest exact integer fit from 19x down to 1x; takes priority over `maintas`. At 2x one game pixel occupies a 2x2 block = 4 output pixels. Below 1x no integer factor exists, so the renderer uses filtered reduction | live |
 | `aspect_ratio` | empty | custom aspect override; the menu shows it as Custom and clears it when Fit / Integer is selected | live |
-| `shader` | `lanczos2-sharp` | upscale filter, OpenGL renderer only; the menu offers 8 presets | live |
+| `shader` | `lanczos-bicubic` | upscale filter, OpenGL renderer only; the menu offers 9 presets | live |
 | `savesettings` | `1` | cnc-ddraw writes window size/pos/state back on exit | - |
 | `maxgameticks` | `180` | game loop cap in ticks/s; see "The game speed cap" below | live |
 | `maxfps` | `-1` | render FPS cap, -1 = screen refresh; paces the render thread only, never slows the game | live |
@@ -533,7 +543,7 @@ remains enabled by default and selects the fixed 990x600 two-panel dialog when t
 | Resolution -> Window/output size | opens a numeric width/height dialog in the same popup and deliberately separates output from game view. Automatic follows the selected game resolution; a fixed value changes the image area inside the window, excluding frame/title/menu, without changing map view. The logical game canvas remains the safe minimum; borderless still uses the desktop | effective `ddraw.ini` `width` + `height` | live and next start |
 | Scaling: Fit / Integer pixel blocks; Custom status | maps the logical game canvas into the actual window/desktop. The result line shows the coefficient, viewport and bars; `1:1` means one game pixel equals one output pixel. Fit preserves geometry and Integer uses exact blocks. A hand-edited legacy X/Y stretch remains readable but is not offered in GUI | `ddraw.ini` `maintas` + `boxing` + `aspect_ratio` | live |
 | Fixed window: 100% (no enlargement) .. actual full-height size (128% at 1366x768, default) | centred DisciplesGL 1.90 crop, enlarged to fill the viewport vertically while preserving geometry; crops side decoration and resamples pixels only on fixed/decorated screens, never the strategic map, and the status row shows selected vs active state | `C4menu.ini` `stretchWindows` (legacy 0..100 effect strength) | live |
-| Filter: Lanczos / xBRZ / Bicubic / AMD FSR / xBR lv2 / Bilinear / None / CRT | OpenGL sampling filter for enlargement or reduction; the centred fixed-screen crop enters the selected preset before the final viewport, including crop-aware multipass FSR/xBRZ. All eight presets and required pass files ship in `Shaders/`. Lanczos, Bicubic and Bilinear suit fractional downscaling | `ddraw.ini` `shader` | live, OpenGL only |
+| Filter: Lanczos + Bicubic (default) / Lanczos / xBRZ / Bicubic / AMD FSR / xBR lv2 / Bilinear / None / CRT | OpenGL sampling filter; the centred fixed-screen crop enters the selected preset before the final viewport, including crop-aware multipass FSR/xBRZ. All nine presets and required pass files ship in `Shaders/`. Lanczos + Bicubic combines the two filters in equal parts when enlarging; like the separate Lanczos and Bicubic presets, it uses nearest at 1:1 and linear filtering when reducing | `ddraw.ini` `shader` | live, OpenGL only |
 | Renderer: OpenGL (recommended) / GDI / Auto | rendering backend; Auto picks D3D9 first, which has no shader filters. The wrapper switches live and retains a safe active backend if the requested one fails | `ddraw.ini` `renderer` | live, best effort |
 | VSync | fixes tearing in exclusive fullscreen at the cost of a little display lag; windowed and borderless never tear (DWM composition), so keep it off there | `ddraw.ini` `vsync` | live |
 | Take screenshot (PrintScreen) | saves a screenshot via the renderer | - | - |
@@ -677,7 +687,7 @@ C4dll-R.
 | `features/widebattle.cpp`, `DLG_BATTLE_B.dlg` | Защищённые сигнатурами хуки широкого боя для исходной таблицы D2 2.00-3.01 + встроенная раскладка диалога шириной 990, перенесённые из DisciplesGL по MIT | да |
 | `features/horplus.cpp` | Защищённые сигнатурами пресеты настоящего Hor+ кадра игры, восстановленные по старому враперу | да |
 | `features/clouds.cpp` | Защищённые сигнатурами загрузка, поиск ресурсов и обновление внешнего `Imgs\IsoClouds.ff` | да |
-| `release/Shaders/` | Восемь OpenGL-пресетов из меню, включая multipass-файлы и сохранённые заголовки лицензий | да |
+| `release/Shaders/` | Девять OpenGL-пресетов из меню, включая multipass-файлы и сохранённые заголовки лицензий | да |
 | `features/rendererbridge.c` | Собственные адаптеры врапера к внутренностям cnc-ddraw: live reload, скриншот, перевод координат, растяжение фиксированных окон и simple zoom | да |
 | `features/localization.cpp` | Мост локали/кодировок по образцу старого врапера, без жёстких русских кодовых страниц | да |
 | `features/savelogic.cpp` | Независимые от версии хуки сейвов/архива | да |
@@ -739,14 +749,14 @@ C4dll-R публикуется в GitHub Releases в **собственном т
 выпустить релиз, запушьте тег:
 
 ```sh
-git tag c4dll-r-v2.1.0
-git push origin c4dll-r-v2.1.0
+git tag c4dll-r-v2.2.0
+git push origin c4dll-r-v2.2.0
 ```
 
 `.github/workflows/c4dll-r-release.yml` соберёт `C4dll-R.dll`, `Mods/timer.c4p` и
 `Mods/twitchstat.c4p`, упакует их с `Shaders`, `INSTALL.txt`, инструкциями `C4PLUGINS.txt` и
 `TWITCH-STREAMER-RU.md`, примером `C4plugins.ini`, `ddraw.ini`, `LICENSE` и notices в
-`C4dll-R-v2.1.0.zip` и опубликует один готовый архив в GitHub Release. Соответствующие PDB и
+`C4dll-R-v2.2.0.zip` и опубликует один готовый архив в GitHub Release. Соответствующие PDB и
 отдельные бинарные файлы сохраняются в техническом workflow `c4ddraw` в Actions.
 Версия релиза зашивается в ресурс версии DLL (`build.ps1 -Version`),
 так что сборка опознаётся по свойствам файла. Ручной запуск workflow (workflow_dispatch) публикует
@@ -829,18 +839,28 @@ git push origin c4dll-r-v2.1.0
 Если `ddraw.ini` отсутствует совсем, автосозданный файл - это больше не апстрим-сток:
 `cfg_create_ini` пишет настроенный под Disciples II конфиг (`patches/cnc-ddraw-default-ini.patch`) -
 `fake_mode=1024x768x16`, `renderer=opengl`, окно с настоящим заголовком (`windowed=true`,
-`border=true`, `resizable=true`), `width=0`/`height=0` (следовать активному разрешению игры), `maintas=true`, шейдер Lanczos,
+`border=true`, `resizable=true`), `width=0`/`height=0` (следовать активному разрешению игры), `maintas=true`, шейдер Lanczos + Bicubic,
 `devmode=true`, `singlecpu=true`, `nonexclusive=true`, `noactivateapp=true`, `maxfps=144`,
 `maxgameticks=180`, `vsync=true`, привычные горячие клавиши рендерера и `savesettings=0`, чтобы cnc-ddraw
 не переписывал файл и не срезал комментарии. Комментарии лежат прямо в файле и объясняют каждый
 выбор; парсер ini берёт значением всё после `=`, поэтому все комментарии - отдельными строками.
 В zip по-прежнему лежит рекомендованный `ddraw.ini` (родное разрешение, тянущееся окно, шейдер
-Lanczos, `savesettings=1`) - удалите его, если хотите сравнить с генерируемым.
+Lanczos + Bicubic, `savesettings=1`) - удалите его, если хотите сравнить с генерируемым.
+
+Lanczos + Bicubic смешивает два существующих фильтра в равных долях и выбирается при отсутствии
+настройки фильтра и после сброса враппера. При обновлении существующий явный выбор сохраняется.
+Смесь работает в OpenGL; в D3D9 сохраняется резервный Lanczos, в GDI — сглаживание.
 
 `F4` обрабатывается самим C4dll-R: из обычного окна он включает последний выбранный вид полного
 экрана (при первом нажатии — безрамочный), а из любого полного экрана возвращает обычное окно.
 `Alt+Enter` остаётся настроенным переключателем окно/полный экран cnc-ddraw; `Alt+F4` по-прежнему
 закрывает игру.
+
+Разворачивание и восстановление окна теперь, как в DisciplesGL, выполняет Windows: штатная
+кнопка, двойной щелчок по заголовку и Snap. Выбранный игровой кадр 1600x900 сохраняет свой
+размер; готовое изображение масштабируется под область окна, а «Вписать» сохраняет пропорции.
+Смена фильтра сохраняет развёрнутое или прикреплённое через Snap окно. Ручное растягивание
+рамки и его ограничения размера остаются прежними.
 
 Полноэкранный путь не является копией старого адаптера 1:1. В C4dll-R три режима вывода: обычное
 окно, адаптивный безрамочный полный экран и настоящий эксклюзивный полный экран. Во всех трёх
@@ -1019,7 +1039,7 @@ SHA-256 проверенного файла:
 | `maintas` | `true` | вписать с сохранением пропорций выбранного разрешения игры и полями при необходимости | сразу |
 | `boxing` | `false` | наибольшее точное целочисленное вписывание от 19x до 1x; имеет приоритет над `maintas`. При 2x один пиксель игры занимает блок 2x2 = 4 пикселя вывода. Ниже 1x целого множителя нет, поэтому рендерер использует фильтрованное уменьшение | сразу |
 | `aspect_ratio` | пусто | свой override пропорций; меню показывает его как Custom и очищает при выборе «Вписать / Целые» | сразу |
-| `shader` | `lanczos2-sharp` | фильтр апскейла, только для OpenGL; в меню 8 пресетов | сразу |
+| `shader` | `lanczos-bicubic` | фильтр апскейла, только для OpenGL; в меню 9 пресетов | сразу |
 | `savesettings` | `1` | cnc-ddraw сам сохраняет размер/позицию/состояние окна при выходе | - |
 | `maxgameticks` | `180` | кап игрового цикла, тиков/с; см. раздел «Кап скорости игры» | сразу |
 | `maxfps` | `-1` | кап FPS рендера, -1 = частота монитора; крутит только поток рендера, игру не замедляет | сразу |
@@ -1152,7 +1172,7 @@ crop упаковывается в FBO, затем выполняется выб
 | Разрешение -> Размер окна/вывода | открывает числовой диалог ширины/высоты и намеренно отделяет вывод от игрового обзора. «Автоматически» следует выбранному разрешению игры; фиксированное значение меняет область изображения внутри окна без рамки, заголовка и меню, но не обзор карты. Безопасным минимумом остаётся логический кадр игры; Borderless всё равно использует рабочий стол | эффективная секция `ddraw.ini`, `width` + `height` | сразу и при следующем запуске |
 | Масштаб: Вписать / Целые блоки пикселей; статус Custom | укладывает логический кадр игры в фактическое окно/рабочий стол. Строка результата показывает коэффициент, viewport и поля; `1:1` означает один игровой пиксель на один выходной. «Вписать» сохраняет геометрию, «Целые» даёт точные блоки. Старый ручной X/Y stretch читается, но в GUI не предлагается | `ddraw.ini` `maintas` + `boxing` + `aspect_ratio` | сразу |
 | Центральное окно: 100% (без увеличения) .. фактический размер на всю высоту (128% при 1366x768, по умолчанию) | центрированный crop DisciplesGL 1.90 увеличивается по вертикали до viewport без искажения геометрии; только в фиксированных/декорированных окнах боковой декор обрезается и пиксели пересчитываются, стратегическая карта не затрагивается, а строка состояния различает выбранное и активное состояние | `C4menu.ini` `stretchWindows` (внутренняя сила эффекта 0..100) | сразу |
-| Фильтр: Lanczos / xBRZ / Bicubic / AMD FSR / xBR lv2 / Bilinear / Без фильтра / CRT | OpenGL-фильтр увеличения или уменьшения; центрированный crop фиксированного экрана поступает в выбранный пресет до финального viewport, включая crop-aware multipass FSR/xBRZ. Все восемь пресетов и необходимые pass-файлы входят в `Shaders/`. Для дробного downscale подходят Lanczos, Bicubic и Bilinear | `ddraw.ini` `shader` | сразу, только OpenGL |
+| Фильтр: Lanczos + Bicubic (по умолчанию) / Lanczos / xBRZ / Bicubic / AMD FSR / xBR lv2 / Bilinear / Без фильтра / CRT | OpenGL-фильтр; центрированный crop фиксированного экрана поступает в выбранный пресет до финального viewport, включая crop-aware multipass FSR/xBRZ. Все девять пресетов и необходимые pass-файлы входят в `Shaders/`. Lanczos + Bicubic смешивает два фильтра в равных долях при увеличении; как и отдельные Lanczos и Bicubic, при 1:1 использует nearest, при уменьшении — линейную фильтрацию | `ddraw.ini` `shader` | сразу, только OpenGL |
 | Рендерер: OpenGL (рекомендуется) / GDI / Auto | бэкенд рендера; Auto сначала берёт D3D9, у которого нет шейдерных фильтров. Враппер переключает его сразу и сохраняет рабочий резервный backend, если выбранный не запустился | `ddraw.ini` `renderer` | сразу, best effort |
 | VSync | лечит разрывы в эксклюзивном фулскрине ценой небольшой задержки вывода; в окне и безрамочном режиме разрывов нет и так (композиция DWM), там держите выключенным | `ddraw.ini` `vsync` | сразу |
 | Сделать скриншот (PrintScreen) | скриншот средствами рендерера | - | - |

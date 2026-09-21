@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$BuildDirectory,
-    [ValidatePattern('^v[0-9][0-9A-Za-z.-]{0,79}$')][string]$Version = 'v2.1.0',
+    [ValidatePattern('^v[0-9][0-9A-Za-z.-]{0,79}$')][string]$Version = 'v2.2.0',
     [string]$OutputRoot = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent)
 )
 # Offline packaging only. Existing output is an error; partial output is never removed.
@@ -41,7 +41,7 @@ $shaderRoot = "$repo/c4ddraw/release/Shaders"
 $shaderContract = & "$repo/c4ddraw/tools/validate-shader-bundle.ps1" `
     -BundleRoot "$repo/c4ddraw/release" -RequireExactShaderSet
 $shaderFiles = @(Get-ChildItem -LiteralPath $shaderRoot -Recurse -File)
-if ($shaderContract.RequiredFileCount -ne 10) { throw 'Shader menu contract is incomplete' }
+if ($shaderContract.RequiredFileCount -ne 11) { throw 'Shader menu contract is incomplete' }
 foreach ($shader in $shaderFiles) { $files['Shaders/' + $shader.FullName.Substring($shaderRoot.Length + 1).Replace('\', '/')] = $shader.FullName }
 foreach ($inputFile in @($files.Values) + @($symbols.Values) + @("$repo/c4ddraw/release/RELEASE_NOTES.md")) {
     if (-not (Test-Path -LiteralPath $inputFile -PathType Leaf) -or (Get-Item -LiteralPath $inputFile).Length -eq 0) { throw "Missing/empty input: $inputFile" }

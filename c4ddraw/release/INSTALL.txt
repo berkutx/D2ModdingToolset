@@ -21,7 +21,7 @@ INSTALL
   3. Copy ddraw.ini next to Discipl2.exe - these are the recommended renderer
      defaults (windowed with the menu bar, OpenGL, game speed cap 180).
      Upgrading and already tuned your ddraw.ini? Keep yours.
-  4. Copy the Shaders\ folder next to Discipl2.exe. It contains the exact eight
+  4. Copy the Shaders\ folder next to Discipl2.exe. It contains the exact nine
      OpenGL filters shown by the Video menu, including required multipass files.
   5. Copy Mods\timer.c4p and Mods\twitchstat.c4p into the game's Mods\ folder.
      Update both plugins and C4dll-R.dll from the same archive; safe tournament Auto Battle
@@ -67,8 +67,10 @@ USING IT
     their game folders. Add C4DLL_NETTRACE_DETAIL=1 before launch only when a detailed
     timing trace is needed; tracing must also be enabled. NETWORK_TRACE.md covers capture and analysis.
     Tracing is not required for batching and is not a freeze-recovery mechanism.
-  - Missing filter settings now default to Lanczos; an existing explicit choice
-    is preserved until you change it or reset the wrapper. Game > Reset wrapper
+  - Missing filter settings now default to Lanczos + Bicubic, an equal blend
+    of the two OpenGL filters. An existing explicit choice is preserved until
+    you change it or reset the wrapper. D3D9 keeps its Lanczos fallback and GDI
+    keeps its smoothing fallback. Game > Reset wrapper
     settings... asks for confirmation and restores video/scaling, performance,
     animation multipliers and convenience defaults. Timer/plugin settings and
     native gameplay settings are preserved. After successfully saving the reset,
@@ -81,6 +83,7 @@ USING IT
     Diagnostics do not use mss32.dll-relative addresses; missing hooks mean less
     coverage, not proof that a network message was lost.
   - In-game menu (under the title bar): Game / Video / Performance / Plugins.
+    Windows maximize/restore and Snap scale the completed frame without changing the game resolution.
     Renderer, shader, windowed/fullscreen etc. are in Video / Performance.
     The current wrapper has three output modes: normal window, adaptive
     borderless fullscreen and true exclusive fullscreen. This is not a 1:1
@@ -229,7 +232,7 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
   3. Скопируйте ddraw.ini рядом с Discipl2.exe - это рекомендованные настройки
      рендерера (окно с меню-баром, OpenGL, кап скорости игры 180).
      Обновляетесь и уже настроили свой ddraw.ini? Оставьте свой.
-  4. Скопируйте папку Shaders\ рядом с Discipl2.exe. В ней находятся ровно восемь
+  4. Скопируйте папку Shaders\ рядом с Discipl2.exe. В ней находятся ровно девять
      OpenGL-фильтров из меню Video и необходимые файлы multipass.
   5. Скопируйте Mods\timer.c4p и Mods\twitchstat.c4p в папку Mods\ игры.
      Обновляйте оба плагина и C4dll-R.dll из одного архива: безопасному турнирному
@@ -277,8 +280,10 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
     C4DLL_NETTRACE_DETAIL=1; сама диагностика также должна быть включена.
     Сбор и чтение журналов описаны в NETWORK_TRACE.md.
     Для пачек трасса не нужна и средством разблокировки зависания не является.
-  - Без ключа фильтра используется Lanczos; существующий явный выбор сохраняется
-    до его смены или сброса. «Игра > Сбросить настройки враппера...» после
+  - Без ключа фильтра используется Lanczos + Bicubic — смесь двух OpenGL-фильтров
+    в равных долях. Существующий явный выбор сохраняется до его смены или сброса.
+    Для D3D9 сохраняется резервный Lanczos, для GDI — сглаживание.
+    «Игра > Сбросить настройки враппера...» после
     подтверждения возвращает стандартные видео/масштаб, производительность,
     множители анимаций и удобства. Настройки таймера, плагинов и штатные игровые
     параметры сохраняются. После успешной записи сброса клиент сразу закрывается;
@@ -292,6 +297,7 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
     отсутствие наблюдателя уменьшает покрытие, а не доказывает потерю сообщения.
   - Внутриигровое меню (под заголовком окна): Game / Video / Performance /
     Plugins. Рендерер, шейдер, окно/полный экран - в Video / Performance.
+    Разворачивание/восстановление окна Windows и Snap масштабируют готовый кадр без смены разрешения игры.
     Текущий враппер имеет три режима вывода: обычное окно, адаптивный
     безрамочный и настоящий эксклюзивный полный экран. Это не копия fullscreen-пути
     старого адаптера 1:1. В обоих полноэкранных режимах меню-бар намеренно скрыт.
