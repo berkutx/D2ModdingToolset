@@ -21,7 +21,8 @@ code = r'''
 #include <stdio.h>
 #include <stdlib.h>
 struct PointI { int x, y; };
-bool g_dragScroll = true, g_dragScrollActive = false, g_dragMoved = false;
+bool g_dragScrollLeft = true, g_dragScrollMiddle = true;
+bool g_dragScrollActive = false, g_dragMoved = false;
 UINT g_dragScrollButton = 0;
 PointI g_dragStart{}, g_dragMapCenter{}, g_dragPointerAnchor{};
 const int kDragStartThreshold = 1;
@@ -74,9 +75,27 @@ int main() {
     CHECK(g_dragScrollButton == WM_LBUTTONDOWN && nativeCalls == 1);
     cancelDragScroll(); // focus/capture loss and toggle OFF share this cleanup
     CHECK(!capture && !g_dragScrollActive && !g_dragScrollButton && !dragScrollButtonHeld(MK_MBUTTON));
-    g_dragScroll = false;
+    g_dragScrollLeft = g_dragScrollMiddle = false;
     CHECK(isoMouseHook(nullptr, nullptr, WM_MBUTTONDOWN, &point) == 17 && !g_dragScrollActive);
-    g_dragScroll = true; overMap = false;
+    g_dragScrollMiddle = true; // middle-only: ordinary left input remains native
+    CHECK(isoMouseHook(nullptr, nullptr, WM_LBUTTONDOWN, &point) == 17 && !capture);
+    CHECK(isoMouseHook(nullptr, nullptr, WM_LBUTTONUP, &point) == 17 && !capture);
+    isoMouseHook(nullptr, nullptr, WM_MBUTTONDOWN, &point);
+    CHECK(g_dragScrollActive && g_dragScrollButton == WM_MBUTTONDOWN);
+    const int beforeOtherButton = nativeCalls;
+    isoMouseHook(nullptr, nullptr, WM_LBUTTONDOWN, &point);
+    isoMouseHook(nullptr, nullptr, WM_LBUTTONUP, &point);
+    CHECK(g_dragScrollButton == WM_MBUTTONDOWN && nativeCalls == beforeOtherButton);
+    isoMouseHook(nullptr, nullptr, WM_MBUTTONUP, &point);
+    CHECK(!capture && !g_dragScrollActive && nativeCalls == beforeOtherButton);
+    g_dragScrollLeft = true; g_dragScrollMiddle = false;
+    CHECK(isoMouseHook(nullptr, nullptr, WM_MBUTTONDOWN, &point) == 17 && !capture);
+    CHECK(isoMouseHook(nullptr, nullptr, WM_MBUTTONUP, &point) == 17 && !capture);
+    isoMouseHook(nullptr, nullptr, WM_LBUTTONDOWN, &point);
+    CHECK(g_dragScrollActive && g_dragScrollButton == WM_LBUTTONDOWN);
+    isoMouseHook(nullptr, nullptr, WM_LBUTTONUP, &point);
+    CHECK(!capture && !g_dragScrollActive && lastMessage == WM_LBUTTONDOWN);
+    g_dragScrollMiddle = true; overMap = false;
     CHECK(isoMouseHook(nullptr, nullptr, WM_MBUTTONDOWN, &point) == 17 && !g_dragScrollActive);
     printf("PASS: %d actual map-drag handler checks\n", checks);
 }

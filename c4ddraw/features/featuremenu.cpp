@@ -1067,7 +1067,7 @@ enum : UINT
     kIdAnimMap4 = 0xA1D4,
     kIdAnimMap5 = 0xA1D5,
     kIdAnimMap6 = 0xA1D6, // 15x (test/exaggerate)
-    kIdDragScroll = 0xA1E0, // toggle: grab+drag map panning
+    kIdDragScrollLeft = 0xA1E0, // toggle: left-button map panning (legacy command ID)
     kIdAtkOff = 0xA1E1, // BATTLE attack burst: off / 1.5x..5x (extra speed only while a hit plays)
     kIdAtk1 = 0xA1E2,
     kIdAtk2 = 0xA1E3,
@@ -1094,6 +1094,7 @@ enum : UINT
     kIdNetTrace = 0xA1FA, // optional diagnostic recorder, restart by closing client
     kIdNetTraceInfo = 0xA1FB,
     kIdEdgeScroll = 0xA1FC, // independent live toggle for scrolling at the screen edge
+    kIdDragScrollMiddle = 0xA1FD, // independent middle-button map panning
     kIdLocaleNone = 0xA200, // disable wrapper OEM/ANSI recoding
     kIdLocaleBase = 0xA201, // + index into installed Windows locales
     kIdLast = 0xA2FF, // upper bound of our WM_COMMAND id block
@@ -1345,7 +1346,8 @@ int g_d3dFilter = 3;    // FILTER_LANCZOS; also selects GDI nearest vs HALFTONE 
 bool g_maintas = false, g_vsync = false, g_boxing = false;
 char g_aspectRatio[32] = {}; // non-empty overrides native aspect and forces maintas in cnc-ddraw
 bool g_singlecpu = true; // ddraw.ini singlecpu stability mode (cnc-ddraw default true)
-bool g_dragScroll = true; // grab+drag map panning (ini [menu] dragScroll, default on)
+bool g_dragScrollLeft = true; // separate preferences; missing keys inherit legacy dragScroll
+bool g_dragScrollMiddle = true;
 bool g_edgeScroll = true; // independent edge-scroll preference; existing configs default to on
 bool g_dialogVoSkip = false; // auto-close voiced event popups after VO + log their text (default off)
 bool g_autoConfirmUnitHire = false; // skip X005TA0285 through BTN_YES (default on for validated MNS)
@@ -1366,6 +1368,7 @@ HMENU g_bar = nullptr;
 UINT g_relayoutMsg = 0; // registered msg: marshal menu/fullscreen chrome sync onto the GUI thread
 HMENU g_gameMenu = nullptr, g_videoMenu = nullptr, g_perfMenu = nullptr; // top-level bar menus
 HMENU g_mnsMenu = nullptr; // exact-build gameplay settings, absent in the scenario editor
+HMENU g_mapScrollMenu = nullptr;
 HMENU g_technicalMenu = nullptr; // technical diagnostics live one level below ordinary settings
 HMENU g_battleAnimMenu = nullptr, g_mapAnimMenu = nullptr, g_battleAtkMenu = nullptr;
 HMENU g_rendMenu = nullptr, g_shaderMenu = nullptr;
@@ -1593,7 +1596,6 @@ void persist()
     wsprintfA(buf, "%d", g_battleAttackSpeed);
     WritePrivateProfileStringA("menu", "battleAttackSpeed", buf, f);
     WritePrivateProfileStringA("menu", "perUnitBurst", g_perUnitBurst ? "1" : "0", f);
-    WritePrivateProfileStringA("menu", "dragScroll", g_dragScroll ? "1" : "0", f);
     WritePrivateProfileStringA("menu", "wideBattle",
                                widebattle_get_enabled() ? "1" : "0", f);
     WritePrivateProfileStringA("menu", "dialogVoSkip", g_dialogVoSkip ? "1" : "0", f);
@@ -1661,11 +1663,12 @@ void seedConfigFirstRun()
         "battleAttackEnabled=1\r\n"
         "battleAttackSpeed=5\r\n"
         "\r\n"
-        "; Grab and drag the strategic map with the left or middle mouse button. A normal left click is preserved.\r\n"
-        "; Independent of edgeScroll.  0 = off, 1 = on (default).\r\n"
-        "dragScroll=1\r\n"
+        "; Grab and drag the strategic map. Each mouse button can be enabled independently.\r\n"
+        "; A normal left click is preserved. 0 = off, 1 = on (default).\r\n"
+        "dragScrollLeft=1\r\n"
+        "dragScrollMiddle=1\r\n"
         "; Scroll the map when the pointer reaches a screen edge. Changes apply immediately.\r\n"
-        "; 0 = off, 1 = on (default); independent of dragScroll.\r\n"
+        "; 0 = off, 1 = on (default); independent of both drag buttons.\r\n"
         "edgeScroll=1\r\n"
         "\r\n"
         "; Show both unit panels at once in battle (validated Disciples II layout, logical width 990+).\r\n"
@@ -4465,10 +4468,14 @@ void refreshChecks()
     // Game
     CheckMenuItem(g_gameMenu, kIdAlwaysActive,
                   MF_BYCOMMAND | (g_alwaysActive ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(g_mnsMenu, kIdDragScroll,
-                  MF_BYCOMMAND | (g_dragScroll ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(g_mnsMenu, kIdEdgeScroll,
-                  MF_BYCOMMAND | (g_edgeScroll ? MF_CHECKED : MF_UNCHECKED));
+    if (g_mapScrollMenu) {
+        CheckMenuItem(g_mapScrollMenu, kIdDragScrollLeft,
+                      MF_BYCOMMAND | (g_dragScrollLeft ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(g_mapScrollMenu, kIdDragScrollMiddle,
+                      MF_BYCOMMAND | (g_dragScrollMiddle ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(g_mapScrollMenu, kIdEdgeScroll,
+                      MF_BYCOMMAND | (g_edgeScroll ? MF_CHECKED : MF_UNCHECKED));
+    }
     CheckMenuItem(g_gameMenu, kIdWideBattle,
                    MF_BYCOMMAND |
                        ((widebattle_is_available() && widebattle_get_enabled())
@@ -4845,9 +4852,9 @@ void onMenuCommand(UINT id)
          (id >= kIdBattle1 && id <= kIdBattle4) ||
          (id >= kIdMap1 && id <= kIdMap3) ||
          (id >= kIdAnimMapOff && id <= kIdAnimMap6) ||
-         (id >= kIdDragScroll && id <= kIdDialogVoInfo) ||
+         (id >= kIdDragScrollLeft && id <= kIdDialogVoInfo) ||
          id == kIdAutoConfirmUnitHire || id == kIdClouds || id == kIdFastAi ||
-         id == kIdEdgeScroll)) {
+         id == kIdEdgeScroll || id == kIdDragScrollMiddle)) {
         // Disabled menu items normally cannot generate WM_COMMAND, but never
         // let a synthetic command reach an exact-address MNS/SMNS path.
         return;
@@ -5006,10 +5013,17 @@ void onMenuCommand(UINT id)
     } else if (id == kIdAlwaysActive) {
         g_alwaysActive = !g_alwaysActive;
         applyAlwaysActive(g_alwaysActive);
-    } else if (id == kIdDragScroll) {
-        g_dragScroll = !g_dragScroll; // live: the detour reads this flag (persist() saves it)
-        if (!g_dragScroll)
+    } else if (id == kIdDragScrollLeft || id == kIdDragScrollMiddle) {
+        const bool left = id == kIdDragScrollLeft;
+        bool& enabled = left ? g_dragScrollLeft : g_dragScrollMiddle;
+        enabled = !enabled;
+        if (!enabled && g_dragScrollButton == (left ? WM_LBUTTONDOWN : WM_MBUTTONDOWN))
             cancelDragScroll();
+        // Each action writes only its own preference, as with edge scrolling.
+        WritePrivateProfileStringA("menu", left ? "dragScrollLeft" : "dragScrollMiddle",
+                                   enabled ? "1" : "0", iniFile());
+        refreshChecks();
+        return;
     } else if (id == kIdEdgeScroll) {
         g_edgeScroll = !g_edgeScroll;
         resetEdgeScrollCadence();
@@ -5974,11 +5988,15 @@ void buildMenu()
                     reinterpret_cast<UINT_PTR>(g_mnsMenu), L"MNS/SMNS");
     // Keep the existing alwaysActive config/patch path intact, but do not expose it in the menu
     // until its game-side behavior is verified.
-    AppendMenuW(g_mnsMenu, MF_STRING, kIdEdgeScroll,
-                L(L"Scroll at screen edges", L"Прокрутка у края экрана"));
-    AppendMenuW(g_mnsMenu, MF_STRING, kIdDragScroll,
-                L(L"Drag map with the left or middle mouse button",
-                  L"Перетаскивание карты левой или средней кнопкой"));
+    g_mapScrollMenu = CreatePopupMenu();
+    AppendMenuW(g_mapScrollMenu, MF_STRING, kIdDragScrollLeft,
+                L(L"Left Mouse Button", L"Левая кнопка мыши"));
+    AppendMenuW(g_mapScrollMenu, MF_STRING, kIdDragScrollMiddle,
+                L(L"Middle Mouse Button", L"Средняя кнопка мыши"));
+    AppendMenuW(g_mapScrollMenu, MF_STRING, kIdEdgeScroll,
+                L(L"Edge Detection", L"У края экрана"));
+    AppendMenuW(g_mnsMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_mapScrollMenu),
+                L(L"Map Scroll", L"Прокрутка карты"));
     // WideBattle remains installed and enabled by its existing default/config path, but is not
     // exposed in the 1.5 menu until the user-facing switch semantics are ready.
     AppendMenuW(g_mnsMenu,
@@ -6732,7 +6750,7 @@ extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, 
 }
 
 // ===== Map drag-scroll (DGL-faithful grab+drag pan) =====
-// Detours the in-game iso-view mouse handler (CStratInterf sub_48E8A0). While g_dragScroll is on, a
+// Detours the in-game iso-view mouse handler (CStratInterf sub_48E8A0). An enabled
 // left/middle press on open map terrain grabs the tile under the cursor; dragging pans so it stays put (like
 // DGL MouseScroll). A left press-release without movement is replayed for selection; middle is pan-only.
 // Russobit addresses RE'd from the DGL backup + game exe. Game calls are __thiscall via typedefs
@@ -7045,7 +7063,7 @@ void normalizeDragBoundary(void* mg, int pointerX, int pointerY)
 
 int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
 {
-    if (!g_dragScroll)
+    if (!g_dragScrollLeft && !g_dragScrollMiddle)
         return callOrigIsoMouse(view, msgId, pt);
 
     __try {
@@ -7055,6 +7073,8 @@ int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
         if (msgId == WM_LBUTTONDOWN || msgId == WM_MBUTTONDOWN) {
             if (g_dragScrollActive)
                 return 1; // keep the first button and anchor until its release
+            if (!(msgId == WM_LBUTTONDOWN ? g_dragScrollLeft : g_dragScrollMiddle))
+                return callOrigIsoMouse(view, msgId, pt);
             void* mg = mapGraphicsPtr();
             PointI tile{}, mapCenter{}, centerOffset{};
             // screen->map returns false over the ~160px minimap/resource corner -> only grab real map
@@ -7212,8 +7232,8 @@ void installDragScrollDetour()
         mlog("[menu] drag-scroll/edge-scroll detours FAILED (0x48E8A0/0x54249C)");
     } else {
         const bool dglScroll = installEdgeScrollDglPatches();
-        mlog("[menu] drag-scroll + edge-scroll detours installed (0x48E8A0 iso, 0x54249C edge; drag default %s; edge %s)",
-             g_dragScroll ? "on" : "off",
+        mlog("[menu] drag-scroll + edge-scroll detours installed (0x48E8A0 iso, 0x54249C edge; left %s; middle %s; edge %s)",
+             g_dragScrollLeft ? "on" : "off", g_dragScrollMiddle ? "on" : "off",
              dglScroll ? "DGL cadence/step" : "v1.8 fail-safe");
     }
 }
@@ -7375,7 +7395,9 @@ extern "C" void featuremenu_install(void)
         g_battleAttackSpeed = 1;
     if (g_battleAttackSpeed > 6)
         g_battleAttackSpeed = 6;
-    g_dragScroll = GetPrivateProfileIntA("menu", "dragScroll", 1, f) != 0;
+    const int legacyDragScroll = GetPrivateProfileIntA("menu", "dragScroll", 1, f) != 0;
+    g_dragScrollLeft = GetPrivateProfileIntA("menu", "dragScrollLeft", legacyDragScroll, f) != 0;
+    g_dragScrollMiddle = GetPrivateProfileIntA("menu", "dragScrollMiddle", legacyDragScroll, f) != 0;
     g_edgeScroll = GetPrivateProfileIntA("menu", "edgeScroll", 1, f) != 0;
     widebattle_set_enabled(GetPrivateProfileIntA("menu", "wideBattle", 1, f) != 0);
     g_dialogVoSkip = GetPrivateProfileIntA("menu", "dialogVoSkip", 0, f) != 0;

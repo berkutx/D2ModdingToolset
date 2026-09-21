@@ -103,12 +103,12 @@ USING IT
     requires a full game restart.
   - Game > MNS/SMNS groups the exact-address gameplay options: Battle animation and Map animation
      (live x1.5..x5 speed-up),
-     map drag-scroll (ON by default; exact button-down anchor, movement starts on
-     the first changed game pixel; held-button drag remains 1:1),
-     edge scrolling (ON by default, independently switchable from the same submenu;
-     applies live and is saved as [menu] edgeScroll in C4menu.ini, defaulting to 1
-     when missing; when enabled it follows the game's Fast/Normal/Slow setting live
-     through the resolution-scaled DisciplesGL cadence),
+     Map Scroll with independent Left Mouse Button, Middle Mouse Button and
+     Edge Detection checkboxes (all ON by default; changes apply immediately).
+     Dragging keeps the exact press point and moves the map 1:1. The button settings
+     are saved as [menu] dragScrollLeft / dragScrollMiddle in C4menu.ini; each missing
+     key inherits the old dragScroll value (default: 1). Edge Detection uses edgeScroll
+     (default: 1) and the game's Fast/Normal/Slow setting through DisciplesGL cadence,
      plus Battle speed / Map turn speed (engine presets, saved per game) and
      restart-only Show map clouds (the game's native option; requires external IsoClouds.ff).
   - Video > Resolution is one direct list. Auto is first; all 13 manual game
@@ -314,14 +314,14 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
     включён; после изменения полностью перезапустите игру.
   - В «Игра > MNS/SMNS» собраны точные адресные игровые опции: Battle animation и Map animation
      (живое ускорение x1.5..x5),
-     перетаскивание карты (включено по умолчанию; точка нажатия сохраняется без
-     стартового рывка, движение остаётся 1:1),
-     прокрутка карты у края экрана (включена по умолчанию и переключается независимо
-     в том же подменю; изменение применяется сразу и сохраняется как edgeScroll
-     в секции [menu] файла C4menu.ini; если ключа нет, используется 1).
-     Включённая краевая прокрутка сразу следует игровой настройке
-     Быстро/Нормально/Медленно через масштабируемый по разрешению такт
-     DisciplesGL 100%/75%/50%. Здесь же находятся Battle speed / Map turn speed (пресеты движка,
+     «Прокрутка карты» с независимыми галочками «Левая кнопка мыши», «Средняя кнопка
+     мыши» и «У края экрана» (все включены по умолчанию; изменения применяются сразу).
+     Перетаскивание сохраняет точку нажатия и движение 1:1. Кнопки сохраняются как
+     dragScrollLeft / dragScrollMiddle в секции [menu] файла C4menu.ini; каждый
+     отсутствующий ключ наследует прежний dragScroll (по умолчанию 1). Для края
+     используется edgeScroll (по умолчанию 1) и игровая настройка
+     Быстро/Нормально/Медленно с тактом DisciplesGL 100%/75%/50%.
+     Здесь же находятся Battle speed / Map turn speed (пресеты движка,
      хранятся в сейве), и restart-only «Показывать облака» (штатная опция игры;
      нужен внешний IsoClouds.ff).
   - Видео > Разрешение — один прямой список. Сначала идёт «Авто», затем все 13
