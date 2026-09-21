@@ -371,7 +371,7 @@ extern "C" void c4trace_event(unsigned event, uintptr_t object, uintptr_t a, uin
     // Apply the volume policy before QPC, sequence allocation and buffering.
     // Unknown/high-frequency legacy emitters cannot fill a minimal match log.
     if (!InterlockedCompareExchange(&g_detailed, 0, 0) &&
-        event != 1 && event != 102 && (event < 200 || event > 239)) return;
+        event != 1 && event != 102 && (event < 200 || event > 244)) return;
     Record record = {};
     LARGE_INTEGER counter;
     if (!QueryPerformanceCounter(&counter)) return;

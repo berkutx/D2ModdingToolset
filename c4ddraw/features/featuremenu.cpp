@@ -18,9 +18,11 @@
 #include "featuremenu_resources.h"
 #include "eventtrace.h"
 #include "messagebatch.h"
+#include "netnotify.h"
 #include "c4trace.h"
 #include "inisettingsreset.h"
 #include "wrapperdefaults.h"
+#include "ownedwindowtimer.h"
 #pragma intrinsic(_ReturnAddress)
 
 // Renderer bridge (rendererbridge.c, same module): DDReloadConfig re-reads ddraw.ini + dd_SetDisplayMode;
@@ -1384,10 +1386,9 @@ using WndProcFn = LRESULT(CALLBACK*)(HWND, UINT, WPARAM, LPARAM);
 WndProcFn g_origWndProc = nullptr;
 volatile LONG g_nativeWndProcDepth = 0;
 HWND g_gameHwnd = nullptr; // game window (drag-scroll SetCapture target); set in wndProcHook
-const UINT_PTR kPressTimerId = 0xC4D7; // our WM_TIMER source: on-elapse END_TURN press fires ONLY on
-                                       // WM_TIMER (idle-gated), like legacy SetTimer(hWnd,0,0x20,0)
-HWND g_pressTimerHwnd = nullptr; // tracked independently: renderer bridge may set g_gameHwnd first
+OwnedWindowTimer g_pressTimer; // separate HWND: native timer IDs occupy the entire game namespace
 volatile LONG g_pressTimerArmFailureLogged = 0;
+void pumpPressTimer(HWND hwnd);
 
 bool dllRelativePath(const char* relative, char* path, size_t capacity)
 {
@@ -1532,31 +1533,22 @@ void showShaderAssetsWarningOnce(HWND owner)
 
 bool ensurePressTimer(HWND hwnd)
 {
-    if (!hwnd)
-        return false;
-    if (g_pressTimerHwnd == hwnd)
-        return true;
-    if (g_pressTimerHwnd)
-        KillTimer(g_pressTimerHwnd, kPressTimerId);
-    g_pressTimerHwnd = nullptr;
-    if (!SetTimer(hwnd, kPressTimerId, 32, nullptr)) {
+    const HWND previous = g_pressTimer.window();
+    if (!g_pressTimer.ensure(hwnd, g_ddraw_module, pumpPressTimer)) {
         if (InterlockedCompareExchange(&g_pressTimerArmFailureLogged, 1, 0) == 0)
-            mlog("[timer] SetTimer(%p, %#Ix) failed error=%lu", hwnd,
-                 kPressTimerId, GetLastError());
+            mlog("[timer] private idle timer failed target=%p error=%lu", hwnd, GetLastError());
         return false;
     }
     InterlockedExchange(&g_pressTimerArmFailureLogged, 0);
-    g_pressTimerHwnd = hwnd;
-    mlog("[timer] idle pump armed hwnd=%p id=%#Ix", hwnd, kPressTimerId);
+    if (previous != g_pressTimer.window())
+        mlog("[timer] idle pump armed target=%p timer-window=%p id=%#Ix", hwnd,
+             g_pressTimer.window(), g_pressTimer.timerId());
     return true;
 }
 
 void releasePressTimer(HWND hwnd)
 {
-    if (g_pressTimerHwnd != hwnd)
-        return;
-    KillTimer(hwnd, kPressTimerId);
-    g_pressTimerHwnd = nullptr;
+    g_pressTimer.release(hwnd);
 }
 
 uintptr_t gameWndProcVA()
@@ -1682,6 +1674,10 @@ void seedConfigFirstRun()
         "\r\n"
         "; Bounded native notification batches. 1 = on (default), 0 = off; restart required.\r\n"
         "messageBatching=1\r\n"
+        "\r\n"
+        "; Renew custom-lobby queue notifications through the safe native UI boundary.\r\n"
+        "; Exact supported EXE only. 1 = on (default), 0 = off; restart required.\r\n"
+        "networkWakeRecovery=1\r\n"
         "\r\n"
         "; Optional network/timing CSV diagnostics; toggling from the menu closes the client.\r\n"
         "; 0 = off (default), 1 = on at next launch. See NETWORK_TRACE.md.\r\n"
@@ -5329,7 +5325,7 @@ void onMenuCommand(UINT id)
             if (liveResult && g_rendererIdx == 0) {
                 g_pendingRendererVerifyTick = GetTickCount() + 3500;
                 if (g_gameHwnd)
-                    SetTimer(g_gameHwnd, kPressTimerId, 32, nullptr);
+                    ensurePressTimer(g_gameHwnd);
             }
         }
         if (rendererChanged && !liveResult) {
@@ -5705,10 +5701,36 @@ LRESULT dispatchGameWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 }
 
+void pumpPressTimer(HWND hwnd)
+{
+    // OwnedWindowTimer has validated the target lifetime and UI thread. Preserve
+    // the former WM_TIMER housekeeping order without dispatching a second message
+    // or borrowing an ID from the game's timer table.
+    if (g_gameHwnd != hwnd) {
+        releasePressTimer(hwnd);
+        return;
+    }
+    if (g_ver != VerRussobit) {
+        verifyPendingRenderer();
+        if (!g_pendingRendererVerifyTick)
+            releasePressTimer(hwnd);
+        return;
+    }
+    reevaluateWrapperCursor(hwnd);
+    featuremenu_refresh_day();
+    updateBattleBurst();
+    dvoPoll();
+    verifyPendingRenderer();
+    timerhost_pump();
+    fastai_pump();
+}
+
 LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     eventtrace_install();
     messagebatch_install(hwnd, iniFile());
+    netnotify_install(hwnd, iniFile());
+    if (netnotify_window_event(hwnd, msg, wParam, lParam)) return 0;
     messagebatch_window_event(hwnd, msg, wParam);
     eventtrace_message(C4TRACE_FEATURE_WND, hwnd, msg, wParam, lParam);
     if (msg == WM_CLOSE || msg == WM_DESTROY || msg == WM_NCDESTROY ||
@@ -5741,24 +5763,6 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     if (timerhost_auto_battle_message(msg))
         return 0;
-    // Our private 32ms timer (idle WM_TIMER): refresh the cached scenario day on the GAME thread, then
-    // run the queued auto-end-turn/retreat press. Gate on OUR id and CONSUME it (return 0) so the game's
-    // own timers don't drive the pump and our id never leaks into the game's WndProc timer dispatch.
-    if (msg == WM_TIMER && wParam == kPressTimerId) {
-        // WM_MOUSELEAVE is not guaranteed when another top-level game window appears under a
-        // stationary pointer. Reconcile visual ownership on the existing idle timer: an inactive
-        // hovered client keeps receiving native D2 hover, every other process clears its stale
-        // software cursor without touching the real foreground application's HCURSOR.
-        reevaluateWrapperCursor(hwnd);
-        featuremenu_refresh_day();
-        updateBattleBurst(); // idle/attack split: drive g_battleFactor from exact visual events
-        dvoPoll();           // auto-close a voiced event popup once its VO has finished
-        verifyPendingRenderer();
-        timerhost_pump();
-        fastai_pump(); // discovery only; accelerated work runs on host ThreadWindowClass itself
-        return 0;
-    }
-
     // cnc-ddraw's renderer bridge also observes these messages because some MNS paths consume an
     // activation notification before the native game WndProc sees it. Calling this here as well is
     // intentional and idempotent; it covers direct/native dispatch and older renderer builds.
@@ -6587,12 +6591,24 @@ extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, 
 {
     eventtrace_install();
     messagebatch_install(hwnd, iniFile());
+    netnotify_install(hwnd, iniFile());
+    if (netnotify_window_event(hwnd, msg, wParam, lParam)) {
+        if (result) *result = 0;
+        return 1;
+    }
     messagebatch_window_event(hwnd, msg, wParam);
     eventtrace_message(C4TRACE_RENDER_WND, hwnd, msg, wParam, lParam);
     if (!result)
         return 0;
 
-    if (!g_gameHwnd)
+    // Renderer dispatch precedes the native detour and cursor lifecycle handling
+    // can clear g_gameHwnd. Release the separate timer before either can do so.
+    if (msg == WM_NCDESTROY) {
+        releasePressTimer(hwnd);
+        if (g_gameHwnd == hwnd)
+            g_gameHwnd = nullptr;
+    }
+    if (!g_gameHwnd && msg != WM_NCDESTROY)
         g_gameHwnd = hwnd;
 
     if (pluginhost_battle_state_message(msg)) {
@@ -6608,14 +6624,6 @@ extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, 
     // consume some of them. Keep this before the Russobit early return so client/menu cursor mode is
     // reconciled immediately. The exact hook repeats it safely when delivery continues.
     handleCursorLifecycle(hwnd, msg, wParam);
-
-    if (g_ver != VerRussobit && msg == WM_TIMER && wParam == kPressTimerId) {
-        verifyPendingRenderer();
-        if (!g_pendingRendererVerifyTick)
-            KillTimer(hwnd, kPressTimerId);
-        *result = 0;
-        return 1;
-    }
 
     // Wrapper-owned keys must be handled at the renderer boundary before the Russobit early return.
     // Some renderer/compatibility paths consume a message before the native game WndProc detour;

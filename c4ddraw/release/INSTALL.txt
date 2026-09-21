@@ -54,6 +54,11 @@ USING IT
     accelerates command delivery without raising the configured 180-tick cap.
     To disable it, set messageBatching=0 in the existing [menu] section of
     C4menu.ini and restart the game. See MESSAGE_BATCHING.md for details.
+    Custom-lobby notification recovery is also ON by default on the validated
+    executable. It periodically services the existing network receiver through
+    the outer UI loop, including when batching is disabled. To opt out, set
+    networkWakeRecovery=0 in [menu] of C4menu.ini and restart. It cannot recover
+    absent server packets or a callback that never returns.
     Network tracing is optional and OFF by default. When enabled, its short log records
     BeginTurn/EndTurn/TurnInfo sends and receives, TurnInfo handling and player disconnects,
     plus network/UI counters every five seconds. Other packet contents are not saved.
@@ -263,6 +268,11 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
     exe. Она ускоряет доставку команд без повышения настройки 180 тиков.
     Для отключения задайте messageBatching=0 в существующей секции [menu]
     файла C4menu.ini и перезапустите игру. Подробности — в MESSAGE_BATCHING.md.
+    На проверенном exe также включена страховка уведомлений лобби: периодический
+    сигнал обслуживает штатный сетевой обработчик через внешний цикл UI, в том
+    числе при выключенных пачках. Для отключения задайте networkWakeRecovery=0
+    в [menu] файла C4menu.ini и перезапустите игру. Отсутствующие пакеты сервера
+    или незавершающийся обработчик эта защита не восстанавливает.
     Трассировка необязательна и по умолчанию выключена. Короткий журнал сохраняет
     отправку и получение BeginTurn/EndTurn/TurnInfo, обработку TurnInfo, отключение
     игрока и сводку сетевых вызовов и работы интерфейса раз в пять секунд.
