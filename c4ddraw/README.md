@@ -191,12 +191,6 @@ The blend runs in OpenGL; D3D9 retains its Lanczos fallback and GDI retains smoo
 (borderless on the first use), and either fullscreen kind back to a normal window. `Alt+Enter`
 retains cnc-ddraw's configured window/fullscreen toggle; `Alt+F4` still closes the game.
 
-Window maximize/restore now follows DisciplesGL's use of Windows' standard button, title-bar
-double-click and Snap placement. A selected 1600x900 game canvas stays 1600x900; the completed
-frame scales to the window's client area, with Fit preserving its aspect ratio. Changing the
-filter preserves maximized or snapped placement. Manual frame resizing and its size limits
-remain unchanged.
-
 This is not a 1:1 copy of the old adapter's fullscreen path. C4dll-R exposes three output modes:
 normal window, adaptive borderless fullscreen, and true exclusive fullscreen. All three enter the
 same renderer geometry: Fit/Integer/custom aspect establishes the base viewport, the same centred
@@ -855,12 +849,6 @@ Lanczos + Bicubic смешивает два существующих фильт�
 экрана (при первом нажатии — безрамочный), а из любого полного экрана возвращает обычное окно.
 `Alt+Enter` остаётся настроенным переключателем окно/полный экран cnc-ddraw; `Alt+F4` по-прежнему
 закрывает игру.
-
-Разворачивание и восстановление окна теперь, как в DisciplesGL, выполняет Windows: штатная
-кнопка, двойной щелчок по заголовку и Snap. Выбранный игровой кадр 1600x900 сохраняет свой
-размер; готовое изображение масштабируется под область окна, а «Вписать» сохраняет пропорции.
-Смена фильтра сохраняет развёрнутое или прикреплённое через Snap окно. Ручное растягивание
-рамки и его ограничения размера остаются прежними.
 
 Полноэкранный путь не является копией старого адаптера 1:1. В C4dll-R три режима вывода: обычное
 окно, адаптивный безрамочный полный экран и настоящий эксклюзивный полный экран. Во всех трёх

@@ -57,7 +57,6 @@ $patchSurfacePublish = Join-Path $root "patches\cnc-ddraw-surface-layout-publish
 $patchWindowStretchFilter = Join-Path $root "patches\cnc-ddraw-window-stretch-filter.patch"
 $patchEventTrace = Join-Path $root "patches\cnc-ddraw-event-trace.patch"
 $patchPaletteColors = Join-Path $root "patches\cnc-ddraw-d2-palette-colors.patch"
-$patchNativeWindow = Join-Path $root "patches\cnc-ddraw-native-window.patch"
 $cb63def = Join-Path $root "forwarder\C4dll-R.cb63.def"
 $out = Join-Path $build "bin\Release\C4dll-R.dll"
 $timerPluginProj = Join-Path $root "plugins\timer\timer.vcxproj"
@@ -171,8 +170,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "git apply (opt-in event diagnostics) failed (exit $LASTEXITCODE)" }
     & git -c core.autocrlf=false apply --ignore-whitespace "$patchPaletteColors"
     if ($LASTEXITCODE -ne 0) { throw "git apply (D2 texture palette colors) failed (exit $LASTEXITCODE)" }
-    & git -c core.autocrlf=false apply --ignore-whitespace "$patchNativeWindow"
-    if ($LASTEXITCODE -ne 0) { throw "git apply (native window maximize/restore) failed (exit $LASTEXITCODE)" }
 }
 finally { Pop-Location }
 if (-not (Select-String -Path (Join-Path $build "src\dllmain.c") -Pattern "c4features_install" -Quiet)) {
@@ -180,10 +177,6 @@ if (-not (Select-String -Path (Join-Path $build "src\dllmain.c") -Pattern "c4fea
 }
 if (-not (Test-Path (Join-Path $build "src\render_null.c"))) {
     throw "render-null patch did not apply: src/render_null.c missing"
-}
-if (-not (Select-String -Path (Join-Path $build "src\dd.c") -Pattern "keep_native_window" -Quiet) -or
-    -not (Select-String -Path (Join-Path $build "src\wndproc.c") -Pattern "dd_ResizeWindowOutput" -Quiet)) {
-    throw "native-window patch did not apply: native placement / output resize integration missing"
 }
 if (-not (Select-String -Path (Join-Path $build "src\config.c") -Pattern "fake_mode=1024x768x16" -Quiet)) {
     throw "default-ini patch did not apply: D2 tuned template missing from src/config.c"

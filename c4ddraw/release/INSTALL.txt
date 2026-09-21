@@ -83,7 +83,6 @@ USING IT
     Diagnostics do not use mss32.dll-relative addresses; missing hooks mean less
     coverage, not proof that a network message was lost.
   - In-game menu (under the title bar): Game / Video / Performance / Plugins.
-    Windows maximize/restore and Snap scale the completed frame without changing the game resolution.
     Renderer, shader, windowed/fullscreen etc. are in Video / Performance.
     The current wrapper has three output modes: normal window, adaptive
     borderless fullscreen and true exclusive fullscreen. This is not a 1:1
@@ -297,7 +296,6 @@ Releases and their source tags: https://github.com/berkutx/D2ModdingToolset/rele
     отсутствие наблюдателя уменьшает покрытие, а не доказывает потерю сообщения.
   - Внутриигровое меню (под заголовком окна): Game / Video / Performance /
     Plugins. Рендерер, шейдер, окно/полный экран - в Video / Performance.
-    Разворачивание/восстановление окна Windows и Snap масштабируют готовый кадр без смены разрешения игры.
     Текущий враппер имеет три режима вывода: обычное окно, адаптивный
     безрамочный и настоящий эксклюзивный полный экран. Это не копия fullscreen-пути
     старого адаптера 1:1. В обоих полноэкранных режимах меню-бар намеренно скрыт.
