@@ -56,6 +56,9 @@ jobs:
       - name: Validate texture palette colors
         run: ./c4ddraw/tests/run-palette-colors-tests.ps1
 
+      - name: Validate map drag buttons
+        run: python c4ddraw/tests/test-map-drag.py
+
       - name: Validate filter defaults
         run: ./c4ddraw/tests/run-filter-defaults-tests.ps1
 

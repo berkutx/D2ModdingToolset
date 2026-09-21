@@ -137,6 +137,9 @@ extern "C" int timerhost_auto_battle_message(UINT msg); // queued native TOG_AUT
 // Map drag-scroll lives in global scope (defined after the anon namespace); forward-declared here.
 extern bool g_dragScrollActive;
 extern bool g_dragMoved;
+extern UINT g_dragScrollButton;
+bool dragScrollReleaseMatches(UINT msg);
+bool dragScrollButtonHeld(WPARAM keys);
 void dragScrollWndMove(int gameX, int gameY);
 void resetEdgeScrollCadence();
 void cancelDragScroll();
@@ -1658,7 +1661,7 @@ void seedConfigFirstRun()
         "battleAttackEnabled=1\r\n"
         "battleAttackSpeed=5\r\n"
         "\r\n"
-        "; Grab and drag the strategic map with the left mouse button. A normal click is preserved.\r\n"
+        "; Grab and drag the strategic map with the left or middle mouse button. A normal left click is preserved.\r\n"
         "; Independent of edgeScroll.  0 = off, 1 = on (default).\r\n"
         "dragScroll=1\r\n"
         "; Scroll the map when the pointer reaches a screen edge. Changes apply immediately.\r\n"
@@ -5666,7 +5669,7 @@ LRESULT dispatchGameWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         // click. If the release landed on another panel/outside the iso view, that handler is not
         // called; repair the still-live wrapper capture after native dispatch instead of carrying
         // it until the view is recreated.
-        if (msg == WM_LBUTTONUP && g_dragScrollActive)
+        if (g_dragScrollActive && dragScrollReleaseMatches(msg))
             cancelDragScroll();
         return result;
     }
@@ -5819,15 +5822,24 @@ LRESULT CALLBACK wndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     // iso field onto a unit panel or outside the window. In that case the game's interface router
     // may never call isoMouseHook with WM_LBUTTONUP. A real drag consumed its original DOWN, so it
     // is both necessary and safe to finish it here without forwarding an unmatched native UP.
-    if (g_dragScrollActive && g_dragMoved && msg == WM_LBUTTONUP) {
+    if (g_dragScrollActive && dragScrollReleaseMatches(msg) &&
+        (g_dragMoved || g_dragScrollButton == WM_MBUTTONDOWN)) {
         cancelDragScroll();
         return 0;
     }
 
+    // The first button owns the gesture. Do not re-anchor or deliver an unmatched
+    // click from the other drag button while capture belongs to the map.
+    if (g_dragScrollActive &&
+        (msg == WM_LBUTTONDOWN || msg == WM_MBUTTONDOWN ||
+         msg == WM_LBUTTONDBLCLK || msg == WM_MBUTTONDBLCLK ||
+         ((msg == WM_LBUTTONUP || msg == WM_MBUTTONUP) && !dragScrollReleaseMatches(msg))))
+        return 0;
+
     // fake_WndProc has already transformed lParam into game coordinates before it calls the game's
     // WndProc. A second cnc-ddraw transform here shifts the drag anchor under scaling or letterboxing.
     if (g_dragScrollActive && msg == WM_MOUSEMOVE) {
-        if ((wParam & MK_LBUTTON) == 0) {
+        if (!dragScrollButtonHeld(wParam)) {
             // Self-heal exactly when the physical gesture has ended even if its WM_LBUTTONUP was
             // lost during a modal/capture transition. Do not swallow this ordinary hover sample.
             cancelDragScroll();
@@ -5965,8 +5977,8 @@ void buildMenu()
     AppendMenuW(g_mnsMenu, MF_STRING, kIdEdgeScroll,
                 L(L"Scroll at screen edges", L"Прокрутка у края экрана"));
     AppendMenuW(g_mnsMenu, MF_STRING, kIdDragScroll,
-                L(L"Drag map with the left mouse button",
-                  L"Перетаскивание карты левой кнопкой"));
+                L(L"Drag map with the left or middle mouse button",
+                  L"Перетаскивание карты левой или средней кнопкой"));
     // WideBattle remains installed and enabled by its existing default/config path, but is not
     // exposed in the 1.5 menu until the user-facing switch semantics are ready.
     AppendMenuW(g_mnsMenu,
@@ -6721,8 +6733,8 @@ extern "C" int featuremenu_renderer_message(HWND hwnd, UINT msg, WPARAM wParam, 
 
 // ===== Map drag-scroll (DGL-faithful grab+drag pan) =====
 // Detours the in-game iso-view mouse handler (CStratInterf sub_48E8A0). While g_dragScroll is on, a
-// left-press on open map terrain grabs the tile under the cursor; dragging pans so it stays put (like
-// DGL MouseScroll). A press-release with no movement is replayed so a plain click still selects.
+// left/middle press on open map terrain grabs the tile under the cursor; dragging pans so it stays put (like
+// DGL MouseScroll). A left press-release without movement is replayed for selection; middle is pan-only.
 // Russobit addresses RE'd from the DGL backup + game exe. Game calls are __thiscall via typedefs
 // (this file is /Gd); every game deref is SEH + isUserPtr guarded.
 struct PointI { int x, y; };
@@ -6750,6 +6762,20 @@ constexpr DWORD kEdgeScrollCadenceMs = 1000 / kEdgeScrollCadenceHz; // DGL integ
 constexpr DWORD kEdgeScrollFallbackIntervalMs = 33; // fail-safe if the exact call site is unknown
 bool g_dragScrollActive = false;
 bool g_dragMoved = false;
+UINT g_dragScrollButton = 0; // WM_LBUTTONDOWN or WM_MBUTTONDOWN; first press owns capture
+
+bool dragScrollReleaseMatches(UINT msg)
+{
+    return (g_dragScrollButton == WM_LBUTTONDOWN && msg == WM_LBUTTONUP) ||
+           (g_dragScrollButton == WM_MBUTTONDOWN && msg == WM_MBUTTONUP);
+}
+
+bool dragScrollButtonHeld(WPARAM keys)
+{
+    const WPARAM mask = g_dragScrollButton == WM_LBUTTONDOWN ? MK_LBUTTON :
+                        g_dragScrollButton == WM_MBUTTONDOWN ? MK_MBUTTON : 0;
+    return (keys & mask) != 0;
+}
 PointI g_dragMapCenter{};     // exact center tile returned by the game at button-down
 PointI g_dragPointerAnchor{}; // button-down cursor plus the center's sub-tile screen offset
 PointI g_dragStart{};         // cursor at button-down (click-vs-drag detection)
@@ -6759,6 +6785,7 @@ void cancelDragScroll()
 {
     g_dragScrollActive = false;
     g_dragMoved = false;
+    g_dragScrollButton = 0;
     if (g_gameHwnd && GetCapture() == g_gameHwnd)
         ReleaseCapture();
 }
@@ -7025,7 +7052,9 @@ int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
         if (!pt)
             return callOrigIsoMouse(view, msgId, pt);
 
-        if (msgId == WM_LBUTTONDOWN) {
+        if (msgId == WM_LBUTTONDOWN || msgId == WM_MBUTTONDOWN) {
+            if (g_dragScrollActive)
+                return 1; // keep the first button and anchor until its release
             void* mg = mapGraphicsPtr();
             PointI tile{}, mapCenter{}, centerOffset{};
             // screen->map returns false over the ~160px minimap/resource corner -> only grab real map
@@ -7042,6 +7071,7 @@ int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
                     pt->x + centerOffset.x,
                     pt->y + centerOffset.y,
                 };
+                g_dragScrollButton = static_cast<UINT>(msgId);
                 g_dragScrollActive = true;
                 g_dragMoved = false;
                 // Win32 capture keeps moves reaching our main WndProc when D2 routes the held
@@ -7064,9 +7094,12 @@ int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
                 normalizeDragBoundary(mg, pt->x, pt->y);
             }
             return 1; // consume moves while panning
-        } else if (g_dragScrollActive && msgId == WM_LBUTTONUP) {
+        } else if (g_dragScrollActive && dragScrollReleaseMatches(msgId)) {
             const bool moved = g_dragMoved;
+            const bool middle = g_dragScrollButton == WM_MBUTTONDOWN;
             cancelDragScroll();
+            if (middle)
+                return 1; // middle grab never synthesizes a selection click
             if (!moved) {
                 // Plain click: replay the down so it selects/opens. Do NOT then forward the up - the
                 // replayed down can open a dialog (e.g. a city) and tear down the iso view, so forwarding
@@ -7080,6 +7113,8 @@ int __fastcall isoMouseHook(void* view, void* /*edx*/, int msgId, PointI* pt)
         cancelDragScroll();
         return 1; // transient torn-down view mid dialog-transition: swallow, do NOT re-dispatch (re-crashes)
     }
+    if (g_dragScrollActive && (msgId == WM_LBUTTONUP || msgId == WM_MBUTTONUP))
+        return 1; // the other button cannot end or click through this gesture
     return callOrigIsoMouse(view, msgId, pt);
 }
 
