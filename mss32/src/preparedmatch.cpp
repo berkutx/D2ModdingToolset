@@ -1,6 +1,6 @@
 #include "preparedmatch.h"
 #include "preparedmatchlifecycle.h"
-#include "preparedmatchsettings.h"
+#include "preparedmatchtemplates.h"
 #include "button.h"
 #include "categorylist.h"
 #include "dialoginterf.h"
@@ -46,6 +46,7 @@ struct Active {
     Stage stage{Stage::Waiting};
     State status{State::Received};
     ScenarioTemplateRecipe recipe;
+    std::string localFilename;
     std::vector<std::string> pages;
     std::size_t page{};
     bool canceled{}, setupReceived{}, querySent{};
@@ -114,18 +115,12 @@ const Participant& host() {
 }
 void makeRecipe() {
     const auto& offer = active->offer;
-    const ScenarioTemplate* cached = nullptr;
-    for (const auto& item : getScenarioTemplates()) {
-        if (std::filesystem::path(item.filename).filename().string() == gameText(offer.filename)) {
-            cached = &item; break;
-        }
-    }
-    if (!cached) throw std::runtime_error("missing-template");
-    if (_stricmp(cached->md5.c_str(), offer.md5.c_str()) != 0) throw std::runtime_error("template-hash");
-    auto settings = applySettings(offer, cached->settings);
+    auto selected = selectLocalTemplate(offer, getScenarioTemplates(), gameText(offer.title),
+                                        gameText(offer.filename));
     rsg::RandomGenerator random; random.setSeed(static_cast<std::size_t>(std::time(nullptr)));
-    settings.replaceRandomRaces(random);
-    active->recipe = {std::move(settings), cached->source};
+    selected.settings.replaceRandomRaces(random);
+    active->localFilename = std::move(selected.filename);
+    active->recipe = {std::move(selected.settings), selected.cached->source};
 }
 std::string parameterLabel(const std::string& key) {
     static const std::pair<const char*, const char*> names[] = {
@@ -143,7 +138,8 @@ std::string parameterLabel(const std::string& key) {
 }
 void buildPages(game::CTextBoxInterf* textBox) {
     const auto& v = active->offer;
-    std::string text = "Подготовленный матч: " + v.title + "\nШаблон: " + v.filename + "\nХост: " + v.host + "\nИгроки: ";
+    std::string text = "Подготовленный матч: " + v.title + "\nШаблон-пример: " + v.filename
+        + "\nКлиент выберет последнюю локальную версию этого варианта.\nХост: " + v.host + "\nИгроки: ";
     for (std::size_t i = 0; i < v.participants.size(); ++i) text += (i ? ", " : "") + v.participants[i].name;
     text += v.ranked ? "\nРейтинговая игра." : "\nНерейтинговая игра.";
     for (const auto& key : v.explicitParameters)
@@ -326,7 +322,7 @@ bool processPreparedMatch() {
             // showMenu installs its own interface after invoking the factory. Show
             // the wait/preview above that menu, never from inside its constructor.
             auto* menu = reinterpret_cast<CMenuRandomScenario*>(p->data->currentMenu);
-            if (!startPreparedMatchScenarioGeneration(menu, active->recipe, gameText(active->offer.filename)))
+            if (!startPreparedMatchScenarioGeneration(menu, active->recipe, active->localFilename))
                 preparedMatchGenerationEnded(RestartScenarioGenerationResult::Error);
             return true;
         } catch (const std::exception& e) {
@@ -334,9 +330,13 @@ bool processPreparedMatch() {
             std::string message = "Не удалось подготовить матч: " + reason;
             if (reason == "missing-template") message = "Шаблон: " + active->offer.filename
                 + "\nне найден шаблон для матча, перезапустите клиент игры после добавления."
-                  " Скачайте нужную версию со страницы подготовки.";
-            else if (reason == "template-hash") message = "Другая версия шаблона " + active->offer.filename
-                + ". Скачайте нужную версию со страницы подготовки и перезапустите клиент игры.";
+                  " Добавьте подходящий локальный шаблон.";
+            else if (reason == "ambiguous-template") message = "Найдено несколько подходящих локальных шаблонов одной версии: "
+                + active->offer.filename + ". Оставьте один нужный вариант и перезапустите клиент игры.";
+            else if (reason == "template-player-count" || reason == "unknown-template-spin"
+                     || reason.compare(0, 10, "parameter-") == 0)
+                message = "Выбранная локальная версия шаблона не поддерживает параметры матча: " + reason
+                    + ". Проверьте условия на странице подготовки.";
             else if (reason == "unsupported-native-client") message = "Автоподготовка матча пока поддерживает только проверенный клиент Russobit.";
             else if (reason == "unsupported-simultaneous-turns") message = "Одновременные ходы требуют сборку MSS с поддержкой ОХ, двух игроков и день объединения 0 или 2–30.";
             terminal(State::Error, reason.substr(0, 128), message); return true;
