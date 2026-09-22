@@ -12,6 +12,7 @@
 Новая ветка: `codex/prepared-simturns`; base PR — `codex/prepared-matches`.
 Перенос начат с опубликованного `c22d29bf`; во время работы база продвинулась до
 `814e6488c8f48971434afa2048f40d623db3511d` (выбор последнего локального шаблона).
+Эта опубликованная база включена обычным merge `b9724397`, без переписывания истории.
 Незакоммиченные изменения других worktree не являются источником этого PR.
 
 ## Карта решений по исходному diff
@@ -93,7 +94,7 @@ raw_excerpt: создание сервера, получение игровог�
 
 source_type: binary/disassembly; observed_at: 2026-09-22;
 content_hash (EXE SHA256):
-`1375cdef09ec470ee64fe5693f3fb734d7c69fb215212311d997f792b258a642eb`.
+`1375cdef09ec470ee64fe5693fb734d7c69fb215212311d997f792b258a642eb`.
 source_ref: caller `0x402BD3` и `0x4338BE`, dispatcher `0x55B948`.
 
 Для повторения открыть EXE указанного SHA256 в IDA, дизассемблировать оба caller
@@ -110,6 +111,34 @@ source_ref: caller `0x402BD3` и `0x4338BE`, dispatcher `0x55B948`.
 
 Это подтверждает pointer identity для регистрации native completion, а не только
 совпадение содержимого пакета. Проверка статическая, не live-прогон DLL.
+
+### E-005 — остановка native обработчиков перед сбросом карты
+
+source_type: binary/disassembly and source; observed_at: 2026-09-22;
+content_hash: тот же EXE SHA256, что в E-004;
+source_ref: `0x402FC2`, `0x402F24`, `0x43307B`, `0x562426`,
+`netcustompeer.cpp`, `netcustomplayer.cpp`, `netcustomservice.cpp`.
+
+Оба native clear вызывают reset server (`0x5818DA`) через поле `data+0x2C`:
+вызовы `0x402FE2` и `0x402F44`. Server vtable `0x6D09BC` ведёт через deleting
+destructor `0x433052` в `0x43307B`. Тот вызывает `0x562426` в `0x4330A8`,
+раньше освобождения server data (`0x4330C5`). Для работающего потока `0x562426`
+посылает `WM_CLOSE` и ждёт `WaitForSingleObject(handle, INFINITE)` (`0x56244F`),
+затем закрывает handle. Уже завершившийся поток ожидания не требует.
+
+Два прямых caller dispatcher `0x55B948` — server worker (`0x43396E`) и client
+UI callback (`0x402CA7`). Client callback зарегистрирован через CreateMessageEvent
+для `MIDGARD NETMSG` (`0x4025B4`); отдельного CMqThread у CMidClient нет.
+В текущем MSS worker CNetCustomPeer уведомляет UI, а не вызывает native dispatcher.
+Удаление endpoints снимает их callbacks; clear удаляет устаревшие `MIDGARD NETMSG`.
+
+Это обосновывает порядок: закрыть допуск новой работы → штатный native clear/join →
+сбросить receipts, очереди и патчи. Утверждение относится к этим маршрутам и
+исправным native handles. Обычный clear не обязан останавливать worker самого
+лобби-сервиса. Доказательство статическое, не подтверждение игрового прогона.
+Дополнительно байты из IDA побайтно сверены с реальным EXE через PE32 section
+mapping: `0x402FD0` (48), `0x402F38` (48), `0x43309A` (64), `0x562426` (75 байт).
+Все четыре диапазона совпали; SHA256 файла повторно вычислен отдельно.
 
 ## Findings и путь применения
 
@@ -130,6 +159,10 @@ F-004 (reverse_algo, validated, confidence high; E-004): receipt можно со
 по сырому buffer pointer до вызова исходного dispatcher; его завершение не следует
 публиковать в момент успешного ReceiveMessage.
 
+F-005 (reverse_algo, validated, confidence high; E-005): сброс native interception
+после исходного clear опирается на штатный server join и UI-thread клиентского RX,
+а не на предположение о задержке сети или остановку всех SLikeNet threads.
+
 P-001 (callflow; E-002/E-003, F-002/F-003): авторизованная комната → Arm/ArmAck →
 обычная загрузка карты → native player binding → SessionPlan/bootstrap →
 пара post-original EndTurn свидетельств → EngineAction/ActionResult →
@@ -139,3 +172,27 @@ P-001 (callflow; E-002/E-003, F-002/F-003): авторизованная ком�
 прогоном двух клиентов. Исторические 18/18 подтверждают только исходную реализацию.
 Текущие воспроизводимые команды проверок приведены в
 [руководстве](SIMULTANEOUS_TURNS.md#проверить-протоколы).
+
+## Итоговые проверки переноса
+
+[PR #10](https://github.com/berkutx/D2ModdingToolset/pull/10) направлен из
+`codex/prepared-simturns` в `codex/prepared-matches`. Повторная сверка всего donor
+diff завершена после переноса; v8 core и исходники/тесты локального координатора
+остались побайтно идентичны донору. Текущий diff — 74 файла вместо 138 исходных.
+
+На `b9724397` успешно прошли
+[все четыре CI-сборки](https://github.com/berkutx/D2ModdingToolset/actions/runs/35752766012):
+Debug/Release × ОХ выключено/включено. В Release OH=true фактически выполнены:
+
+- 171/171 тестов локального координатора, без пропусков и ошибок;
+- 15/15 исходных transcript-сценариев control-client v8;
+- тесты lobby port, wire/room properties и native-apply fence;
+- prepared protocol, lifecycle и settings, включая latest-local выбор из новой базы.
+
+Эти portable проверки также повторены локально после merge базы. Полная локальная
+Release без ОХ собрана ранее; для окончательной базы обе конфигурации подтверждены CI.
+Локальная Release с ОХ после merge также собрана: 0 ошибок, четыре существующих
+signed/unsigned предупреждения `menurandomscenario.cpp`; 6 751 744 байта, SHA256
+`5da472fc22e7219a9dd5ba3daabba53eb2b8743df6796966d4db69314c7366c9`.
+Последующее изменение `11306f98` затрагивает только фильтры путей CI, не native-код.
+DLL в игру не устанавливалась; сервер и live-харнес этим PR не изменены.
