@@ -26,6 +26,9 @@
 #include "netcustomplayer.h"
 #include "netcustomservice.h"
 #include "netcustomsession.h"
+#ifdef D2_SIMTURNS
+#include "netintercept.h"
+#endif
 #include "netmsg.h"
 #include <BitStream.h>
 #include <cstring>
@@ -95,6 +98,17 @@ bool __fastcall CNetCustomPlayerClient::sendMessage(CNetCustomPlayerClient* this
                                                     std::uint32_t idTo,
                                                     const game::NetMessageHeader* message)
 {
+#ifdef D2_SIMTURNS
+    return netintercept::dispatchTx(thisptr, nullptr, idTo, message,
+                                    &sendMessageUnintercepted) != 0;
+}
+
+int CNetCustomPlayerClient::sendMessageUnintercepted(
+    void* self, void* /*transportContext*/, std::uint32_t idTo,
+    const game::NetMessageHeader* message)
+{
+    auto* thisptr = static_cast<CNetCustomPlayerClient*>(self);
+#endif
     if (idTo != game::serverNetPlayerId) {
         thisptr->getLogger()->debug(
             __FUNCTION__ ": denying sending message to a player other than the server");

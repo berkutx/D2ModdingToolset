@@ -18,6 +18,11 @@
  */
 
 #include "hooks.h"
+#ifdef D2_SIMTURNS
+#include "simturns/controller.h"
+#include "simturns/state.h"
+#include "uiframedispatcher.h"
+#endif
 #include "lobbysaveresume.h"
 #include "stealitemhooks.h"
 #include "stealmerchantiteminterf.h"
@@ -304,6 +309,15 @@ static std::vector<PendingBattleEffect> g_pendingBattleEffects;
 
 namespace hooks {
 
+#ifdef D2_SIMTURNS
+static void __fastcall mainView2ShowIsoDialogWithSimturnsHooked(game::CMainView2* thisptr,
+                                                              int edx)
+{
+    mainView2ShowIsoDialogHooked(thisptr, edx);
+    simturns::onPhaseGame(thisptr->phaseGame);
+}
+#endif
+
 /** Hooks that used only in game. */
 static Hooks getGameHooks()
 {
@@ -464,7 +478,11 @@ static Hooks getGameHooks()
         {GameImagesApi::get().getCityPreviewLargeImageNames, getCityPreviewLargeImageNamesHooked, (void**)&orig.getCityPreviewLargeImageNames},
         {GameImagesApi::get().getCityIconImageNames, getCityIconImageNamesHooked, (void**)&orig.getCityIconImageNames},
         // Support grid toggle button
+#ifdef D2_SIMTURNS
+        {CMainView2Api::get().showIsoDialog, mainView2ShowIsoDialogWithSimturnsHooked},
+#else
         {CMainView2Api::get().showIsoDialog, mainView2ShowIsoDialogHooked},
+#endif
         // Reference ground rendering implementation
         // TODO: fix occasional magenta 'triangles' showing up after closing capital window
         //{CGroundTextureApi::vftable()->draw, groundTextureDrawHooked},
@@ -826,6 +844,11 @@ static Hooks getGameHooks()
                                     (void**)&orig.midServerLogicSendObjectsChanges});
     }
 
+#ifdef D2_SIMTURNS
+    simturns::appendHooks(hooks);
+    if (uiframedispatcher::requested())
+        hooks.push_back(uiframedispatcher::hookInfo());
+#endif
     return hooks;
 }
 
@@ -2041,6 +2064,11 @@ void __stdcall getUnitAttacksHooked(const game::IMidgardObjectMap* objectMap,
 
     auto unit = fn.findUnitById(objectMap, unitId);
 
+#ifdef D2_SIMTURNS
+    // Preserve the donor's absent-unit handling only inside an armed OH map.
+    if (simturns::phase() != simturns::Phase::Disabled && (!unit || !unit->unitImpl))
+        return;
+#endif
     auto attack = getAttack(unit->unitImpl, true, checkAltAttack);
     AttackTypePair pair{attack, AttackType::Primary};
     vectorApi.pushBack(value, &pair);

@@ -11,6 +11,14 @@ on:
       - "Examples/Custom Lobby/CustomLobby.ff"
       - ".github/workflows/mss32.yml"
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "mss32/**"
+      - "tests/**"
+      - "tools/simturns-relay/**"
+      - "tests/**"
+      - "tools/simturns-relay/**"
+      - ".github/workflows/mss32.yml"
 
 permissions:
   contents: read
@@ -38,9 +46,14 @@ jobs:
           [ "$n" -ge 7 ] || { echo "::error::expected >=7 submodules, found $n"; exit 1; }
 
   build:
-    name: Build mss32.dll (MSVC x86)
+    name: ${{ matrix.configuration }} OH=${{ matrix.simturns }}
     needs: prepare
     runs-on: windows-2025-vs2026
+    strategy:
+      fail-fast: false
+      matrix:
+        simturns: ['false', 'true']
+        configuration: [Debug, Release]
     defaults:
       run:
         shell: pwsh
@@ -73,12 +86,25 @@ jobs:
 
           # Speed comes from the PCH + /Z7 + per-file parallel tasks (set in mss32.vcxproj).
           msbuild mss32\mss32.vcxproj `
-            /t:Build /p:Configuration=Debug /p:Platform=Win32 /p:PlatformToolset=v143 `
+            /t:Build /p:Configuration=${{ matrix.configuration }} /p:Platform=Win32 /p:PlatformToolset=v143 `
             /p:SolutionDir=$env:GITHUB_WORKSPACE\mss32\ `
+            /p:EnableSimultaneousTurns=${{ matrix.simturns }} `
             /p:MultiProcessorCompilation=false /p:UseMultiToolTask=true `
             /p:EnforceProcessCountAcrossBuilds=true /p:MinimalRebuild=false `
             /m /nologo /clp:Summary /verbosity:minimal 2>&1 | Tee-Object build.log
           exit $LASTEXITCODE
+
+      - name: OH and prepared protocol regressions
+        if: matrix.simturns == 'true' && matrix.configuration == 'Release'
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
+          ./tests/run-simturns.ps1 -OutputDirectory "$env:RUNNER_TEMP/simturns-tests"
+          ./tests/run-prepared-match-protocol.ps1 -OutputDirectory "$env:RUNNER_TEMP/prepared-tests" -DependenciesRoot $env:GITHUB_WORKSPACE
+          Push-Location tools/simturns-relay
+          try { node --test; if ($LASTEXITCODE -ne 0) { throw 'Relay regression failed' } }
+          finally { Pop-Location }
 
       # archive: false uploads the file as-is (no zip). It only supports a single
       # file, so the build outputs go up as separate artifacts.
@@ -86,7 +112,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: build.log
+          name: build-${{ matrix.configuration }}-oh-${{ matrix.simturns }}.log
           path: build.log
           if-no-files-found: ignore
           archive: false
@@ -95,7 +121,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v7
         with:
-          name: mss32.dll
+          name: mss32-${{ matrix.configuration }}-oh-${{ matrix.simturns }}.dll
           path: out/mss32.dll
           if-no-files-found: error
           archive: false
@@ -104,7 +130,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v7
         with:
-          name: mss32.pdb
+          name: mss32-${{ matrix.configuration }}-oh-${{ matrix.simturns }}.pdb
           path: out/mss32.pdb
           if-no-files-found: error
           archive: false

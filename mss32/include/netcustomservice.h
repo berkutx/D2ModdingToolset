@@ -107,11 +107,13 @@ enum LobbyMessageId
     ID_LOBBY_PREPARED_MATCH = ID_USER_PACKET_ENUM + 16,
     /** Authenticated client -> core: one cached FilesHash, independent of room membership. */
     ID_LOBBY_CLIENT_COMPATIBILITY = ID_USER_PACKET_ENUM + 17,
+    /** Authenticated, room/map-scoped simultaneous-turn coordinator control. */
+    ID_LOBBY_SIMULTANEOUS_TURNS = ID_USER_PACKET_ENUM + 18,
     ID_GAME_MESSAGE = game::netMessageNormalType & 0xff,
 };
 
 static_assert(ID_GAME_MESSAGE == 255);
-static_assert(ID_LOBBY_CLIENT_COMPATIBILITY < ID_GAME_MESSAGE);
+static_assert(ID_LOBBY_SIMULTANEOUS_TURNS < ID_GAME_MESSAGE);
 
 /** Lobby-specific wire protocol. Values are serialized field-by-field with SLNet::BitStream;
  * these structures are logical payloads, not packed wire images. Keep in sync with the lobby
@@ -228,6 +230,7 @@ public:
     static constexpr char templateHashColumnName[] = "TemplateHash";
     static constexpr char rankedColumnName[] = "Ranked";
     static constexpr char simultaneousTurnsDaysColumnName[] = "SimultaneousTurnsDays";
+    static constexpr char simultaneousTurnsColumnName[] = "SimultaneousTurns";
     static constexpr char unlockGuiColumnName[] = "UnlockGui";
     // See SLNet::Lobby2Message::ValidatePassword
     static constexpr std::uint32_t passwordMaxLength{50};
@@ -268,6 +271,7 @@ public:
     std::shared_ptr<NativeGameMessageTracker> getNativeGameMessageTracker() const;
 
     RoomOptions& getRoomOptions();
+    bool roomRequiresSimultaneousTurns() const { return m_roomSimultaneousTurns; }
 
     bool registerAccount(const char* userName, const char* password);
     bool login(const char* userName, const char* password);
@@ -391,7 +395,7 @@ private:
     class RoomsCallback : public SLNet::RoomsCallback
     {
     public:
-        RoomsCallback() = default;
+        explicit RoomsCallback(CNetCustomService* service) : m_service(service) {}
         ~RoomsCallback() override = default;
 
         void CreateRoom_Callback(const SLNet::SystemAddress& senderAddress,
@@ -416,6 +420,8 @@ private:
                                   SLNet::RoomsErrorCode resultCode,
                                   SLNet::RoomID roomId,
                                   SLNet::RoomDescriptor* roomDescriptor = nullptr) const;
+    private:
+        CNetCustomService* m_service;
     };
 
     static void __fastcall peerProcessEventCallback(const CNetCustomService* thisptr,
@@ -468,6 +474,7 @@ private:
     std::string m_templateName;
     std::string m_templateHash;
     RoomOptions m_roomOptions;
+    std::atomic<bool> m_roomSimultaneousTurns{};
 };
 
 assert_offset(CNetCustomService, vftable, 0);

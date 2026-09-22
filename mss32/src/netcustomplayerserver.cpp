@@ -24,11 +24,16 @@
 #include "mqnetsystem.h"
 #include "netcustomplayer.h"
 #include "netcustomsession.h"
+#include "simturns/lobby_transport.h"
+#ifdef D2_SIMTURNS
+#include "netintercept.h"
+#endif
 #include "netmsg.h"
 #include "utils.h"
 #include <BitStream.h>
 #include <MessageIdentifiers.h>
 #include <algorithm>
+#include <cstring>
 #include <mutex>
 #include <spdlog/spdlog.h>
 
@@ -163,6 +168,26 @@ bool __fastcall CNetCustomPlayerServer::sendMessage(CNetCustomPlayerServer* this
                                                     std::uint32_t idTo,
                                                     const game::NetMessageHeader* message)
 {
+    // Host loopback does not cross the lobby server. Reject the map start at
+    // this shared send boundary until both the room policy and native Arm agree.
+    // This check is also required in builds without OH support.
+    if (message && std::strncmp(message->messageClassName, ".?AVCStartScenarioMsg@@",
+                                sizeof(message->messageClassName)) == 0
+        && !simturns::lobbyAllowsMapStart(thisptr->getService())) {
+        thisptr->getLogger()->error("Cannot start simultaneous-turn map before lobby Arm");
+        return false;
+    }
+#ifdef D2_SIMTURNS
+    return netintercept::dispatchTx(thisptr, nullptr, idTo, message,
+                                    &sendMessageUnintercepted) != 0;
+}
+
+int CNetCustomPlayerServer::sendMessageUnintercepted(
+    void* self, void* /*transportContext*/, std::uint32_t idTo,
+    const game::NetMessageHeader* message)
+{
+    auto* thisptr = static_cast<CNetCustomPlayerServer*>(self);
+#endif
     if (idTo == getClientId(thisptr->getService()->getPeerGuid())) {
         return thisptr->sendHostMessage(message);
     } else if (idTo == game::broadcastNetPlayerId) {
