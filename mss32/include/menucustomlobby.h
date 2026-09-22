@@ -77,6 +77,10 @@ public:
 
     CMenuCustomLobby(game::CMenuPhase* menuPhase);
     ~CMenuCustomLobby();
+    bool isPreparedMatchIdle() const {
+        return !m_restartJoin && !m_restartJoinPending && !m_helpDialog
+            && !m_roomPasswordDialog && !hasWaitDialog();
+    }
 
 protected:
     // CInterface

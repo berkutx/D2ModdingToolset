@@ -26,6 +26,7 @@
 #include "menubase.h"
 #include "scenariotemplaterecipe.h"
 #include <array>
+#include <atomic>
 #include <ctime>
 #include <string>
 #include <thread>
@@ -84,12 +85,14 @@ struct CMenuRandomScenario : public game::CMenuBase
     RaceIndices raceIndices;
 
     game::CPopupDialogInterf* popup{};
-    GenerationStatus generationStatus{GenerationStatus::NotStarted};
+    // Atomically shared by the generator worker and UI cancellation safe points.
+    std::atomic<GenerationStatus> generationStatus{GenerationStatus::NotStarted};
     StartScenario startScenario{};
     RestartScenarioCompletion restartCompletion{};
     std::time_t generatedSeed{};
-    bool cancelGeneration{false};
+    std::atomic<bool> cancelGeneration{false};
     bool restartGeneration{false};
+    bool preparedMatchGeneration{false};
 };
 
 void prepareToStartRandomScenario(CMenuRandomScenario* menu, bool networkGame = false);
@@ -108,6 +111,12 @@ bool prepareRestartScenarioGeneration(RestartScenarioCompletion completion);
 
 /** Starts regeneration with preview/retry; completion is sent only on accept or failure/cancel. */
 bool startPreparedRestartScenarioGeneration(CMenuRandomScenario* menu);
+/** Ordinary first generation with agreed inputs and the native preview/Retry/Accept UI. */
+bool startPreparedMatchScenarioGeneration(CMenuRandomScenario* menu,
+                                          const ScenarioTemplateRecipe& recipe,
+                                          const std::string& templateName);
+/** Safe-point cancellation: wait for a running worker, or dismiss a completed preview. */
+void cancelPreparedMatchScenarioGeneration(CMenuRandomScenario* menu);
 
 } // namespace hooks
 

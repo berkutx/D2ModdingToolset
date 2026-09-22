@@ -21,6 +21,7 @@
 #include "interfaceutils.h"
 #include "mempool.h"
 #include "originalfunctions.h"
+#include "preparedmatch.h"
 #include "textids.h"
 #include "utils.h"
 #include <spdlog/spdlog.h>
@@ -70,14 +71,24 @@ void CMenuCustomRandomScenarioMulti::createRoomAndServer(CMenuCustomRandomScenar
 {
     using namespace game;
 
-    prepareToStartRandomScenario(menu, true);
+    if (!canAcceptPreparedMatch(menu)) return;
+    try {
+        prepareToStartRandomScenario(menu, true);
+    } catch (const std::exception& error) {
+        if (menu->preparedMatchGeneration)
+            preparedMatchGenerationEnded(RestartScenarioGenerationResult::Error);
+        showMessageBox(error.what());
+        return;
+    }
+    if (!preparePreparedMatchRoom(menu)) return;
     // Publish the accepted map, not transient state from the generation button.
     CNetCustomService::get()->setTemplateInfo(menu->scenarioTemplateName);
 
     auto dialog = CMenuBaseApi::get().getDialogInterface(menu);
     auto phaseData = menu->menuBaseData->menuPhase->data;
-    menu->createRoom(getEditBoxText(dialog, "EDIT_GAME"), phaseData->scenarioName,
-                     phaseData->scenarioDescription, getEditBoxText(dialog, "EDIT_PASSWORD"));
+    if (!menu->createRoom(getEditBoxText(dialog, "EDIT_GAME"), phaseData->scenarioName,
+                          phaseData->scenarioDescription, getEditBoxText(dialog, "EDIT_PASSWORD"))
+        && menu->preparedMatchGeneration) preparedMatchRoomCreated(false);
 }
 
 void __fastcall CMenuCustomRandomScenarioMulti::destructor(CMenuCustomRandomScenarioMulti* thisptr,
@@ -104,13 +115,20 @@ void CMenuCustomRandomScenarioMulti::RoomsCallback::CreateRoom_Callback(
     case SLNet::REC_SUCCESS: {
         // Setup game host: reuse original game logic that creates player server and client
         if (CMenuNewSkirmishMultiApi::get().createServer(m_menu)) {
+            if (m_menu->preparedMatchGeneration) preparedMatchRoomCreated(true);
             CMenuPhaseApi::get().switchPhase(m_menu->menuBaseData->menuPhase,
                                              MenuTransition::RandomScenarioMulti2LobbyHost);
+        } else if (m_menu->preparedMatchGeneration) {
+            // Same failure cleanup as CMenuCustomNewSkirmishMulti: the lobby
+            // room exists, but native hosting did not start. This is not Cancel.
+            CNetCustomService::get()->leaveRoom();
+            preparedMatchRoomCreated(false);
         }
         break;
     }
 
     default: {
+        if (m_menu->preparedMatchGeneration) preparedMatchRoomCreated(false);
         auto msg{getInterfaceText(textIds().lobby.createRoomFailed.c_str())};
         if (msg.empty()) {
             msg = "Could not create a room.\n%ERROR%";
