@@ -14,6 +14,7 @@ struct CoordinatorPort::Impl
     Sender sender;
     std::function<void()> terminal;
     std::function<void()> progressWake;
+    FaultDiagnostic diagnostic;
     CoordinatorCallbacks callbacks;
     std::uint32_t epoch{}, mergeDay{};
     std::uint64_t generation{};
@@ -53,17 +54,25 @@ struct CoordinatorPort::Impl
     {
         std::function<void()> notify;
         std::function<void(CoordinatorTerminalFault)> sink;
+        FaultDiagnostic diagnose;
+        CoordinatorFaultDiagnostic snapshot;
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (!armed || failed || (expectedGeneration && expectedGeneration != generation)) return;
             failed = true;
             notify = terminal;
             sink = callbacks.terminalFault;
+            snapshot = {reason ? reason : "simultaneous-turn terminal failure",
+                        epoch, generation, session.role, started};
+            // A diagnostic target's copy may also throw. Diagnostics must
+            // never prevent the existing fail-closed terminal path.
+            try { diagnose = diagnostic; } catch (...) { }
         }
-        // Both callbacks may call fail() again. First failure wins; neither
+        // Callbacks may call fail() again. First failure wins; none
         // runs while holding the core mutex, and no failed send is retried.
+        try { if (diagnose) diagnose(snapshot); } catch (...) { }
         try { if (notify) notify(); } catch (...) { }
-        if (sink) sink({reason ? reason : "simultaneous-turn terminal failure"});
+        if (sink) sink({snapshot.message});
     }
 };
 
@@ -77,7 +86,8 @@ CoordinatorPort& CoordinatorPort::processInstance()
 bool CoordinatorPort::arm(const SimTurnsSessionOptions& session,
                            std::uint32_t epoch, std::uint32_t mergeDay,
                            Sender sender, std::function<void()> terminal,
-                           std::function<void()> progressWake)
+                           std::function<void()> progressWake,
+                           FaultDiagnostic diagnostic)
 {
     std::lock_guard<std::mutex> lock(impl->mutex);
     if (impl->armed || impl->generation == UINT64_MAX || !session.requested || !epoch || !sender
@@ -90,6 +100,7 @@ bool CoordinatorPort::arm(const SimTurnsSessionOptions& session,
     impl->sender = std::move(sender);
     impl->terminal = std::move(terminal);
     impl->progressWake = std::move(progressWake);
+    impl->diagnostic = std::move(diagnostic);
     impl->core = {};
     impl->core.configure(session);
     impl->armed = true;
@@ -145,6 +156,7 @@ void CoordinatorPort::quiesce()
     impl->sender = {};
     impl->terminal = {};
     impl->progressWake = {};
+    impl->diagnostic = {};
 }
 
 void CoordinatorPort::notifyNativeProgress()
@@ -168,6 +180,7 @@ void CoordinatorPort::stop()
     impl->sender = {};
     impl->terminal = {};
     impl->progressWake = {};
+    impl->diagnostic = {};
     impl->core = {};
 }
 

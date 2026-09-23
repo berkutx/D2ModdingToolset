@@ -17,6 +17,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <utility>
+#include <type_traits>
 #include <spdlog/spdlog.h>
 #include <vector>
 #define WIN32_LEAN_AND_MEAN
@@ -83,7 +84,9 @@ struct NativeReceiveTicket
     void* context = nullptr;
     NativeReceiveCallback complete = nullptr;
     UiTaskDiscardCallback discard = nullptr;
+    NativeReceiveDiagnostic diagnostic;
 };
+static_assert(std::is_trivially_destructible_v<NativeReceiveTicket>);
 
 std::mutex g_nativeTicketMutex;
 std::unordered_map<const game::NetMessageHeader*, NativeReceiveTicket> g_nativeTickets;
@@ -247,7 +250,7 @@ void completeNativeTicket(NativeReceiveTicket& ticket, NativeReceiveResult resul
     if (!retired.complete)
         return;
     try {
-        retired.complete(retired.context, result);
+        retired.complete(retired.context, result, retired.diagnostic);
     } catch (...) {
         failFastRuntime("native receive ticket completion threw", 0xD2E77119u);
     }
@@ -437,6 +440,11 @@ int receiveHookCore(void* self, void* edx, int packet, int idFrom, int playerNet
     ++g_localReceiveHookDepth;
     NativeReceiveTicket ticket = replayTicket ? std::exchange(*replayTicket, {})
                                               : takeNativeTicket(packet);
+    ticket.diagnostic.sender = static_cast<std::uint32_t>(idFrom);
+    ticket.diagnostic.receiver = static_cast<std::uint32_t>(playerNetId);
+    ticket.diagnostic.threadId = GetCurrentThreadId();
+    ticket.diagnostic.captureDPlaySelf = captureDPlaySelf;
+    ticket.diagnostic.replay = replayTicket != nullptr;
     NativeReceiveResult disposition = NativeReceiveResult::Failed;
     int result = 0;
     __try {
@@ -522,6 +530,7 @@ int receiveHookCoreImpl(void* self, void* edx, int packet, int idFrom,
 #endif
             }
             if (decision != RxDecision::Pass) {
+                ticket.diagnostic.policy = decision;
                 if (decision == RxDecision::Consume) {
                     disposition = NativeReceiveResult::Filtered;
                     return 0;
@@ -542,6 +551,9 @@ int receiveHookCoreImpl(void* self, void* edx, int packet, int idFrom,
         }
     }
     const int result = callOriginalReceive(self, edx, packet, idFrom, playerNetId);
+    ticket.diagnostic.policy = RxDecision::Pass;
+    ticket.diagnostic.dispatched = true;
+    ticket.diagnostic.dispatchResult = result;
     disposition = result > 0 ? NativeReceiveResult::Applied : NativeReceiveResult::Failed;
     if (completion.callback && !g_sessionTeardown.load(std::memory_order_acquire)) {
         if (result <= 0) {
@@ -841,8 +853,9 @@ bool stageNativeReceive(const game::NetMessageHeader* buffer, void* context,
         || g_nativeTickets.size() >= kMaxNativeTickets)
         return false;
     try {
-        return g_nativeTickets.emplace(buffer, NativeReceiveTicket{context, complete, discard})
-            .second;
+        NativeReceiveTicket ticket{context, complete, discard};
+        ticket.diagnostic.captureHeader(buffer->messageType, buffer->length, buffer->messageClassName);
+        return g_nativeTickets.emplace(buffer, ticket).second;
     } catch (...) {
         return false;
     }

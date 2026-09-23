@@ -78,7 +78,33 @@ using UiTaskCallback = void (*)(void* context);
 using UiTaskDiscardCallback = void (*)(void* context);
 
 enum class NativeReceiveResult { Applied, Filtered, Failed };
-using NativeReceiveCallback = void (*)(void* context, NativeReceiveResult result);
+/** Owned, bounded evidence only; never used to decide packet admission. The
+ * native result is a handler count, not a boolean handler success. Kept trivial
+ * so the SEH receive wrapper needs no C++ unwinding. No payload/chat is copied. */
+struct NativeReceiveDiagnostic
+{
+    char messageClass[37]{};
+    std::uint32_t messageType{}, frameLength{}, sender{}, receiver{}, threadId{};
+    RxDecision policy{RxDecision::Pass};
+    int dispatchResult{};
+    bool dispatched{}, captureDPlaySelf{}, replay{};
+
+    void captureHeader(std::uint32_t type, std::uint32_t length,
+                       const char (&name)[36]) noexcept
+    {
+        messageType = type;
+        frameLength = length;
+        for (auto& c : messageClass) c = 0;
+        for (unsigned i = 0; i < sizeof(name); ++i) {
+            const auto c = static_cast<unsigned char>(name[i]);
+            if (!c) break;
+            // No control bytes / injected log lines from a remote class name.
+            messageClass[i] = c >= 32 && c < 127 ? static_cast<char>(c) : '?';
+        }
+    }
+};
+using NativeReceiveCallback = void (*)(void* context, NativeReceiveResult result,
+                                       const NativeReceiveDiagnostic& diagnostic);
 
 /** Attach an owned completion ticket to the exact native receive buffer.
  * Queuing/dequeuing a custom-player message is not proof of engine dispatch.

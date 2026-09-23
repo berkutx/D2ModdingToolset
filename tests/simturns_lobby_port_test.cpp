@@ -1,6 +1,7 @@
 #include "simturns/coordinator_port.h"
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <vector>
 
@@ -131,16 +132,18 @@ void lifecycleAndDelivery() {
 void retiredCallbackCannotFaultNewSession() {
     auto& port = CoordinatorPort::processInstance();
     port.stop();
-    unsigned oldFaults{}, newFaults{}, newEvents{}, terminal{};
+    unsigned oldFaults{}, newFaults{}, newEvents{}, terminal{}, oldDiagnostics{}, newDiagnostics{};
     const auto sender = [](const p::Bytes&) { return true; };
-    check(port.arm({true, Role::Host}, 123, 3, sender), "old arm failed");
+    check(port.arm({true, Role::Host}, 123, 3, sender, {}, {},
+                   [&](const CoordinatorFaultDiagnostic&) { ++oldDiagnostics; }), "old arm failed");
     CoordinatorCallbacks oldCallbacks;
     oldCallbacks.terminalFault = [&](CoordinatorTerminalFault) { ++oldFaults; };
     oldCallbacks.postToUi = [&](CoordinatorEvent) {
         // Deterministically exercise the same unlock/callback boundary as a
         // retiring map: the old callback fails only after a new map is armed.
         port.stop();
-        check(port.arm({true, Role::Join}, 124, 3, sender, [&] { ++terminal; }), "replacement arm failed");
+        check(port.arm({true, Role::Join}, 124, 3, sender, [&] { ++terminal; }, {},
+                       [&](const CoordinatorFaultDiagnostic&) { ++newDiagnostics; }), "replacement arm failed");
         CoordinatorCallbacks next;
         next.postToUi = [&](CoordinatorEvent) { ++newEvents; };
         next.terminalFault = [&](CoordinatorTerminalFault) { ++newFaults; };
@@ -152,7 +155,8 @@ void retiredCallbackCannotFaultNewSession() {
     check(port.bindLocalPlayer(1), "old bind failed");
     auto plan = packet(p::Op::SessionPlan, {123, 1, 1, 2, 3, 11, 12});
     port.receive(plan.data(), plan.size());
-    check(!oldFaults && !newFaults && !terminal, "retired callback fault crossed map generation");
+    check(!oldFaults && !newFaults && !terminal && !oldDiagnostics && !newDiagnostics,
+          "retired callback fault crossed map generation");
     plan = packet(p::Op::SessionPlan, {124, 1, 1, 2, 3, 21, 22});
     port.receive(plan.data(), plan.size());
     check(newEvents == 1 && !newFaults && !terminal, "replacement map was poisoned by retired callback");
@@ -160,6 +164,95 @@ void retiredCallbackCannotFaultNewSession() {
     port.receive(plan.data(), plan.size());
     check(newEvents == 1 && !newFaults, "quiesced map dispatched control");
     port.stop();
+}
+void firstFaultDiagnostics() {
+    auto& port = CoordinatorPort::processInstance();
+    port.stop();
+    const auto sender = [](const p::Bytes&) { return true; };
+    unsigned diagnostics{}, terminal{}, faults{};
+    std::vector<unsigned> order;
+    CoordinatorFaultDiagnostic first;
+    std::string firstMessage;
+    bool reentrantPreflightRejected{};
+    check(port.arm({true, Role::Join}, 321, 3, sender, [&] {
+        ++terminal; order.push_back(2);
+    }, {}, [&](const CoordinatorFaultDiagnostic& diagnostic) {
+        ++diagnostics; order.push_back(1);
+        first = diagnostic;
+        firstMessage = diagnostic.message;
+        first.message = nullptr; // The diagnostic message is borrowed, never retained.
+        std::string error;
+        reentrantPreflightRejected = !port.preflight({true, Role::Join}, error);
+        port.fail(CoordinatorFailureOrigin::UiApply, "reentrant replacement reason");
+    }), "diagnostic prestart arm failed");
+    port.fail(CoordinatorFailureOrigin::LocalInvariant, "first pregame fault");
+    port.fail(CoordinatorFailureOrigin::LocalInvariant, "later fault");
+    check(diagnostics == 1 && terminal == 1 && !faults && reentrantPreflightRejected,
+          "prestart diagnostic was not reentrant and exact once");
+    check(order == std::vector<unsigned>({1, 2}) && firstMessage == "first pregame fault",
+          "diagnostic did not preserve the first reason before terminal");
+    check(first.epoch == 321 && first.generation && first.role == Role::Join && !first.started,
+          "prestart diagnostic has the wrong arm snapshot");
+    port.stop();
+
+    CoordinatorFaultDiagnostic next;
+    std::string nextMessage;
+    order.clear();
+    check(port.arm({true, Role::Host}, 322, 3, sender, [&] {
+        ++terminal; order.push_back(2);
+    }, {}, [&](const CoordinatorFaultDiagnostic& diagnostic) {
+        ++diagnostics; order.push_back(1);
+        next = diagnostic;
+        nextMessage = diagnostic.message;
+        next.message = nullptr;
+        throw std::runtime_error("diagnostic sink failed");
+    }), "diagnostic next-generation arm failed");
+    CoordinatorCallbacks callbacks;
+    callbacks.postToUi = [](CoordinatorEvent) {};
+    callbacks.terminalFault = [&](CoordinatorTerminalFault fault) {
+        ++faults; order.push_back(3);
+        check(fault.message == nextMessage, "terminal fault lost the original reason");
+    };
+    check(port.start({true, Role::Host}, callbacks), "diagnostic started arm failed");
+    port.fail(CoordinatorFailureOrigin::UiApply, nullptr);
+    port.fail(CoordinatorFailureOrigin::UiApply, "later started fault");
+    check(diagnostics == 2 && terminal == 2 && faults == 1
+              && order == std::vector<unsigned>({1, 2, 3}),
+          "throwing diagnostic suppressed or duplicated terminal notifications");
+    check(next.epoch == 322 && next.generation > first.generation
+              && next.role == Role::Host && next.started
+              && nextMessage == "simultaneous-turn terminal failure",
+          "next diagnostic inherited a prior arm or lost its fallback reason");
+    port.stop();
+
+    // Both retirement paths release the optional callback and its owned data.
+    for (const bool quiesce : {false, true}) {
+        auto lifetime = std::make_shared<unsigned>(0);
+        const std::weak_ptr<unsigned> weak = lifetime;
+        check(port.arm({true, Role::Host}, 323, 3, sender, {}, {},
+                       [lifetime, &diagnostics](const CoordinatorFaultDiagnostic&) {
+                           ++diagnostics;
+                       }), "diagnostic lifetime arm failed");
+        lifetime.reset();
+        check(!weak.expired(), "armed diagnostic did not own its capture");
+        if (quiesce) port.quiesce(); else port.stop();
+        check(weak.expired(), "retired diagnostic retained its capture");
+        port.fail(CoordinatorFailureOrigin::LocalInvariant, "retired fault");
+        check(diagnostics == 2, "retired diagnostic was invoked");
+        port.stop();
+    }
+    check(port.arm({true, Role::Join}, 324, 3, sender, [&] { ++terminal; }),
+          "default diagnostic arm failed");
+    port.fail(CoordinatorFailureOrigin::LocalInvariant, "default callback fault");
+    check(diagnostics == 2 && terminal == 3, "old diagnostic leaked into default arm");
+    port.stop();
+#ifdef D2_TESTDRV
+    check(port.armLocal({true, Role::Host}, sender, [&] { ++terminal; }),
+          "default local diagnostic arm failed");
+    port.fail(CoordinatorFailureOrigin::LocalInvariant, "local callback fault");
+    check(diagnostics == 2 && terminal == 4, "diagnostic changed the local arm contract");
+    port.stop();
+#endif
 }
 #ifdef D2_TESTDRV
 void localTransportUsesTheSameCore() {
@@ -206,6 +299,7 @@ void localTransportUsesTheSameCore() {
 }
 int main() {
     try { malformedFrames(); lifecycleAndDelivery(); retiredCallbackCannotFaultNewSession();
+        firstFaultDiagnostics();
 #ifdef D2_TESTDRV
         localTransportUsesTheSameCore();
 #endif
