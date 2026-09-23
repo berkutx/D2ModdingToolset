@@ -25,7 +25,8 @@ void lobbyDeliverNativePacket(std::shared_ptr<LobbyNativeTicket> ticket,
 // The existing restart policy deliberately consumes pre-NewScenario snapshots.
 void lobbyDiscardNativePacket(std::shared_ptr<LobbyNativeTicket> ticket);
 bool lobbyStageNativeReceive(const game::NetMessageHeader* buffer,
-                            std::shared_ptr<LobbyNativeTicket> ticket);
+                            std::shared_ptr<LobbyNativeTicket> ticket,
+                            std::uint32_t sender);
 void lobbyRoomJoined(CNetCustomService* service, std::uint32_t room);
 void lobbyRoomLeft(CNetCustomService* service);
 void lobbyDisconnected(CNetCustomService* service);

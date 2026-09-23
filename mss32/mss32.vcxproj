@@ -1581,6 +1581,7 @@ call ..\buildDetours.bat ..\Detours
     <ClInclude Include="include\simturns\lobby_transport.h" />
     <ClInclude Include="include\simturns\lobby_wire.h" />
     <ClInclude Include="include\simturns\native_apply_fence.h" />
+    <ClInclude Include="include\simturns\native_notification_policy.h" />
     <ClInclude Include="include\simturns\russobit_sites.h" />
     <ClInclude Include="include\simturns\session_types.h" />
   </ItemGroup>

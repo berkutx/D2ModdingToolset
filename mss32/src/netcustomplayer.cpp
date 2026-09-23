@@ -381,7 +381,7 @@ game::ReceiveMessageResult __fastcall CNetCustomPlayer::receiveMessage(
         *idFrom = pair.first;
         std::memcpy(buffer, message, message->length);
 #ifdef D2_SIMTURNS
-        if (!simturns::lobbyStageNativeReceive(buffer, pair.nativeTicket)) {
+        if (!simturns::lobbyStageNativeReceive(buffer, pair.nativeTicket, pair.first)) {
             consumeFront();
             return game::ReceiveMessageResult::Failure;
         }

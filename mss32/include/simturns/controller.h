@@ -48,6 +48,10 @@ bool available();
  * RX return alone is insufficient when it queued native commands. */
 bool strategicQueueIdle();
 
+/** UI-only, live pregame lifetime token; zero once native strategic setup begins,
+ * while faulted/tearing down, or without an authenticated active OH session. */
+std::uint64_t pregameNativeNotificationGeneration();
+
 /** UI-thread authenticated-room boundary before native map startup. */
 bool beginSession(Role role);
 

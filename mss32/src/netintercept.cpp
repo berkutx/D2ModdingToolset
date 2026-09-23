@@ -554,7 +554,7 @@ int receiveHookCoreImpl(void* self, void* edx, int packet, int idFrom,
     ticket.diagnostic.policy = RxDecision::Pass;
     ticket.diagnostic.dispatched = true;
     ticket.diagnostic.dispatchResult = result;
-    disposition = result > 0 ? NativeReceiveResult::Applied : NativeReceiveResult::Failed;
+    disposition = nativeDispatchResult(result);
     if (completion.callback && !g_sessionTeardown.load(std::memory_order_acquire)) {
         if (result <= 0) {
             failFastRuntime("armed post-dispatch RX transition had no matching engine handler",

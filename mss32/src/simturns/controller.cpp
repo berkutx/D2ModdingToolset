@@ -3077,6 +3077,23 @@ bool strategicQueueIdle()
            && exactStrategicQueueEmpty(phaseGame, phaseGame->data->midObjectLock);
 }
 
+std::uint64_t pregameNativeNotificationGeneration()
+{
+    if (GetCurrentThreadId() != netintercept::mainThreadId()
+        || !g_sessionActive.load(std::memory_order_acquire)
+        || g_tearingDown.load(std::memory_order_acquire)
+        || phase() != Phase::WaitingForSession
+        || g_phaseGame.load(std::memory_order_acquire)
+        || g_coordinatorStartAttempted.load(std::memory_order_acquire)) {
+        return 0;
+    }
+    // CMidClient owns the strategic notification handlers. Its creation closes
+    // this exception before the first onPhaseGame callback can publish itself.
+    const auto* midgard = game::CMidgardApi::get().instance();
+    if (!midgard || !midgard->data || midgard->data->client) return 0;
+    return g_sessionGeneration.load(std::memory_order_acquire);
+}
+
 bool beginSession(Role selectedRole)
 {
     std::lock_guard<std::recursive_mutex> lock(g_sessionCallbackMutex);
