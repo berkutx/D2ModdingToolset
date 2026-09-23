@@ -151,6 +151,50 @@ test('transport-neutral simturns contracts do not depend on local adapters', () 
     }
 });
 
+test('ordinary lobby JoinByFilter binds the authenticated OH room before native admission', () => {
+    // Wiring regression, not a claim of two-client native acceptance. RoomsPlugin
+    // dispatches JoinByFilter separately from EnterRoom; its base callback is empty.
+    const header = fs.readFileSync(path.resolve(
+        __dirname, '../../../mss32/include/netcustomservice.h'), 'utf8');
+    const service = fs.readFileSync(path.resolve(
+        __dirname, '../../../mss32/src/netcustomservice.cpp'), 'utf8');
+    const menu = fs.readFileSync(path.resolve(
+        __dirname, '../../../mss32/src/menucustomlobby.cpp'), 'utf8');
+    const transport = fs.readFileSync(path.resolve(
+        __dirname, '../../../mss32/src/simturns/lobby_transport.cpp'), 'utf8');
+
+    assert.match(service, /void CNetCustomService::joinRoom\([^]*?SLNet::JoinByFilter_Func func/,
+        'ordinary manual and prepared joins use the actual JoinByFilter operation');
+    assert.match(header,
+        /void JoinByFilter_Callback\(const SLNet::SystemAddress& senderAddress,\s*SLNet::JoinByFilter_Func\* callResult\) override;/,
+        'the service must override the callback that RoomsPlugin really dispatches');
+    const callback = service.match(
+        /void CNetCustomService::RoomsCallback::JoinByFilter_Callback\([^]*?(?=\nvoid CNetCustomService::)/);
+    assert.ok(callback, 'JoinByFilter needs its own service-side room binding');
+    assert.match(callback[0],
+        /if \(callResult->resultCode == SLNet::REC_SUCCESS && m_service->loggedIn\(\)\s*&& m_service->m_peer->GetGuidFromSystemAddress\(senderAddress\) == m_service->getLobbyGuid\(\)\) \{\s*auto& room = callResult->joinedRoomResult.roomDescriptor;\s*m_service->m_roomSimultaneousTurns = hooks::roomRequiresSimultaneousTurns\(room\);\s*simturns::lobbyRoomJoined\(m_service, room.lobbyRoomId\);\s*\}/,
+        'only an authenticated successful response may bind the actual descriptor, including room zero');
+    assert.equal((callback[0].match(/simturns::lobbyRoomJoined\(/g) || []).length, 1,
+        'no unauthenticated or failed-result fallback may bind a room');
+    assert.match(service, /m_roomsClient.SetRoomsCallback\(&m_roomsCallback\);/);
+    assert.match(service, /m_roomsClient.AddRoomsCallback\(callback\);/);
+    assert.match(menu,
+        /void CMenuCustomLobby::RoomsCallback::JoinByFilter_Callback\([^]*?case SLNet::REC_SUCCESS: \{\s*m_menu->joinServer\(&callResult->joinedRoomResult.roomDescriptor\);/,
+        'the separately registered menu callback must still execute ordinary native joining');
+    assert.match(transport, /if \(owner != service \|\| !room\) return;/);
+    assert.match(transport, /if \(envelope.room != \*room\) return;/);
+    assert.match(transport, /!service->roomRequiresSimultaneousTurns\(\)/,
+        'fixing membership must not weaken the Arm room/negotiation fence');
+    const properties = service.match(
+        /bool roomRequiresSimultaneousTurns\(SLNet::RoomDescriptor& descriptor\)[^]*?(?=\nbool isSafeSaveStem)/);
+    assert.ok(properties);
+    assert.match(properties[0],
+        /GetRowByIndex\(0, nullptr\)[^]*?ColumnIndex\(name\)[^]*?if \(!row \|\| index >= row->cells.Size\(\)\)\s*return nullptr;[^]*?row->cells\[index\]/,
+        'absent legacy OH columns, unsigned missing index and empty rows are safe');
+    assert.doesNotMatch(properties[0], /descriptor.GetProperty\(/,
+        'SLikeNet GetProperty does not return null for an absent column');
+});
+
 test('engine controller and port remain independent of the local test transport', () => {
     const controller = fs.readFileSync(nativeSimturnController, 'utf8');
     const portHeader = fs.readFileSync(nativeCoordinatorPortHeader, 'utf8');
