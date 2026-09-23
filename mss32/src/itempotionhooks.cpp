@@ -1,5 +1,6 @@
 #include "itempotionhooks.h"
 #include "dbtable.h"
+#include "d2string.h"
 #include "mempool.h"
 #include "originalfunctions.h"
 #include <limits>
@@ -23,11 +24,17 @@ static void readPotionExtraFields(int* itemCat,
     db.readIntWithBoundsCheck(&item_Cat, dbTable, "ITEM_CAT", 0, 14);
     db.readIntWithBoundsCheck(&hp_Potion, dbTable, "HP_POTION", std::numeric_limits<int>::min(),
                               std::numeric_limits<int>::max());
-    
-    try {
+    // Healing/revival potions may leave this optional DBF field blank. Do not
+    // use a native exception for absence: debug mode reports it before catch.
+    String modifierText{};
+    db.readString(&modifierText, dbTable, "MOD_POTION");
+    const char* value = modifierText.string;
+    while (value && *value == ' ')
+        ++value;
+    const bool hasModifier = value && *value != '\0';
+    StringApi::get().free(&modifierText);
+    if (hasModifier) {
         db.readId(&mod_Potion, dbTable, "MOD_POTION");
-    } catch (...) {
-        mod_Potion = invalidId;
     }
 
     *itemCat = item_Cat;

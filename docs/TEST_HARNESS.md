@@ -81,6 +81,14 @@ $artifacts = Join-Path $env:TEMP ('oh-lobby-' + [guid]::NewGuid().ToString('N'))
 
 ## Проверки без игры
 
+Из MSVC x86 developer shell: `./tests/run-item-potion-fields.ps1 -OutputDirectory ./artifacts/potion-fields`.
+Проверяет настоящий загрузчик полей зелий с подставленными DB API в Debug и Release.
+Пустой `MOD_POTION` (включая DBF padding) означает отсутствие модификатора;
+непустое значение остаётся под строгой проверкой игры. Причина прежнего окна:
+`readPotionExtraFields` вызывал `readId` для пустой строки, а Debug-перехватчик
+показывал исключение ещё до `catch`. `DisplayErrors` и debug mode не отключаются.
+Эта проверка не заменяет запуск клиента с настоящей базой.
+
 ```powershell
 ./tools/test/lobby-simturns-smoke.ps1 -StaticCheck
 node --test tools/relay/test/relay-v2.test.js
