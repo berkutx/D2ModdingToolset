@@ -19,5 +19,12 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "$simTest compilation failed; no stale binary will be run" }
         & ('.\' + $simTest + '.exe')
         if ($LASTEXITCODE -ne 0) { throw "$simTest failed" }
+        if ($simTest -eq 'simturns_lobby_port') {
+            # The optional local transport uses this same port, not another OH engine.
+            & cl.exe /nologo /std:c++17 /EHsc /MT /O2 /DNDEBUG /DD2_TESTDRV ('/I' + (Join-Path $simRepo 'mss32\include')) @simSources /Fesimturns_local_port.exe /link /INCREMENTAL:NO
+            if ($LASTEXITCODE -ne 0) { throw 'Local port compilation failed; no stale binary will be run' }
+            & .\simturns_local_port.exe
+            if ($LASTEXITCODE -ne 0) { throw 'Local port failed' }
+        }
     }
 } finally { Pop-Location }

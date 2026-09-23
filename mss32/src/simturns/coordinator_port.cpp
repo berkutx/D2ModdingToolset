@@ -18,6 +18,9 @@ struct CoordinatorPort::Impl
     std::uint32_t epoch{}, mergeDay{};
     std::uint64_t generation{};
     bool armed{}, started{}, failed{};
+#ifdef D2_TESTDRV
+    bool localPlanIdentity{};
+#endif
 
     // Sender is the non-reentrant RakPeerInterface::Send enqueue operation,
     // not a callback into the coordinator. Serialize its acceptance and the
@@ -91,8 +94,25 @@ bool CoordinatorPort::arm(const SimTurnsSessionOptions& session,
     impl->core.configure(session);
     impl->armed = true;
     impl->failed = false;
+#ifdef D2_TESTDRV
+    impl->localPlanIdentity = false;
+#endif
     return true;
 }
+
+#ifdef D2_TESTDRV
+bool CoordinatorPort::armLocal(const SimTurnsSessionOptions& session, Sender sender,
+                                std::function<void()> terminal)
+{
+    // The adapter arms before publishing its first LocalPlayerHandle, the
+    // causal prerequisite for SessionPlan. Reuse normal lifetime validation.
+    if (!arm(session, 1, 0, std::move(sender), std::move(terminal))) return false;
+    std::lock_guard<std::mutex> lock(impl->mutex);
+    impl->epoch = 0;
+    impl->localPlanIdentity = true;
+    return true;
+}
+#endif
 
 bool CoordinatorPort::preflight(const SimTurnsSessionOptions& session, std::string& error)
 {
@@ -179,10 +199,18 @@ void CoordinatorPort::receive(const std::uint8_t* bytes, std::size_t size)
                 // a downgrade path after this room explicitly armed OH.
                 if (frame.op == protocol::Op::SessionPlan) {
                     protocol::SessionPlan plan;
-                    if (protocol::decodeSessionPlan(frame.payload, plan, error)
-                        && (plan.epoch != impl->epoch || plan.mergeDay != impl->mergeDay
-                            || plan.mode != TurnMode::Simultaneous))
-                        error = "SessionPlan disagrees with authenticated lobby Arm";
+                    if (protocol::decodeSessionPlan(frame.payload, plan, error)) {
+#ifdef D2_TESTDRV
+                        if (impl->localPlanIdentity && plan.mode == TurnMode::Simultaneous) {
+                            impl->epoch = plan.epoch;
+                            impl->mergeDay = plan.mergeDay;
+                            impl->localPlanIdentity = false;
+                        }
+#endif
+                        if (plan.epoch != impl->epoch || plan.mergeDay != impl->mergeDay
+                            || plan.mode != TurnMode::Simultaneous)
+                            error = "SessionPlan disagrees with armed simultaneous-turn session";
+                    }
                 }
                 ControlInboundEvent decoded;
                 ControlFailure failure;

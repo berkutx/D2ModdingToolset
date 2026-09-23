@@ -9,6 +9,8 @@ on:
       - "mss32/**"
       - "tests/**"
       - "tools/simturns-relay/**"
+      - "tools/relay/**"
+      - "tools/test/**"
       - "Examples/Custom Lobby/CustomLobby.dlg"
       - "Examples/Custom Lobby/CustomLobby.ff"
       - ".github/workflows/mss32.yml"
@@ -18,6 +20,8 @@ on:
       - "mss32/**"
       - "tests/**"
       - "tools/simturns-relay/**"
+      - "tools/relay/**"
+      - "tools/test/**"
       - "Examples/Custom Lobby/CustomLobby.dlg"
       - "Examples/Custom Lobby/CustomLobby.ff"
       - ".github/workflows/mss32.yml"
@@ -48,7 +52,7 @@ jobs:
           [ "$n" -ge 7 ] || { echo "::error::expected >=7 submodules, found $n"; exit 1; }
 
   build:
-    name: ${{ matrix.configuration }} OH=${{ matrix.simturns }}
+    name: ${{ matrix.configuration }} OH=${{ matrix.simturns }} TH=${{ matrix.testdrv }}
     needs: prepare
     runs-on: windows-2025-vs2026
     strategy:
@@ -56,6 +60,17 @@ jobs:
       matrix:
         simturns: ['false', 'true']
         configuration: [Debug, Release]
+        testdrv: ['false']
+        include:
+          - configuration: DebugTest
+            simturns: 'false'
+            testdrv: 'true'
+          - configuration: DebugTest
+            simturns: 'true'
+            testdrv: 'true'
+          - configuration: Release
+            simturns: 'true'
+            testdrv: 'true'
     defaults:
       run:
         shell: pwsh
@@ -91,13 +106,14 @@ jobs:
             /t:Build /p:Configuration=${{ matrix.configuration }} /p:Platform=Win32 /p:PlatformToolset=v143 `
             /p:SolutionDir=$env:GITHUB_WORKSPACE\mss32\ `
             /p:EnableSimultaneousTurns=${{ matrix.simturns }} `
+            /p:D2TestDrv=${{ matrix.testdrv }} `
             /p:MultiProcessorCompilation=false /p:UseMultiToolTask=true `
             /p:EnforceProcessCountAcrossBuilds=true /p:MinimalRebuild=false `
             /m /nologo /clp:Summary /verbosity:minimal 2>&1 | Tee-Object build.log
           exit $LASTEXITCODE
 
       - name: OH and prepared protocol regressions
-        if: matrix.simturns == 'true' && matrix.configuration == 'Release'
+        if: matrix.simturns == 'true' && matrix.configuration == 'Release' && matrix.testdrv == 'false'
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
@@ -107,6 +123,17 @@ jobs:
           Push-Location tools/simturns-relay
           try { node --test; if ($LASTEXITCODE -ne 0) { throw 'Relay regression failed' } }
           finally { Pop-Location }
+          Push-Location tools/relay
+          try { node --test; if ($LASTEXITCODE -ne 0) { throw 'Harness relay regression failed' } }
+          finally { Pop-Location }
+          ./tools/test/simturns-production-poc.ps1 -StaticCheck
+          ./tools/test/simturns-acceptance-campaign.ps1 -StaticCheck -GameDir . -FixtureManifest ./tools/test/fixtures/simturns-russobit.json -ArtifactDir "$env:RUNNER_TEMP/campaign-static"
+          ./tools/test/lobby-simturns-smoke.ps1 -StaticCheck
+          ./tools/test/simturns-battle-cases-test.ps1
+          ./tools/test/legacy-mass-oracle-test.ps1
+          ./tools/test/literal-inner-startup-test.ps1
+          node --test tools/test/battle-trace-audit.test.js
+          if ($LASTEXITCODE -ne 0) { throw 'Battle trace regression failed' }
 
       # archive: false uploads the file as-is (no zip). It only supports a single
       # file, so the build outputs go up as separate artifacts.
@@ -114,7 +141,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: build-${{ matrix.configuration }}-oh-${{ matrix.simturns }}.log
+          name: build-${{ matrix.configuration }}-oh-${{ matrix.simturns }}-th-${{ matrix.testdrv }}.log
           path: build.log
           if-no-files-found: ignore
           archive: false
@@ -123,7 +150,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v7
         with:
-          name: mss32-${{ matrix.configuration }}-oh-${{ matrix.simturns }}.dll
+          name: mss32-${{ matrix.configuration }}-oh-${{ matrix.simturns }}-th-${{ matrix.testdrv }}.dll
           path: out/mss32.dll
           if-no-files-found: error
           archive: false
@@ -132,7 +159,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v7
         with:
-          name: mss32-${{ matrix.configuration }}-oh-${{ matrix.simturns }}.pdb
+          name: mss32-${{ matrix.configuration }}-oh-${{ matrix.simturns }}-th-${{ matrix.testdrv }}.pdb
           path: out/mss32.pdb
           if-no-files-found: error
           archive: false

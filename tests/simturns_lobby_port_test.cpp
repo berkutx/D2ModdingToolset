@@ -161,9 +161,54 @@ void retiredCallbackCannotFaultNewSession() {
     check(newEvents == 1 && !newFaults, "quiesced map dispatched control");
     port.stop();
 }
+#ifdef D2_TESTDRV
+void localTransportUsesTheSameCore() {
+    auto& port = CoordinatorPort::processInstance();
+    const auto sender = [](const p::Bytes&) { return true; };
+    for (unsigned variant = 0; variant != 6; ++variant) {
+        port.stop();
+        unsigned faults{}, terminal{}, events{};
+        check(port.armLocal({true, Role::Host}, sender, [&] { ++terminal; }), "local arm failed");
+        check(!port.armLocal({true, Role::Join}, sender), "active local arm replaced");
+        CoordinatorCallbacks callbacks;
+        callbacks.postToUi = [&](CoordinatorEvent) { ++events; };
+        callbacks.terminalFault = [&](CoordinatorTerminalFault) { ++faults; };
+        check(port.start({true, Role::Host}, callbacks), "local start failed");
+        check(port.bindLocalPlayer(1), "local bind failed");
+        auto first = packet(p::Op::SessionPlan, {912, 1, 1, 2, 7, 81, 82});
+        if (variant == 1) first = packet(p::Op::SessionPlan, {912, 0, 1, 2, 0, 0, 0});
+        if (variant == 2) first = packet(p::Op::SessionPlan, {0, 1, 1, 2, 7, 81, 82});
+        if (variant == 3) first = packet(p::Op::EngineAction, {912, 1, 1, 2, 1, 82});
+        if (variant == 4) first = packet(p::Op::SessionPlan, {912, 1, 1, 2, 1, 81, 82});
+        port.receive(first.data(), first.size());
+        if (variant == 0 || variant == 5) {
+            check(events == 1 && !faults, "first local OH identity rejected");
+            const auto next = variant == 0 ? first
+                : packet(p::Op::SessionPlan, {911, 1, 1, 2, 7, 81, 82});
+            port.receive(next.data(), next.size());
+            check(events == 1 && faults == 1 && terminal == 1,
+                  "duplicate/stale local SessionPlan replaced identity");
+        } else {
+            check(!events && faults == 1 && terminal == 1, "invalid first local control accepted");
+        }
+    }
+    port.stop();
+    check(!port.armLocal({false, Role::Host}, sender), "local opt-out armed");
+    check(!port.arm({true, Role::Host}, 0, 0, sender), "local API weakened lobby epoch check");
+    {
+        Fixture f;
+        f.receive(packet(p::Op::SessionPlan, {912, 1, 1, 2, 7, 81, 82}));
+        check(f.faults == 1 && f.terminal == 1 && !f.events,
+              "retired local identity weakened a subsequent lobby arm");
+    }
+}
+#endif
 }
 int main() {
     try { malformedFrames(); lifecycleAndDelivery(); retiredCallbackCannotFaultNewSession();
+#ifdef D2_TESTDRV
+        localTransportUsesTheSameCore();
+#endif
         std::cout << "lobby port: exact frames, epochs, no downgrade, write barriers, terminal failures and new-map reset passed\n";
         return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

@@ -18,6 +18,10 @@
  */
 
 #include "menucustomlobby.h"
+#ifdef D2_TESTDRV
+#include "testdrv/lobbychatreporter.h"
+#include "testdrv/uistatereporter.h"
+#endif
 #include "autodialog.h"
 #include "button.h"
 #include "dialoginterf.h"
@@ -131,6 +135,10 @@ CMenuCustomLobby::CMenuCustomLobby(game::CMenuPhase* menuPhase, bool restartJoin
 CMenuCustomLobby ::~CMenuCustomLobby()
 {
     using namespace game;
+#ifdef D2_TESTDRV
+    testdrv::uistatereporter::observeLobbyRooms(
+        CMenuBaseApi::get().getDialogInterface(this), {});
+#endif
 
     const auto& uiEventApi = UiEventApi::get();
 
@@ -1104,6 +1112,13 @@ void CMenuCustomLobby::updateRooms(DataStructures::List<SLNet::RoomDescriptor*>&
         }
     }
 
+#ifdef D2_TESTDRV
+    std::vector<std::string> observedNames;
+    observedNames.reserve(m_rooms.size());
+    for (const auto& room : m_rooms)
+        observedNames.push_back(room.gameName);
+    testdrv::uistatereporter::observeLobbyRooms(dialog, std::move(observedNames));
+#endif
     listBoxApi.setElementsTotal(listBox, (int)m_rooms.size());
     if (selectedIndex != (unsigned)-1) {
         listBoxApi.setSelectedIndex(listBox, selectedIndex);
@@ -1620,6 +1635,10 @@ void CMenuCustomLobby::completeRestartJoin(bool success)
 
 void CMenuCustomLobby::addChatMessage(CNetCustomService::ChatMessage message)
 {
+#ifdef D2_TESTDRV
+    hooks::testdrv::lobbychatreporter::onChatReceived(message.sender.C_String(),
+                                                    message.text.C_String());
+#endif
     if (m_chatMessages.size() >= chatMessageMaxCount) {
         m_chatMessages.pop_front();
     }

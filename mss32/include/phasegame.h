@@ -93,6 +93,11 @@ struct Api
                                               const char* saveName,
                                               bool uiLockRequest);
     SendSaveGameMsg sendSaveGameMsg;
+#ifdef D2_TESTDRV
+    /** Actual native predicate, including any installed gameplay hook. */
+    using ClientTakesTurn = bool(__thiscall*)(CPhaseGame* thisptr);
+    ClientTakesTurn clientTakesTurn;
+#endif
 };
 
 Api& get();

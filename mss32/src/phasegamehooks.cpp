@@ -49,9 +49,8 @@ bool __fastcall phaseGameCheckObjectLockHooked(game::CPhaseGame* thisptr, int /*
     return lock->pendingLocalUpdates || lock->pendingNetworkUpdates;
 }
 
-void __fastcall phaseGameSendStackMoveMsgHooked(
+static bool sendStackMoveMsgThroughNativeTransport(
     game::CPhaseGame* thisptr,
-    int /*%edx*/,
     const game::CMidgardID* stackId,
     const game::List<game::Pair<game::CMqPoint, int>>* movementPath,
     const game::CMqPoint* startPosition,
@@ -75,14 +74,14 @@ void __fastcall phaseGameSendStackMoveMsgHooked(
     case simturns::Phase::AwaitingStockTurn:
     case simturns::Phase::Closing:
     case simturns::Phase::Faulted:
-        return;
+        return false;
     }
 #endif
     const auto& stackMoveMsgApi = CStackMoveMsgApi::get();
 
     auto* data = thisptr->data;
     if (!data->clientTakesTurn) {
-        return;
+        return false;
     }
 
 #ifdef D2_SIMTURNS
@@ -100,11 +99,7 @@ void __fastcall phaseGameSendStackMoveMsgHooked(
 
     CMidClient* client = data->midClient;
     CMidgard* midgard = client->core.data->midgard;
-#ifdef D2_SIMTURNS
     const bool sent = CMidgardApi::get().sendNetMsgToServer(midgard, &message);
-#else
-    CMidgardApi::get().sendNetMsgToServer(midgard, &message);
-#endif
 
     stackMoveMsgApi.destructor(&message);
 #ifdef D2_SIMTURNS
@@ -116,6 +111,31 @@ void __fastcall phaseGameSendStackMoveMsgHooked(
         spdlog::error(__FUNCTION__ ": native CStackMoveMsg send rejected");
     }
 #endif
+    return sent;
+}
+
+#ifdef D2_TESTDRV
+bool trySendStackMoveMsgThroughNativeTransport(
+    game::CPhaseGame* thisptr,
+    const game::CMidgardID* stackId,
+    const game::List<game::Pair<game::CMqPoint, int>>* movementPath,
+    const game::CMqPoint* startPosition,
+    const game::CMqPoint* endPosition)
+{
+    return sendStackMoveMsgThroughNativeTransport(
+        thisptr, stackId, movementPath, startPosition, endPosition);
+}
+#endif
+
+void __fastcall phaseGameSendStackMoveMsgHooked(
+    game::CPhaseGame* thisptr, int /*%edx*/,
+    const game::CMidgardID* stackId,
+    const game::List<game::Pair<game::CMqPoint, int>>* movementPath,
+    const game::CMqPoint* startPosition,
+    const game::CMqPoint* endPosition)
+{
+    (void)sendStackMoveMsgThroughNativeTransport(
+        thisptr, stackId, movementPath, startPosition, endPosition);
 }
 
 } // namespace hooks

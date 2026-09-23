@@ -93,6 +93,13 @@ public:
              std::uint32_t mergeDay, Sender sender,
              std::function<void()> terminal = {},
              std::function<void()> progressWake = {});
+#ifdef D2_TESTDRV
+    /** Local v8 has no Arm envelope: bind epoch/merge day exactly once from
+     * its first validated OH SessionPlan. It never accepts a stock downgrade.
+     * The pipe adapter must not begin inbound delivery before this returns. */
+    bool armLocal(const SimTurnsSessionOptions& session, Sender sender,
+                  std::function<void()> terminal = {});
+#endif
     /** Natural native progress edge; adapters may wake an ordered-input barrier. */
     void notifyNativeProgress();
     /** Each envelope contains exactly one complete v8 frame. */
