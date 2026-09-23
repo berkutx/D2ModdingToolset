@@ -315,7 +315,7 @@ if ($StaticCheck) {
     $sourceJoinBudgetGate = [regex]::Match(
         $literalInnerStartupSource,
         '(?ms)if \(\$null -ne \$hostStrategicAtSeconds.*?' +
-        '(?=\n\s*}\n\s*}\n\s*if \(-not \$hostStrategic)'
+        '(?=\r?\n\s*}\r?\n\s*}\r?\n\s*if \(-not \$hostStrategic)'
     ).Value
     if ([string]::IsNullOrWhiteSpace($sourceJoinBudgetGate) -or
         [regex]::Matches(
