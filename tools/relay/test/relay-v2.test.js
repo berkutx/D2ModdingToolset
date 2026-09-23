@@ -6421,7 +6421,7 @@ test('canonical gameplay preserves exact move geometry on normal transport and i
         'popup exclusions must come from that same immutable plan');
 
     const sender = phaseHooks.match(
-        /bool sendStackMoveMsgThroughNativeTransport\([\s\S]*?(?=\n#ifdef D2_TESTDRV\n\s*bool trySendStackMoveMsgThroughNativeTransport)/);
+        /bool sendStackMoveMsgThroughNativeTransport\([\s\S]*?(?=\r?\n#ifdef D2_TESTDRV\r?\n\s*bool trySendStackMoveMsgThroughNativeTransport)/);
     assert.ok(sender, 'the common one-shot native sender must remain independently auditable');
     assert.equal((sender[0].match(/sendNetMsgToServer/g) || []).length, 1,
         'the common sender has one and only one transport attempt');

@@ -48,7 +48,7 @@ protected:
                                        int /*%edx*/,
                                        std::uint32_t idTo,
                                        const game::NetMessageHeader* message);
-#ifdef D2_SIMTURNS
+#if defined(D2_SIMTURNS) || defined(D2_TESTDRV)
     static int sendMessageUnintercepted(void* self, void* transportContext,
                                         std::uint32_t idTo,
                                         const game::NetMessageHeader* message);
