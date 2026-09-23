@@ -3,9 +3,11 @@
 #include "simturns/controller.h"
 #include "simturns/coordinator_port.h"
 #include "simturns/native_apply_fence.h"
+#include "simturns/native_notification_policy.h"
 #include "netcustomservice.h"
 #include "netcustomsession.h"
 #include "netintercept.h"
+#include "netmsg.h"
 #include <BitStream.h>
 #include <deque>
 #include <memory>
@@ -166,6 +168,8 @@ namespace {
 struct NativeCompletion {
     std::shared_ptr<LobbyNativeTicket> ticket;
     netintercept::NativeReceiveResult result{};
+    bool allowedNotification{};
+    std::uint64_t pregameGeneration{};
 };
 void discardNativeCompletion(void* context) { delete static_cast<NativeCompletion*>(context); }
 void completeNativeOnUi(void* context) {
@@ -176,7 +180,8 @@ void completeNativeOnUi(void* context) {
         std::lock_guard lock(selected->mutex);
         if (!selected->sending) return;
     }
-    if (completion->result == netintercept::NativeReceiveResult::Failed) {
+    if (completion->result == netintercept::NativeReceiveResult::Failed
+        || completion->result == netintercept::NativeReceiveResult::Unhandled) {
         rejectActive(lobby::AbortReason::Protocol, "native packet did not complete its handler"); return;
     }
     if (completion->ticket->clientReceiver
@@ -196,6 +201,14 @@ void nativeReceiveCompleted(void* context, netintercept::NativeReceiveResult res
     {
         std::lock_guard lock(selected->mutex);
         if (!selected->sending) return;
+    }
+    // Classify synchronously, before a queued UI task can enter another phase.
+    // The stage snapshot and current generation must describe the same pregame
+    // lifetime; the weak binding above also rejects a retired lobby map.
+    if (result == netintercept::NativeReceiveResult::Unhandled) {
+        completion->result = resolveLobbyNativeReceiveResult(
+            result, completion->allowedNotification, completion->pregameGeneration,
+            completion->allowedNotification ? pregameNativeNotificationGeneration() : 0);
     }
     // The native dispatcher may run on the server worker. Never inspect the
     // strategic command queue or run a coordinator action on that thread.
@@ -258,7 +271,8 @@ void lobbyDiscardNativePacket(std::shared_ptr<LobbyNativeTicket> ticket) {
 }
 
 bool lobbyStageNativeReceive(const game::NetMessageHeader* buffer,
-                            std::shared_ptr<LobbyNativeTicket> ticket) {
+                            std::shared_ptr<LobbyNativeTicket> ticket,
+                            std::uint32_t sender) {
     if (!ticket) return true;
     const auto selected = ticket->owner.lock();
     const auto retired = [&selected]() {
@@ -271,6 +285,13 @@ bool lobbyStageNativeReceive(const game::NetMessageHeader* buffer,
     if (retired()) return true;
     auto context = std::make_unique<NativeCompletion>();
     context->ticket = std::move(ticket);
+    if (buffer) {
+        context->allowedNotification = isPregameConnectNotification(
+            buffer->messageType, buffer->length, buffer->messageClassName,
+            context->ticket->clientReceiver, sender);
+        if (context->allowedNotification)
+            context->pregameGeneration = pregameNativeNotificationGeneration();
+    }
     if (!netintercept::stageNativeReceive(buffer, context.get(), nativeReceiveCompleted,
                                          discardNativeCompletion)) {
         if (retired()) return true; // Teardown may have won between check and registration.

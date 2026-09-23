@@ -506,7 +506,7 @@ int receiveHookCoreImpl(void* self, void* edx, int packet, int idFrom,
         }
     }
     const int result = callOriginalReceive(self, edx, packet, idFrom, playerNetId);
-    disposition = result > 0 ? NativeReceiveResult::Applied : NativeReceiveResult::Failed;
+    disposition = nativeDispatchResult(result);
     if (completion.callback && !g_sessionTeardown.load(std::memory_order_acquire)) {
         if (result <= 0) {
             failFastRuntime("armed post-dispatch RX transition had no matching engine handler",

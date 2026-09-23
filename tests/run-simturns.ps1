@@ -5,7 +5,8 @@ $simOutput = New-Item -ItemType Directory -Path $OutputDirectory -Force
 Push-Location $simOutput.FullName
 try {
     foreach ($simTest in @('simturns_control_client_core', 'simturns_lobby_port',
-                           'simturns_lobby_wire', 'simturns_native_apply_fence')) {
+                           'simturns_lobby_wire', 'simturns_native_apply_fence',
+                           'simturns_native_notification_policy')) {
         $simSources = @((Join-Path $simRepo ('tests\' + $simTest + '_test.cpp')))
         if ($simTest -in @('simturns_control_client_core', 'simturns_lobby_port')) {
             $simSources += @((Join-Path $simRepo 'mss32\src\simturns\protocol.cpp'),

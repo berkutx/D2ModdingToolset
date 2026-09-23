@@ -77,7 +77,13 @@ using UiTaskCallback = void (*)(void* context);
 /** Releases a queued task's context without touching native game objects. */
 using UiTaskDiscardCallback = void (*)(void* context);
 
-enum class NativeReceiveResult { Applied, Filtered, Failed };
+enum class NativeReceiveResult { Applied, Filtered, Failed, Unhandled };
+/** Policy-free result of a normally returned original native dispatch. */
+constexpr NativeReceiveResult nativeDispatchResult(int handlerCount) noexcept
+{
+    return handlerCount > 0 ? NativeReceiveResult::Applied
+         : handlerCount == 0 ? NativeReceiveResult::Unhandled : NativeReceiveResult::Failed;
+}
 using NativeReceiveCallback = void (*)(void* context, NativeReceiveResult result);
 
 /** Attach an owned completion ticket to the exact native receive buffer.
@@ -85,7 +91,8 @@ using NativeReceiveCallback = void (*)(void* context, NativeReceiveResult result
  * Success transfers context ownership: complete consumes it after RX exits,
  * or discard releases it at teardown/exception. Defer preserves the ticket
  * through the later replay; an intentional policy Consume reports Filtered.
- * Policy Drop and a native dispatch without a handler report Failed.
+ * Policy Drop reports Failed. Original native dispatch with no matching handler
+ * reports Unhandled; its transport owner must explicitly resolve that result.
  * False retains caller ownership. Both callbacks must not throw. */
 bool stageNativeReceive(const game::NetMessageHeader* buffer, void* context,
                         NativeReceiveCallback complete, UiTaskDiscardCallback discard);
