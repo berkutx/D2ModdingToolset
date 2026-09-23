@@ -51,6 +51,41 @@ int main() {
         require(!validParameterKey("spin:32") && !validParameterKey("spin:01") && !validParameterKey("spin:-1")
             && !validParameterKey("race") && !validParameterKey("__proto__"), "unknown parameter accepted");
         require(!decodeOffer(nullptr, 1, parsed), "null accepted");
+        static_assert(static_cast<unsigned>(Operation::JoinOffer) == 3
+            && static_cast<unsigned>(Operation::JoinStatus) == 4
+            && static_cast<unsigned>(Operation::JoinCancel) == 5, "join operations must remain append-only");
+        auto invitation = header(3); num(invitation, 17, 4);
+        str(invitation, "host"); str(invitation, "Ready map"); str(invitation, "joiner");
+        JoinOffer join;
+        require(decodeJoinOffer(invitation.data(), invitation.size(), join), "join invitation rejected");
+        require(join.target.identity == id && join.target.roomId == 17
+            && join.host == "host" && join.title == "Ready map" && join.recipient == "joiner", "join fields mismatch");
+        for (std::size_t i = 0; i < invitation.size(); ++i)
+            require(!decodeJoinOffer(invitation.data(), i, join), "truncated join invitation accepted");
+        invalid = invitation; invalid.push_back(0);
+        require(!decodeJoinOffer(invalid.data(), invalid.size(), join), "join trailing byte accepted");
+        invalid = invitation; invalid[0] = 2;
+        require(!decodeJoinOffer(invalid.data(), invalid.size(), join), "unknown join version accepted");
+        invalid = header(3); num(invalid, UINT32_MAX, 4); str(invalid, "host"); str(invalid, "map"); str(invalid, "joiner");
+        require(!decodeJoinOffer(invalid.data(), invalid.size(), join), "sentinel room id accepted");
+        invalid = header(3); num(invalid, 0, 4); str(invalid, "host"); str(invalid, ""); str(invalid, "");
+        require(!decodeJoinOffer(invalid.data(), invalid.size(), join), "missing recipient accepted");
+        auto zero = header(3); num(zero, 0, 4); str(zero, "host"); str(zero, ""); str(zero, "joiner");
+        require(decodeJoinOffer(zero.data(), zero.size(), join), "zero room id rejected");
+        auto withdrawal = header(5); num(withdrawal, 17, 4); JoinIdentity target;
+        require(decodeJoinCancel(withdrawal.data(), withdrawal.size(), target), "join withdrawal rejected");
+        for (std::size_t i = 0; i < withdrawal.size(); ++i)
+            require(!decodeJoinCancel(withdrawal.data(), i, target), "truncated join withdrawal accepted");
+        invalid = withdrawal; invalid.push_back(0);
+        require(!decodeJoinCancel(invalid.data(), invalid.size(), target), "withdrawal trailing byte accepted");
+        require(!decodeCancel(withdrawal.data(), withdrawal.size(), id), "join withdrawal mistaken for host cancel");
+        for (unsigned state = 0; state <= 5; ++state) {
+            expected = header(4); num(expected, 17, 4); expected.push_back(static_cast<std::uint8_t>(state)); str(expected, "result");
+            require(encodeJoinStatus(target, static_cast<JoinState>(state), "result") == expected, "join status golden vector mismatch");
+        }
+        require(encodeJoinStatus(target, static_cast<JoinState>(6), "").empty(), "unknown join status accepted");
+        require(encodeJoinStatus(target, JoinState::Unavailable, std::string(129, 'x')).empty(), "oversized join detail accepted");
+        require(encodeJoinStatus(target, JoinState::Unavailable, "line\nbreak").empty(), "control byte in join detail accepted");
         std::cout << "prepared protocol: golden vectors, categories, every truncation, bounds and parameter keys passed\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
