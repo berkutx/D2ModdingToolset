@@ -23,6 +23,13 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Prepared lifecycle compilation failed; old executable was not run' }
     & '.\preparedmatchlifecycle_test.exe'
     if ($LASTEXITCODE -ne 0) { throw 'Prepared lifecycle regression failed' }
+    & cl.exe /nologo /std:c++17 /utf-8 /EHsc /MT /O2 /DNDEBUG `
+        ('/I' + (Join-Path $preparedRepo 'mss32\include')) `
+        (Join-Path $preparedRepo 'tests\preparedmatchtext_test.cpp') `
+        /Fepreparedmatchtext_test.exe /link /INCREMENTAL:NO
+    if ($LASTEXITCODE -ne 0) { throw 'Prepared text compilation failed; old executable was not run' }
+    & '.\preparedmatchtext_test.exe'
+    if ($LASTEXITCODE -ne 0) { throw 'Prepared text regression failed' }
     if ($DependenciesRoot) {
         $preparedRsg = Join-Path (Resolve-Path -LiteralPath $DependenciesRoot).Path 'D2RSG\ScenarioGenerator\src'
         & cl.exe /nologo /std:c++17 /EHsc /MT /O2 /DNDEBUG `

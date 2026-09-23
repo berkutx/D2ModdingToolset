@@ -1096,6 +1096,7 @@ call ..\buildDetours.bat ..\Detours
     <ClInclude Include="include\preparedmatchsettings.h" />
     <ClInclude Include="include\preparedmatchtemplates.h" />
     <ClInclude Include="include\preparedmatchlifecycle.h" />
+    <ClInclude Include="include\preparedmatchtext.h" />
     <ClInclude Include="include\clientcompatibility.h" />
     <ClInclude Include="include\scenedit.h" />
     <ClInclude Include="include\isoborder.h" />

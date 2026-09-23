@@ -1,6 +1,7 @@
 #include "preparedmatch.h"
 #include "preparedmatchlifecycle.h"
 #include "preparedmatchtemplates.h"
+#include "preparedmatchtext.h"
 #include "button.h"
 #include "categorylist.h"
 #include "dialoginterf.h"
@@ -153,23 +154,8 @@ void makeRecipe() {
     active->localFilename = std::move(selected.filename);
     active->recipe = {std::move(selected.settings), selected.cached->source};
 }
-std::string parameterLabel(const std::string& key) {
-    static const std::pair<const char*, const char*> names[] = {
-        {"size", "Размер карты"}, {"roads", "Дороги, %"}, {"forest", "Лес, %"},
-        {"startingGold", "Стартовое золото"}, {"startingNativeMana", "Стартовая родная мана"},
-        {"water", "Вода, %"}, {"maxUnit", "Макс. уровень юнитов"},
-        {"maxSpell", "Макс. круг заклинаний"}, {"maxLeader", "Макс. уровень героя"},
-        {"maxCity", "Макс. уровень города"}, {"startingLevel", "Стартовый уровень"},
-        {"iterations", "Итерации генерации"}
-    };
-    for (const auto& name : names) if (key == name.first) return name.second;
-    if (key.compare(0, 5, "spin:") == 0)
-        return "Параметр шаблона " + std::to_string(std::stoul(key.substr(5)) + 1);
-    return key;
-}
 std::vector<std::string> paginateText(game::CTextBoxInterf* textBox, std::string text,
-                                    const std::string& footer) {
-    std::vector<std::string> pages;
+                                    const std::string& question, const std::string& next) {
     text = gameText(text);
     const auto* rect = textBox->vftable->getArea(textBox);
     const auto width = rect->right - rect->left;
@@ -181,41 +167,15 @@ std::vector<std::string> paginateText(game::CTextBoxInterf* textBox, std::string
         ~TextMetrics() { game::SmartPointerApi::get().createOrFree(reinterpret_cast<game::SmartPointer*>(&ptr), nullptr); }
     } metrics;
     if (!metrics.ptr.data || width <= 0 || height <= 0) throw std::runtime_error("message-box-size");
-    const auto reserve = gameText("\n(9999/9999) " + footer);
     auto fits = [&](const std::string& body) {
-        const auto candidate = format + body + reserve;
+        const auto candidate = format + body;
         return metrics.ptr.data->vftable->getTextHeight(metrics.ptr.data, candidate.c_str(), width) <= height;
     };
-    // Measure with the game's renderer and the actual mod's textbox. Pages retain
-    // every byte; the reserved footer is longer than any displayed page counter.
-    while (!text.empty()) {
-        std::size_t n{}, upper = std::min<std::size_t>(text.size(), 1024);
-        while (n < upper) {
-            const auto middle = n + (upper - n + 1) / 2;
-            if (fits(text.substr(0, middle))) n = middle;
-            else upper = middle - 1;
-        }
-        if (!n) throw std::runtime_error("message-box-too-small");
-        if (n < text.size()) {
-            const auto split = text.find_last_of(" \n", n - 1);
-            if (split != std::string::npos && split > n / 2) n = split + 1;
-        }
-        pages.push_back(text.substr(0, n)); text.erase(0, n);
-    }
-    return pages;
+    return promptPages(std::move(text), gameText(question), gameText(next), fits);
 }
 void buildPages(game::CTextBoxInterf* textBox) {
-    const auto& v = active->offer;
-    std::string text = "Подготовленный матч: " + v.title + "\nШаблон-пример: " + v.filename
-        + "\nКлиент выберет последнюю локальную версию этого варианта.\nХост: " + v.host + "\nИгроки: ";
-    for (std::size_t i = 0; i < v.participants.size(); ++i) text += (i ? ", " : "") + v.participants[i].name;
-    text += v.ranked ? "\nРейтинговая игра." : "\nНерейтинговая игра.";
-    for (const auto& key : v.explicitParameters)
-        text += "\n" + parameterLabel(key) + ": " + std::to_string(v.parameters.at(key));
-    if (v.unlockGui) text += "\nUnlock GUI включён.";
-    if (v.simultaneous) text += "\nОдновременные ходы: " + std::to_string(v.simultaneousUntil);
-    if (!v.summary.empty()) text += "\n" + v.summary;
-    active->pages = paginateText(textBox, text, "Создать матч? Да — генерация, Нет — отложить.");
+    active->pages = paginateText(textBox, hostPromptText(active->offer),
+        "Сгенерировать карту?", "Да — далее, Нет — отложить.");
 }
 struct ConfirmationHandler : game::CMidMsgBoxButtonHandler { std::uint64_t epoch; };
 void __fastcall destroyHandler(ConfirmationHandler* p, int, char flags) { if (flags & 1) game::Memory::get().freeNonZero(p); }
@@ -343,11 +303,10 @@ bool processPreparedJoin() {
             auto* textBox = game::CDialogInterfApi::get().findTextBox(dialog, "TXT_INFO");
             if (!textBox || !textBox->data) throw std::runtime_error("message-box-text-missing");
             if (join.pages.empty()) join.pages = paginateText(textBox,
-                "Подготовленный матч готов: " + join.offer.title + "\nХост: " + join.offer.host
-                    + "\nКарта создана. Присоединиться к игровой комнате?",
-                "Присоединиться? Да — войти, Нет — отказаться.");
-            const auto footer = "\n(" + std::to_string(join.page + 1) + "/" + std::to_string(join.pages.size()) + ") "
-                + (join.page + 1 == join.pages.size() ? "Присоединиться? Да — войти, Нет — отказаться." : "Да — далее, Нет — отказаться.");
+                join.offer.title + "\nХост: " + join.offer.host + "\nКарта готова.",
+                "Войти в комнату?", "Да — далее, Нет — отказаться.");
+            const auto footer = promptFooter(join.page, join.pages.size(),
+                "Войти в комнату?", "Да — далее, Нет — отказаться.");
             const auto text = join.pages[join.page] + gameText(footer);
             game::CTextBoxInterfApi::get().setString(textBox, text.c_str());
             joinBox = box; showInterface(box); sendJoinStatus(join.offer.target, JoinState::Prompt);
@@ -472,9 +431,8 @@ bool processPreparedMatch() {
             auto* textBox = game::CDialogInterfApi::get().findTextBox(dialog, "TXT_INFO");
             if (!textBox || !textBox->data) throw std::runtime_error("message-box-text-missing");
             if (active->pages.empty()) buildPages(textBox);
-            const bool last = active->page + 1 == active->pages.size();
-            const auto footer = "\n(" + std::to_string(active->page + 1) + "/" + std::to_string(active->pages.size()) + ") "
-                + (last ? "Создать матч? Да — генерация, Нет — отложить." : "Да — далее, Нет — отложить.");
+            const auto footer = promptFooter(active->page, active->pages.size(),
+                "Сгенерировать карту?", "Да — далее, Нет — отложить.");
             const auto message = active->pages[active->page] + gameText(footer);
             game::CTextBoxInterfApi::get().setString(textBox, message.c_str());
             modal = true; showInterface(box);
