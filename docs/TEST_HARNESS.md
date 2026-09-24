@@ -84,6 +84,11 @@ $artifacts = Join-Path $env:TEMP ('oh-lobby-' + [guid]::NewGuid().ToString('N'))
 
 ## Проверки без игры
 
+Из MSVC x86 developer shell: `./tests/run-simturns.ps1 -OutputDirectory ./artifacts/simturns`.
+Включает реальный lobby transport startup regression в Debug/Release. Он воспроизводит
+сбой раннего JoinGame и проверяет completion/fence, но подставляет native dispatch,
+UI loop и сеть: [границы и воспроизведение красного теста](2026-09-24_reverse-lobby-startup-report.md).
+
 Из MSVC x86 developer shell: `./tests/run-item-potion-fields.ps1 -OutputDirectory ./artifacts/potion-fields`.
 Проверяет настоящий загрузчик полей зелий с подставленными DB API в Debug и Release.
 Пустой `MOD_POTION` (включая DBF padding) означает отсутствие модификатора;

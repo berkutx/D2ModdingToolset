@@ -343,6 +343,11 @@ bool lobbyStageNativeReceive(const game::NetMessageHeader* buffer,
                 selected->role == Role::Join, context->ticket->clientReceiver, sender)
                 || selected->pregameSnapshot.allowsUnhandledStartupBeginTurn(
                     buffer->messageType, buffer->length, buffer->messageClassName, startupWords,
+                    selected->role == Role::Join, context->ticket->clientReceiver, sender)
+                || selected->pregameSnapshot.allowsUnhandledJoinGame(
+                    buffer->messageType, buffer->length, buffer->messageClassName,
+                    reinterpret_cast<const std::uint8_t*>(buffer + 1),
+                    buffer->length >= sizeof(*buffer) ? buffer->length - sizeof(*buffer) : 0,
                     selected->role == Role::Join, context->ticket->clientReceiver, sender);
             context->allowedNotification = context->pregameJoinNotification || isPregameConnectNotification(
                 buffer->messageType, buffer->length, buffer->messageClassName,

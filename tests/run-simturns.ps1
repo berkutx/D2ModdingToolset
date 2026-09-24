@@ -30,3 +30,7 @@ try {
         }
     }
 } finally { Pop-Location }
+
+# Exercise the real lobby binding/staging/completion path, not only its helpers.
+& (Join-Path $PSScriptRoot 'run-simturns-lobby-startup-regression.ps1') `
+    -OutputDirectory (Join-Path $simOutput.FullName 'lobby-startup')
