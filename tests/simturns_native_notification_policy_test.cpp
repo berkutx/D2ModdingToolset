@@ -226,6 +226,117 @@ void filteredRefreshKeepsEarlierFence()
           "earlier native command/drain did not release the barrier");
     check(!fence.complete(snapshot), "duplicate Refresh completion admitted");
 }
+
+void exactEarlyStartupBeginTurn()
+{
+    PregameJoinSnapshotPolicy policy;
+    char name[36] = ".?AVCCmdBeginTurnMsg@@";
+    std::uint32_t words[3]{0, 1, 0xa3de0001u};
+    const auto allows = [&](std::uint32_t type, std::uint32_t length, bool joinRole,
+                            bool clientReceiver, std::uint32_t sender) {
+        return policy.allowsUnhandledStartupBeginTurn(type, length, name, words,
+                                                       joinRole, clientReceiver, sender);
+    };
+    check(allows(0xffff, 56, true, true, 1), "exact startup BeginTurn broadcast rejected");
+    policy.observe(0xffff, 56, name, true, 1);
+    check(!policy.scenarioStarted(), "startup BeginTurn closed the pre-scenario window");
+    for (const auto type : {0u, 1u, 0xfffeu, 0x10000u})
+        check(!allows(type, 56, true, true, 1), "wrong startup BeginTurn type admitted");
+    for (const auto length : {0u, 43u, 44u, 48u, 52u, 55u, 57u, 23896u, 0x80000u})
+        check(!allows(0xffff, length, true, true, 1), "non-exact startup BeginTurn size admitted");
+    check(!allows(0xffff, 56, false, true, 1), "host received startup BeginTurn exception");
+    check(!allows(0xffff, 56, true, false, 1), "server endpoint received startup BeginTurn exception");
+    for (const auto sender : {0u, 2u, 0xffffffffu})
+        check(!allows(0xffff, 56, true, true, sender), "foreign startup BeginTurn sender admitted");
+    for (const auto addressee : {1u, 0xa3de0002u, 0xffffffffu}) {
+        words[0] = addressee;
+        check(!allows(0xffff, 56, true, true, 1), "directed addressee admitted as startup broadcast");
+    }
+    words[0] = 0;
+    for (const auto sequence : {0u, 2u, 0xffffffffu}) {
+        words[1] = sequence;
+        check(!allows(0xffff, 56, true, true, 1), "non-startup sequence admitted");
+    }
+    words[0] = 0xa3de0002u;
+    words[1] = 0xffffffffu;
+    check(!allows(0xffff, 56, true, true, 1), "exact directed-activation tuple admitted");
+    words[0] = 0;
+    words[1] = 1;
+    words[2] = 0;
+    check(!allows(0xffff, 56, true, true, 1), "zero startup active handle admitted");
+    for (const auto active : {1u, 0xa3de0001u, 0xffffffffu}) {
+        words[2] = active;
+        check(allows(0xffff, 56, true, true, 1), "nonzero startup active handle rejected");
+    }
+    name[sizeof(".?AVCCmdBeginTurnMsg@@") - 1] = 'X';
+    check(!allows(0xffff, 56, true, true, 1), "longer BeginTurn RTTI prefix admitted");
+    std::memset(name, 'A', sizeof(name));
+    check(!allows(0xffff, 56, true, true, 1), "unterminated BeginTurn RTTI admitted");
+    for (const auto* other : {".?AVCBeginTurnMsg@@", ".?AVCCmdTurnInfoMsg@@", ".?AVCRefreshInfo@@",
+                             ".?AVCNewScenarioMsg@@", ".?AVCStartScenarioMsg@@",
+                             ".?AVCCmdMoveStackMsg@@", ".?AVCConnectMsg@@"}) {
+        std::memset(name, 0, sizeof(name));
+        std::memcpy(name, other, std::strlen(other) + 1);
+        check(!allows(0xffff, 56, true, true, 1), "other RTTI received startup BeginTurn exception");
+    }
+}
+
+void startupBeginTurnCompletionKeepsLifetimeAndFailures()
+{
+    char name[36] = ".?AVCCmdBeginTurnMsg@@";
+    const std::uint32_t words[3]{0, 1, 0xa3de0001u};
+    for (const auto* boundaryClass : {".?AVCNewScenarioMsg@@", ".?AVCStartScenarioMsg@@"}) {
+        char boundary[36]{};
+        std::memcpy(boundary, boundaryClass, std::strlen(boundaryClass) + 1);
+        for (const bool crossed : {false, true}) {
+            PregameJoinSnapshotPolicy policy;
+            const bool staged = policy.allowsUnhandledStartupBeginTurn(0xffff, 56, name, words,
+                                                                        true, true, 1);
+            check(staged, "early startup BeginTurn could not stage");
+            // Model the native nested receive between staging and synchronous completion.
+            if (crossed) policy.observe(0xffff, 56, boundary, true, 1);
+            const bool allowed = staged && !policy.scenarioStarted();
+            check(policy.allowsUnhandledStartupBeginTurn(0xffff, 56, name, words, true, true, 1)
+                      == !crossed, "startup BeginTurn ignored the latched scenario boundary");
+            for (const auto before : {0u, 41u}) {
+                for (const auto after : {0u, 41u, 42u}) {
+                    const bool accept = allowed && before && before == after;
+                    check(resolveLobbyNativeReceiveResult(nativeDispatchResult(0), allowed, before, after)
+                              == (accept ? NativeReceiveResult::Filtered : NativeReceiveResult::Failed),
+                          "startup BeginTurn crossed a scenario/lifetime boundary");
+                    // A duplicate/invalid startup proof is already Drop/Failed from rxGate.
+                    // Class eligibility must never override that failure or a positive handler count.
+                    for (const auto result : {NativeReceiveResult::Failed, NativeReceiveResult::Applied,
+                                              NativeReceiveResult::Filtered})
+                        check(resolveLobbyNativeReceiveResult(result, allowed, before, after) == result,
+                              "startup BeginTurn exception rescued a failed proof or changed native result");
+                }
+            }
+        }
+    }
+}
+
+void filteredStartupBeginTurnKeepsEarlierFence()
+{
+    PregameJoinSnapshotPolicy policy;
+    char name[36] = ".?AVCCmdBeginTurnMsg@@";
+    const std::uint32_t words[3]{0, 1, 0xa3de0001u};
+    NativeApplyFence fence;
+    const auto earlierCommand = fence.issue();
+    const auto beginTurn = fence.issue();
+    const auto barrier = fence.watermark();
+    const auto laterPacket = fence.issue();
+    check(resolveLobbyNativeReceiveResult(nativeDispatchResult(0),
+              policy.allowsUnhandledStartupBeginTurn(0xffff, 56, name, words, true, true, 1), 43, 43)
+              == NativeReceiveResult::Filtered, "startup BeginTurn classification failed");
+    check(fence.complete(beginTurn) && !fence.reached(barrier),
+          "filtered startup BeginTurn bypassed an earlier native command/drain");
+    check(fence.complete(laterPacket) && !fence.reached(barrier),
+          "later packet bypassed the startup native barrier");
+    check(fence.complete(earlierCommand) && fence.reached(barrier),
+          "earlier native completion did not release startup barrier");
+    check(!fence.complete(beginTurn), "duplicate startup BeginTurn completion admitted");
+}
 }
 
 int main()
@@ -234,6 +345,8 @@ int main()
         exactNotification(); onlyNormallyUnhandledNotification(); filteredNotificationKeepsEarlierFence();
         exactEarlyJoinRefresh(); scenarioBoundaryIsAuthoritativeAndPermanent();
         refreshCompletionRequiresSamePregameLifetime(); filteredRefreshKeepsEarlierFence();
+        exactEarlyStartupBeginTurn(); startupBeginTurnCompletionKeepsLifetimeAndFailures();
+        filteredStartupBeginTurnKeepsEarlierFence();
         std::cout << "simturns native notification policy: PASS\n";
         return 0;
     } catch (const std::exception& e) {

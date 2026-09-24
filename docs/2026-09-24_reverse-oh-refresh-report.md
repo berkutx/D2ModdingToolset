@@ -1,4 +1,4 @@
-# ОХ: ранний Refresh до игрового клиента джойнера
+# ОХ: ранние сообщения до игрового клиента джойнера
 
 24 сентября 2026. [Область и авторизация](2026-09-24_oh-refresh-scope.md).
 Сборка и консольные регрессии не заменяют живой прогон двух клиентов с
@@ -74,6 +74,24 @@ scenarioID4 (0x47E666), count4 (0x605304→0x604E46). При isExpansionContent
 всех объектов; native dispatch и обработка ошибок payload сохранены.
 Дизассемблер подтверждает порядок полного снимка, а конкретный ранний пакет — E-1.
 
+### E-5 — соседний startup BeginTurn
+
+Локальный raw `artifacts/oh-refresh-native/targeted-beginturn-evidence.json`,
+SHA256 `4ed08e13dbe0e50ae7af5d42e4d4bfaf4df2008fbee9f9fd8137e89863755f54`;
+повтор: `artifacts/oh-refresh-native/collect-beginturn-evidence.ps1` (12/12).
+Тот же E-1 содержит у join UI20184 startup broadcast BeginTurn в05:27:21.465
+после первого Abort. Его handler_count в этом прогоне уже не установлен;
+следующий отказ нельзя выдавать за отдельно воспроизведённый.
+
+Native CNMMap ctor0x40FD60 безусловно регистрирует оба callback:
+Refresh0x40FD9F→0x4102C0 и BeginTurn0x40FF47→0x4102B0 через add0x55BAA9.
+Другой BeginTurn member-handler принадлежит CMidClient: vtable0x6CECFC,
+adapter0x40F079, allocator0x40E0C8, registration0x40BAE6→callback0x40CC7C.
+Отдельного menu-handler нет. Отсутствие обработчика Refresh и CMidClient
+объясняет отсутствие обоих маршрутов BeginTurn в том же предыгровом состоянии.
+В исходниках rxGate сохраняет startup proof, но возвращает Pass, не Consume.
+Поэтому только Refresh-исправление оставило бы следующий zero-handler отказ.
+
 ## Findings и Path
 
 - F-1: validated/high confidence/n/a_re, E-1/E-2/E-4,
@@ -82,6 +100,9 @@ scenarioID4 (0x47E666), count4 (0x605304→0x604E46). При isExpansionContent
 - F-2: validated/high confidence/n/a_re, E-3, `turnhooks.cpp`: отсутствующий
   optional script ошибочно выглядит обязательной зависимостью. Прямой причины
   Abort в этом hook нет; исходный native ход уже выполнен.
+- F-3: inferred/high confidence/n/a_re, E-5, следующий ранний broadcast BeginTurn
+  требует того же узкого предыгрового признания. Native регистрации подтверждены,
+  но отдельный следующий Abort в игре не воспроизводился.
 - P-1, path_type=callflow: host startup broadcast [E-1] → join без обработчика
   [E-1/E-2] → Unhandled становится Failed [F-1] → Abort → серверный MATCH_ENDED
   → автоматический возврат хоста в лобби [E-1/E-2].
@@ -89,6 +110,7 @@ scenarioID4 (0x47E666), count4 (0x605304→0x604E46). При isExpansionContent
 ## Исправление и проверка
 
 Native dispatch не пропускается. Только normally Unhandled exact Refresh
+либо первый broadcast BeginTurn56 с полями{addressee0,sequence1,active!=0}
 от server1 клиенту с ролью join получает Filtered, если до/после dispatch
 одинаковое ненулевое предыгровое поколение: UI thread, нет CMidClient,
 phaseGame, старта координатора и teardown. Per-Binding latch закрывается
@@ -96,6 +118,8 @@ phaseGame, старта координатора и teardown. Per-Binding latch 
 его синхронно до постановки UI задачи. Внутри той же Binding latch не сбрасывается.
 Это не общее исключение для Refresh/Erase/нулевых callbacks. Applied/Failed/Drop,
 causal completion, synthetic path, старые bindings и native fence не ослаблены.
+Directed BeginTurn не разрешён. Существующая проверка startup proof в rxGate
+не меняется: неверный маршрут, формат и повтор дают Drop/Failed, не Filtered.
 
 Optional turn.lua: отсутствие файла тихо пропускается, ошибки существующего
 скрипта остаются видны. Lua/INI/диалоги не создаются и не изменяются.
@@ -109,6 +133,7 @@ Optional turn.lua: отсутствие файла тихо пропускает
 
 Проверены sender/endpoint/role/type/RTTI/длина, монотонная граница сценария,
 смена поколения, переход между staging/completion, сохранение Connect,
+точный startup broadcast, отказ directed/duplicate-policy-failure,
 Filtered без обхода предыдущего native ticket и повторные completion.
 Отдельный source-тест проверяет optional Lua и отрицательные контроли.
 Нативная сборка обязательна для обеих веток; PR11 сохраняет свою диагностику.

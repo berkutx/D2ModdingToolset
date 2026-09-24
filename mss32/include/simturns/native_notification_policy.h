@@ -51,6 +51,21 @@ public:
 
     bool scenarioStarted() const noexcept { return scenarioStarted_; }
 
+    // The host's first broadcast also reaches the join menu before its own
+    // scenario. rxGate must still validate/latch the exact startup identity;
+    // a rejected or duplicate proof returns Failed and is never rescued here.
+    bool allowsUnhandledStartupBeginTurn(std::uint32_t type, std::uint32_t length,
+                                        const char (&name)[36],
+                                        const std::uint32_t (&words)[3], bool joinRole,
+                                        bool clientReceiver, std::uint32_t sender) const noexcept
+    {
+        constexpr char beginTurn[] = ".?AVCCmdBeginTurnMsg@@";
+        return !scenarioStarted_ && joinRole && length == 56
+            && serverToClient(type, length, clientReceiver, sender)
+            && std::memcmp(name, beginTurn, sizeof(beginTurn)) == 0
+            && words[0] == 0 && words[1] == 1 && words[2] != 0;
+    }
+
 private:
     static bool serverToClient(std::uint32_t type, std::uint32_t length,
                                bool clientReceiver, std::uint32_t sender) noexcept
