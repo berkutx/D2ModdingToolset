@@ -21,6 +21,9 @@
 #include "lobbysaveresume.h"
 #include "midcommandqueue2.h"
 #include "originalfunctions.h"
+#ifdef D2_SIMTURNS
+#include "simturns/controller.h"
+#endif
 #include <spdlog/spdlog.h>
 
 namespace hooks {
@@ -44,6 +47,9 @@ void __fastcall midObjectLockNotify1CallbackHooked(game::CMidObjectLock* thisptr
         thisptr->pendingLocalUpdates, thisptr->commandQueue->processingCommand);
 
     game::CMidCommandQueue2Api::get().processCommands(thisptr->commandQueue);
+#ifdef D2_SIMTURNS
+    simturns::onCommandQueueDrained(thisptr);
+#endif
 }
 
 void __fastcall midObjectLockNotify2CallbackHooked(game::CMidObjectLock* thisptr, int /*%edx*/)
@@ -54,6 +60,9 @@ void __fastcall midObjectLockNotify2CallbackHooked(game::CMidObjectLock* thisptr
         thisptr->pendingLocalUpdates, thisptr->commandQueue->processingCommand);
 
     game::CMidCommandQueue2Api::get().processCommands(thisptr->commandQueue);
+#ifdef D2_SIMTURNS
+    simturns::onCommandQueueDrained(thisptr);
+#endif
 }
 
 void __fastcall midObjectLockOnObjectChangedHooked(game::CMidObjectLock* thisptr,

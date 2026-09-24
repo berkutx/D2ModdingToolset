@@ -23,6 +23,11 @@
 #include "customattacks.h"
 #include "custommodifiers.h"
 #include "hooks.h"
+#ifdef D2_SIMTURNS
+#include "simturns/controller.h"
+#include "uiframedispatcher.h"
+#include <cstdlib>
+#endif
 #include "restrictions.h"
 #include "settings.h"
 #include "unitsforhire.h"
@@ -156,6 +161,7 @@ static bool setupHooks()
 
     for (auto& hook : hooks) {
         if (!setupHook(hook)) {
+            DetourTransactionAbort();
             return false;
         }
     }
@@ -167,9 +173,22 @@ static bool setupHooks()
         return false;
     }
 
+#ifdef D2_SIMTURNS
+    hooks::uiframedispatcher::markInstalled();
+#endif
     spdlog::debug("All hooks are set");
     return true;
 }
+
+#ifdef D2_SIMTURNS
+[[noreturn]] static void failFastCommittedInstall()
+{
+    spdlog::critical("Simultaneous-turn installation failed after hook commit; terminating");
+    spdlog::default_logger()->flush();
+    TerminateProcess(GetCurrentProcess(), 0xD2E77001u);
+    std::abort();
+}
+#endif
 
 static void setupVftableHooks()
 {
@@ -257,16 +276,32 @@ BOOL APIENTRY DllMain(HMODULE hDll, DWORD reason, LPVOID reserved)
         return FALSE;
     }
 
+#ifdef D2_SIMTURNS
+    // Capability preflight only: the lobby selects a role and starts each map
+    // later. Unsupported executables retain ordinary stock-turn gameplay.
+    hooks::simturns::prepare();
+#endif
+
     if (hooks::executableIsGame() && !hooks::loadUnitsForHire()) {
         hooks::showErrorMessageBox("Failed to load new units. Check error log for details.");
         return FALSE;
     }
 
+#ifndef D2_SIMTURNS
     adjustGameRestrictions();
     setupVftableHooks();
+#endif
     if (!setupHooks()) {
         return FALSE;
     }
+
+#ifdef D2_SIMTURNS
+    // Do not unload a DLL after committed hooks point into its code.
+    adjustGameRestrictions();
+    setupVftableHooks();
+    if (!hooks::simturns::install())
+        failFastCommittedInstall();
+#endif
 
     // Lazy initialization is not optimal as the data can be accessed in parallel threads.
     // Thread sync is excessive because the data is read-only or thread-exclusive once initialized.

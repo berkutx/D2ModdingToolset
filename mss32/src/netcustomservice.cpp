@@ -35,6 +35,8 @@
 #include "netmsg.h"
 #include "phasegame.h"
 #include "settings.h"
+#include "simturns/lobby_transport.h"
+#include "simturns/lobby_wire.h"
 #include "textids.h"
 #include "uimanager.h"
 #include "utils.h"
@@ -289,6 +291,14 @@ bool isAuthenticatedLobbyPacket(const CNetCustomService* service, const SLNet::P
            && packet->guid == service->getLobbyGuid();
 }
 
+bool roomRequiresSimultaneousTurns(SLNet::RoomDescriptor& descriptor)
+{
+    const auto* enabled = descriptor.GetProperty(CNetCustomService::simultaneousTurnsColumnName);
+    const auto* legacyDays = descriptor.GetProperty(CNetCustomService::simultaneousTurnsDaysColumnName);
+    return simturns::lobby::roomRequiresSimultaneousTurns(enabled ? enabled->c : nullptr,
+                                                        legacyDays ? legacyDays->c : nullptr);
+}
+
 bool isSafeSaveStem(std::string_view stem)
 {
     if (stem.empty() || stem.size() > LobbyProtocol::saveStemMax) {
@@ -334,6 +344,7 @@ CNetCustomService::CNetCustomService()
     , m_session(nullptr)
     , m_peerCallback(this)
     , m_lobbyCallback(this)
+    , m_roomsCallback(this)
 {
     spdlog::debug(__FUNCTION__);
 
@@ -372,6 +383,7 @@ CNetCustomService::CNetCustomService()
 
 CNetCustomService::~CNetCustomService()
 {
+    simturns::lobbyDisconnected(this);
     m_compatibilityPublication.stop();
     resetPreparedMatch();
     resetLobbyRestart();
@@ -740,6 +752,13 @@ bool CNetCustomService::createRoom(const char* gameName,
 {
     spdlog::debug(__FUNCTION__ ": game name = '{:s}', password = '{:s}'", gameName, password);
 
+    if (m_roomOptions.simultaneousTurnsEnabled
+        && (!simturns::lobbySupported()
+            || !simturns::lobby::validMergeDay(m_roomOptions.simultaneousTurnsDays))) {
+        spdlog::warn("Refusing an unsupported simultaneous-turn room");
+        return false;
+    }
+
     const auto& filesHash = getGameFilesHash();
     if (filesHash.empty()) {
         spdlog::debug(__FUNCTION__ ": failed because the game files hash is empty");
@@ -787,6 +806,8 @@ bool CNetCustomService::createRoom(const char* gameName,
     auto rankedColumn{properties.AddColumn(rankedColumnName, DataStructures::Table::STRING)};
     auto simTurnsDaysColumn{
         properties.AddColumn(simultaneousTurnsDaysColumnName, DataStructures::Table::STRING)};
+    auto simTurnsColumn{
+        properties.AddColumn(simultaneousTurnsColumnName, DataStructures::Table::STRING)};
     auto unlockGuiColumn{properties.AddColumn(unlockGuiColumnName, DataStructures::Table::STRING)};
 
     // The accepted recipe is authoritative even if the service/UI metadata was lost.
@@ -817,6 +838,7 @@ bool CNetCustomService::createRoom(const char* gameName,
     const bool ranked{game::CPhaseGameApi::nativeSaveSupported() && m_roomOptions.ranked};
     row->UpdateCell(rankedColumn, ranked ? "1" : "0");
     row->UpdateCell(simTurnsDaysColumn, simTurnsDays.c_str());
+    row->UpdateCell(simTurnsColumn, m_roomOptions.simultaneousTurnsEnabled ? "1" : "0");
     row->UpdateCell(unlockGuiColumn, m_roomOptions.unlockGui ? "1" : "0");
 
     if (const auto* binding = preparedMatchRoomIdentity()) {
@@ -837,6 +859,8 @@ bool CNetCustomService::createRoom(const char* gameName,
 
 void CNetCustomService::leaveRoom()
 {
+    simturns::lobbyRoomLeft(this);
+    m_roomSimultaneousTurns = false;
     resetLobbyRestart();
     spdlog::debug(__FUNCTION__);
 
@@ -1441,6 +1465,8 @@ void CNetCustomService::PeerCallback::onPacketReceived(DefaultMessageIDTypes typ
         spdlog::debug(__FUNCTION__ ": server is full");
         break;
     case ID_DISCONNECTION_NOTIFICATION:
+        simturns::lobbyDisconnected(m_service);
+        m_service->m_roomSimultaneousTurns = false;
         m_service->m_compatibilityPublication.stop();
         resetPreparedMatch();
         spdlog::debug(__FUNCTION__ ": server was shut down");
@@ -1449,6 +1475,8 @@ void CNetCustomService::PeerCallback::onPacketReceived(DefaultMessageIDTypes typ
         m_service->clearLobbyMatchState();
         break;
     case ID_CONNECTION_LOST:
+        simturns::lobbyDisconnected(m_service);
+        m_service->m_roomSimultaneousTurns = false;
         m_service->m_compatibilityPublication.stop();
         resetPreparedMatch();
         spdlog::debug(__FUNCTION__ ": connection with server is lost");
@@ -1493,6 +1521,11 @@ void CNetCustomService::PeerCallback::onPacketReceived(DefaultMessageIDTypes typ
     case ID_LOBBY_PREPARED_MATCH: {
         if (isAuthenticatedLobbyPacket(m_service, packet) && packet->data && packet->length > 1)
             receivePreparedMatch(packet->data + 1, packet->length - 1);
+        break;
+    }
+    case ID_LOBBY_SIMULTANEOUS_TURNS: {
+        if (isAuthenticatedLobbyPacket(m_service, packet) && packet->data && packet->length > 1)
+            simturns::receiveLobbyControl(m_service, packet->data + 1, packet->length - 1);
         break;
     }
     case ID_LOBBY_RESTART: {
@@ -1556,7 +1589,8 @@ void CNetCustomService::LobbyCallback::MessageResult(SLNet::Client_Login* messag
         stream.Write(environment.windowsMajor);
         stream.Write(environment.windowsMinor);
         stream.Write(environment.windowsBuild);
-        stream.Write(restartNativeSupported() ? LobbyProtocol::coordinatedRestartFeature : 0u);
+        stream.Write((restartNativeSupported() ? LobbyProtocol::coordinatedRestartFeature : 0u)
+                     | (simturns::lobbySupported() ? simturns::lobby::featureBit : 0u));
         const auto lobbyGuid{m_service->getLobbyGuid()};
         if (!m_service->send(stream, lobbyGuid, LOW_PRIORITY)) {
             spdlog::warn(__FUNCTION__ ": failed to advertise ranked-lifecycle capability");
@@ -1569,6 +1603,7 @@ void CNetCustomService::LobbyCallback::MessageResult(SLNet::Client_Login* messag
 void CNetCustomService::LobbyCallback::MessageResult(SLNet::Client_Logoff* message)
 {
     if (message->resultCode == SLNet::L2RC_SUCCESS) {
+        simturns::lobbyDisconnected(m_service);
         m_service->m_compatibilityPublication.stop();
         resetPreparedMatch();
         m_service->m_userName.clear();
@@ -1583,6 +1618,7 @@ void CNetCustomService::LobbyCallback::MessageResult(
 {
     if (message->resultCode == SLNet::L2RC_SUCCESS) {
         if (m_service->m_userName == message->handle.C_String()) {
+            simturns::lobbyDisconnected(m_service);
             m_service->m_compatibilityPublication.stop();
             resetPreparedMatch();
             // The same account is remotely logged-in, means that we are now logged out
@@ -1611,6 +1647,11 @@ void CNetCustomService::RoomsCallback::CreateRoom_Callback(
     const SLNet::SystemAddress& senderAddress,
     SLNet::CreateRoom_Func* callResult)
 {
+    if (callResult->resultCode == SLNet::REC_SUCCESS && m_service->loggedIn()
+        && m_service->m_peer->GetGuidFromSystemAddress(senderAddress) == m_service->getLobbyGuid()) {
+        m_service->m_roomSimultaneousTurns = hooks::roomRequiresSimultaneousTurns(callResult->roomDescriptor);
+        simturns::lobbyRoomJoined(m_service, callResult->roomId);
+    }
     ExecuteDefaultResult("CreateRoom", callResult->resultCode, callResult->roomId,
                          &callResult->roomDescriptor);
 }
@@ -1618,6 +1659,11 @@ void CNetCustomService::RoomsCallback::CreateRoom_Callback(
 void CNetCustomService::RoomsCallback::EnterRoom_Callback(const SLNet::SystemAddress& senderAddress,
                                                           SLNet::EnterRoom_Func* callResult)
 {
+    if (callResult->resultCode == SLNet::REC_SUCCESS && m_service->loggedIn()
+        && m_service->m_peer->GetGuidFromSystemAddress(senderAddress) == m_service->getLobbyGuid()) {
+        m_service->m_roomSimultaneousTurns = hooks::roomRequiresSimultaneousTurns(callResult->joinedRoomResult.roomDescriptor);
+        simturns::lobbyRoomJoined(m_service, callResult->roomId);
+    }
     ExecuteDefaultResult("EnterRoom", callResult->resultCode, callResult->roomId,
                          &callResult->joinedRoomResult.roomDescriptor);
 }
@@ -1625,6 +1671,8 @@ void CNetCustomService::RoomsCallback::EnterRoom_Callback(const SLNet::SystemAdd
 void CNetCustomService::RoomsCallback::LeaveRoom_Callback(const SLNet::SystemAddress& senderAddress,
                                                           SLNet::LeaveRoom_Func* callResult)
 {
+    if (callResult->resultCode == SLNet::REC_SUCCESS)
+        simturns::lobbyRoomLeft(m_service);
     auto roomId = callResult->removeUserResult.roomId;
     ExecuteDefaultResult("LeaveRoom", callResult->resultCode, roomId);
 }
@@ -1665,6 +1713,11 @@ void CNetCustomService::RoomsCallback::ExecuteDefaultResult(
         break;
     }
     }
+}
+
+bool simturns::lobbyAllowsMapStart(CNetCustomService* service)
+{
+    return service && (!service->roomRequiresSimultaneousTurns() || lobbyMapArmed(service));
 }
 
 } // namespace hooks

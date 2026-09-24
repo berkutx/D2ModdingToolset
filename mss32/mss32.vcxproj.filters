@@ -4069,4 +4069,45 @@
   <ItemGroup>
     <Natvis Include="midgardid.natvis" />
   </ItemGroup>
+  <ItemGroup>
+    <Filter Include="simturns">
+      <UniqueIdentifier>{8C2EE7D4-1424-4099-A7C1-3B762F40BAC2}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\executablefingerprint.cpp"><Filter>simturns</Filter></ClCompile>
+    <ClCompile Include="src\netintercept.cpp"><Filter>simturns</Filter></ClCompile>
+    <ClCompile Include="src\uiframedispatcher.cpp"><Filter>simturns</Filter></ClCompile>
+    <ClCompile Include="src\simturns\battle_compat.cpp"><Filter>simturns</Filter></ClCompile>
+    <ClCompile Include="src\simturns\control_client_core.cpp"><Filter>simturns</Filter></ClCompile>
+    <ClCompile Include="src\simturns\controller.cpp"><Filter>simturns</Filter></ClCompile>
+    <ClCompile Include="src\simturns\coordinator_port.cpp"><Filter>simturns</Filter></ClCompile>
+    <ClCompile Include="src\simturns\day_scope.cpp"><Filter>simturns</Filter></ClCompile>
+    <ClCompile Include="src\simturns\engine_hooks.cpp"><Filter>simturns</Filter></ClCompile>
+    <ClCompile Include="src\simturns\patches.cpp"><Filter>simturns</Filter></ClCompile>
+    <ClCompile Include="src\simturns\protocol.cpp"><Filter>simturns</Filter></ClCompile>
+    <ClCompile Include="src\simturns\spell_timing.cpp"><Filter>simturns</Filter></ClCompile>
+    <ClCompile Include="src\simturns\state.cpp"><Filter>simturns</Filter></ClCompile>
+    <ClCompile Include="src\simturns\turn_context.cpp"><Filter>simturns</Filter></ClCompile>
+    <ClCompile Include="src\simturns\lobby_transport.cpp"><Filter>simturns</Filter></ClCompile>
+    <ClInclude Include="include\executablefingerprint.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\netintercept.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\uiframedispatcher.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\battle_compat.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\control_client_core.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\controller.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\coordinator_port.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\day_scope.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\engine_hooks.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\patches.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\protocol.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\spell_timing.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\state.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\turn_context.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\lobby_transport.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\lobby_wire.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\native_apply_fence.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\russobit_sites.h"><Filter>simturns</Filter></ClInclude>
+    <ClInclude Include="include\simturns\session_types.h"><Filter>simturns</Filter></ClInclude>
+  </ItemGroup>
 </Project>

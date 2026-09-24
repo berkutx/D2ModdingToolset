@@ -1,0 +1,170 @@
+#include "simturns/coordinator_port.h"
+#include <functional>
+#include <iostream>
+#include <stdexcept>
+#include <vector>
+
+using namespace hooks::simturns;
+namespace p = hooks::simturns::protocol;
+namespace {
+void check(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
+p::Bytes packet(p::Op op, std::initializer_list<std::uint32_t> words)
+{
+    p::Bytes bytes;
+    for (const auto word : words)
+        for (unsigned i = 0; i != 4; ++i) bytes.push_back(static_cast<std::uint8_t>(word >> (8 * i)));
+    return p::encodeFrame(op, bytes);
+}
+struct Fixture {
+    CoordinatorPort& port{CoordinatorPort::processInstance()};
+    unsigned terminal{}, faults{}, events{};
+    bool sendOk{true}, throwSend{}, throwSink{};
+    std::vector<p::Bytes> sent;
+    CoordinatorEvent last;
+    explicit Fixture(Role role = Role::Host, bool start = true) {
+        port.stop();
+        check(port.arm({true, role}, 123, 3, [this](const p::Bytes& bytes) {
+            if (throwSend) throw std::runtime_error("send exception");
+            if (sendOk) sent.push_back(bytes);
+            return sendOk;
+        }, [this] { ++terminal; }), "arm failed");
+        if (start) {
+            CoordinatorCallbacks callbacks;
+            callbacks.postToUi = [this](CoordinatorEvent event) {
+                if (throwSink) throw std::runtime_error("sink exception");
+                ++events; last = event;
+            };
+            callbacks.terminalFault = [this](CoordinatorTerminalFault) { ++faults; };
+            check(port.start({true, role}, callbacks), "start failed");
+            check(port.bindLocalPlayer(role == Role::Host ? 1 : 2), "bind failed");
+        }
+    }
+    ~Fixture() { port.stop(); }
+    void receive(const p::Bytes& bytes) { port.receive(bytes.data(), bytes.size()); }
+    void plan() { receive(packet(p::Op::SessionPlan, {123, 1, 1, 2, 3, 11, 12})); }
+    void hostBootstrap() {
+        plan();
+        check(events == 1 && !faults, "plan not delivered");
+        check(port.reportSessionActivated(), "activation failed");
+        receive(packet(p::Op::EngineAction, {123, 1, 1, 2, 1, 12}));
+        check(port.reportActionResult(last.engineAction, true), "cascade failed");
+        receive(packet(p::Op::BootstrapCommitted, {2, 1}));
+        check(port.reportBootstrap(BootstrapCheckpoint::CommitApplied, 2, 1), "commit failed");
+        receive(packet(p::Op::BootstrapOperational, {2, 1}));
+        check(port.reportBootstrap(BootstrapCheckpoint::OperationalApplied, 2, 1), "prepare failed");
+        check(!port.operational(), "opened before release");
+        receive(packet(p::Op::BootstrapReleased, {2, 1}));
+        check(port.acceptBootstrapRelease(last.bootstrapReleased), "release failed");
+        check(port.operational() && !faults, "bootstrap not operational");
+    }
+};
+void malformedFrames() {
+    const auto valid = packet(p::Op::SessionPlan, {123, 1, 1, 2, 3, 11, 12});
+    for (std::size_t n = 0; n < valid.size(); ++n) {
+        Fixture f;
+        f.port.receive(valid.data(), n);
+        check(f.faults == 1 && f.terminal == 1 && !f.events, "truncated frame accepted");
+        f.plan();
+        check(f.faults == 1 && !f.events, "faulted epoch revived");
+    }
+    for (auto bad : {packet(p::Op::SessionPlan, {124, 1, 1, 2, 3, 11, 12}),
+                     packet(p::Op::SessionPlan, {123, 1, 1, 2, 4, 11, 12}),
+                     packet(p::Op::SessionPlan, {123, 0, 1, 2, 0, 0, 0}),
+                     p::encodeHello(1, Role::Host)}) {
+        Fixture f; f.receive(bad);
+        check(f.faults == 1 && !f.events, "Arm/plan mismatch accepted");
+    }
+    for (unsigned variant = 0; variant < 3; ++variant) {
+        Fixture f; auto bad = valid;
+        if (variant == 0) bad.push_back(0);
+        if (variant == 1) bad.insert(bad.end(), valid.begin(), valid.end());
+        if (variant == 2) bad[6] = 1;
+        f.receive(bad);
+        check(f.faults == 1 && !f.events, "invalid envelope boundary accepted");
+    }
+}
+void lifecycleAndDelivery() {
+    auto& port = CoordinatorPort::processInstance();
+    port.stop();
+    check(!port.arm({false, Role::Host}, 1, 3, [](const auto&) { return true; }), "opt-out armed");
+    check(!port.arm({true, Role::Host}, 0, 3, [](const auto&) { return true; }), "zero epoch armed");
+    check(!port.arm({true, Role::Host}, 1, 1, [](const auto&) { return true; }), "day one armed");
+    {
+        Fixture f(Role::Host, false); f.plan();
+        check(f.terminal == 1 && !f.events, "pre-bind frame accepted");
+        check(!port.start({true, Role::Host}, {}), "faulted arm started");
+    }
+    for (unsigned variant = 0; variant != 3; ++variant) {
+        Fixture f; f.plan();
+        if (variant == 0) f.sendOk = false;
+        if (variant == 1) f.throwSend = true;
+        if (variant == 2) {
+            check(port.reportSessionActivated(), "activation before sink exception failed");
+            f.throwSink = true;
+            f.receive(packet(p::Op::EngineAction, {123, 1, 1, 2, 1, 12}));
+        }
+        if (variant != 2) check(!port.reportSessionActivated(), "rejected send accepted");
+        check(f.faults == 1 && f.terminal == 1, "terminal failure not exact once");
+        const auto count = f.sent.size();
+        port.fail(CoordinatorFailureOrigin::UiApply, "again");
+        check(!port.reportSessionActivated() && f.sent.size() == count && f.faults == 1, "failed send retried");
+    }
+    {
+        Fixture f; f.hostBootstrap();
+        std::uint32_t lease{};
+        check(port.claimEndTurn(lease) && lease == 11 && port.endTurnPending(), "wrong first lease");
+        check(port.reportEndTurnObserved(lease) && port.reportEndTurnApplied(1), "turn evidence failed");
+        f.receive(packet(p::Op::EngineAction, {123, 2, 1, 1, 2, 13}));
+        check(port.reportActionResult(f.last.engineAction, true), "apply failed");
+        f.receive(packet(p::Op::EngineAction, {123, 2, 2, 1, 2, 13}));
+        check(port.reportActionResult(f.last.engineAction, true), "activate failed");
+        check(!port.endTurnPending() && port.claimEndTurn(lease) && lease == 13, "lease did not advance");
+    }
+    {
+        Fixture f(Role::Join); f.plan();
+        check(!f.faults && f.events == 1, "new role inherited retired map state");
+        check(!port.arm({true, Role::Host}, 124, 3, [](const auto&) { return true; }), "active epoch replaced");
+        check(!port.operational() && !port.endTurnPending(), "new map inherited old admission");
+        check(!port.bindLocalPlayer(3) && f.faults == 1, "handle change accepted");
+    }
+}
+void retiredCallbackCannotFaultNewSession() {
+    auto& port = CoordinatorPort::processInstance();
+    port.stop();
+    unsigned oldFaults{}, newFaults{}, newEvents{}, terminal{};
+    const auto sender = [](const p::Bytes&) { return true; };
+    check(port.arm({true, Role::Host}, 123, 3, sender), "old arm failed");
+    CoordinatorCallbacks oldCallbacks;
+    oldCallbacks.terminalFault = [&](CoordinatorTerminalFault) { ++oldFaults; };
+    oldCallbacks.postToUi = [&](CoordinatorEvent) {
+        // Deterministically exercise the same unlock/callback boundary as a
+        // retiring map: the old callback fails only after a new map is armed.
+        port.stop();
+        check(port.arm({true, Role::Join}, 124, 3, sender, [&] { ++terminal; }), "replacement arm failed");
+        CoordinatorCallbacks next;
+        next.postToUi = [&](CoordinatorEvent) { ++newEvents; };
+        next.terminalFault = [&](CoordinatorTerminalFault) { ++newFaults; };
+        check(port.start({true, Role::Join}, next), "replacement start failed");
+        check(port.bindLocalPlayer(2), "replacement bind failed");
+        throw std::runtime_error("retired callback failed");
+    };
+    check(port.start({true, Role::Host}, oldCallbacks), "old start failed");
+    check(port.bindLocalPlayer(1), "old bind failed");
+    auto plan = packet(p::Op::SessionPlan, {123, 1, 1, 2, 3, 11, 12});
+    port.receive(plan.data(), plan.size());
+    check(!oldFaults && !newFaults && !terminal, "retired callback fault crossed map generation");
+    plan = packet(p::Op::SessionPlan, {124, 1, 1, 2, 3, 21, 22});
+    port.receive(plan.data(), plan.size());
+    check(newEvents == 1 && !newFaults && !terminal, "replacement map was poisoned by retired callback");
+    port.quiesce();
+    port.receive(plan.data(), plan.size());
+    check(newEvents == 1 && !newFaults, "quiesced map dispatched control");
+    port.stop();
+}
+}
+int main() {
+    try { malformedFrames(); lifecycleAndDelivery(); retiredCallbackCannotFaultNewSession();
+        std::cout << "lobby port: exact frames, epochs, no downgrade, write barriers, terminal failures and new-map reset passed\n";
+        return 0;
+    } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
+}

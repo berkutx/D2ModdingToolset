@@ -48,6 +48,11 @@ protected:
                                        int /*%edx*/,
                                        std::uint32_t idTo,
                                        const game::NetMessageHeader* message);
+#ifdef D2_SIMTURNS
+    static int sendMessageUnintercepted(void* self, void* transportContext,
+                                        std::uint32_t idTo,
+                                        const game::NetMessageHeader* message);
+#endif
     static bool __fastcall setName(CNetCustomPlayerClient* thisptr, int /*%edx*/, const char* name);
     static bool __fastcall isHost(CNetCustomPlayerClient* thisptr, int /*%edx*/);
 

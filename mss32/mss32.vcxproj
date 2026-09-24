@@ -43,6 +43,9 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <EnableSimultaneousTurns Condition="'$(EnableSimultaneousTurns)' == ''">false</EnableSimultaneousTurns>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LinkIncremental>true</LinkIncremental>
     <OutDir>$(DISCIPLES2_PATH)</OutDir>
@@ -1529,6 +1532,52 @@ call ..\buildDetours.bat ..\Detours
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">false</ExcludedFromBuild>
     </Natvis>
   </ItemGroup>
+  <!-- Independent production opt-in; no test harness or named-pipe dependency. -->
+  <ItemDefinitionGroup Condition="'$(EnableSimultaneousTurns)' == 'true'">
+    <ClCompile>
+      <PreprocessorDefinitions>D2_SIMTURNS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup Condition="'$(EnableSimultaneousTurns)' == 'true'">
+    <ClCompile Include="src\executablefingerprint.cpp" />
+    <ClCompile Include="src\netintercept.cpp" />
+    <ClCompile Include="src\uiframedispatcher.cpp" />
+    <ClCompile Include="src\simturns\battle_compat.cpp" />
+    <ClCompile Include="src\simturns\control_client_core.cpp" />
+    <ClCompile Include="src\simturns\controller.cpp" />
+    <ClCompile Include="src\simturns\coordinator_port.cpp" />
+    <ClCompile Include="src\simturns\day_scope.cpp" />
+    <ClCompile Include="src\simturns\engine_hooks.cpp" />
+    <ClCompile Include="src\simturns\patches.cpp" />
+    <ClCompile Include="src\simturns\protocol.cpp" />
+    <ClCompile Include="src\simturns\spell_timing.cpp" />
+    <ClCompile Include="src\simturns\state.cpp" />
+    <ClCompile Include="src\simturns\turn_context.cpp" />
+    <ClCompile Include="src\simturns\lobby_transport.cpp" />
+    <ClInclude Include="include\executablefingerprint.h" />
+    <ClInclude Include="include\netintercept.h" />
+    <ClInclude Include="include\uiframedispatcher.h" />
+    <ClInclude Include="include\simturns\battle_compat.h" />
+    <ClInclude Include="include\simturns\control_client_core.h" />
+    <ClInclude Include="include\simturns\controller.h" />
+    <ClInclude Include="include\simturns\coordinator_port.h" />
+    <ClInclude Include="include\simturns\day_scope.h" />
+    <ClInclude Include="include\simturns\engine_hooks.h" />
+    <ClInclude Include="include\simturns\patches.h" />
+    <ClInclude Include="include\simturns\protocol.h" />
+    <ClInclude Include="include\simturns\spell_timing.h" />
+    <ClInclude Include="include\simturns\state.h" />
+    <ClInclude Include="include\simturns\turn_context.h" />
+    <ClInclude Include="include\simturns\lobby_transport.h" />
+    <ClInclude Include="include\simturns\lobby_wire.h" />
+    <ClInclude Include="include\simturns\native_apply_fence.h" />
+    <ClInclude Include="include\simturns\native_notification_policy.h" />
+    <ClInclude Include="include\simturns\russobit_sites.h" />
+    <ClInclude Include="include\simturns\session_types.h" />
+  </ItemGroup>
+  <Target Name="ValidateSimultaneousTurnsOption" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(EnableSimultaneousTurns)' != 'true' and '$(EnableSimultaneousTurns)' != 'false'" Text="EnableSimultaneousTurns must be true or false." />
+  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

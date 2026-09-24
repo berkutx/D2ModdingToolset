@@ -23,6 +23,8 @@
 #include "racelist.h"
 #include "randomgenerator.h"
 #include "scenariotemplates.h"
+#include "simturns/lobby_transport.h"
+#include "simturns/lobby_wire.h"
 #include "textboxinterf.h"
 #include "utils.h"
 #include <BitStream.h>
@@ -305,6 +307,10 @@ bool processPreparedMatch() {
     if (active->stage == Stage::Accepted && idleLobby()) {
         try {
             if (!restartNativeSupported()) throw std::runtime_error("unsupported-native-client");
+            if (active->offer.simultaneous && (!simturns::lobbySupported()
+                || active->offer.participants.size() != 2
+                || !simturns::lobby::validMergeDay(active->offer.simultaneousUntil)))
+                throw std::runtime_error("unsupported-simultaneous-turns");
             makeRecipe();
             auto* service = CNetCustomService::get(); auto& options = service->getRoomOptions();
             options.ranked = active->offer.ranked; options.unlockGui = active->offer.unlockGui;
@@ -332,6 +338,7 @@ bool processPreparedMatch() {
                 message = "Выбранная локальная версия шаблона не поддерживает параметры матча: " + reason
                     + ". Проверьте условия на странице подготовки.";
             else if (reason == "unsupported-native-client") message = "Автоподготовка матча пока поддерживает только проверенный клиент Russobit.";
+            else if (reason == "unsupported-simultaneous-turns") message = "Одновременные ходы требуют сборку MSS с поддержкой ОХ, двух игроков и день объединения 0 или 2–30.";
             terminal(State::Error, reason.substr(0, 128), message); return true;
         }
     }

@@ -46,6 +46,11 @@ protected:
                                        int /*%edx*/,
                                        std::uint32_t idTo,
                                        const game::NetMessageHeader* message);
+#ifdef D2_SIMTURNS
+    static int sendMessageUnintercepted(void* self, void* transportContext,
+                                        std::uint32_t idTo,
+                                        const game::NetMessageHeader* message);
+#endif
     static bool __fastcall destroyPlayer(CNetCustomPlayerServer* thisptr,
                                          int /*%edx*/,
                                          int playerId);
