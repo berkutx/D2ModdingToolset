@@ -51,6 +51,36 @@ public:
 
     bool scenarioStarted() const noexcept { return scenarioStarted_; }
 
+    // Stock broadcasts the host's entry into the scenario while a joiner can
+    // still be in CMenuLobby. Only CMidClient registers CJoinGame; menu-owned
+    // PlayerList/MenusAnsInfo and directed activation remain mandatory.
+    // Body: player ID, NUL-inclusive name length, encoded name, lord category ID.
+    bool allowsUnhandledJoinGame(std::uint32_t type, std::uint32_t length,
+                                 const char (&name)[36], const std::uint8_t* body,
+                                 std::size_t bodySize, bool joinRole,
+                                 bool clientReceiver, std::uint32_t sender) const noexcept
+    {
+        constexpr char joinGame[] = ".?AVCJoinGameMsg@@";
+        if (scenarioStarted_ || !joinRole
+            || !serverToClient(type, length, clientReceiver, sender)
+            || std::memcmp(name, joinGame, sizeof(joinGame)) != 0
+            || !body || bodySize < 13 || bodySize != length - 44)
+            return false;
+        std::uint32_t player{}, nameLength{};
+        std::memcpy(&player, body, sizeof(player));
+        std::memcpy(&nameLength, body + 4, sizeof(nameLength));
+        // Compare by subtraction: untrusted lengths must never wrap into a fit.
+        // The stock string serializer uses a 256-byte temporary buffer.
+        if (!player || !nameLength || nameLength > 256 || nameLength != bodySize - 12)
+            return false;
+        std::uint32_t lordCategory{};
+        std::memcpy(&lordCategory, body + 8 + nameLength, sizeof(lordCategory));
+        if (lordCategory > 2) return false; // Stock LLordCategory: mage/warrior/diplomat.
+        const auto* encodedName = body + 8;
+        return encodedName[nameLength - 1] == 0
+            && std::memchr(encodedName, 0, nameLength - 1) == nullptr;
+    }
+
     // The host's first broadcast also reaches the join menu before its own
     // scenario. rxGate must still validate/latch the exact startup identity;
     // a rejected or duplicate proof returns Failed and is never rescued here.
