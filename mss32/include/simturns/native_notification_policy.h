@@ -19,6 +19,63 @@ inline bool isPregameConnectNotification(std::uint32_t type, std::uint32_t lengt
         && std::memcmp(messageClass, connectClass, sizeof(connectClass)) == 0;
 }
 
+/** Per-binding boundary, protected by the binding mutex. Stock startup sends
+ * object broadcasts to joiners still in the setup menu. Their own NewScenario
+ * starts a separate, full snapshot; never excuse an unhandled delta after it.
+ * This is NOT a receive filter: only a normally dispatched Unhandled result
+ * can be retired, with the no-CMidClient lifetime checked on both sides. */
+class PregameJoinSnapshotPolicy {
+public:
+    void observe(std::uint32_t type, std::uint32_t length,
+                 const char (&name)[36], bool clientReceiver, std::uint32_t sender) noexcept
+    {
+        if (!serverToClient(type, length, clientReceiver, sender)) return;
+        constexpr char newScenario[] = ".?AVCNewScenarioMsg@@";
+        constexpr char startScenario[] = ".?AVCStartScenarioMsg@@";
+        if (std::memcmp(name, newScenario, sizeof(newScenario)) == 0
+            || std::memcmp(name, startScenario, sizeof(startScenario)) == 0)
+            scenarioStarted_ = true;
+    }
+
+    bool allowsUnhandledRefresh(std::uint32_t type, std::uint32_t length,
+                                const char (&name)[36], bool joinRole,
+                                bool clientReceiver, std::uint32_t sender) const noexcept
+    {
+        constexpr char refresh[] = ".?AVCRefreshInfo@@";
+        return !scenarioStarted_ && joinRole
+            // Header (44), scenario ID (4), object count (4). Expansion frames
+            // additionally carry an expansion marker; payload size varies.
+            && serverToClient(type, length, clientReceiver, sender) && length >= 52
+            && std::memcmp(name, refresh, sizeof(refresh)) == 0;
+    }
+
+    bool scenarioStarted() const noexcept { return scenarioStarted_; }
+
+    // The host's first broadcast also reaches the join menu before its own
+    // scenario. rxGate must still validate/latch the exact startup identity;
+    // a rejected or duplicate proof returns Failed and is never rescued here.
+    bool allowsUnhandledStartupBeginTurn(std::uint32_t type, std::uint32_t length,
+                                        const char (&name)[36],
+                                        const std::uint32_t (&words)[3], bool joinRole,
+                                        bool clientReceiver, std::uint32_t sender) const noexcept
+    {
+        constexpr char beginTurn[] = ".?AVCCmdBeginTurnMsg@@";
+        return !scenarioStarted_ && joinRole && length == 56
+            && serverToClient(type, length, clientReceiver, sender)
+            && std::memcmp(name, beginTurn, sizeof(beginTurn)) == 0
+            && words[0] == 0 && words[1] == 1 && words[2] != 0;
+    }
+
+private:
+    static bool serverToClient(std::uint32_t type, std::uint32_t length,
+                               bool clientReceiver, std::uint32_t sender) noexcept
+    {
+        return clientReceiver && sender == 1 && type == 0xffff
+            && length >= 44 && length < 0x80000;
+    }
+    bool scenarioStarted_{};
+};
+
 /** Only a normally dispatched zero-handler notification in the same pregame
  * lifetime may retire its ticket without an engine handler. A policy Drop is
  * Failed, not Unhandled, and is never rescued by this exception. */

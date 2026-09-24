@@ -35,6 +35,7 @@ struct Binding {
     bool nativeReady{};
     bool progressQueued{};
     bool noticePending{};
+    PregameJoinSnapshotPolicy pregameSnapshot;
     NativeApplyFence nativeApplied;
     std::vector<std::uint64_t> awaitingClientDrain;
     std::deque<PendingDelivery> deliveries;
@@ -194,6 +195,7 @@ struct NativeCompletion {
     netintercept::NativeReceiveResult result{};
     netintercept::NativeReceiveDiagnostic diagnostic;
     bool allowedNotification{};
+    bool pregameJoinNotification{};
     std::uint64_t pregameGeneration{};
 };
 void discardNativeCompletion(void* context) { delete static_cast<NativeCompletion*>(context); }
@@ -239,6 +241,9 @@ void nativeReceiveCompleted(void* context, netintercept::NativeReceiveResult res
     {
         std::lock_guard lock(selected->mutex);
         if (!selected->sending) return;
+        // A nested native receive may already have crossed the snapshot boundary.
+        if (completion->pregameJoinNotification && selected->pregameSnapshot.scenarioStarted())
+            completion->allowedNotification = false;
     }
     // Classify synchronously, before a queued UI task can enter another phase.
     // The stage snapshot and current generation must describe the same pregame
@@ -324,9 +329,25 @@ bool lobbyStageNativeReceive(const game::NetMessageHeader* buffer,
     auto context = std::make_unique<NativeCompletion>();
     context->ticket = std::move(ticket);
     if (buffer) {
-        context->allowedNotification = isPregameConnectNotification(
-            buffer->messageType, buffer->length, buffer->messageClassName,
-            context->ticket->clientReceiver, sender);
+        {
+            std::lock_guard lock(selected->mutex);
+            // Latch before dispatch, never from a delayed UI completion. A new
+            // map gets a new Binding; leaving/re-entering a menu cannot reopen it.
+            selected->pregameSnapshot.observe(buffer->messageType, buffer->length,
+                buffer->messageClassName, context->ticket->clientReceiver, sender);
+            std::uint32_t startupWords[3]{};
+            if (buffer->length == sizeof(game::NetMessageHeader) + sizeof(startupWords))
+                std::memcpy(startupWords, buffer + 1, sizeof(startupWords));
+            context->pregameJoinNotification = selected->pregameSnapshot.allowsUnhandledRefresh(
+                buffer->messageType, buffer->length, buffer->messageClassName,
+                selected->role == Role::Join, context->ticket->clientReceiver, sender)
+                || selected->pregameSnapshot.allowsUnhandledStartupBeginTurn(
+                    buffer->messageType, buffer->length, buffer->messageClassName, startupWords,
+                    selected->role == Role::Join, context->ticket->clientReceiver, sender);
+            context->allowedNotification = context->pregameJoinNotification || isPregameConnectNotification(
+                buffer->messageType, buffer->length, buffer->messageClassName,
+                context->ticket->clientReceiver, sender);
+        }
         if (context->allowedNotification)
             context->pregameGeneration = pregameNativeNotificationGeneration();
     }
