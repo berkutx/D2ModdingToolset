@@ -34,6 +34,7 @@ struct Binding {
     bool nativeReady{};
     bool progressQueued{};
     bool noticePending{};
+    PregameJoinSnapshotPolicy pregameSnapshot;
     NativeApplyFence nativeApplied;
     std::vector<std::uint64_t> awaitingClientDrain;
     std::deque<PendingDelivery> deliveries;
@@ -169,6 +170,7 @@ struct NativeCompletion {
     std::shared_ptr<LobbyNativeTicket> ticket;
     netintercept::NativeReceiveResult result{};
     bool allowedNotification{};
+    bool pregameRefresh{};
     std::uint64_t pregameGeneration{};
 };
 void discardNativeCompletion(void* context) { delete static_cast<NativeCompletion*>(context); }
@@ -201,6 +203,9 @@ void nativeReceiveCompleted(void* context, netintercept::NativeReceiveResult res
     {
         std::lock_guard lock(selected->mutex);
         if (!selected->sending) return;
+        // A nested native receive may already have crossed the snapshot boundary.
+        if (completion->pregameRefresh && selected->pregameSnapshot.scenarioStarted())
+            completion->allowedNotification = false;
     }
     // Classify synchronously, before a queued UI task can enter another phase.
     // The stage snapshot and current generation must describe the same pregame
@@ -286,9 +291,19 @@ bool lobbyStageNativeReceive(const game::NetMessageHeader* buffer,
     auto context = std::make_unique<NativeCompletion>();
     context->ticket = std::move(ticket);
     if (buffer) {
-        context->allowedNotification = isPregameConnectNotification(
-            buffer->messageType, buffer->length, buffer->messageClassName,
-            context->ticket->clientReceiver, sender);
+        {
+            std::lock_guard lock(selected->mutex);
+            // Latch before dispatch, never from a delayed UI completion. A new
+            // map gets a new Binding; leaving/re-entering a menu cannot reopen it.
+            selected->pregameSnapshot.observe(buffer->messageType, buffer->length,
+                buffer->messageClassName, context->ticket->clientReceiver, sender);
+            context->pregameRefresh = selected->pregameSnapshot.allowsUnhandledRefresh(
+                buffer->messageType, buffer->length, buffer->messageClassName,
+                selected->role == Role::Join, context->ticket->clientReceiver, sender);
+            context->allowedNotification = context->pregameRefresh || isPregameConnectNotification(
+                buffer->messageType, buffer->length, buffer->messageClassName,
+                context->ticket->clientReceiver, sender);
+        }
         if (context->allowedNotification)
             context->pregameGeneration = pregameNativeNotificationGeneration();
     }

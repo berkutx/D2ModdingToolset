@@ -103,6 +103,7 @@ jobs:
           Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
           ./tests/run-simturns.ps1 -OutputDirectory "$env:RUNNER_TEMP/simturns-tests"
+          ./tests/run-turn-script-optional.ps1
           ./tests/run-prepared-match-protocol.ps1 -OutputDirectory "$env:RUNNER_TEMP/prepared-tests" -DependenciesRoot $env:GITHUB_WORKSPACE
           Push-Location tools/simturns-relay
           try { node --test; if ($LASTEXITCODE -ne 0) { throw 'Relay regression failed' } }

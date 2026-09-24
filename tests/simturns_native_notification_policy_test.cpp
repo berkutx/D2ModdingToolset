@@ -76,12 +76,164 @@ void filteredNotificationKeepsEarlierFence()
     check(fence.complete(earlierCommand) && fence.reached(barrier), "earlier command did not release barrier");
     check(!fence.complete(notification), "duplicate notification completion admitted");
 }
+
+void exactEarlyJoinRefresh()
+{
+    PregameJoinSnapshotPolicy policy;
+    char name[36] = ".?AVCRefreshInfo@@";
+    check(!policy.scenarioStarted(), "fresh binding inherited a scenario boundary");
+    for (const auto length : {52u, 55u, 56u, 91u, 105u, 218u, 464u, 535u, 616u, 23896u, 0x7ffffu}) {
+        policy.observe(0xffff, length, name, true, 1);
+        check(policy.allowsUnhandledRefresh(0xffff, length, name, true, true, 1),
+              "valid variable-length pre-scenario join Refresh rejected");
+        check(!policy.scenarioStarted(), "Refresh advanced the scenario boundary");
+    }
+    for (const auto length : {0u, 43u, 44u, 48u, 51u, 0x80000u, 0xffffffffu})
+        check(!policy.allowsUnhandledRefresh(0xffff, length, name, true, true, 1),
+              "out-of-range Refresh length admitted");
+    for (const auto type : {0u, 1u, 0xfffeu, 0x10000u})
+        check(!policy.allowsUnhandledRefresh(type, 56, name, true, true, 1),
+              "wrong Refresh message type admitted");
+    check(!policy.allowsUnhandledRefresh(0xffff, 56, name, false, true, 1),
+          "host received join-only Refresh exception");
+    check(!policy.allowsUnhandledRefresh(0xffff, 56, name, true, false, 1),
+          "server endpoint received client Refresh exception");
+    for (const auto sender : {0u, 2u, 0xffffffffu})
+        check(!policy.allowsUnhandledRefresh(0xffff, 56, name, true, true, sender),
+              "foreign Refresh sender admitted");
+    name[sizeof(".?AVCRefreshInfo@@") - 1] = 'X';
+    check(!policy.allowsUnhandledRefresh(0xffff, 56, name, true, true, 1),
+          "longer Refresh RTTI prefix admitted");
+    std::memset(name, 'A', sizeof(name));
+    check(!policy.allowsUnhandledRefresh(0xffff, 56, name, true, true, 1),
+          "unterminated Refresh RTTI admitted");
+    for (const auto* other : {".?AVCConnectMsg@@", ".?AVCPlayerListMsg@@",
+                             ".?AVCCmdBeginTurnMsg@@", ".?AVCCmdTurnInfoMsg@@",
+                             ".?AVCNewScenarioMsg@@", ".?AVCStartScenarioMsg@@",
+                             ".?AVCCmdEraseObjMsg@@", ".?AVCCmdUpdateObjMsg@@",
+                             ".?AVCMenusAnsInfoMsg@@", ".?AVCCmdMoveStackMsg@@"}) {
+        std::memset(name, 0, sizeof(name));
+        std::memcpy(name, other, std::strlen(other) + 1);
+        check(!policy.allowsUnhandledRefresh(0xffff, 56, name, true, true, 1),
+              "other state/notification class received Refresh exception");
+    }
+}
+
+void scenarioBoundaryIsAuthoritativeAndPermanent()
+{
+    char refresh[36] = ".?AVCRefreshInfo@@";
+    char connect[36] = ".?AVCConnectMsg@@";
+    char beginTurn[36] = ".?AVCCmdBeginTurnMsg@@";
+    for (const auto* boundaryClass : {".?AVCNewScenarioMsg@@", ".?AVCStartScenarioMsg@@"}) {
+        char boundary[36]{};
+        std::memcpy(boundary, boundaryClass, std::strlen(boundaryClass) + 1);
+        PregameJoinSnapshotPolicy policy;
+        // Wrong route or invalid envelope cannot retire this binding's window.
+        for (const auto type : {0u, 1u, 0xfffeu, 0x10000u})
+            policy.observe(type, 56, boundary, true, 1);
+        for (const auto length : {0u, 43u, 0x80000u, 0xffffffffu})
+            policy.observe(0xffff, length, boundary, true, 1);
+        for (const auto sender : {0u, 2u, 0xffffffffu})
+            policy.observe(0xffff, 56, boundary, true, sender);
+        policy.observe(0xffff, 56, boundary, false, 1);
+        boundary[std::strlen(boundaryClass)] = 'X';
+        policy.observe(0xffff, 56, boundary, true, 1);
+        boundary[std::strlen(boundaryClass)] = '\0';
+        policy.observe(0xffff, 48, connect, true, 1);
+        policy.observe(0xffff, 56, beginTurn, true, 1);
+        check(!policy.scenarioStarted()
+                  && policy.allowsUnhandledRefresh(0xffff, 56, refresh, true, true, 1),
+              "unrelated or invalid boundary closed pre-scenario window");
+
+        // Stage is the boundary: no native completion or handler count is needed.
+        const auto length = std::strcmp(boundaryClass, ".?AVCNewScenarioMsg@@") == 0 ? 48u : 53u;
+        policy.observe(0xffff, length, boundary, true, 1);
+        check(policy.scenarioStarted(), "authoritative scenario stage did not close the window");
+        check(!policy.allowsUnhandledRefresh(0xffff, 56, refresh, true, true, 1),
+              "post-scenario Refresh was excused");
+        policy.observe(0xffff, 48, connect, true, 1);
+        policy.observe(0xffff, 23896, refresh, true, 1);
+        policy.observe(0xffff, length, boundary, true, 1);
+        check(policy.scenarioStarted()
+                  && !policy.allowsUnhandledRefresh(0xffff, 23896, refresh, true, true, 1),
+              "later traffic reopened a retired window");
+
+        PregameJoinSnapshotPolicy replacement;
+        check(!replacement.scenarioStarted()
+                  && replacement.allowsUnhandledRefresh(0xffff, 56, refresh, true, true, 1),
+              "new binding inherited old scenario state");
+        policy.observe(0xffff, length, boundary, true, 1);
+        check(!replacement.scenarioStarted(), "old binding changed replacement boundary");
+        check(isPregameConnectNotification(0xffff, 48, connect, true, 1),
+              "join snapshot boundary changed the separate Connect classifier");
+    }
+}
+
+void refreshCompletionRequiresSamePregameLifetime()
+{
+    char refresh[36] = ".?AVCRefreshInfo@@";
+    char newScenario[36] = ".?AVCNewScenarioMsg@@";
+    for (const bool crossBoundary : {false, true}) {
+        PregameJoinSnapshotPolicy policy;
+        const bool stagedAllowed = policy.allowsUnhandledRefresh(0xffff, 23896, refresh, true, true, 1);
+        check(stagedAllowed, "early Refresh could not stage");
+        if (crossBoundary) policy.observe(0xffff, 48, newScenario, true, 1);
+        const bool stillAllowed = stagedAllowed && !policy.scenarioStarted();
+        for (const auto before : {0u, 17u}) {
+            for (const auto after : {0u, 17u, 18u}) {
+                const bool accept = stillAllowed && before && before == after;
+                check(resolveLobbyNativeReceiveResult(nativeDispatchResult(0), stillAllowed, before, after)
+                          == (accept ? NativeReceiveResult::Filtered : NativeReceiveResult::Failed),
+                      "Refresh completion crossed a scenario/phase/generation boundary");
+                for (const auto result : {NativeReceiveResult::Applied, NativeReceiveResult::Filtered,
+                                          NativeReceiveResult::Failed})
+                    check(resolveLobbyNativeReceiveResult(result, stillAllowed, before, after) == result,
+                          "Refresh exception altered applied, consumed or failed result");
+            }
+        }
+    }
+
+    PregameJoinSnapshotPolicy policy;
+    const bool allowed = policy.allowsUnhandledRefresh(0xffff, 56, refresh, true, true, 1);
+    const auto resolved = resolveLobbyNativeReceiveResult(nativeDispatchResult(0), allowed, 23, 23);
+    check(resolved == NativeReceiveResult::Filtered, "early zero-handler Refresh was not retired");
+    // A later UI task consumes the already resolved outcome, not current phase.
+    policy.observe(0xffff, 48, newScenario, true, 1);
+    check(resolved == NativeReceiveResult::Filtered && policy.scenarioStarted(),
+          "later boundary retroactively changed synchronous completion");
+    check(resolveLobbyNativeReceiveResult(nativeDispatchResult(0),
+              policy.allowsUnhandledRefresh(0xffff, 56, refresh, true, true, 1), 23, 23)
+              == NativeReceiveResult::Failed, "later Refresh reused an earlier allowance");
+}
+
+void filteredRefreshKeepsEarlierFence()
+{
+    PregameJoinSnapshotPolicy policy;
+    char refresh[36] = ".?AVCRefreshInfo@@";
+    NativeApplyFence fence;
+    const auto earlierCommand = fence.issue();
+    const auto snapshot = fence.issue();
+    const auto barrier = fence.watermark();
+    const auto laterPacket = fence.issue();
+    check(resolveLobbyNativeReceiveResult(nativeDispatchResult(0),
+              policy.allowsUnhandledRefresh(0xffff, 23896, refresh, true, true, 1), 31, 31)
+              == NativeReceiveResult::Filtered, "Refresh classification failed");
+    check(fence.complete(snapshot), "filtered Refresh did not complete its ticket");
+    check(!fence.reached(barrier), "filtered Refresh bypassed an earlier native command/drain");
+    check(fence.complete(laterPacket) && !fence.reached(barrier),
+          "later packet bypassed the native command/drain");
+    check(fence.complete(earlierCommand) && fence.reached(barrier),
+          "earlier native command/drain did not release the barrier");
+    check(!fence.complete(snapshot), "duplicate Refresh completion admitted");
+}
 }
 
 int main()
 {
     try {
         exactNotification(); onlyNormallyUnhandledNotification(); filteredNotificationKeepsEarlierFence();
+        exactEarlyJoinRefresh(); scenarioBoundaryIsAuthoritativeAndPermanent();
+        refreshCompletionRequiresSamePregameLifetime(); filteredRefreshKeepsEarlierFence();
         std::cout << "simturns native notification policy: PASS\n";
         return 0;
     } catch (const std::exception& e) {
