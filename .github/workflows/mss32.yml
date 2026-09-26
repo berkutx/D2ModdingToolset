@@ -140,6 +140,21 @@ jobs:
           node --test tools/test/battle-trace-audit.test.js
           if ($LASTEXITCODE -ne 0) { throw 'Battle trace regression failed' }
 
+      - name: Harness-only lobby automation regressions
+        if: matrix.simturns == 'true' && matrix.configuration == 'Release' && matrix.testdrv == 'true'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Offline only: no game, site credentials, sockets or live lobby.
+          # A GitHub step has its own process; reload x86 MSVC for the actual
+          # native popup state machine even though the DLL build ran earlier.
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
+          ./tests/run-testdrv-scripted-popups.ps1 -OutputDirectory "$env:RUNNER_TEMP/lobby-popup-tests"
+          ./tests/run-simturns-lobby-e2e.ps1
+          node --test tests/run-simturns-lobby-preparation.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Lobby preparation API boundary regression failed' }
+
       # archive: false uploads the file as-is (no zip). It only supports a single
       # file, so the build outputs go up as separate artifacts.
       - name: Upload build log

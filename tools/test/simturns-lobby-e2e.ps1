@@ -67,14 +67,48 @@ function Protect-UiSnapshot($Snapshot) {
     }
     foreach ($target in @(Property $Snapshot 'targets' @())) { Protect-UiSnapshot $target }
 }
-function Assert-FreshOwnedLog([string]$Role) {
-    $name = "mss32_$($script:Clients[$Role].Id).log"
-    if ($name -in $preexistingLogs) {
-        throw "Owned $Role PID collides with an existing log; refusing stale diagnostic evidence."
+function Get-LogLaunchBoundary {
+    $lengths = @{}
+    foreach ($file in Get-ChildItem -LiteralPath $GameDir -Filter 'mss32_*.log' -File) {
+        $lengths[$file.Name] = [long]$file.Length
     }
-    $script:ClientLogs[$Role] = Join-Path $GameDir $name
-    $script:ClientLogInitialLengths[$script:ClientLogs[$Role]] = [long]0
+    return $lengths
+}
+function Assert-FreshOwnedLog([string]$Role, [hashtable]$PreLaunchLengths) {
+    $name = "mss32_$($script:Clients[$Role].Id).log"
+    # main.cpp uses an append logger. Windows may reuse an old PID; its earlier
+    # bytes are not this run's evidence. The shared reader checks truncation.
+    $offset = if ($PreLaunchLengths.ContainsKey($name)) { [long]$PreLaunchLengths[$name] } else { [long]0 }
+    if ($offset -lt 0) { throw 'Owned log launch boundary is invalid.' }
+    $script:ClientLogs[$Role] = [IO.Path]::GetFullPath((Join-Path $GameDir $name))
+    $script:ClientLogInitialLengths[$script:ClientLogs[$Role]] = $offset
     $script:ClientLogOwnedProcessIds[$script:ClientLogs[$Role]] = [long]$script:Clients[$Role].Id
+}
+function Copy-OwnedLogTail([string]$Role) {
+    $source = $script:ClientLogs[$Role]
+    $offset = Get-ClientLogBaseline $source
+    $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+    $inputLog = [IO.FileStream]::new($source, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+    try {
+        if ($inputLog.Length -lt $offset) { throw 'Owned log was truncated before evidence copy.' }
+        [void]$inputLog.Seek($offset, [IO.SeekOrigin]::Begin)
+        $outputLog = [IO.FileStream]::new((Join-Path $ArtifactDir "$Role.mss32.log"), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+        try { $inputLog.CopyTo($outputLog) } finally { $outputLog.Dispose() }
+    } finally { $inputLog.Dispose() }
+}
+function Get-ProtectedFileHashes([string[]]$Files) {
+    $hashes = @{}
+    foreach ($file in $Files) {
+        $path = Join-Path $GameDir $file
+        $hashes[$file] = if (Test-Path -LiteralPath $path) { (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash } else { $null }
+    }
+    return $hashes
+}
+function Compare-ProtectedFileHashes([hashtable]$Before, [hashtable]$After) {
+    $changed = @(@($Before.Keys) + @($After.Keys) | Sort-Object -Unique | Where-Object {
+        -not $Before.ContainsKey($_) -or -not $After.ContainsKey($_) -or $Before[$_] -cne $After[$_]
+    })
+    [pscustomobject]@{ unchanged=($changed.Count -eq 0); changedFiles=$changed; before=$Before; after=$After }
 }
 function Get-OwnedLogEvidence([string]$Role) {
     if (-not $script:ClientLogs.ContainsKey($Role)) { throw 'Owned log has not passed the freshness check.' }
@@ -82,8 +116,10 @@ function Get-OwnedLogEvidence([string]$Role) {
     $exists = Test-Path -LiteralPath $log
     $text = if ($exists) { (Read-ClientLogLines $log) -join "`n" } else { '' }
     $item = if ($exists) { Get-Item -LiteralPath $log } else { $null }
+    $baseline = Get-ClientLogBaseline $log
     return [ordered]@{
         exists = $exists; bytes = if ($item) { $item.Length } else { 0 }
+        baselineBytes = $baseline; runBytes = if ($item) { $item.Length - $baseline } else { 0 }
         lastWriteUtc = if ($item) { $item.LastWriteTimeUtc.ToString('o') } else { $null }
         bootstrapOperational = $text -match 'bootstrap operational release applied; strict independent turns are operational'
         startupLeaderNameSent = $text -match 'bootstrap first-leader-name TX sent \(role=host,'
@@ -310,7 +346,7 @@ function Import-ExistingPopupObservers([string]$SourcePath = (Join-Path $PSScrip
 
 function Invoke-OwnedPreparation([ValidateSet('create', 'start', 'detail', 'close')][string]$Action) {
     $psi = [Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+    $psi.FileName = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
     $psi.ArgumentList.Add((Join-Path $PSScriptRoot 'simturns-lobby-preparation.mjs'))
@@ -533,13 +569,8 @@ $cleanupErrors = [Collections.Generic.List[string]]::new()
 $previousPipe = [Environment]::GetEnvironmentVariable('D2TESTDRV_PIPE_NAME')
 $script:last = $null; $script:logEvidence = @{}
 $script:RunDeadline = (Get-PairUtcNow).AddSeconds($SessionSeconds)
-$preexistingLogs = @(Get-ChildItem -LiteralPath $GameDir -Filter 'mss32_*.log' -File | ForEach-Object Name)
 $protected = @('Disciple.ini', 'Scripts/userSettings.lua', 'Scripts/settings.lua', 'Scripts/generatorSettings.lua', 'Interf/CustomLobby.dlg', 'Interf/Interf.dlg', 'Globals/GItem.dbf')
-$beforeHashes = @{}
-foreach ($file in $protected) {
-    $path = Join-Path $GameDir $file
-    if (Test-Path -LiteralPath $path) { $beforeHashes[$file] = (Get-FileHash -LiteralPath $path).Hash }
-}
+$beforeHashes = Get-ProtectedFileHashes $protected
 Import-ExistingPopupObservers
 try {
     foreach ($role in @('host', 'join')) {
@@ -559,10 +590,11 @@ try {
     $env:D2TESTDRV_PIPE_NAME = '\\.\pipe\d2mss.lobbye2e.' + [guid]::NewGuid().ToString('N')
     $script:Relay = Start-TestRelay -LogDir $ArtifactDir
     foreach ($role in @('host', 'join')) {
+        $preLaunchLengths = Get-LogLaunchBoundary
         $script:Clients[$role] = Start-GameClient -GameDir $GameDir -Role $role -Transport Lobby -Flags @(
             'SKIP_INTRO', 'BLACKSCREEN_FIX', 'UI_REPORTER', 'WORLD', 'RELAY_BRIDGE', 'TURN_EVENTS',
             'SCRIPTED_POPUPS', 'SCRIPTED_POPUPS_CONFIRMATIONS', 'SCRIPTED_POPUPS_LOBBY')
-        Assert-FreshOwnedLog $role
+        Assert-FreshOwnedLog $role $preLaunchLengths
         Assert-OwnedRelayClientIdentity $role $script:Clients[$role] $GameDir
         $script:PopupObservers[$role] = New-LiteralStartupPopupService $role $script:ClientLogs[$role]
         Wait-Ready $role DLG_MAIN_MENU
@@ -604,15 +636,17 @@ try {
     if (Test-Path -LiteralPath (Join-Path $ArtifactDir 'owned-preparation.json')) {
         try { [void](Invoke-OwnedPreparation close) } catch { $cleanupErrors.Add('Owned preparation close failed; retain receipt for exact manual cleanup.') }
     }
-    $unchanged = $true
-    foreach ($file in $beforeHashes.Keys) {
-        try { if ((Get-FileHash -LiteralPath (Join-Path $GameDir $file)).Hash -cne $beforeHashes[$file]) { $unchanged = $false } }
-        catch { $unchanged = $false; $cleanupErrors.Add('Protected file hash verification failed.') }
+    $afterHashes = @{}
+    foreach ($file in $protected) {
+        try { $afterHashes[$file] = (Get-ProtectedFileHashes @($file))[$file] }
+        catch { $afterHashes[$file] = '[unreadable]'; $cleanupErrors.Add("Protected file hash verification failed: $file") }
     }
+    $protectedFileProof = Compare-ProtectedFileHashes $beforeHashes $afterHashes
+    $unchanged = $protectedFileProof.unchanged
     if (-not $unchanged) { $cleanupErrors.Add('Game configuration changed during the run.') }
     if (Test-Path -LiteralPath $ArtifactDir) {
         foreach ($role in $script:ClientLogs.Keys) {
-            try { if (Test-Path -LiteralPath $script:ClientLogs[$role]) { Copy-Item -LiteralPath $script:ClientLogs[$role] -Destination (Join-Path $ArtifactDir "$role.mss32.log") } }
+            try { if (Test-Path -LiteralPath $script:ClientLogs[$role]) { Copy-OwnedLogTail $role } }
             catch { $cleanupErrors.Add('Owned log copy failed.') }
         }
         try {
@@ -621,6 +655,11 @@ try {
                 startupAcceptance=($accepted -and -not $failure -and $cleanupErrors.Count -eq 0)
                 fullGameplayAcceptance=$false; campaign18=$false; failure=$failure; cleanupErrors=$cleanupErrors.ToArray()
                 gameConfigurationUnchanged=$unchanged; evidence=$script:logEvidence; lastObservation=$script:last
+                protectedFiles=$protectedFileProof
+                ownedLogBoundaries=@($script:ClientLogs.Keys | ForEach-Object {
+                    @{ role=$_; pid=$script:ClientLogOwnedProcessIds[$script:ClientLogs[$_]]; source=$script:ClientLogs[$_]
+                        baselineBytes=$script:ClientLogInitialLengths[$script:ClientLogs[$_]]; artifact=($_ + '.mss32.log'); artifactStartsAtBaseline=$true }
+                })
                 ownedPids=@($script:Clients.Values | ForEach-Object Id); pairMapsObserved=$script:PairMapsObserved
                 nativePopupReceipts=@{ host=(Property $script:PopupObservers['host'] 'Appearances'); join=(Property $script:PopupObservers['join'] 'Appearances') }
                 latestSnapshotSharingSkips=$script:LatestSnapshotSharingSkips

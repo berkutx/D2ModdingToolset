@@ -1,5 +1,6 @@
 #requires -Version 7.0
-# Offline: actual extracted runner policies, no game/API/process launch or file writes.
+# Offline: actual extracted runner policies, no game/API/process launch.
+# PID-log I/O uses only this test's temporary directory; no existing log is edited.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -12,7 +13,8 @@ foreach ($node in $ast.FindAll({ param($item) $item -is [Management.Automation.L
     $functions[$node.Name] = $node
 }
 foreach ($name in @('Property', 'Protect-UiSnapshot', 'ConvertTo-NativeReportedText', 'Get-PreparedPrompt',
-    'Get-ExactEntryAction', 'Test-ConsumedEntryAppearance', 'Import-ExistingPopupObservers', 'Start-OwnedPair')) {
+    'Get-ExactEntryAction', 'Test-ConsumedEntryAppearance', 'Import-ExistingPopupObservers', 'Start-OwnedPair',
+    'Get-LogLaunchBoundary', 'Assert-FreshOwnedLog', 'Get-OwnedLogEvidence', 'Copy-OwnedLogTail', 'Compare-ProtectedFileHashes')) {
     . ([scriptblock]::Create($functions[$name].Extent.Text))
 }
 $script:checks=0
@@ -85,6 +87,47 @@ foreach($name in @('New-LiteralStartupPopupService','Invoke-LiteralPersistentSta
     Check ((Get-Command $name).ScriptBlock.ToString() -notmatch 'Invoke-Button|Set-Edit|Set-Secret|/api/ui/invoke') "Existing observer $name unexpectedly acts"
 }
 
+# Reused PID: actual append-log boundary + original reader must exclude the old
+# PASS/fault/native-marker prefix; only new bytes can prove this run's behavior.
+$scratch = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('d2-lobby-log-test-' + [guid]::NewGuid().ToString('N'))))
+[void](New-Item -ItemType Directory -Path $scratch)
+$logPath = Join-Path $scratch 'mss32_12345.log'
+$tailPath = Join-Path $scratch 'host.mss32.log'
+try {
+    $GameDir=$scratch; $ArtifactDir=$scratch; $ExpectedMergeDay=2
+    $oldText="bootstrap operational release applied; strict independent turns are operational`n[simturns] terminal fault: previous run`n[testdrv][scripted-popup] malformed previous run marker`n"
+    [IO.File]::WriteAllText($logPath,$oldText,[Text.UTF8Encoding]::new($false))
+    $boundary=Get-LogLaunchBoundary
+    $script:Clients=@{host=[pscustomobject]@{Id=12345}}
+    $script:ClientLogs=@{}; $script:ClientLogInitialLengths=@{}; $script:ClientLogOwnedProcessIds=@{}
+    [IO.File]::AppendAllText($logPath,"fresh launch`n",[Text.UTF8Encoding]::new($false))
+    Assert-FreshOwnedLog host $boundary
+    Check ((Get-ClientLogBaseline $logPath) -eq [Text.Encoding]::UTF8.GetByteCount($oldText)) 'Reused PID lost its prelaunch byte boundary'
+    $evidence=Get-OwnedLogEvidence host
+    Check (-not $evidence.bootstrapOperational -and -not $evidence.fault) 'Old PASS/fault bytes leaked across launch boundary'
+    Check ((Read-ClientLogLines $logPath) -ceq 'fresh launch') 'Existing PID reader returned prelaunch content'
+    $observer=New-LiteralStartupPopupService host $logPath
+    Check (@(Invoke-LiteralPersistentStartupPopupTick $observer).Count -eq 0) 'Old native popup markers leaked across launch boundary'
+    [IO.File]::AppendAllText($logPath,"bootstrap operational release applied; strict independent turns are operational`n",[Text.UTF8Encoding]::new($false))
+    Check (Get-OwnedLogEvidence host).bootstrapOperational 'New bootstrap marker was not accepted after launch boundary'
+    Copy-OwnedLogTail host
+    $tail=[IO.File]::ReadAllText($tailPath)
+    Check ($tail.StartsWith("fresh launch`n") -and -not $tail.Contains('previous run')) 'Artifact log copied stale prefix'
+    Check ([IO.File]::ReadAllText($logPath).StartsWith($oldText)) 'Source log prefix was changed or cleared'
+    [IO.File]::WriteAllText($logPath,"short`n",[Text.UTF8Encoding]::new($false))
+    Reject { Read-ClientLogLines $logPath } '*shorter than its launch boundary*'
+    Reject { Copy-OwnedLogTail host } '*truncated*'
+} finally {
+    # Exact test-owned files only; no recursive deletion or computed broad target.
+    if ([IO.File]::Exists($logPath)) { [IO.File]::Delete($logPath) }
+    if ([IO.File]::Exists($tailPath)) { [IO.File]::Delete($tailPath) }
+    [IO.Directory]::Delete($scratch, $false)
+}
+$hashProof=Compare-ProtectedFileHashes @{'Disciple.ini'='before';'Scripts/settings.lua'='same';'missing.lua'=$null} @{'Disciple.ini'='after';'Scripts/settings.lua'='same';'missing.lua'=$null}
+Check (-not $hashProof.unchanged -and ($hashProof.changedFiles -join ',') -ceq 'Disciple.ini') 'INI hash change was not strict and exactly named'
+Check ($hashProof.before['Disciple.ini'] -ceq 'before' -and $hashProof.after['Disciple.ini'] -ceq 'after') 'Before/after hashes were not preserved'
+Check (-not (Compare-ProtectedFileHashes @{'missing.lua'=$null} @{'missing.lua'='created'}).unchanged) 'New protected file escaped hash comparison'
+
 # Actual pair orchestration with native observer/actor boundaries mocked, simulated clock.
 function Get-PairUtcNow { $script:Now }
 function Start-Sleep([int]$Milliseconds) { $script:Now=$script:Now.AddMilliseconds($Milliseconds) }
@@ -117,4 +160,15 @@ Reset-Pair DelayedJoin
 $script:Fault=$true
 Reject { Start-OwnedPair } '*mock production fault*'
 Check (($script:Starts -join ',') -ceq 'host') 'Fault allowed join/retry'
-"PASS: $script:checks offline lobby E2E checks; no processes, APIs, game callbacks or writes"
+$nodeAssignment = @($ast.FindAll({ param($item)
+    $item -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $item.Left.Extent.Text -ceq '$psi.FileName'
+}, $true))
+Check ($nodeAssignment.Count -eq 1) 'Node helper executable assignment is not unique'
+& {
+    function Get-Command { @([pscustomobject]@{Source='C:\\first\\node.exe'}, [pscustomobject]@{Source='C:\\second\\node.exe'}) }
+    $psi = [Diagnostics.ProcessStartInfo]::new()
+    . ([scriptblock]::Create($nodeAssignment[0].Extent.Text))
+    Check ($psi.FileName -ceq 'C:\\first\\node.exe') 'Multiple PATH matches were concatenated into one executable'
+}
+"PASS: $script:checks offline lobby E2E checks; no processes, APIs or game callbacks; temporary log fixture cleaned"
