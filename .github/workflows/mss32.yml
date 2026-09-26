@@ -122,6 +122,7 @@ jobs:
           ./tests/run-turn-script-optional.ps1
           ./tests/run-prepared-match-protocol.ps1 -OutputDirectory "$env:RUNNER_TEMP/prepared-tests" -DependenciesRoot $env:GITHUB_WORKSPACE
           ./tests/run-item-potion-fields.ps1 -OutputDirectory "$env:RUNNER_TEMP/potion-fields-tests"
+          ./tests/run-testdrv-ui-bind-seam.ps1 -OutputDirectory "$env:RUNNER_TEMP/ui-bind-seam-tests"
           Push-Location tools/simturns-relay
           try { node --test; if ($LASTEXITCODE -ne 0) { throw 'Relay regression failed' } }
           finally { Pop-Location }

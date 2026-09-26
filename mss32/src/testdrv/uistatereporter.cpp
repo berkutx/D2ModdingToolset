@@ -53,6 +53,8 @@ constexpr uintptr_t kAssignFunctorVA = 0x5C93D6;
 // .text image and requires set equality. C4's timerhost legitimately owns an entry Detour at
 // 0x5C93D6; keeping that entry intact gives the deterministic chain
 // game call-site -> MSS reporter -> 0x5C93D6 -> C4 timerhost -> stock function.
+// After that bundle commits, the MSS API table uses the same reporter wrapper. DLL callers do not
+// execute any of these EXE CALL sites, so each binding is observed exactly once on either path.
 constexpr uintptr_t kBindCallSites[] = {
     0x480806, 0x4817d9, 0x4822c0, 0x482302, 0x482988, 0x4829cd, 0x482a12,
     0x482a57, 0x482a9c, 0x482ae1, 0x482b25, 0x486a15, 0x486a55, 0x488d18,
@@ -1238,6 +1240,16 @@ bool preflight()
     if (!testenv::supportedGameBuild())
         return false;
     const FnAssignFunctor apiAssignFunctor = game::CButtonInterfApi::get().assignFunctor;
+    if (g_bindCallSitesInstalled) {
+        // An idempotent preflight accepts only our complete, still-owned bundle: both EXE call
+        // sites and the DLL API table. The original remains the canonical entry (including C4).
+        if (apiAssignFunctor != &hookAssignFunctor
+            || reinterpret_cast<uintptr_t>(g_origAssignFunctor) != kAssignFunctorVA) {
+            spdlog::error("[testdrv] UI-state: owned MSS bind API seam changed; refusing");
+            return false;
+        }
+        return allBindCallSitesPointToHook();
+    }
     if (reinterpret_cast<uintptr_t>(apiAssignFunctor) != kAssignFunctorVA) {
         spdlog::error("[testdrv] UI-state: assignFunctor API target is 0x{:08X}, expected "
                       "Russobit 0x{:08X}; refusing",
@@ -1259,9 +1271,21 @@ bool preflight()
 
 bool commit()
 {
+    auto& buttonApi = game::CButtonInterfApi::get();
+    const FnAssignFunctor expectedApi = g_bindCallSitesInstalled
+        ? &hookAssignFunctor : reinterpret_cast<FnAssignFunctor>(kAssignFunctorVA);
+    if (buttonApi.assignFunctor != expectedApi
+        || reinterpret_cast<uintptr_t>(g_origAssignFunctor) != kAssignFunctorVA) {
+        spdlog::error("[testdrv] UI-state: MSS bind API seam changed before commit; refusing");
+        return false;
+    }
     if (!installBindCallPatches())
         return false;
-    spdlog::info("[testdrv] UI-state reporter installed ({} Russobit bind call-sites patched)",
+    // MSS-created dialogs (login, custom lobby and generated-map menus) bind through this table,
+    // outside the EXE call-site manifest. Reuse the exact same begin/record/next-frame readiness
+    // path. Do not detour the canonical entry or observe again in setButtonCallback.
+    buttonApi.assignFunctor = &hookAssignFunctor;
+    spdlog::info("[testdrv] UI-state reporter installed ({} Russobit bind call-sites + MSS API)",
                  kBindCallSiteCount);
     return true;
 }

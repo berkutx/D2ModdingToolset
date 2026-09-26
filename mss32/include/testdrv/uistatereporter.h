@@ -1,13 +1,14 @@
 /*
  * Publishable test/logging system for the Disciples 2 modding toolset.
  *
- * UI-state reporter: Detours the game's button-bind helper
- * (CButtonInterfApi::assignFunctor) to track the current dialog, then enumerates
+ * UI-state reporter: Observes native call sites and the MSS API table for the
+ * game's button-bind helper (CButtonInterfApi::assignFunctor), then enumerates
  * ALL of that dialog's controls (buttons, list boxes, spin buttons, edit boxes,
  * text) with their live state into a JSON snapshot, the "true path" replacing
  * screenshots. Native menus bind through assignFunctor, so one hook catches the
  * whole menu chain; the snapshot is the relay's GET /api/ui payload, and the
- * current dialog is exposed for the auto-nav driver. Gated at runtime by
+ * current dialog is exposed for the auto-nav driver. The canonical helper entry
+ * remains owned by C4; native and MSS bindings each reach it exactly once. Gated at runtime by
  * D2TESTDRV_UI_REPORTER; compile-gated by D2_TESTDRV.
  */
 
@@ -33,7 +34,8 @@ namespace uistatereporter {
 bool preflight();
 
 /** Patch the already preflighted direct CALL operands as one rollback-safe
- * bundle. The assignFunctor entry remains owned by C4/timerhost. */
+ * bundle, then attach the same observer to the MSS API table. The assignFunctor
+ * entry remains owned by C4/timerhost. */
 bool commit();
 
 /** Compatibility one-shot wrapper. New startup uses preflight/commit. */
