@@ -51,6 +51,22 @@ public:
 
     bool scenarioStarted() const noexcept { return scenarioStarted_; }
 
+    // Stock CCmdUpdateObjMsg uses only the CCommandMsg serializer: header (44),
+    // recipient ID (4), sequence (4). It accompanies object Refresh broadcasts,
+    // including confirmation of the host's default leader name. Its consumer
+    // belongs to CMidCommandQueue2, not CMenuLobby. A joiner without CMidClient
+    // receives the current objects in its later full scenario snapshot; do not
+    // replay this pre-snapshot command into that new queue or claim it applied.
+    bool allowsUnhandledUpdateObject(std::uint32_t type, std::uint32_t length,
+                                     const char (&name)[36], bool joinRole,
+                                     bool clientReceiver, std::uint32_t sender) const noexcept
+    {
+        constexpr char updateObject[] = ".?AVCCmdUpdateObjMsg@@";
+        return !scenarioStarted_ && joinRole && length == 52
+            && serverToClient(type, length, clientReceiver, sender)
+            && std::memcmp(name, updateObject, sizeof(updateObject)) == 0;
+    }
+
     // Stock broadcasts the host's entry into the scenario while a joiner can
     // still be in CMenuLobby. Only CMidClient registers CJoinGame; menu-owned
     // PlayerList/MenusAnsInfo and directed activation remain mandatory.

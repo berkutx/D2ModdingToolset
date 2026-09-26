@@ -411,6 +411,83 @@ void exactEarlyJoinGame()
     policy.observe(0xffff, 48, boundary, true, 1);
     check(!allowed(valid, 62), "post-scenario JoinGame zero-handler admitted");
 }
+
+void exactEarlyUpdateObject()
+{
+    PregameJoinSnapshotPolicy policy;
+    char name[36] = ".?AVCCmdUpdateObjMsg@@";
+    const auto allows = [&](std::uint32_t type, std::uint32_t length,
+                            bool join = true, bool client = true, std::uint32_t sender = 1) {
+        return policy.allowsUnhandledUpdateObject(type, length, name, join, client, sender);
+    };
+    check(allows(0xffff, 52), "exact pre-snapshot UpdateObj was rejected");
+    policy.observe(0xffff, 52, name, true, 1);
+    check(!policy.scenarioStarted(), "UpdateObj incorrectly started the join snapshot");
+    for (const auto length : {0u, 43u, 44u, 48u, 51u, 53u, 56u, 0x80000u, 0xffffffffu})
+        check(!allows(0xffff, length), "non-exact UpdateObj envelope was admitted");
+    for (const auto type : {0u, 1u, 0xfffeu, 0x10000u})
+        check(!allows(type, 52), "wrong UpdateObj message type was admitted");
+    check(!allows(0xffff, 52, false) && !allows(0xffff, 52, true, false),
+          "host/server endpoint received the join-client UpdateObj allowance");
+    for (const auto sender : {0u, 2u, 0xffffffffu})
+        check(!allows(0xffff, 52, true, true, sender), "foreign UpdateObj sender was admitted");
+    name[sizeof(".?AVCCmdUpdateObjMsg@@") - 1] = 'X';
+    check(!allows(0xffff, 52), "longer UpdateObj RTTI prefix was admitted");
+    std::memset(name, 'A', sizeof(name));
+    check(!allows(0xffff, 52), "unterminated UpdateObj RTTI was admitted");
+    for (const auto* other : {".?AVCRefreshInfo@@", ".?AVCCmdEraseObjMsg@@",
+                             ".?AVCCmdBeginTurnMsg@@", ".?AVCCmdTurnInfoMsg@@",
+                             ".?AVCPlayerListMsg@@", ".?AVCMenusAnsInfoMsg@@",
+                             ".?AVCCmdMoveStackMsg@@", ".?AVCJoinGameMsg@@"}) {
+        std::memset(name, 0, sizeof(name));
+        std::memcpy(name, other, std::strlen(other) + 1);
+        check(!allows(0xffff, 52), "another class received the UpdateObj allowance");
+    }
+}
+
+void updateObjectCompletionKeepsLifetimeAndFence()
+{
+    char update[36] = ".?AVCCmdUpdateObjMsg@@";
+    for (const auto* boundaryClass : {".?AVCNewScenarioMsg@@", ".?AVCStartScenarioMsg@@"}) {
+        char boundary[36]{};
+        std::memcpy(boundary, boundaryClass, std::strlen(boundaryClass) + 1);
+        for (const bool crossed : {false, true}) {
+            PregameJoinSnapshotPolicy policy;
+            const bool staged = policy.allowsUnhandledUpdateObject(0xffff, 52, update, true, true, 1);
+            check(staged, "early UpdateObj could not stage");
+            if (crossed) policy.observe(0xffff, 48, boundary, true, 1);
+            const bool allowed = staged && !policy.scenarioStarted();
+            check(policy.allowsUnhandledUpdateObject(0xffff, 52, update, true, true, 1) == !crossed,
+                  "UpdateObj ignored the per-binding snapshot boundary");
+            for (const auto before : {0u, 51u}) {
+                for (const auto after : {0u, 51u, 52u}) {
+                    const bool accept = allowed && before && before == after;
+                    check(resolveLobbyNativeReceiveResult(nativeDispatchResult(0), allowed, before, after)
+                              == (accept ? NativeReceiveResult::Filtered : NativeReceiveResult::Failed),
+                          "UpdateObj crossed its scenario or no-CMidClient lifetime");
+                    for (const auto result : {NativeReceiveResult::Applied, NativeReceiveResult::Filtered,
+                                              NativeReceiveResult::Failed})
+                        check(resolveLobbyNativeReceiveResult(result, allowed, before, after) == result,
+                              "UpdateObj changed an actual handler result or rescued policy Drop");
+                }
+            }
+        }
+    }
+
+    PregameJoinSnapshotPolicy policy;
+    NativeApplyFence fence;
+    const auto applied = fence.issue();
+    const auto notification = fence.issue();
+    const auto barrier = fence.watermark();
+    check(resolveLobbyNativeReceiveResult(nativeDispatchResult(0),
+              policy.allowsUnhandledUpdateObject(0xffff, 52, update, true, true, 1), 53, 53)
+              == NativeReceiveResult::Filtered, "UpdateObj was not retired as a notification");
+    check(fence.complete(notification) && !fence.reached(barrier),
+          "UpdateObj bypassed an earlier Applied native ticket");
+    check(fence.complete(applied) && fence.reached(barrier),
+          "the preceding real native drain did not release the barrier");
+    check(!fence.complete(notification), "duplicate UpdateObj completion was admitted");
+}
 }
 
 int main()
@@ -422,6 +499,7 @@ int main()
         exactEarlyStartupBeginTurn(); startupBeginTurnCompletionKeepsLifetimeAndFailures();
         filteredStartupBeginTurnKeepsEarlierFence();
         exactEarlyJoinGame();
+        exactEarlyUpdateObject(); updateObjectCompletionKeepsLifetimeAndFence();
         std::cout << "simturns native notification policy: PASS\n";
         return 0;
     } catch (const std::exception& e) {

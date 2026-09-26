@@ -293,10 +293,19 @@ bool isAuthenticatedLobbyPacket(const CNetCustomService* service, const SLNet::P
 
 bool roomRequiresSimultaneousTurns(SLNet::RoomDescriptor& descriptor)
 {
-    const auto* enabled = descriptor.GetProperty(CNetCustomService::simultaneousTurnsColumnName);
-    const auto* legacyDays = descriptor.GetProperty(CNetCustomService::simultaneousTurnsDaysColumnName);
-    return simturns::lobby::roomRequiresSimultaneousTurns(enabled ? enabled->c : nullptr,
-                                                        legacyDays ? legacyDays->c : nullptr);
+    // SLikeNet GetProperty(name) does not check a missing column. Legacy rooms
+    // may omit either OH property entirely, not merely have an empty value.
+    const auto property = [&descriptor](const char* name) -> const char* {
+        const auto* row = descriptor.roomProperties.GetRowByIndex(0, nullptr);
+        const auto index = descriptor.roomProperties.ColumnIndex(name);
+        if (!row || index >= row->cells.Size())
+            return nullptr;
+        const auto* cell = row->cells[index];
+        return cell ? cell->c : nullptr;
+    };
+    return simturns::lobby::roomRequiresSimultaneousTurns(
+        property(CNetCustomService::simultaneousTurnsColumnName),
+        property(CNetCustomService::simultaneousTurnsDaysColumnName));
 }
 
 bool isSafeSaveStem(std::string_view stem)
@@ -1666,6 +1675,25 @@ void CNetCustomService::RoomsCallback::EnterRoom_Callback(const SLNet::SystemAdd
     }
     ExecuteDefaultResult("EnterRoom", callResult->resultCode, callResult->roomId,
                          &callResult->joinedRoomResult.roomDescriptor);
+}
+
+void CNetCustomService::RoomsCallback::JoinByFilter_Callback(
+    const SLNet::SystemAddress& senderAddress,
+    SLNet::JoinByFilter_Func* callResult)
+{
+    // Ordinary manual and prepared joins both use JoinByFilter, not EnterRoom.
+    // The service callback runs before the menu starts the native join handshake.
+    if (callResult->resultCode == SLNet::REC_SUCCESS && m_service->loggedIn()
+        && m_service->m_peer->GetGuidFromSystemAddress(senderAddress) == m_service->getLobbyGuid()) {
+        auto& room = callResult->joinedRoomResult.roomDescriptor;
+        m_service->m_roomSimultaneousTurns = hooks::roomRequiresSimultaneousTurns(room);
+        simturns::lobbyRoomJoined(m_service, room.lobbyRoomId);
+    }
+    ExecuteDefaultResult("JoinByFilter", callResult->resultCode,
+                         callResult->resultCode == SLNet::REC_SUCCESS
+                             ? callResult->joinedRoomResult.roomDescriptor.lobbyRoomId : 0,
+                         callResult->resultCode == SLNet::REC_SUCCESS
+                             ? &callResult->joinedRoomResult.roomDescriptor : nullptr);
 }
 
 void CNetCustomService::RoomsCallback::LeaveRoom_Callback(const SLNet::SystemAddress& senderAddress,

@@ -404,6 +404,9 @@ private:
         void EnterRoom_Callback(const SLNet::SystemAddress& senderAddress,
                                 SLNet::EnterRoom_Func* callResult) override;
 
+        void JoinByFilter_Callback(const SLNet::SystemAddress& senderAddress,
+                                   SLNet::JoinByFilter_Func* callResult) override;
+
         void LeaveRoom_Callback(const SLNet::SystemAddress& senderAddress,
                                 SLNet::LeaveRoom_Func* callResult) override;
 
