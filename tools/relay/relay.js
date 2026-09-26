@@ -131,6 +131,7 @@ const state = {
     worldHistory: [],
     turnHistory: [],
     startupActionsRelease: null,
+    delayedStartupHostRelease: null,
 };
 
 let commandSequence = 0;
@@ -1123,6 +1124,27 @@ function tryReleaseStartupActions() {
     const pair = roles.map((role) => ({
         role, socket: clientByRole(role), observation: state.byRole[role],
     }));
+    if (state.delayedStartupHostRelease) {
+        // Dedicated diagnostic lane: the original released host must still
+        // own this session and its loaded map. Never send it a second release.
+        const receipt = state.delayedStartupHostRelease;
+        const [host, join] = pair;
+        if (pair.some(({ socket, observation }) => !socket || !socket.writable
+            || socket.destroyed || observation?.connected !== true
+            || observation.mapLoaded !== true || observation.lobbyStartupPopups !== true)
+            || host.observation.pid !== receipt.pid
+            || host.observation.startupActionsHeld !== false
+            || join.observation.startupActionsHeld !== true) return;
+        if (host.socket === join.socket || host.observation.pid === join.observation.pid)
+            return faultRelay('delayed startup requires two distinct client identities');
+        state.startupActionsRelease = {
+            t: nowIso(), mode: 'delayed-join', host: receipt,
+            join: { pid: join.observation.pid, uiSeq: join.observation.uiSeq },
+        };
+        if (!send(join.socket, Op.ReleaseStartupActions, Buffer.alloc(0)))
+            return faultRelay('delayed startup release could not be written to join', join.socket);
+        return;
+    }
     if (pair.some(({ socket, observation }) => !socket || !socket.writable
         || socket.destroyed || observation?.connected !== true
         || observation.mapLoaded !== true || observation.startupActionsHeld !== true)) return;
@@ -1156,6 +1178,8 @@ function handleUiSnapshot(socket, identity, payload) {
         || typeof snapshot.strategicIdle !== 'boolean'
         || typeof snapshot.mapLoaded !== 'boolean'
         || typeof snapshot.startupActionsHeld !== 'boolean'
+        || (snapshot.lobbyStartupPopups !== undefined
+            && typeof snapshot.lobbyStartupPopups !== 'boolean')
         || !Array.isArray(snapshot.widgets) || !snapshot.widgets.every(validWidget)
         || !Array.isArray(snapshot.targets)) {
         return faultRelay('UI snapshot shape is invalid', socket);
@@ -1185,6 +1209,7 @@ function handleUiSnapshot(socket, identity, payload) {
         dialogInstance: snapshot.instance, dialogAppearance: snapshot.instance,
         dialogReady: snapshot.ready, strategicIdle: snapshot.strategicIdle,
         mapLoaded: snapshot.mapLoaded, startupActionsHeld: snapshot.startupActionsHeld,
+        lobbyStartupPopups: snapshot.lobbyStartupPopups === true,
         widgets: snapshot.widgets, targets: snapshot.targets,
     }, socket);
     if (!evidence) return;
@@ -1195,6 +1220,7 @@ function handleUiSnapshot(socket, identity, payload) {
         dialogAppearance: snapshot.instance, dialogReady: snapshot.ready,
         strategicIdle: snapshot.strategicIdle, uiSeq: evidence.seq,
         mapLoaded: snapshot.mapLoaded, startupActionsHeld: snapshot.startupActionsHeld,
+        lobbyStartupPopups: snapshot.lobbyStartupPopups === true,
         widgets: snapshot.widgets, buttons, targets: snapshot.targets,
     });
     const roleState = state.byRole[identity.role];
@@ -1203,6 +1229,7 @@ function handleUiSnapshot(socket, identity, payload) {
         dialogAppearance: snapshot.instance, dialogReady: snapshot.ready,
         strategicIdle: snapshot.strategicIdle, uiSeq: evidence.seq,
         mapLoaded: snapshot.mapLoaded, startupActionsHeld: snapshot.startupActionsHeld,
+        lobbyStartupPopups: snapshot.lobbyStartupPopups === true,
         widgets: snapshot.widgets, buttons, targets: snapshot.targets,
     });
     if (snapshot.dialog === 'DLG_STRATEGIC' || snapshot.dialog === 'DLG_ISO_PAL')
@@ -2134,6 +2161,7 @@ async function handleHttp(req, res) {
             instanceId: INSTANCE_ID, agentListening: state.agentListening,
             terminalFault: state.terminalFault, roles: state.byRole,
             startupActionsRelease: state.startupActionsRelease,
+            delayedStartupHostRelease: state.delayedStartupHostRelease,
         });
     }
     if (req.method === 'GET' && path === '/api/state') {
@@ -2155,6 +2183,7 @@ async function handleHttp(req, res) {
                 strategicIdle: value?.strategicIdle ?? false,
                 mapLoaded: value?.mapLoaded ?? false,
                 startupActionsHeld: value?.startupActionsHeld ?? false,
+                lobbyStartupPopups: value?.lobbyStartupPopups ?? false,
                 uiSeq: value?.uiSeq ?? 0, widgets: value?.widgets || [],
                 worldSeq: value?.worldSeq ?? 0,
                 targets: value?.targets || [],
@@ -2264,6 +2293,50 @@ async function handleHttp(req, res) {
         const intent = parseEndTurnPairIntent(res, query);
         if (!intent) return;
         return armEndTurnPairIntent(req, res, intent);
+    }
+    if (req.method === 'POST' && path === '/api/startup/release-host') {
+        if (!validateQuery(res, query,
+            ['fixture', 'relayInstance', 'role', 'pid', 'appearance', 'instance', 'uiSeq'])) return;
+        if (query.get('fixture') !== 'delayed-join' || query.get('role') !== 'host'
+            || query.get('relayInstance') !== INSTANCE_ID)
+            return sendJson(res, 400, { error: 'exact owned relay delayed-join host fixture required' });
+        const pid = parseUint32Token(res, query.get('pid'), 'pid');
+        if (pid === null) return;
+        const appearance = parseUint32Token(res, query.get('appearance'), 'appearance');
+        if (appearance === null) return;
+        const owner = parseUint32Token(res, query.get('instance'), 'instance');
+        if (owner === null) return;
+        const uiSeq = parseUint32Token(res, query.get('uiSeq'), 'uiSeq');
+        if (uiSeq === null) return;
+        const current = state.byRole.host;
+        const join = state.byRole.join;
+        const socket = clientByRole('host');
+        const joinSocket = clientByRole('join');
+        if (state.startupActionsRelease || state.delayedStartupHostRelease
+            || !socket || !socket.writable || socket.destroyed
+            || !joinSocket || !joinSocket.writable || joinSocket.destroyed
+            || current?.connected !== true || current.pid !== pid
+            || current.lobbyStartupPopups !== true || current.mapLoaded !== true
+            || current.startupActionsHeld !== true || current.dialogReady !== true
+            || current.dialogAppearance !== appearance || current.uiSeq !== uiSeq
+            || !Array.isArray(current.targets)
+            || current.targets.filter((target) => target.dialog === current.dialog
+                && target.instance === owner).length !== 1
+            || join?.connected !== true || join.pid === pid
+            || join.lobbyStartupPopups !== true || join.mapLoaded !== false
+            || join.startupActionsHeld !== true)
+            return sendJson(res, 409, { error: 'delayed host release requires current exact held lobby owners before join map load' });
+        const receipt = {
+            t: nowIso(), mode: 'delayed-join', relayInstance: INSTANCE_ID,
+            role: 'host', pid, appearance, owner, uiSeq,
+        };
+        // Consume before writing. A failed send faults, never retries.
+        state.delayedStartupHostRelease = receipt;
+        if (!send(socket, Op.ReleaseStartupActions, Buffer.concat([u32(pid), u32(appearance), u32(owner)]))) {
+            faultRelay('delayed host startup release could not be written', socket);
+            return sendJson(res, 500, { error: 'delayed host startup release write failed' });
+        }
+        return sendJson(res, 200, receipt);
     }
     if (req.method === 'POST' && path === '/api/ui/invoke') {
         const target = parseUiTarget(res, query, 'btn', 'button', [], ['timeoutMs']);

@@ -27,7 +27,7 @@ namespace autonav {
  * callback before the ordinary hook transaction commits. */
 bool preflight(bool selfnav, bool relay, bool autoDismiss,
                bool autoBattlePrearm, bool scriptedPopups,
-               bool scriptedPopupConfirmations);
+               bool scriptedPopupConfirmations, bool scriptedPopupLobby = false);
 
 /** Publish activation after every required hook/registration has committed.
  * Any violated preflight invariant terminates fail-closed. */
@@ -59,4 +59,3 @@ void tick();
 } // namespace hooks
 
 #endif // TESTDRV_AUTONAV_H
-

@@ -657,6 +657,8 @@ void rebuildSnapshot()
     json += testdrv::mapLoaded() ? "true" : "false";
     json += ",\"startupActionsHeld\":";
     json += scriptedpopups::startupActionsHeld() ? "true" : "false";
+    json += ",\"lobbyStartupPopups\":";
+    json += scriptedpopups::lobbyStartupPopups() ? "true" : "false";
     json += ",\"strategicIdle\":";
     json += computeStrategicIdle() ? "true" : "false";
     json += ",\"widgets\":";

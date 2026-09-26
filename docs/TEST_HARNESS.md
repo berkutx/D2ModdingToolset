@@ -88,6 +88,57 @@ $artifacts = Join-Path $env:TEMP ('oh-lobby-' + [guid]::NewGuid().ToString('N'))
 а прежняя кампания требует точную экспортированную карту. Подменять её случайной
 картой, имитировать серверные события или объявлять старый результат новым нельзя.
 
+## Полностью автоматическая подготовка через сайт
+
+`tools/test/simturns-lobby-e2e.ps1` создаёт собственную нерейтинговую подготовку,
+проводит оба клиента через native Login, предложения хосту и джойнеру, принятие
+карты и запуск. Между шагами не нужны action JSON, анализ LLM или computer-use.
+Узкая текущая fixture: host `test2`, join `test1`, опубликованный пример Diligence,
+эльфы/кланы, ОХ с объединением на день 2. Имена лидеров остаются стандартными.
+
+Передать `D2_LOBBY_HOST_ACCOUNT`, `D2_LOBBY_HOST_PASSWORD`,
+`D2_LOBBY_JOIN_ACCOUNT`, `D2_LOBBY_JOIN_PASSWORD` только через окружение процесса.
+Также задать `OH_SITE_ORIGIN` и абсолютный `OH_SITE_PACKAGE` к `package.json`
+существующего клиента сайта с Socket.IO. Секреты не записывать в командные файлы.
+Нужны эффективные настройки согласия тестовых участников; скрипт не меняет их.
+
+```powershell
+./tools/test/simturns-lobby-e2e.ps1 -ArtifactDir ./artifacts/lobby-e2e-normal -PairStartup Normal
+./tools/test/simturns-lobby-e2e.ps1 -ArtifactDir ./artifacts/lobby-e2e-delayed -PairStartup DelayedJoin
+```
+
+Каждый каталог должен быть новым. Точные prepared-предложения подтверждает runner;
+после загрузки карты работает **прежний** native `scriptedpopups` с однократным
+вызовом штатного callback и минимальным settle 300 мс. Режим
+`D2TESTDRV_SCRIPTED_POPUPS_LOBBY=1` отделяет предложения лобби от стартовых окон.
+Сообщение «Начало задания, день 1» распознаётся по точному исходному CP1251-тексту
+и `BTN_OK`; неизвестные сообщения, включая ошибки ОХ, автоматически не закрываются.
+Штатный TCP/IP-режим старого subscriber остаётся прежним.
+
+Normal выпускает стартовые окна после загрузки обеих карт. DelayedJoin отдельно
+выпускает окна хоста по текущим PID/appearance/owner, ждёт отправки подтверждения
+стандартного имени и задерживает джойнера на 8 секунд: это регрессия раннего UpdateObj.
+Повтор команды после неоднозначного ответа запрещён. Завершение и ошибка сохраняют
+собственные журналы и закрывают только собственные процессы и подготовку без итога/PTS.
+
+`startupAcceptance=true` требует обе загруженные карты, завершённые popup receipts,
+настоящий bootstrap operational и свободный стратегический экран у обоих.
+Это **не** проверка объединения, боёв или всей 18-case кампании: соответствующие
+поля полного gameplay остаются `false`.
+
+Offline-проверки без API и игровых процессов:
+
+```powershell
+./tests/run-simturns-lobby-e2e.ps1
+node --test tests/run-simturns-lobby-preparation.mjs
+```
+
+В MSVC developer shell: `./tests/run-testdrv-scripted-popups.ps1 -OutputDirectory
+./artifacts/popup-state-machine`. Проверяется настоящий код subscriber с подстановкой
+платформы/UI/SEH и очереди callback: pre-map, hold/release, возраст 300 мс,
+точное сообщение дня 1, запрет неизвестных окон, прежний TCP/IP-режим и одноразовый
+delayed-release. Это не имитация результатов игры и не проверка native hooks.
+
 ## Проверки без игры
 
 Из MSVC x86 developer shell: `./tests/run-testdrv-ui-bind-seam.ps1 -OutputDirectory ./artifacts/ui-bind-seam`.

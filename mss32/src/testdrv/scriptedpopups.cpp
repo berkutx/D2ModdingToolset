@@ -10,9 +10,12 @@
 #include "testdrv/testdrv.h"
 #include "testdrv/uistatereporter.h"
 #include "button.h"
+#include "dialoginterf.h"
+#include "textboxinterf.h"
 #include <atomic>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include <spdlog/spdlog.h>
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -41,9 +44,12 @@ struct PendingPopup
 bool g_prepared = false;
 bool g_enabled = false;
 bool g_confirmations = false;
+bool g_lobbyScope = false;
 bool g_active = false;
-enum class StartupAdmission { Disabled, Held, ReleaseReceived, Released };
+enum class StartupAdmission { Disabled, Held, ReleaseClaimed, ReleaseReceived, Released };
 std::atomic<StartupAdmission> g_startupAdmission{StartupAdmission::Disabled};
+std::uint32_t g_releaseAppearance = 0;
+std::uint32_t g_releaseOwner = 0;
 bool g_battleActive = false;
 bool g_battleResultPublished = false;
 bool g_battleResultClaimed = false;
@@ -138,6 +144,29 @@ unsigned messageButtonBit(const char* buttonName)
     return 0;
 }
 
+bool knownLobbyDayOneMessage(const char* text, std::size_t length)
+{
+    // Exact observed Russobit CP1251 bytes: "Nachalo zadaniya, den' 1".
+    // Never accept prefixes, formatting fragments, arbitrary OKs or error boxes.
+    constexpr char russian[] = "\xCD\xE0\xF7\xE0\xEB\xEE \xE7\xE0\xE4\xE0\xED\xE8\xFF, \xE4\xE5\xED\xFC 1";
+    return text && length == sizeof(russian) - 1
+        && std::memcmp(text, russian, sizeof(russian) - 1) == 0;
+}
+
+bool readyLobbyMessageIsKnown()
+{
+    // Called only after the exact pending owner passed ready/age validation.
+    // Read the original textbox, never a truncated or converted JSON rendering.
+    __try {
+        auto* dialog = uistatereporter::findDialog("DLG_MESSAGE_BOX");
+        auto* box = dialog ? game::CDialogInterfApi::get().findTextBox(dialog, "TXT_INFO") : nullptr;
+        const char* text = box && box->data ? box->data->text.string : nullptr;
+        return text && knownLobbyDayOneMessage(text, strnlen_s(text, 128));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void logObserved(PendingPopup& pending)
 {
     if (pending.observedLogged)
@@ -188,15 +217,16 @@ void releaseBattleGateOnReadyBareMap()
 
 } // namespace
 
-bool preflight(bool enabled, bool confirmations, const char* role)
+bool preflight(bool enabled, bool confirmations, const char* role, bool lobbyScope)
 {
     if (g_prepared)
-        return g_enabled == enabled && g_confirmations == confirmations
+        return g_enabled == enabled && g_confirmations == confirmations && g_lobbyScope == lobbyScope
                && (!enabled || (role && lstrcmpA(g_role, role) == 0));
 
     g_enabled = enabled;
     g_confirmations = confirmations;
-    if (confirmations && !enabled) {
+    g_lobbyScope = lobbyScope;
+    if ((confirmations || lobbyScope) && !enabled) {
         spdlog::error(
             "[testdrv][scripted-popup] confirmation ownership requires "
             "D2TESTDRV_SCRIPTED_POPUPS");
@@ -217,8 +247,8 @@ bool preflight(bool enabled, bool confirmations, const char* role)
     g_prepared = true;
     spdlog::info(
         "[testdrv][scripted-popup] preflight passed role={} minReadyAgeMs={} "
-        "confirmations={}",
-        g_role, kMinimumReadyAgeMs, g_confirmations);
+        "confirmations={} lobbyScope={}",
+        g_role, kMinimumReadyAgeMs, g_confirmations, g_lobbyScope);
     return true;
 }
 
@@ -238,16 +268,33 @@ void activateAfterHooks()
 bool startupActionsHeld()
 {
     const auto state = g_startupAdmission.load(std::memory_order_acquire);
-    return state == StartupAdmission::Held || state == StartupAdmission::ReleaseReceived;
+    return state == StartupAdmission::Held || state == StartupAdmission::ReleaseClaimed
+           || state == StartupAdmission::ReleaseReceived;
 }
 
-void receiveStartupRelease(std::uint32_t payloadSize)
+bool lobbyStartupPopups() { return g_active && g_lobbyScope; }
+
+void receiveStartupRelease(const std::uint8_t* payload, std::uint32_t payloadSize)
 {
+    std::uint32_t words[3]{};
+    // Empty is the unchanged paired release. The diagnostic host release
+    // carries PID/appearance/owner and is revalidated on the natural UI frame.
+    if (payloadSize != 0) {
+        if (payloadSize != sizeof(words) || !payload || !g_lobbyScope
+            || lstrcmpA(g_role, "host") != 0)
+            failFast("invalid lobby host startup release", 0xD2E77362u);
+        std::memcpy(words, payload, sizeof(words));
+        if (words[0] != GetCurrentProcessId() || !words[1] || !words[2])
+            failFast("lobby host startup release identity mismatch", 0xD2E77363u);
+    }
     StartupAdmission expected = StartupAdmission::Held;
-    if (payloadSize != 0 || !g_startupAdmission.compare_exchange_strong(
-            expected, StartupAdmission::ReleaseReceived, std::memory_order_acq_rel))
+    if (!g_startupAdmission.compare_exchange_strong(
+            expected, StartupAdmission::ReleaseClaimed, std::memory_order_acq_rel))
         failFast("startup release was malformed, duplicated, or outside the paired popup mode",
                  0xD2E77360u);
+    g_releaseAppearance = words[1];
+    g_releaseOwner = words[2];
+    g_startupAdmission.store(StartupAdmission::ReleaseReceived, std::memory_order_release);
 }
 
 void onDialogBound(const char* dialogName, const char* buttonName,
@@ -255,6 +302,13 @@ void onDialogBound(const char* dialogName, const char* buttonName,
                    game::CButtonInterf* exactButton)
 {
     if (!g_active || !dialogName || !buttonName)
+        return;
+
+    // Prepared Yes/Accept offers belong to the runner before native map load.
+    // Briefing alone is navigation into that map and must keep its native owner.
+    if (g_lobbyScope && !testdrv::mapLoaded() && !testdrv::livePhaseGame()
+        && !(lstrcmpA(dialogName, "DLG_SCENARIO_BRIEFING") == 0
+             && lstrcmpA(buttonName, "BTN_CONTINUE") == 0))
         return;
 
     if (lstrcmpA(dialogName, "DLG_BATTLE_A") == 0 && !g_battleActive) {
@@ -376,6 +430,12 @@ void tick()
         if (!testdrv::mapLoaded())
             failFast("paired startup release reached a client without its loaded scenario",
                      0xD2E77361u);
+        if (g_releaseAppearance) {
+            const char* current = uistatereporter::currentDialogName();
+            if (!current || !uistatereporter::isReadyDialogInstance(
+                    current, g_releaseAppearance, g_releaseOwner))
+                failFast("lobby host startup release owner retired", 0xD2E77364u);
+        }
         g_startupAdmission.store(StartupAdmission::Released, std::memory_order_release);
         spdlog::info("[testdrv][scripted-popup] paired startup release applied role={}", g_role);
     }
@@ -407,12 +467,19 @@ void tick()
         : bindAgeMs;
     if (settleAgeMs < kMinimumReadyAgeMs)
         return;
+    if (g_lobbyScope && lstrcmpA(g_pending.dialog, "DLG_MESSAGE_BOX") == 0
+        && ((g_pending.messageButtonMask != 0 && g_pending.messageButtonMask != kMessageOk)
+            || lstrcmpA(g_pending.button, "BTN_OK") != 0 || !readyLobbyMessageIsKnown()))
+        failFast("unknown lobby startup message; no automatic dismissal", 0xD2E77365u);
     // Briefing is navigation into the map. Every other automatic startup
     // action remains observed, not claimed, until both clients have loaded it.
     if (startupActionsHeld()
         && !(lstrcmpA(g_pending.dialog, "DLG_SCENARIO_BRIEFING") == 0
              && lstrcmpA(g_pending.button, "BTN_CONTINUE") == 0))
         return;
+    if (g_lobbyScope && !testdrv::mapLoaded()
+        && lstrcmpA(g_pending.dialog, "DLG_SCENARIO_BRIEFING") != 0)
+        failFast("lobby startup popup lost its loaded scenario", 0xD2E77366u);
     if (g_pending.battleResultClose
         && !uistatereporter::isReadyBattleResultCloseInstance(
             g_pending.appearance, g_pending.owner, g_pending.exactButton,
@@ -451,4 +518,3 @@ void tick()
 } // namespace hooks
 
 #endif // D2_TESTDRV
-

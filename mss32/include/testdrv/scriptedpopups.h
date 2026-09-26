@@ -20,7 +20,7 @@ namespace testdrv {
 namespace scriptedpopups {
 
 /** Validate the immutable opt-in and exact host/join role. Default-off. */
-bool preflight(bool enabled, bool confirmations, const char* role);
+bool preflight(bool enabled, bool confirmations, const char* role, bool lobbyScope = false);
 
 /** Activate only after the UI reporter and natural-frame seam committed. */
 void activateAfterHooks();
@@ -28,8 +28,11 @@ void activateAfterHooks();
 /** Published with the UI snapshot until the paired relay release is applied on the UI thread. */
 bool startupActionsHeld();
 
+/** Explicit test-only lobby scope; never inferred from a dialog or a role. */
+bool lobbyStartupPopups();
+
 /** Bridge-thread control receipt only; no native game state is read here. */
-void receiveStartupRelease(std::uint32_t payloadSize);
+void receiveStartupRelease(const std::uint8_t* payload, std::uint32_t payloadSize);
 
 /** Capture an eligible button after its stock functor was really bound.
  * This callback never invokes or queues an action. */
@@ -52,4 +55,3 @@ void tick();
 } // namespace hooks
 
 #endif // TESTDRV_SCRIPTEDPOPUPS_H
-

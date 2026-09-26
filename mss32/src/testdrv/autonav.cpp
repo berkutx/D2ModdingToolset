@@ -126,6 +126,7 @@ bool g_relay = false;
 bool g_autoBattlePrearm = false;
 bool g_scriptedPopups = false;
 bool g_scriptedPopupConfirmations = false;
+bool g_scriptedPopupLobby = false;
 char g_role[16] = {};
 int g_scenarioIdx = 0;
 constexpr DWORD kStepTimeoutMs = 15000;
@@ -1125,8 +1126,8 @@ bool sameSemanticIntent(const RemoteCmd& left, const RemoteCmd& right)
 
 void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size)
 {
-    if (op == 0x0312) { // ReleaseStartupActions: empty one-shot relay control.
-        scriptedpopups::receiveStartupRelease(size);
+    if (op == 0x0312) { // Empty paired release or identity-bound lobby host diagnostic.
+        scriptedpopups::receiveStartupRelease(p, size);
         return;
     }
     if (op != 0x0300 && op != 0x0301 && op != 0x0302 && op != 0x0303
@@ -1740,14 +1741,15 @@ void claimAndEnqueueScriptedPopupAction(const char* dialogName,
 
 bool preflight(bool selfnav, bool relay, bool autoDismiss,
                bool autoBattlePrearm, bool scriptedPopups,
-               bool scriptedPopupConfirmations)
+               bool scriptedPopupConfirmations, bool scriptedPopupLobby)
 {
     if (g_prepared)
         return g_selfnav == selfnav && g_relay == relay
                && g_autoDismiss == autoDismiss
                && g_autoBattlePrearm == autoBattlePrearm
                && g_scriptedPopups == scriptedPopups
-               && g_scriptedPopupConfirmations == scriptedPopupConfirmations;
+               && g_scriptedPopupConfirmations == scriptedPopupConfirmations
+               && g_scriptedPopupLobby == scriptedPopupLobby;
 
     if (GetEnvironmentVariableA("D2TESTDRV_EXPECT_ROOM", g_expectedLobbyRoom,
                                 sizeof(g_expectedLobbyRoom)) >= sizeof(g_expectedLobbyRoom)) {
@@ -1765,10 +1767,11 @@ bool preflight(bool selfnav, bool relay, bool autoDismiss,
     g_autoBattlePrearm = autoBattlePrearm;
     g_scriptedPopups = scriptedPopups;
     g_scriptedPopupConfirmations = scriptedPopupConfirmations;
+    g_scriptedPopupLobby = scriptedPopupLobby;
     g_needsUiFrame = selfnav || relay || g_autoDismiss || g_autoBattlePrearm
                      || g_scriptedPopups;
     if (!scriptedpopups::preflight(g_scriptedPopups,
-                                   g_scriptedPopupConfirmations, g_role))
+                                   g_scriptedPopupConfirmations, g_role, g_scriptedPopupLobby))
         return false;
     if (g_autoBattlePrearm)
         g_prearmedAutoBattleState =

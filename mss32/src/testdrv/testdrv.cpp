@@ -61,6 +61,8 @@ struct HarnessPlan
     bool wantAutoBattlePrearm = false;
     bool wantScriptedPopups = false;
     bool wantScriptedPopupConfirmations = false;
+    bool wantScriptedPopupLobby = false;
+    bool scriptedPopupLobbyGateValid = true;
     bool skipIntro = false;
     bool blackScreen = false;
     bool needsUiFrame = false;
@@ -110,6 +112,8 @@ HarnessPlan parseHarnessPlan()
         testenv::on("D2TESTDRV_SCRIPTED_POPUPS");
     plan.wantScriptedPopupConfirmations =
         testenv::on("D2TESTDRV_SCRIPTED_POPUPS_CONFIRMATIONS");
+    plan.scriptedPopupLobbyGateValid =
+        readExactOneGate("D2TESTDRV_SCRIPTED_POPUPS_LOBBY", plan.wantScriptedPopupLobby);
     plan.skipIntro = testenv::on("D2TESTDRV_SKIP_INTRO");
     plan.blackScreen = testenv::on("D2TESTDRV_BLACKSCREEN_FIX");
     plan.needsUiFrame = plan.wantRelay || plan.wantSelfNav || plan.wantAutoDismiss
@@ -126,6 +130,7 @@ HarnessPlan parseHarnessPlan()
                       || plan.wantAutoDismiss || plan.wantAutoBattlePrearm
                       || plan.wantScriptedPopups
                       || plan.wantScriptedPopupConfirmations
+                      || plan.wantScriptedPopupLobby || !plan.scriptedPopupLobbyGateValid
                      || plan.skipIntro || plan.blackScreen;
     return plan;
 }
@@ -309,6 +314,11 @@ bool preflight()
         g_preflightComplete = true;
         return true;
     }
+    if (!g_plan.scriptedPopupLobbyGateValid
+        || (g_plan.wantScriptedPopupLobby && !g_plan.wantScriptedPopups)) {
+        spdlog::error("[testdrv] SCRIPTED_POPUPS_LOBBY requires exact value 1 and SCRIPTED_POPUPS");
+        return false;
+    }
     if (g_plan.wantScriptedPopups && g_plan.wantAutoDismiss) {
         spdlog::error(
             "[testdrv] D2TESTDRV_SCRIPTED_POPUPS is mutually exclusive with "
@@ -392,7 +402,8 @@ bool preflight()
                                g_plan.wantAutoDismiss,
                                g_plan.wantAutoBattlePrearm,
                                g_plan.wantScriptedPopups,
-                               g_plan.wantScriptedPopupConfirmations))
+                               g_plan.wantScriptedPopupConfirmations,
+                               g_plan.wantScriptedPopupLobby))
         return false;
 
     g_preflightComplete = true;

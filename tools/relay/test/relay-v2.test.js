@@ -1183,6 +1183,75 @@ test('join LegacyStacksSnapshot publication is terminal and cannot become a fall
         });
     });
 
+test('lobby delayed startup releases only the exact opted-in host then the same-session join once',
+    { timeout: 15000 }, async (t) => {
+        const relay = await startRelay(t);
+        const relayInstance = (await requestJson(relay.base, '/api/status')).body.instanceId;
+        const host = await relay.connect({ role: 'host', pid: 4242 });
+        const join = await relay.connect({ role: 'join', pid: 4343 });
+        let nextAppearance = 1;
+        const publish = async (agent, role, overrides = {}) => {
+            const appearance = nextAppearance++;
+            const snapshot = JSON.parse(uiSnapshot(appearance, appearance + 100, {
+                dialog: 'DLG_BEGIN_TURN', mapLoaded: role === 'host', startupActionsHeld: true,
+            }).toString());
+            Object.assign(snapshot, { lobbyStartupPopups: true }, overrides);
+            agent.send(Op.UiSnapshot, Buffer.from(JSON.stringify(snapshot)));
+            await waitFor(async () => (await requestJson(relay.base, '/api/state'))
+                .body.roles[role]?.dialogAppearance === appearance, 2000, `${role} lobby publication`);
+            return (await requestJson(relay.base, '/api/state')).body.roles[role];
+        };
+        await publish(join, 'join');
+        const targetPath = (current, overrides = {}) => '/api/startup/release-host?' + new URLSearchParams({
+            fixture: 'delayed-join', relayInstance, role: 'host', pid: '4242',
+            appearance: String(current.dialogAppearance),
+            instance: String(current.targets[0].instance), uiSeq: String(current.uiSeq), ...overrides,
+        });
+        let current = await publish(host, 'host');
+        for (const overrides of [
+            { fixture: 'normal' }, { relayInstance: 'foreign' }, { role: 'join' },
+            { pid: '4343' }, { appearance: '99999' }, { instance: '99999' }, { uiSeq: '99999' },
+        ]) {
+            const response = await requestJson(relay.base, targetPath(current, overrides), 'POST');
+            assert.ok([400, 409].includes(response.status));
+            assert.equal(host.count(Op.ReleaseStartupActions), 0);
+        }
+        for (const overrides of [
+            { lobbyStartupPopups: false }, { mapLoaded: false }, { startupActionsHeld: false }, { ready: false },
+        ]) {
+            current = await publish(host, 'host', overrides);
+            assert.equal((await requestJson(relay.base, targetPath(current), 'POST')).status, 409);
+            assert.equal(host.count(Op.ReleaseStartupActions), 0);
+        }
+        current = await publish(host, 'host');
+        const endpoint = targetPath(current);
+        const release = await requestJson(relay.base, endpoint, 'POST');
+        assert.equal(release.status, 200);
+        assert.equal(release.body.pid, 4242);
+        assert.equal(release.body.uiSeq, current.uiSeq);
+        await waitFor(() => host.count(Op.ReleaseStartupActions) === 1, 2000, 'single diagnostic host release');
+        const payload = host.last(Op.ReleaseStartupActions).payload;
+        assert.equal(payload.length, 12);
+        assert.deepEqual([payload.readUInt32LE(0), payload.readUInt32LE(4), payload.readUInt32LE(8)],
+            [4242, current.dialogAppearance, current.targets[0].instance]);
+        assert.equal(join.count(Op.ReleaseStartupActions), 0);
+        assert.equal((await requestJson(relay.base, endpoint, 'POST')).status, 409);
+        await publish(join, 'join', { mapLoaded: true });
+        assert.equal(join.count(Op.ReleaseStartupActions), 0, 'host has not yet applied the release');
+        await publish(host, 'host', { startupActionsHeld: false });
+        await waitFor(() => join.count(Op.ReleaseStartupActions) === 1, 2000, 'join-only release');
+        assert.equal(join.last(Op.ReleaseStartupActions).payload.length, 0);
+        await publish(join, 'join', { mapLoaded: true, startupActionsHeld: false });
+        await publish(host, 'host', { startupActionsHeld: false });
+        assert.equal(host.count(Op.ReleaseStartupActions), 1);
+        assert.equal(join.count(Op.ReleaseStartupActions), 1);
+        const status = (await requestJson(relay.base, '/api/status')).body;
+        assert.equal(status.terminalFault, null);
+        assert.equal(status.startupActionsRelease.mode, 'delayed-join');
+        assert.equal(status.startupActionsRelease.host.uiSeq, release.body.uiSeq);
+        assert.equal(status.startupActionsRelease.join.pid, 4343);
+    });
+
 test('paired startup waits for both current loaded maps and releases each exact process once',
     { timeout: 10000 }, async (t) => {
         const relay = await startRelay(t);
