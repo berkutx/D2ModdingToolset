@@ -214,8 +214,11 @@ function Save-PairReceipt([string]$Stage, $Proof = $null) {
 function Invoke-ReadyRoomStart([string]$Role) {
     Assert-OwnedRelayClientIdentity $Role $script:Clients[$Role] $GameDir
     $observed = Get-GameUiSnapshot $Role
-    if ([string]$observed.dialog -cne 'DLG_LOBBY' -or -not [bool]$observed.dialogReady -or
-        [long]$observed.uiSeq -lt 1) { throw "Owned $Role is not in its ready native room." }
+    if ([string]$observed.dialog -cne 'DLG_LOBBY' -or
+        [long]$observed.uiSeq -lt 1) { throw "Owned $Role is not in its native room." }
+    # The arriving peer may rebind the same room between observation and arm.
+    # Wait for readiness in the existing single native intent, not in a second
+    # click/retry loop. Its receipt below still must prove one enabled owner.
     $after = [long]$observed.uiSeq - 1
     # The relay owns the final enabled/appearance/owner check and the host stability interval.
     # Rebinding only updates this still-unissued intent; there is exactly one POST/native command.
@@ -477,6 +480,13 @@ function Test-ConsumedEntryAppearance($Ui, [string]$Role) {
     return $false
 }
 
+function Test-StartupRoleAccepted($Ui, [bool]$BootstrapOperational) {
+    # Same two co-present bare-map roots as the existing production campaign.
+    # ISO_PAL may be the last publisher; it is not an unresolved modal dialog.
+    return $BootstrapOperational -and $Ui.mapLoaded -eq $true -and
+        $Ui.dialogReady -eq $true -and $Ui.strategicIdle -eq $true -and
+        $Ui.dialog -cin @('DLG_STRATEGIC', 'DLG_ISO_PAL')
+}
 function Wait-StartupAcceptance {
     $deadline = (Get-PairUtcNow).AddSeconds(180)
     while ((Get-PairUtcNow) -lt $deadline) {
@@ -485,9 +495,7 @@ function Wait-StartupAcceptance {
         foreach ($role in @('host', 'join')) {
             $roles[$role] = Get-Observation $role
             $ui = Get-GameUiSnapshot $role
-            $ready = $ready -and $script:logEvidence[$role].bootstrapOperational -and
-                $ui.mapLoaded -eq $true -and $ui.dialogReady -eq $true -and
-                $ui.dialog -ceq 'DLG_STRATEGIC' -and $ui.strategicIdle -eq $true
+            $ready = $ready -and (Test-StartupRoleAccepted $ui $script:logEvidence[$role].bootstrapOperational)
         }
         $script:last = @{ utc=(Get-PairUtcNow).ToString('o'); preparationId=$PreparationId; roles=$roles; evidence=$script:logEvidence }
         Save-Json 'latest.json' $script:last

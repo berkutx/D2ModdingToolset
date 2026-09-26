@@ -14,7 +14,8 @@ foreach ($node in $ast.FindAll({ param($item) $item -is [Management.Automation.L
 }
 foreach ($name in @('Property', 'Protect-UiSnapshot', 'ConvertTo-NativeReportedText', 'Get-PreparedPrompt',
     'Get-ExactEntryAction', 'Test-ConsumedEntryAppearance', 'Import-ExistingPopupObservers', 'Start-OwnedPair',
-    'Get-LogLaunchBoundary', 'Assert-FreshOwnedLog', 'Get-OwnedLogEvidence', 'Copy-OwnedLogTail', 'Compare-ProtectedFileHashes')) {
+    'Get-LogLaunchBoundary', 'Assert-FreshOwnedLog', 'Get-OwnedLogEvidence', 'Copy-OwnedLogTail', 'Compare-ProtectedFileHashes',
+    'Test-StartupRoleAccepted')) {
     . ([scriptblock]::Create($functions[$name].Extent.Text))
 }
 $script:checks=0
@@ -30,6 +31,26 @@ function Ui([string]$dialog,[string]$button,[string]$text='') {
         targets=@([pscustomobject]@{ dialog=$dialog; instance=42
             widgets=@([pscustomobject]@{ name=$button; type='button'; state=[pscustomobject]@{ enabled=$true } }) }) }
 }
+# The existing campaign accepts either co-present bare-map root. A different
+# root or any missing readiness proof must not become startup acceptance.
+foreach ($rootDialog in @('DLG_STRATEGIC', 'DLG_ISO_PAL')) {
+    $acceptedUi=[pscustomobject]@{dialog=$rootDialog;mapLoaded=$true;dialogReady=$true;strategicIdle=$true}
+    Check (Test-StartupRoleAccepted $acceptedUi $true) "Valid bare map rejected: $rootDialog"
+    Check (-not (Test-StartupRoleAccepted $acceptedUi $false)) "Bootstrap guard bypassed: $rootDialog"
+    foreach ($guard in @('mapLoaded', 'dialogReady', 'strategicIdle')) {
+        $acceptedUi.$guard=$false
+        Check (-not (Test-StartupRoleAccepted $acceptedUi $true)) "$guard guard bypassed: $rootDialog"
+        $acceptedUi.$guard=$true
+    }
+}
+foreach ($rootDialog in @('DLG_MESSAGE_BOX', 'DLG_GETINFO_BOX', 'DLG_BEGIN_TURN', 'DLG_LOBBY', 'UNKNOWN', 'dlg_iso_pal')) {
+    $modalUi=[pscustomobject]@{dialog=$rootDialog;mapLoaded=$true;dialogReady=$true;strategicIdle=$true}
+    Check (-not (Test-StartupRoleAccepted $modalUi $true)) "Modal/unknown root accepted: $rootDialog"
+}
+$acceptanceCalls=@($functions['Wait-StartupAcceptance'].Body.FindAll({ param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Test-StartupRoleAccepted'
+},$true))
+Check ($acceptanceCalls.Count -eq 1) 'Live acceptance loop does not use the tested root predicate'
 $expectedHost = 'Diligence 1.2.3 · áåç ðåéòèíãà' + "`n" + 'test2 '+[char]0x97+' Ýëüôû (õîñò)' + "`n" +
     'test1 '+[char]0x97+' Êëàíû' + "`n" + '1-é õîä: test2' + "`n" + 'ÎÕ: îáúåäèíåíèå íà äåíü 2' + "`n" + 'Ñãåíåðèðîâàòü êàðòó?'
 $hostPrompt=Get-PreparedPrompt host 'Diligence 1.2.3'
@@ -127,6 +148,73 @@ $hashProof=Compare-ProtectedFileHashes @{'Disciple.ini'='before';'Scripts/settin
 Check (-not $hashProof.unchanged -and ($hashProof.changedFiles -join ',') -ceq 'Disciple.ini') 'INI hash change was not strict and exactly named'
 Check ($hashProof.before['Disciple.ini'] -ceq 'before' -and $hashProof.after['Disciple.ini'] -ceq 'after') 'Before/after hashes were not preserved'
 Check (-not (Compare-ProtectedFileHashes @{'missing.lua'=$null} @{'missing.lua'='created'}).unchanged) 'New protected file escaped hash comparison'
+
+# Exercise the actual room-start function, not the orchestration mock below.
+# Peer arrival may leave the current native room unready; one relay intent owns
+# settling/rebinding and must return a fresh, ready exact-owner proof.
+& {
+    . ([scriptblock]::Create($functions['Invoke-ReadyRoomStart'].Extent.Text))
+    $script:Clients=@{host=[pscustomobject]@{Id=12345}}; $script:RelayBase='http://mock.invalid'
+    $mock=@{}
+    function Reset-RoomMock {
+        $mock.Clear()
+        $initial=Ui DLG_LOBBY BTN_OK
+        $initial.dialogReady=$false
+        $initial | Add-Member -NotePropertyName uiSeq -NotePropertyValue 101
+        $proof=Ui DLG_LOBBY BTN_OK
+        $proof.dialogAppearance=15; $proof.dialogInstance=15; $proof.targets[0].instance=84
+        $proof | Add-Member -NotePropertyName role -NotePropertyValue host
+        $proof | Add-Member -NotePropertyName uiSeq -NotePropertyValue 104
+        $mock.ui=$initial; $mock.requests=0; $mock.receipts=[Collections.Generic.List[object]]::new()
+        $mock.response=[pscustomobject]@{ found=$true; role='host'; observation=$proof
+            invoke=[pscustomobject]@{dlg='DLG_LOBBY';btn='BTN_OK';appearance=15;instance=84} }
+        $mock.transportFailure=$false
+    }
+    function Assert-OwnedRelayClientIdentity { }
+    function Get-GameUiSnapshot([string]$Role) { $mock.ui }
+    function Save-PairReceipt([string]$Stage,$Proof=$null) { $mock.receipts.Add([pscustomobject]@{stage=$Stage;proof=$Proof}) }
+    function Invoke-RestMethod([string]$Uri,[string]$Method,[int]$TimeoutSec) {
+        $mock.requests++
+        Check ($Method -ceq 'POST' -and $Uri -ceq 'http://mock.invalid/api/ui/invoke-when-ready?role=host&dlg=DLG_LOBBY&btn=BTN_OK&after=100&waitMs=30000&stableMs=500&timeoutMs=90000') 'Room start lost its single stable pending intent'
+        if($mock.transportFailure) { throw 'mock ambiguous transport failure' }
+        return $mock.response
+    }
+    Reset-RoomMock
+    Invoke-ReadyRoomStart host
+    Check ($mock.requests -eq 1) 'Initially unready native room did not use exactly one intent'
+    Check (($mock.receipts.stage -join ',') -ceq 'host-start-armed,host-start-issued') 'Fresh-ready intent did not preserve armed/issued receipts'
+    Check ($mock.receipts[1].proof.invoke.instance -eq 84 -and $mock.receipts[1].proof.invoke.appearance -eq 15) 'Room receipt reused the initial owner instead of fresh ready proof'
+
+    Reset-RoomMock
+    $mock.ui.dialog='DLG_CUSTOM_LOBBY'
+    Reject { Invoke-ReadyRoomStart host } '*not in its native room*'
+    Check ($mock.requests -eq 0) 'Wrong initial dialog issued a room-start intent'
+
+    Reset-RoomMock
+    $mock.response.observation.dialogReady=$false
+    Reject { Invoke-ReadyRoomStart host } '*exact ready native proof*'
+    Check ($mock.requests -eq 1 -and $mock.receipts.Count -eq 1) 'Unready receipt was issued or retried'
+
+    Reset-RoomMock
+    $mock.response.observation.targets[0].instance=83
+    Reject { Invoke-ReadyRoomStart host } '*'
+    Check ($mock.requests -eq 1 -and $mock.receipts.Count -eq 1) 'Wrong native owner receipt was issued or retried'
+
+    Reset-RoomMock
+    $mock.response.found='true'
+    Reject { Invoke-ReadyRoomStart host } '*exact ready native proof*'
+    Check ($mock.requests -eq 1) 'Malformed found receipt triggered a retry'
+
+    Reset-RoomMock
+    $mock.response.observation.uiSeq=100
+    Reject { Invoke-ReadyRoomStart host } '*exact ready native proof*'
+    Check ($mock.requests -eq 1) 'Stale ready publication triggered a retry'
+
+    Reset-RoomMock
+    $mock.transportFailure=$true
+    Reject { Invoke-ReadyRoomStart host } '*mock ambiguous transport failure*'
+    Check ($mock.requests -eq 1 -and $mock.receipts.Count -eq 1) 'Ambiguous native intent was retried'
+}
 
 # Actual pair orchestration with native observer/actor boundaries mocked, simulated clock.
 function Get-PairUtcNow { $script:Now }
