@@ -76,6 +76,12 @@ $artifacts = Join-Path $env:TEMP ('oh-lobby-' + [guid]::NewGuid().ToString('N'))
 Управление/наблюдение остаётся тем же API. Процессы закрываются только по сохранённым
 собственным Process handles; `-Keep` оставляет их для ручного осмотра.
 
+Окна, созданные самим MSS (`DLG_LOGIN_ACCOUNT`, генератор и custom lobby),
+наблюдаются через тот же UI reporter, что и штатные окна EXE. Харнес перехватывает
+также MSS-таблицу `CButtonInterfApi::assignFunctor`; одних EXE call sites недостаточно.
+Автоматический ввод обеих учётных записей проверен двумя настоящими клиентами.
+ОХ-приёмка пока не пройдена: [живой прогон и следующий отказ](2026-09-26_testdrv-lobby-login-report.md).
+
 `passed=true` здесь означает **generated-map-bootstrap**, а не 18/18 и не проверку
 боёв/нескольких ходов. `-Transport Lobby -Campaign` и fixture-режимы заранее
 отклоняются: опубликованный сервер принимает новую сгенерированную карту,
@@ -83,6 +89,11 @@ $artifacts = Join-Path $env:TEMP ('oh-lobby-' + [guid]::NewGuid().ToString('N'))
 картой, имитировать серверные события или объявлять старый результат новым нельзя.
 
 ## Проверки без игры
+
+Из MSVC x86 developer shell: `./tests/run-testdrv-ui-bind-seam.ps1 -OutputDirectory ./artifacts/ui-bind-seam`.
+Проверяет настоящие функции reporter preflight/commit/hookAssignFunctor с подставленными
+native/UI API: оба источника кнопок, однократную доставку и неизменность MSS API-таблицы
+при отказе patch bundle. Сам native patch/rollback в этом тесте подставлен.
 
 Из MSVC x86 developer shell: `./tests/run-simturns.ps1 -OutputDirectory ./artifacts/simturns`.
 Включает реальный lobby transport startup regression в Debug/Release. Он воспроизводит
