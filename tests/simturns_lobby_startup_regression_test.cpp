@@ -1,3 +1,6 @@
+// Portable tests of the production lobby adapter, CoordinatorPort and core.
+// Only the native/UI/service boundary is stubbed; no game, local coordinator,
+// D2_TESTDRV, network or binary fixture is used.
 #include "simturns/lobby_transport.h"
 #include "simturns/lobby_wire.h"
 #include "simturns/coordinator_port.h"
@@ -105,6 +108,18 @@ NativeFrame syntheticJoinGame62()
     return result;
 }
 
+NativeFrame syntheticUpdateObj52()
+{
+    NativeFrame result(".?AVCCmdUpdateObjMsg@@", 52);
+    // Reconstructed, not captured run004 payload: factory case 1 at 0x47C0BB,
+    // constructor 0x47B902/vtable 0x6D4F34, serializer 0x47F663 uses only the
+    // 44-byte CNetMsg header followed by CCommandMsg player ID and sequence.
+    // Neither word is an object ID, and this test imposes no new value rule.
+    const std::uint32_t words[]{0, 2};
+    std::memcpy(result.bytes.data() + sizeof(game::NetMessageHeader), words, sizeof(words));
+    return result;
+}
+
 netintercept::NativeReceiveDiagnostic diagnosticFor(const game::NetMessageHeader* buffer,
                                                      int handlerCount)
 {
@@ -140,10 +155,18 @@ void completeNextNative(netintercept::NativeReceiveResult result, int handlerCou
     check(!stagedReceives.empty(), "expected one staged native completion");
     auto staged = std::move(stagedReceives.front());
     stagedReceives.pop_front();
+    // Keep the production callback policy-free. A normally returned native
+    // dispatch must carry its real handler-count classification; policy Drop
+    // is independently a failure and cannot be rescued by the adapter.
+    const auto actual = policy == netintercept::RxDecision::Drop
+        ? netintercept::NativeReceiveResult::Failed
+        : netintercept::nativeDispatchResult(handlerCount);
+    check(actual == result, "test input contradicts native dispatch completion semantics");
     staged.diagnostic.sender = sender;
     staged.diagnostic.dispatchResult = handlerCount;
     staged.diagnostic.policy = policy;
-    staged.complete(staged.context, result, staged.diagnostic);
+    staged.diagnostic.dispatched = policy == netintercept::RxDecision::Pass;
+    staged.complete(staged.context, actual, staged.diagnostic);
 }
 
 void dispatchNative(NativeFrame& frame, netintercept::NativeReceiveResult result,
@@ -241,11 +264,13 @@ void directedBeginTurnRemainsFailClosed(CNetCustomService& service,
 }
 
 void scenarioBoundaryClosesZeroHandlerExceptions(CNetCustomService& service,
-                                                 CNetCustomSession& session)
+                                                 CNetCustomSession& session,
+                                                 std::uint32_t epoch = 7,
+                                                 const char* boundary = ".?AVCNewScenarioMsg@@")
 {
-    armMap(service, session, 7);
+    armMap(service, session, epoch);
     strategicIdle = true;
-    NativeFrame scenario(".?AVCNewScenarioMsg@@", 48);
+    NativeFrame scenario(boundary, 48);
     dispatchNative(scenario, netintercept::NativeReceiveResult::Applied, 1);
     drainAllUiTasks();
 
@@ -253,7 +278,19 @@ void scenarioBoundaryClosesZeroHandlerExceptions(CNetCustomService& service,
     dispatchNative(lateJoin, netintercept::NativeReceiveResult::Unhandled, 0);
     drainAllUiTasks();
     check(abortCount(service) == 1,
-          "NewScenario did not permanently close the zero-handler JoinGame exception");
+          "scenario boundary did not permanently close the zero-handler JoinGame exception");
+    retireMap();
+}
+
+void unrelatedPregameCommandRemainsFailClosed(CNetCustomService& service,
+                                             CNetCustomSession& session)
+{
+    armMap(service, session, 23);
+    NativeFrame move(".?AVCCmdMoveStackMsg@@", 56);
+    dispatchNative(move, netintercept::NativeReceiveResult::Unhandled, 0);
+    drainAllUiTasks();
+    check(abortCount(service) == 1,
+          "unrelated pregame strategic command was silently retired");
     retireMap();
 }
 
@@ -509,6 +546,178 @@ void capturedFailingJoinBatchMustNotAbort(CNetCustomService& service,
           "observed join startup burst emitted protocol Abort at zero-handler CJoinGameMsg(62)");
 }
 
+void updateObjNegativeControls(CNetCustomService& service, CNetCustomSession& session)
+{
+    std::uint32_t epoch = 24;
+    const auto mustAbort = [&](NativeFrame frame, Role role = Role::Join,
+                              bool clientReceiver = true,
+                              std::uint32_t sender = game::serverNetPlayerId) {
+        armMap(service, session, epoch++, role);
+        dispatchNative(frame, netintercept::NativeReceiveResult::Unhandled, 0,
+                       sender, clientReceiver);
+        drainAllUiTasks();
+        check(abortCount(service) == 1, "invalid UpdateObj notification escaped its boundary");
+        retireMap();
+    };
+    for (const auto length : {44u, 48u, 51u, 53u, 56u})
+        mustAbort(NativeFrame(".?AVCCmdUpdateObjMsg@@", length));
+    auto wrongType = syntheticUpdateObj52();
+    wrongType.header()->messageType = 0xfffe;
+    mustAbort(std::move(wrongType));
+    auto longerName = syntheticUpdateObj52();
+    longerName.header()->messageClassName[sizeof(".?AVCCmdUpdateObjMsg@@") - 1] = 'X';
+    mustAbort(std::move(longerName));
+    mustAbort(syntheticUpdateObj52(), Role::Host);
+    mustAbort(syntheticUpdateObj52(), Role::Join, false);
+    mustAbort(syntheticUpdateObj52(), Role::Join, true, 2);
+
+    for (const bool zero : {false, true}) {
+        armMap(service, session, epoch++);
+        auto update = syntheticUpdateObj52();
+        stageNative(update);
+        if (zero) pregameGeneration = 0;
+        else ++pregameGeneration;
+        completeNextNative(netintercept::NativeReceiveResult::Unhandled, 0);
+        drainAllUiTasks();
+        check(abortCount(service) == 1, "UpdateObj crossed its no-CMidClient generation");
+        retireMap();
+    }
+    for (const auto policy : {netintercept::RxDecision::Pass, netintercept::RxDecision::Drop}) {
+        armMap(service, session, epoch++);
+        auto update = syntheticUpdateObj52();
+        dispatchNative(update, netintercept::NativeReceiveResult::Failed, -1,
+                       game::serverNetPlayerId, true, policy);
+        drainAllUiTasks();
+        check(abortCount(service) == 1, "failed UpdateObj dispatch was rescued");
+        retireMap();
+    }
+    for (const auto* boundary : {".?AVCNewScenarioMsg@@", ".?AVCStartScenarioMsg@@"}) {
+        armMap(service, session, epoch++);
+        NativeFrame scenario(boundary, 48);
+        dispatchNative(scenario, netintercept::NativeReceiveResult::Applied, 1);
+        drainAllUiTasks();
+        // Keep the stub generation nonzero to independently prove that the
+        // per-binding latch cannot reopen even if a lifetime probe is delayed.
+        auto update = syntheticUpdateObj52();
+        dispatchNative(update, netintercept::NativeReceiveResult::Unhandled, 0);
+        drainAllUiTasks();
+        check(abortCount(service) == 1, "post-snapshot UpdateObj was silently retired");
+        retireMap();
+    }
+
+    armMap(service, session, epoch++);
+    auto update = syntheticUpdateObj52();
+    stageNative(update);
+    NativeFrame scenario(".?AVCNewScenarioMsg@@", 48);
+    auto ticket = lobbyTrackNativePacket(true);
+    check(static_cast<bool>(ticket), "nested scenario did not receive a ticket");
+    bool delivered{};
+    lobbyDeliverNativePacket(ticket, [&] { delivered = true; });
+    check(delivered && lobbyStageNativeReceive(scenario.header(), std::move(ticket),
+                                               game::serverNetPlayerId),
+          "could not stage nested scenario after UpdateObj");
+    completeNextNative(netintercept::NativeReceiveResult::Unhandled, 0);
+    completeNextNative(netintercept::NativeReceiveResult::Applied, 1);
+    drainAllUiTasks();
+    check(abortCount(service) == 1, "UpdateObj completion crossed a nested snapshot boundary");
+    retireMap();
+}
+
+void run004UpdateObjThenOwnSnapshot(CNetCustomService& service, CNetCustomSession& session)
+{
+    constexpr std::uint32_t epoch = 50;
+    armMap(service, session, epoch);
+    struct Entry {
+        const char* name;
+        std::uint32_t length;
+        int handlers;
+        std::uint32_t word0{}, word1{}, word2{};
+    };
+    // Order/lengths are from oh-real-lobby-20260926/run-004/join.mss32.log.
+    // Apart from UpdateObj's observed zero, handler counts below are controlled
+    // test inputs, not recovered packet-by-packet evidence. Fourteen Applied
+    // inputs reproduce the observed awaiting_drain=14 without inventing a drain.
+    const Entry burst[]{
+        {".?AVCRefreshInfo@@", 70700, 0},
+        {".?AVCRefreshInfo@@", 20326, 0},
+        {".?AVCRefreshInfo@@", 105, 1},
+        {".?AVCRefreshInfo@@", 105, 1},
+        {".?AVCRefreshInfo@@", 105, 1},
+        {".?AVCRefreshInfo@@", 105, 1},
+        {".?AVCRefreshInfo@@", 105, 1},
+        {".?AVCRefreshInfo@@", 545, 1},
+        {".?AVCRefreshInfo@@", 56, 1},
+        {".?AVCMenusAnsInfoMsg@@", 204, 1},
+        {".?AVCCmdBeginTurnMsg@@", 56, 0, 0, 1, 0xa3de0001},
+        {".?AVCRefreshInfo@@", 56, 1},
+        {".?AVCRefreshInfo@@", 91, 1},
+        {".?AVCRefreshInfo@@", 218, 1},
+        {".?AVCRefreshInfo@@", 316, 1},
+        {".?AVCMenusAnsInfoMsg@@", 204, 1},
+        {".?AVCJoinGameMsg@@", 62, 0},
+        {".?AVCPlayerListMsg@@", 88, 1},
+    };
+    for (const auto& entry : burst) {
+        auto frame = std::strcmp(entry.name, ".?AVCJoinGameMsg@@") == 0
+            ? syntheticJoinGame62()
+            : NativeFrame(entry.name, entry.length, entry.word0, entry.word1, entry.word2);
+        dispatchNative(frame, netintercept::nativeDispatchResult(entry.handlers), entry.handlers);
+    }
+    drainAllUiTasks();
+    check(abortCount(service) == 0 && service.sent.size() == 1,
+          "startup burst aborted or fabricated an engine acknowledgement");
+
+    auto update = syntheticUpdateObj52();
+    NativeFrame renameRefresh(".?AVCRefreshInfo@@", 118);
+    dispatchNative(update, netintercept::NativeReceiveResult::Unhandled, 0);
+    // This companion result is a test input: the run aborted before its queued
+    // UI completion. It remains a pre-snapshot native notification, not an ACK.
+    dispatchNative(renameRefresh, netintercept::NativeReceiveResult::Unhandled, 0);
+    drainAllUiTasks();
+    check(lobbyMapArmed(&service) && abortCount(service) == 0 && service.sent.size() == 1,
+          "run004 pre-snapshot UpdateObj(52) aborted or fabricated an engine acknowledgement");
+
+    // The following own snapshot is a required continuation, not an event seen
+    // in the aborted run. Creating CMidClient closes the generation before the
+    // strategic phase exists; its NewScenario and full Refresh must still run.
+    pregameGeneration = 0;
+    NativeFrame scenario(".?AVCNewScenarioMsg@@", 48);
+    NativeFrame fullRefresh(".?AVCRefreshInfo@@", 70700);
+    dispatchNative(scenario, netintercept::NativeReceiveResult::Applied, 1);
+    dispatchNative(fullRefresh, netintercept::NativeReceiveResult::Applied, 1);
+    drainAllUiTasks();
+
+    unsigned events{}, faults{};
+    CoordinatorCallbacks callbacks;
+    callbacks.postToUi = [&](CoordinatorEvent event) {
+        check(event.kind == CoordinatorEventKind::SessionPlan, "unexpected control event");
+        ++events;
+    };
+    callbacks.terminalFault = [&](CoordinatorTerminalFault) { ++faults; };
+    auto& port = CoordinatorPort::processInstance();
+    check(port.start({true, Role::Join}, std::move(callbacks)) && port.bindLocalPlayer(2),
+          "own snapshot could not progress to the actual coordinator port");
+    const auto beforeControl = service.sent.size();
+    lobby::Envelope control;
+    control.operation = lobby::Operation::Frame;
+    control.room = 6;
+    control.epoch = epoch;
+    control.frame = controlPacket(protocol::Op::SessionPlan, {epoch, 1, 1, 2, 3, 11, 12});
+    const auto bytes = lobby::encode(control);
+    check(!bytes.empty(), "could not encode continuation SessionPlan");
+    receiveLobbyControl(&service, bytes.data(), bytes.size());
+    drainAllUiTasks();
+    check(events == 0 && faults == 0 && service.sent.size() == beforeControl,
+          "UpdateObj retirement bypassed an Applied snapshot/startup ticket");
+    strategicIdle = true;
+    port.notifyNativeProgress();
+    drainAllUiTasks();
+    check(events == 1 && faults == 0 && abortCount(service) == 0
+              && service.sent.size() == beforeControl,
+          "own snapshot drain did not release SessionPlan once without fabricated engine ACKs");
+    retireMap();
+}
+
 } // namespace
 
 namespace hooks::simturns {
@@ -585,7 +794,16 @@ int main()
             [&] { capturedFailingJoinBatchMustNotAbort(service, session); });
         run("filtered JoinGame retires only its ticket before the control frame",
             [&] { appliedClientTicketBlocksControlUntilStrategicDrain(service, session, true); });
-        std::cout << "lobby startup: captured failing join batch completed without Abort; negative controls stayed closed\n";
+        run("StartScenario also closes pregame zero-handler exceptions",
+            [&] { scenarioBoundaryClosesZeroHandlerExceptions(service, session, 22,
+                                                               ".?AVCStartScenarioMsg@@"); });
+        run("unrelated pregame strategic command stays fail-closed",
+            [&] { unrelatedPregameCommandRemainsFailClosed(service, session); });
+        run("UpdateObj shape, sender, role, failure and snapshot boundaries stay closed",
+            [&] { updateObjNegativeControls(service, session); });
+        run("run004 UpdateObj retires before own snapshot without bypassing its apply fence",
+            [&] { run004UpdateObjThenOwnSnapshot(service, session); });
+        std::cout << "lobby startup: pre-snapshot notifications retired; own snapshot and control fence preserved\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "lobby startup regression: " << e.what() << '\n';

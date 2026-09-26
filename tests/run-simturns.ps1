@@ -29,8 +29,8 @@ try {
             if ($LASTEXITCODE -ne 0) { throw 'Local port failed' }
         }
     }
+    # Compile the actual production lobby adapter in both configurations.
+    # This portable boundary test uses no game process, server or D2_TESTDRV.
+    & (Join-Path $simRepo 'tests\run-simturns-lobby-startup-regression.ps1') `
+        -OutputDirectory (Join-Path $simOutput.FullName 'lobby-startup') -Configuration Both
 } finally { Pop-Location }
-
-# Exercise the real lobby binding/staging/completion path, not only its helpers.
-& (Join-Path $PSScriptRoot 'run-simturns-lobby-startup-regression.ps1') `
-    -OutputDirectory (Join-Path $simOutput.FullName 'lobby-startup')

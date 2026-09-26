@@ -3,6 +3,8 @@ param(
     [ValidateSet('Debug', 'Release', 'Both')][string]$Configuration = 'Both',
     [string]$ProductionRoot
 )
+# Compile the actual adapter with test-boundary substitutes only.
+# Requires an MSVC x86 developer environment; never launches a game or a server.
 $ErrorActionPreference = 'Stop'
 $simRepo = Split-Path $PSScriptRoot -Parent
 if (!$ProductionRoot) { $ProductionRoot = $simRepo }
@@ -25,7 +27,11 @@ try {
     Start-Transcript -LiteralPath (Join-Path $simOutput.FullName 'simturns_lobby_startup_regression.transcript.txt') -Force
     $transcriptStarted = $true
     Write-Output "Production source: $ProductionRoot"
-    Get-FileHash ($sources + @((Join-Path $mssInclude 'simturns\native_notification_policy.h'))) |
+    Get-FileHash ($sources + @(
+        (Join-Path $mssInclude 'simturns\native_notification_policy.h'),
+        (Join-Path $mssInclude 'simturns\native_apply_fence.h'),
+        (Join-Path $mssInclude 'netintercept.h')
+    )) |
         Format-List Path, Hash
     Get-FileHash (@($PSCommandPath) + @(Get-ChildItem -LiteralPath $stubInclude -Recurse -File |
         Select-Object -ExpandProperty FullName)) | Format-List Path, Hash

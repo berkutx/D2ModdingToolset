@@ -112,12 +112,14 @@ jobs:
             /m /nologo /clp:Summary /verbosity:minimal 2>&1 | Tee-Object build.log
           exit $LASTEXITCODE
 
-      - name: OH and prepared protocol regressions
+      - name: OH core, lobby-adapter and prepared protocol regressions
         if: matrix.simturns == 'true' && matrix.configuration == 'Release' && matrix.testdrv == 'false'
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
+          # The portable actual-adapter startup suite compiles Debug and Release
+          # here once, without the optional game driver or a live lobby.
           ./tests/run-simturns.ps1 -OutputDirectory "$env:RUNNER_TEMP/simturns-tests"
           ./tests/run-turn-script-optional.ps1
           ./tests/run-prepared-match-protocol.ps1 -OutputDirectory "$env:RUNNER_TEMP/prepared-tests" -DependenciesRoot $env:GITHUB_WORKSPACE
@@ -148,6 +150,16 @@ jobs:
           path: build.log
           if-no-files-found: ignore
           archive: false
+
+      - name: Upload lobby-adapter regression evidence
+        if: always() && matrix.simturns == 'true' && matrix.configuration == 'Release' && matrix.testdrv == 'false'
+        uses: actions/upload-artifact@v7
+        with:
+          name: simturns-lobby-startup-regressions
+          path: |
+            ${{ runner.temp }}/simturns-tests/lobby-startup/*.log
+            ${{ runner.temp }}/simturns-tests/lobby-startup/*.txt
+          if-no-files-found: ignore
 
       - name: Upload mss32.dll
         if: success()
