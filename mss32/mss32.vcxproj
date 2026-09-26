@@ -9,6 +9,10 @@
       <Configuration>Release</Configuration>
       <Platform>Win32</Platform>
     </ProjectConfiguration>
+    <ProjectConfiguration Include="DebugTest|Win32">
+      <Configuration>DebugTest</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
@@ -18,11 +22,12 @@
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32' Or '$(Configuration)|$(Platform)'=='DebugTest|Win32'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
     <PlatformToolset>v142</PlatformToolset>
     <CharacterSet>MultiByte</CharacterSet>
+    <D2TestDrv Condition="'$(Configuration)'=='DebugTest' And '$(D2TestDrv)'==''">true</D2TestDrv>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
@@ -36,7 +41,7 @@
   </ImportGroup>
   <ImportGroup Label="Shared">
   </ImportGroup>
-  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32' Or '$(Configuration)|$(Platform)'=='DebugTest|Win32'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -45,8 +50,9 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
     <EnableSimultaneousTurns Condition="'$(EnableSimultaneousTurns)' == ''">false</EnableSimultaneousTurns>
+    <D2TestDrv Condition="'$(D2TestDrv)' == ''">false</D2TestDrv>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32' Or '$(Configuration)|$(Platform)'=='DebugTest|Win32'">
     <LinkIncremental>true</LinkIncremental>
     <OutDir>$(DISCIPLES2_PATH)</OutDir>
   </PropertyGroup>
@@ -54,7 +60,7 @@
     <LinkIncremental>false</LinkIncremental>
     <OutDir>$(DISCIPLES2_PATH)</OutDir>
   </PropertyGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32' Or '$(Configuration)|$(Platform)'=='DebugTest|Win32'">
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <WarningLevel>Level3</WarningLevel>
@@ -64,6 +70,7 @@
       <ConformanceMode>false</ConformanceMode>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <DebugInformationFormat Condition="'$(Configuration)'=='DebugTest'">OldStyle</DebugInformationFormat>
       <AdditionalIncludeDirectories>$(ProjectDir)..\Detours\src;$(ProjectDir)..\GSL\include;$(ProjectDir)..\fmt\include;$(ProjectDir)include;$(ProjectDir)include\dbf;$(ProjectDir)..\lua;$(ProjectDir)..\sol2\single\include;$(ProjectDir)..\spdlog\include;$(ProjectDir)include\bindings;$(ProjectDir)..\SLikeNet\Source;$(ProjectDir)..\SLikeNet\DependentExtensions\Lobby2;$(ProjectDir)..\SLikeNet\DependentExtensions\Lobby2\Rooms;$(ProjectDir)..\D2RSG\ScenarioGenerator\src;$(ProjectDir)..\D2RSG\ScenarioGenerator\src\scenario;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
@@ -72,7 +79,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <ModuleDefinitionFile>module.def</ModuleDefinitionFile>
-      <AdditionalDependencies>$(SolutionDir)Lib\SLikeNet_LibStatic_$(Configuration)_$(Platform).lib;$(SolutionDir)Lib\ScenarioGenerator_$(Configuration)_$(Platform).lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(SolutionDir)Lib\SLikeNet_LibStatic_Debug_$(Platform).lib;$(SolutionDir)Lib\ScenarioGenerator_Debug_$(Platform).lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
       <Command>if not exist Lib\detours.lib (
@@ -1089,6 +1096,7 @@ call ..\buildDetours.bat ..\Detours
     <ClInclude Include="include\preparedmatchsettings.h" />
     <ClInclude Include="include\preparedmatchtemplates.h" />
     <ClInclude Include="include\preparedmatchlifecycle.h" />
+    <ClInclude Include="include\preparedmatchtext.h" />
     <ClInclude Include="include\clientcompatibility.h" />
     <ClInclude Include="include\scenedit.h" />
     <ClInclude Include="include\isoborder.h" />
@@ -1538,10 +1546,15 @@ call ..\buildDetours.bat ..\Detours
       <PreprocessorDefinitions>D2_SIMTURNS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
-  <ItemGroup Condition="'$(EnableSimultaneousTurns)' == 'true'">
+  <ItemGroup Condition="'$(EnableSimultaneousTurns)' == 'true' Or '$(D2TestDrv)' == 'true'">
     <ClCompile Include="src\executablefingerprint.cpp" />
     <ClCompile Include="src\netintercept.cpp" />
     <ClCompile Include="src\uiframedispatcher.cpp" />
+    <ClInclude Include="include\executablefingerprint.h" />
+    <ClInclude Include="include\netintercept.h" />
+    <ClInclude Include="include\uiframedispatcher.h" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(EnableSimultaneousTurns)' == 'true'">
     <ClCompile Include="src\simturns\battle_compat.cpp" />
     <ClCompile Include="src\simturns\control_client_core.cpp" />
     <ClCompile Include="src\simturns\controller.cpp" />
@@ -1554,9 +1567,6 @@ call ..\buildDetours.bat ..\Detours
     <ClCompile Include="src\simturns\state.cpp" />
     <ClCompile Include="src\simturns\turn_context.cpp" />
     <ClCompile Include="src\simturns\lobby_transport.cpp" />
-    <ClInclude Include="include\executablefingerprint.h" />
-    <ClInclude Include="include\netintercept.h" />
-    <ClInclude Include="include\uiframedispatcher.h" />
     <ClInclude Include="include\simturns\battle_compat.h" />
     <ClInclude Include="include\simturns\control_client_core.h" />
     <ClInclude Include="include\simturns\controller.h" />
@@ -1575,8 +1585,49 @@ call ..\buildDetours.bat ..\Detours
     <ClInclude Include="include\simturns\russobit_sites.h" />
     <ClInclude Include="include\simturns\session_types.h" />
   </ItemGroup>
+  <!-- Harness and OH are independent; DebugTest is only a Debug convenience profile. -->
+  <ItemDefinitionGroup Condition="'$(D2TestDrv)' == 'true'">
+    <ClCompile><PreprocessorDefinitions>D2_TESTDRV;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup Condition="'$(D2TestDrv)' == 'true'">
+    <ClCompile Include="src\testdrv\autonav.cpp" />
+    <ClCompile Include="src\testdrv\bootfixes.cpp" />
+    <ClCompile Include="src\testdrv\battletrace.cpp" />
+    <ClCompile Include="src\testdrv\fixture_reinforcement.cpp" />
+    <ClCompile Include="src\testdrv\fixtureplan.cpp" />
+    <ClCompile Include="src\testdrv\legacystackreporter.cpp" />
+    <ClCompile Include="src\testdrv\lobbychatreporter.cpp" />
+    <ClCompile Include="src\testdrv\nettracehooks.cpp" />
+    <ClCompile Include="src\testdrv\packetlogicbridge.cpp" />
+    <ClCompile Include="src\testdrv\scriptedpopups.cpp" />
+    <ClCompile Include="src\testdrv\testdrv.cpp" />
+    <ClCompile Include="src\testdrv\testenv.cpp" />
+    <ClCompile Include="src\testdrv\uistatereporter.cpp" />
+    <ClCompile Include="src\testdrv\worldactions.cpp" />
+    <ClCompile Include="src\testdrv\worldreporter.cpp" />
+    <ClCompile Include="src\testdrv\local_coordinator_adapter.cpp" />
+    <ClInclude Include="include\testdrv\autonav.h" />
+    <ClInclude Include="include\testdrv\bootfixes.h" />
+    <ClInclude Include="include\testdrv\battletrace.h" />
+    <ClInclude Include="include\testdrv\fixture_reinforcement.h" />
+    <ClInclude Include="include\testdrv\fixtureplan.h" />
+    <ClInclude Include="include\testdrv\legacystackreporter.h" />
+    <ClInclude Include="include\testdrv\lobbychatreporter.h" />
+    <ClInclude Include="include\testdrv\nettracehooks.h" />
+    <ClInclude Include="include\testdrv\packetlogicbridge.h" />
+    <ClInclude Include="include\testdrv\scriptedpopups.h" />
+    <ClInclude Include="include\testdrv\testdrv.h" />
+    <ClInclude Include="include\testdrv\testenv.h" />
+    <ClInclude Include="include\testdrv\uistatereporter.h" />
+    <ClInclude Include="include\testdrv\worldactions.h" />
+    <ClInclude Include="include\testdrv\worldreporter.h" />
+    <ClInclude Include="include\testdrv\local_coordinator_adapter.h" />
+    <ClInclude Include="include\testdrv\json.h" />
+    <ClInclude Include="include\testdrv\networkobservers.h" />
+  </ItemGroup>
   <Target Name="ValidateSimultaneousTurnsOption" BeforeTargets="PrepareForBuild">
     <Error Condition="'$(EnableSimultaneousTurns)' != 'true' and '$(EnableSimultaneousTurns)' != 'false'" Text="EnableSimultaneousTurns must be true or false." />
+    <Error Condition="'$(D2TestDrv)' != 'true' and '$(D2TestDrv)' != 'false'" Text="D2TestDrv must be true or false." />
   </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

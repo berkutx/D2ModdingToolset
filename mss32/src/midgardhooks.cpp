@@ -29,6 +29,9 @@
 #include "netcustomservice.h"
 #include "originalfunctions.h"
 #include "simturns/lobby_transport.h"
+#ifdef D2_TESTDRV
+#include "testdrv/local_coordinator_adapter.h"
+#endif
 #ifdef D2_SIMTURNS
 #include "simturns/controller.h"
 #include "simturns/state.h"
@@ -130,7 +133,12 @@ void __fastcall midgardClearNetworkStateHooked(game::CMidgard* thisptr, int /*%e
 
 #ifdef D2_SIMTURNS
     const bool simultaneousTeardown = simturns::phase() != simturns::Phase::Disabled;
-    if (simultaneousTeardown && ++simultaneousTeardownDepth == 1) simturns::lobbyMapTeardownBegun();
+    if (simultaneousTeardown && ++simultaneousTeardownDepth == 1) {
+        simturns::lobbyMapTeardownBegun();
+#ifdef D2_TESTDRV
+        testdrv::local_coordinator_adapter::beginTeardown();
+#endif
+    }
     if (simultaneousTeardown && !simturns::beginSessionTeardown()) {
         spdlog::critical("Cannot destroy native network state while simultaneous-turn work is active");
         std::terminate(); // Continuing would invalidate pointers used by native dispatch.
@@ -140,6 +148,10 @@ void __fastcall midgardClearNetworkStateHooked(game::CMidgard* thisptr, int /*%e
     getOriginalFunctions().midgardClearNetworkState(thisptr);
 
 #ifdef D2_SIMTURNS
+#ifdef D2_TESTDRV
+    if (simultaneousTeardown && simultaneousTeardownDepth == 1)
+        testdrv::local_coordinator_adapter::stop();
+#endif
     if (simultaneousTeardown && !simturns::endSession()) {
         spdlog::critical("Cannot restore simultaneous-turn patches after native network teardown");
         std::terminate();
@@ -167,7 +179,12 @@ void __fastcall midgardClearNetworkStateAndServiceHooked(game::CMidgard* thisptr
 
 #ifdef D2_SIMTURNS
     const bool simultaneousTeardown = simturns::phase() != simturns::Phase::Disabled;
-    if (simultaneousTeardown && ++simultaneousTeardownDepth == 1) simturns::lobbyMapTeardownBegun();
+    if (simultaneousTeardown && ++simultaneousTeardownDepth == 1) {
+        simturns::lobbyMapTeardownBegun();
+#ifdef D2_TESTDRV
+        testdrv::local_coordinator_adapter::beginTeardown();
+#endif
+    }
     if (simultaneousTeardown && !simturns::beginSessionTeardown()) {
         spdlog::critical("Cannot destroy native service while simultaneous-turn work is active");
         std::terminate();
@@ -177,6 +194,10 @@ void __fastcall midgardClearNetworkStateAndServiceHooked(game::CMidgard* thisptr
     getOriginalFunctions().midgardClearNetworkStateAndService(thisptr);
 
 #ifdef D2_SIMTURNS
+#ifdef D2_TESTDRV
+    if (simultaneousTeardown && simultaneousTeardownDepth == 1)
+        testdrv::local_coordinator_adapter::stop();
+#endif
     if (simultaneousTeardown && !simturns::endSession()) {
         spdlog::critical("Cannot restore simultaneous-turn patches after native service teardown");
         std::terminate();

@@ -14,10 +14,14 @@ struct CoordinatorPort::Impl
     Sender sender;
     std::function<void()> terminal;
     std::function<void()> progressWake;
+    FaultDiagnostic diagnostic;
     CoordinatorCallbacks callbacks;
     std::uint32_t epoch{}, mergeDay{};
     std::uint64_t generation{};
     bool armed{}, started{}, failed{};
+#ifdef D2_TESTDRV
+    bool localPlanIdentity{};
+#endif
 
     // Sender is the non-reentrant RakPeerInterface::Send enqueue operation,
     // not a callback into the coordinator. Serialize its acceptance and the
@@ -50,17 +54,25 @@ struct CoordinatorPort::Impl
     {
         std::function<void()> notify;
         std::function<void(CoordinatorTerminalFault)> sink;
+        FaultDiagnostic diagnose;
+        CoordinatorFaultDiagnostic snapshot;
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (!armed || failed || (expectedGeneration && expectedGeneration != generation)) return;
             failed = true;
             notify = terminal;
             sink = callbacks.terminalFault;
+            snapshot = {reason ? reason : "simultaneous-turn terminal failure",
+                        epoch, generation, session.role, started};
+            // A diagnostic target's copy may also throw. Diagnostics must
+            // never prevent the existing fail-closed terminal path.
+            try { diagnose = diagnostic; } catch (...) { }
         }
-        // Both callbacks may call fail() again. First failure wins; neither
+        // Callbacks may call fail() again. First failure wins; none
         // runs while holding the core mutex, and no failed send is retried.
+        try { if (diagnose) diagnose(snapshot); } catch (...) { }
         try { if (notify) notify(); } catch (...) { }
-        if (sink) sink({reason ? reason : "simultaneous-turn terminal failure"});
+        if (sink) sink({snapshot.message});
     }
 };
 
@@ -74,7 +86,8 @@ CoordinatorPort& CoordinatorPort::processInstance()
 bool CoordinatorPort::arm(const SimTurnsSessionOptions& session,
                            std::uint32_t epoch, std::uint32_t mergeDay,
                            Sender sender, std::function<void()> terminal,
-                           std::function<void()> progressWake)
+                           std::function<void()> progressWake,
+                           FaultDiagnostic diagnostic)
 {
     std::lock_guard<std::mutex> lock(impl->mutex);
     if (impl->armed || impl->generation == UINT64_MAX || !session.requested || !epoch || !sender
@@ -87,12 +100,30 @@ bool CoordinatorPort::arm(const SimTurnsSessionOptions& session,
     impl->sender = std::move(sender);
     impl->terminal = std::move(terminal);
     impl->progressWake = std::move(progressWake);
+    impl->diagnostic = std::move(diagnostic);
     impl->core = {};
     impl->core.configure(session);
     impl->armed = true;
     impl->failed = false;
+#ifdef D2_TESTDRV
+    impl->localPlanIdentity = false;
+#endif
     return true;
 }
+
+#ifdef D2_TESTDRV
+bool CoordinatorPort::armLocal(const SimTurnsSessionOptions& session, Sender sender,
+                                std::function<void()> terminal)
+{
+    // The adapter arms before publishing its first LocalPlayerHandle, the
+    // causal prerequisite for SessionPlan. Reuse normal lifetime validation.
+    if (!arm(session, 1, 0, std::move(sender), std::move(terminal))) return false;
+    std::lock_guard<std::mutex> lock(impl->mutex);
+    impl->epoch = 0;
+    impl->localPlanIdentity = true;
+    return true;
+}
+#endif
 
 bool CoordinatorPort::preflight(const SimTurnsSessionOptions& session, std::string& error)
 {
@@ -125,6 +156,7 @@ void CoordinatorPort::quiesce()
     impl->sender = {};
     impl->terminal = {};
     impl->progressWake = {};
+    impl->diagnostic = {};
 }
 
 void CoordinatorPort::notifyNativeProgress()
@@ -148,6 +180,7 @@ void CoordinatorPort::stop()
     impl->sender = {};
     impl->terminal = {};
     impl->progressWake = {};
+    impl->diagnostic = {};
     impl->core = {};
 }
 
@@ -179,10 +212,18 @@ void CoordinatorPort::receive(const std::uint8_t* bytes, std::size_t size)
                 // a downgrade path after this room explicitly armed OH.
                 if (frame.op == protocol::Op::SessionPlan) {
                     protocol::SessionPlan plan;
-                    if (protocol::decodeSessionPlan(frame.payload, plan, error)
-                        && (plan.epoch != impl->epoch || plan.mergeDay != impl->mergeDay
-                            || plan.mode != TurnMode::Simultaneous))
-                        error = "SessionPlan disagrees with authenticated lobby Arm";
+                    if (protocol::decodeSessionPlan(frame.payload, plan, error)) {
+#ifdef D2_TESTDRV
+                        if (impl->localPlanIdentity && plan.mode == TurnMode::Simultaneous) {
+                            impl->epoch = plan.epoch;
+                            impl->mergeDay = plan.mergeDay;
+                            impl->localPlanIdentity = false;
+                        }
+#endif
+                        if (plan.epoch != impl->epoch || plan.mergeDay != impl->mergeDay
+                            || plan.mode != TurnMode::Simultaneous)
+                            error = "SessionPlan disagrees with armed simultaneous-turn session";
+                    }
                 }
                 ControlInboundEvent decoded;
                 ControlFailure failure;

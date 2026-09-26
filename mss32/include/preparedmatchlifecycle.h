@@ -1,9 +1,51 @@
 #ifndef PREPAREDMATCHLIFECYCLE_H
 #define PREPAREDMATCHLIFECYCLE_H
+#include "preparedmatchprotocol.h"
+#include <algorithm>
+#include <deque>
+#include <optional>
 
 namespace hooks::prepared {
 enum class Stage { Waiting, Confirming, Accepted, Generating, Creating, Setup, Terminal, Returning };
 enum class CancelAction { Acknowledge, AwaitSafePoint, PreserveRoom };
+enum class JoinStage { Waiting, CheckingRoom, Prompt, Accepted, CheckingJoinRoom, Terminal };
+enum class JoinAction { Wait, RefreshRooms, ShowPrompt, Join, Unavailable };
+
+inline JoinStage joinStageAfterBusy(JoinStage stage)
+{
+    if (stage == JoinStage::CheckingRoom) return JoinStage::Waiting;
+    if (stage == JoinStage::CheckingJoinRoom) return JoinStage::Accepted;
+    return stage;
+}
+
+class JoinReceipts {
+    struct Receipt { JoinIdentity target; std::string recipient; JoinState state; };
+    std::deque<Receipt> values;
+public:
+    std::optional<JoinState> find(const JoinIdentity& target, const std::string& recipient) const {
+        const auto found = std::find_if(values.begin(), values.end(), [&](const Receipt& v) {
+            return v.target == target && v.recipient == recipient;
+        });
+        return found == values.end() ? std::nullopt : std::optional<JoinState>(found->state);
+    }
+    void remember(const JoinIdentity& target, const std::string& recipient, JoinState state) {
+        if (state != JoinState::Accepted && state != JoinState::Declined && state != JoinState::Unavailable) return;
+        if (find(target, recipient)) return;
+        values.push_back({target, recipient, state});
+        if (values.size() > 512) values.pop_front();
+    }
+};
+
+inline JoinAction joinAction(JoinStage stage, bool idleLobby, bool freshRooms, bool roomAvailable)
+{
+    // Never let a network callback, an unrelated modal or a running session own a transition.
+    if (!idleLobby || stage == JoinStage::Terminal) return JoinAction::Wait;
+    if (stage == JoinStage::Waiting || stage == JoinStage::Accepted) return JoinAction::RefreshRooms;
+    if (stage == JoinStage::Prompt) return JoinAction::ShowPrompt;
+    if (!freshRooms) return JoinAction::Wait;
+    if (!roomAvailable) return JoinAction::Unavailable;
+    return stage == JoinStage::CheckingJoinRoom ? JoinAction::Join : JoinAction::ShowPrompt;
+}
 
 inline CancelAction cancelAction(Stage stage, bool roomCreated)
 {

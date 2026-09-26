@@ -35,6 +35,10 @@ std::atomic<bool> g_requested{false};
 std::atomic<bool> g_installed{false};
 thread_local bool g_dispatchActive = false;
 
+#ifdef D2_TESTDRV
+std::atomic<DebugFrameCallback> g_debugFrameCallback{nullptr};
+#endif
+
 class DispatchScope
 {
 public:
@@ -62,6 +66,13 @@ LONG __stdcall uiFrameHook(HWND window, LPPOINT point, LONG* state)
     DispatchScope dispatchScope;
 
     netintercept::drainOneOnUiThread();
+
+#ifdef D2_TESTDRV
+    const DebugFrameCallback callback =
+        g_debugFrameCallback.load(std::memory_order_acquire);
+    if (callback)
+        callback(window);
+#endif
 
     return g_originalUiFrame(window, point, state);
 }
@@ -115,6 +126,23 @@ bool installed()
 {
     return g_installed.load(std::memory_order_acquire);
 }
+
+#ifdef D2_TESTDRV
+bool setDebugFrameCallback(DebugFrameCallback callback)
+{
+    if (!callback || !requested())
+        return false;
+
+    std::lock_guard<std::mutex> lock(g_requestMutex);
+    const DebugFrameCallback currentCallback =
+        g_debugFrameCallback.load(std::memory_order_relaxed);
+    if (currentCallback && currentCallback != callback) {
+        return false;
+    }
+    g_debugFrameCallback.store(callback, std::memory_order_release);
+    return true;
+}
+#endif
 
 } // namespace uiframedispatcher
 } // namespace hooks

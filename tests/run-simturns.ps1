@@ -6,6 +6,7 @@ Push-Location $simOutput.FullName
 try {
     foreach ($simTest in @('simturns_control_client_core', 'simturns_lobby_port',
                            'simturns_lobby_wire', 'simturns_native_apply_fence',
+                           'simturns_native_receive_diagnostic',
                            'simturns_native_notification_policy')) {
         $simSources = @((Join-Path $simRepo ('tests\' + $simTest + '_test.cpp')))
         if ($simTest -in @('simturns_control_client_core', 'simturns_lobby_port')) {
@@ -20,5 +21,16 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "$simTest compilation failed; no stale binary will be run" }
         & ('.\' + $simTest + '.exe')
         if ($LASTEXITCODE -ne 0) { throw "$simTest failed" }
+        if ($simTest -eq 'simturns_lobby_port') {
+            # The optional local transport uses this same port, not another OH engine.
+            & cl.exe /nologo /std:c++17 /EHsc /MT /O2 /DNDEBUG /DD2_TESTDRV ('/I' + (Join-Path $simRepo 'mss32\include')) @simSources /Fesimturns_local_port.exe /link /INCREMENTAL:NO
+            if ($LASTEXITCODE -ne 0) { throw 'Local port compilation failed; no stale binary will be run' }
+            & .\simturns_local_port.exe
+            if ($LASTEXITCODE -ne 0) { throw 'Local port failed' }
+        }
     }
 } finally { Pop-Location }
+
+# Exercise the real lobby binding/staging/completion path, not only its helpers.
+& (Join-Path $PSScriptRoot 'run-simturns-lobby-startup-regression.ps1') `
+    -OutputDirectory (Join-Path $simOutput.FullName 'lobby-startup')

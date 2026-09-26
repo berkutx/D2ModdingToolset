@@ -30,6 +30,9 @@
 #include "groupview.h"
 #include "scripts.h"
 #include "resultsender.h"
+#ifdef D2_TESTDRV
+#include "testdrv/battletrace.h"
+#endif
 #include <spdlog/spdlog.h>
 
 static std::atomic<game::CBatLogic*> g_batLogic{nullptr};
@@ -44,6 +47,10 @@ void __fastcall battleTurnHooked(game::CBatLogic* thisptr,
                                  game::CMidgardID* a5)
 {
     using namespace game;
+#ifdef D2_TESTDRV
+    testdrv::battletrace::Scope trace("resolution", thisptr ? thisptr->battleMsgData : nullptr,
+                                     thisptr ? thisptr->objectMap : nullptr);
+#endif
 
     const CBatLogicApi::Api& batLogicApi = CBatLogicApi::get();
 
@@ -59,6 +66,10 @@ void __fastcall updateGroupsIfBattleIsOverHooked(game::CBatLogic* thisptr,
                                                  game::CResultSender* resultSender)
 {
     using namespace game;
+#ifdef D2_TESTDRV
+    testdrv::battletrace::Scope trace("finalize-check", thisptr ? thisptr->battleMsgData : nullptr,
+                                     thisptr ? thisptr->objectMap : nullptr);
+#endif
     auto& batLogicApi = CBatLogicApi::get();
 
     // Available whenever battle logic runs — earlier and more often than battleTurn alone

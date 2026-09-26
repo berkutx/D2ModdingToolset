@@ -18,6 +18,10 @@
  */
 
 #include "menucustomlobby.h"
+#ifdef D2_TESTDRV
+#include "testdrv/lobbychatreporter.h"
+#include "testdrv/uistatereporter.h"
+#endif
 #include "autodialog.h"
 #include "button.h"
 #include "dialoginterf.h"
@@ -131,6 +135,10 @@ CMenuCustomLobby::CMenuCustomLobby(game::CMenuPhase* menuPhase, bool restartJoin
 CMenuCustomLobby ::~CMenuCustomLobby()
 {
     using namespace game;
+#ifdef D2_TESTDRV
+    testdrv::uistatereporter::observeLobbyRooms(
+        CMenuBaseApi::get().getDialogInterface(this), {});
+#endif
 
     const auto& uiEventApi = UiEventApi::get();
 
@@ -716,65 +724,87 @@ CMenuCustomLobby::CHelpInterf::CHelpInterf(CMenuCustomLobby* menu)
 void __fastcall CMenuCustomLobby::joinBtnHandler(CMenuCustomLobby* thisptr, int /*%edx*/)
 {
     auto room = thisptr->getSelectedRoom();
-    if (!room) {
-        return;
-    }
+    if (room) thisptr->joinRoomInfo(*room);
+}
 
-    if (room->usedSlots >= room->totalSlots) {
+bool CMenuCustomLobby::hasPreparedJoinRoom(std::uint32_t roomId, const std::string& host) const
+{
+    return std::any_of(m_rooms.begin(), m_rooms.end(), [&](const RoomInfo& room) {
+        return room.id == roomId && room.hostName == host && room.usedSlots < room.totalSlots;
+    });
+}
+
+bool CMenuCustomLobby::joinPreparedRoom(std::uint32_t roomId, const std::string& host)
+{
+    if (!isPreparedMatchIdle()) return false;
+    const auto found = std::find_if(m_rooms.begin(), m_rooms.end(), [&](const RoomInfo& room) {
+        return room.id == roomId && room.hostName == host;
+    });
+    if (found == m_rooms.end()) return false;
+    // The same checks and handshake as a manual Join; never use the restart shortcut.
+    const auto room = *found;
+    try { return joinRoomInfo(room); }
+    catch (...) { hideWaitDialog(); throw; }
+}
+
+bool CMenuCustomLobby::joinRoomInfo(const RoomInfo& room)
+{
+    if (room.usedSlots >= room.totalSlots) {
         showMessageBox(getInterfaceText("X005TA0886"));
-        return;
+        return false;
     }
 
     // Show wait dialog right away because game files hashing can be lengthy
-    thisptr->showWaitDialog();
+    showWaitDialog();
 
     const auto& gameFilesHash = CNetCustomService::get()->getGameFilesHash();
-    if (room->gameFilesHash != gameFilesHash) {
+    if (room.gameFilesHash != gameFilesHash) {
         auto message = getInterfaceText(textIds().lobby.checkFilesFailed.c_str());
         if (message.empty()) {
             message =
                 "Unable to join the room because the owner's game version or files are different.";
         }
 
-        thisptr->hideWaitDialog();
+        hideWaitDialog();
         showMessageBox(message);
-        return;
+        return false;
     }
 
-    if (!room->templateHash.empty()) {
-        auto templatePath = templatesFolder() / room->templateName;
+    if (!room.templateHash.empty()) {
+        auto templatePath = templatesFolder() / room.templateName;
 
         if (!std::filesystem::exists(templatePath)) {
-            thisptr->hideWaitDialog();
+            hideWaitDialog();
 
             showMessageBox(
-                fmt::format("Required map template was not found:\n{}", room->templateName));
+                fmt::format("Required map template was not found:\n{}", room.templateName));
 
-            return;
+            return false;
         }
 
         auto localHash = computeHash({templatePath});
 
-        if (localHash != room->templateHash) {
-            thisptr->hideWaitDialog();
+        if (localHash != room.templateHash) {
+            hideWaitDialog();
 
             showMessageBox(
-                fmt::format("Map template differs from the host version:\n{}", room->templateName));
+                fmt::format("Map template differs from the host version:\n{}", room.templateName));
 
-            return;
+            return false;
         }
     }
 
-    if (!room->password.empty()) {
+    if (!room.password.empty()) {
         // Store selected room info because the room list can be updated while the dialog is shown
-        thisptr->m_joiningRoomId = room->id;
-        thisptr->m_joiningRoomPassword = room->password;
-        thisptr->hideWaitDialog();
-        thisptr->showRoomPasswordDialog();
-        return;
+        m_joiningRoomId = room.id;
+        m_joiningRoomPassword = room.password;
+        hideWaitDialog();
+        showRoomPasswordDialog();
+        return true;
     }
 
-    CNetCustomService::get()->joinRoom(room->id);
+    CNetCustomService::get()->joinRoom(room.id);
+    return true;
 }
 
 void __fastcall CMenuCustomLobby::backBtnHandler(CMenuCustomLobby* thisptr, int /*%edx*/)
@@ -1095,6 +1125,7 @@ void CMenuCustomLobby::updateRooms(DataStructures::List<SLNet::RoomDescriptor*>&
     }
 
     m_rooms.clear();
+    ++m_preparedRoomsRevision;
     m_rooms.reserve(roomDescriptors.Size());
     auto selectedIndex = roomDescriptors.Size() ? 0 : (unsigned)-1;
     for (unsigned int i = 0; i < roomDescriptors.Size(); ++i) {
@@ -1104,6 +1135,13 @@ void CMenuCustomLobby::updateRooms(DataStructures::List<SLNet::RoomDescriptor*>&
         }
     }
 
+#ifdef D2_TESTDRV
+    std::vector<std::string> observedNames;
+    observedNames.reserve(m_rooms.size());
+    for (const auto& room : m_rooms)
+        observedNames.push_back(room.gameName);
+    testdrv::uistatereporter::observeLobbyRooms(dialog, std::move(observedNames));
+#endif
     listBoxApi.setElementsTotal(listBox, (int)m_rooms.size());
     if (selectedIndex != (unsigned)-1) {
         listBoxApi.setSelectedIndex(listBox, selectedIndex);
@@ -1620,6 +1658,10 @@ void CMenuCustomLobby::completeRestartJoin(bool success)
 
 void CMenuCustomLobby::addChatMessage(CNetCustomService::ChatMessage message)
 {
+#ifdef D2_TESTDRV
+    hooks::testdrv::lobbychatreporter::onChatReceived(message.sender.C_String(),
+                                                    message.text.C_String());
+#endif
     if (m_chatMessages.size() >= chatMessageMaxCount) {
         m_chatMessages.pop_front();
     }

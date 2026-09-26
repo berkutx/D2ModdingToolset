@@ -35,24 +35,36 @@ static std::array<Api, 4> functions = {{
         (Api::CheckObjectLock)0x4078b7,
         (Api::SendStackMoveMsg)0x40650f,
         (Api::SendSaveGameMsg)nullptr,
+#ifdef D2_TESTDRV
+        nullptr,
+#endif
     },
     // Russobit
     Api{
         (Api::CheckObjectLock)0x4078b7,
         (Api::SendStackMoveMsg)0x40650f,
         (Api::SendSaveGameMsg)0x40639b,
+#ifdef D2_TESTDRV
+        (Api::ClientTakesTurn)0x406394,
+#endif
     },
     // GOG -- ranked host capture is intentionally unsupported for this build.
     Api{
         (Api::CheckObjectLock)0x40753e,
         (Api::SendStackMoveMsg)0x40619b,
         (Api::SendSaveGameMsg)nullptr,
+#ifdef D2_TESTDRV
+        nullptr,
+#endif
     },
     // Scenario Editor
     Api{
         (Api::CheckObjectLock)nullptr,
         (Api::SendStackMoveMsg)nullptr,
         (Api::SendSaveGameMsg)nullptr,
+#ifdef D2_TESTDRV
+        nullptr,
+#endif
     },
 }};
 // clang-format on

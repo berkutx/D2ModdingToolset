@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "description": "The ordered self and peer CConnectMsg bodies that released WaitPeer in one successful stock DirectPlay Russobit startup",
+  "provenance": {
+    "sourceRepository": "C:\\GOG Games\\Disciples 2 - Rise of the Elves\\lobby",
+    "packetLog": "logs\\d2lobby_packets_13112.log",
+    "sourceLines": [12, 34],
+    "sourceDeclaredFrameSize": 48,
+    "legacyGuard": "hdr[1] >= 41",
+    "normalization": "The old hook compared and logged the complete 48-byte NetMessageHeader::length while pointing at frame +8; the final 8 logged bytes were an out-of-frame over-read. The MSS observer instead exposes the exact bounded 40-byte body."
+  },
+  "layout": {
+    "payloadSize": 40,
+    "dpidOffset": 36
+  },
+  "orderedPayloads": [
+    {
+      "meaning": "host self-announcement cached as the first CConnectMsg DPID",
+      "dpid": "0x48C0A75A",
+      "payloadHex": "2E 3F 41 56 43 43 6F 6E 6E 65 63 74 4D 73 67 40 40 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 5A A7 C0 48"
+    },
+    {
+      "meaning": "joiner announcement whose different DPID released WaitPeer",
+      "dpid": "0x48C0A758",
+      "payloadHex": "2E 3F 41 56 43 43 6F 6E 6E 65 63 74 4D 73 67 40 40 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 58 A7 C0 48"
+    }
+  ]
+}
+

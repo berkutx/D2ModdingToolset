@@ -116,4 +116,31 @@ std::vector<std::uint8_t> encodeStatus(const Identity& v, State state, const std
     number(out, v.revision, 4); out.push_back(static_cast<std::uint8_t>(state)); string(out, detail);
     return out;
 }
+bool decodeJoinOffer(const std::uint8_t* bytes, std::size_t length, JoinOffer& offer) noexcept {
+    if (!bytes || length < 2 || length > 854 || bytes[0] != 1 || bytes[1] != 3) return false;
+    try {
+        Reader r{bytes + 2, bytes + length}; JoinOffer v;
+        if (!r.identity(v.target.identity) || !r.number(v.target.roomId, 4) || v.target.roomId == UINT32_MAX
+            || !r.string(v.host, 192) || !r.string(v.title, 256, true) || !r.string(v.recipient, 192)
+            || r.at != r.end) return false;
+        offer = std::move(v); return true;
+    } catch (...) { return false; }
+}
+bool decodeJoinCancel(const std::uint8_t* bytes, std::size_t length, JoinIdentity& target) noexcept {
+    if (!bytes || length < 2 || length > 208 || bytes[0] != 1 || bytes[1] != 5) return false;
+    try {
+        Reader r{bytes + 2, bytes + length}; JoinIdentity v;
+        if (!r.identity(v.identity) || !r.number(v.roomId, 4) || v.roomId == UINT32_MAX || r.at != r.end) return false;
+        target = std::move(v); return true;
+    } catch (...) { return false; }
+}
+std::vector<std::uint8_t> encodeJoinStatus(const JoinIdentity& target, JoinState state, const std::string& detail) {
+    if (!validIdentity(target.identity) || target.roomId == UINT32_MAX
+        || !text(detail, 128, true) || static_cast<unsigned>(state) > 5) return {};
+    std::vector<std::uint8_t> out{1, static_cast<std::uint8_t>(Operation::JoinStatus)};
+    string(out, target.identity.preparationId); string(out, target.identity.gameId); string(out, target.identity.attemptId);
+    number(out, target.identity.revision, 4);
+    number(out, target.roomId, 4); out.push_back(static_cast<std::uint8_t>(state)); string(out, detail);
+    return out;
+}
 } // namespace hooks::prepared

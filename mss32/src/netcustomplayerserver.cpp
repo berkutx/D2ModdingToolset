@@ -25,7 +25,7 @@
 #include "netcustomplayer.h"
 #include "netcustomsession.h"
 #include "simturns/lobby_transport.h"
-#ifdef D2_SIMTURNS
+#if defined(D2_SIMTURNS) || defined(D2_TESTDRV)
 #include "netintercept.h"
 #endif
 #include "netmsg.h"
@@ -177,7 +177,7 @@ bool __fastcall CNetCustomPlayerServer::sendMessage(CNetCustomPlayerServer* this
         thisptr->getLogger()->error("Cannot start simultaneous-turn map before lobby Arm");
         return false;
     }
-#ifdef D2_SIMTURNS
+#if defined(D2_SIMTURNS) || defined(D2_TESTDRV)
     return netintercept::dispatchTx(thisptr, nullptr, idTo, message,
                                     &sendMessageUnintercepted) != 0;
 }

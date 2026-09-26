@@ -43,6 +43,17 @@ struct CoordinatorTerminalFault
     std::string message;
 };
 
+/** First-fault snapshot, including failures before strategic callbacks exist. */
+struct CoordinatorFaultDiagnostic
+{
+    /** Borrowed only for the synchronous diagnostic callback. */
+    const char* message{};
+    std::uint32_t epoch{};
+    std::uint64_t generation{};
+    Role role{};
+    bool started{};
+};
+
 struct CoordinatorCallbacks
 {
     /**
@@ -81,6 +92,7 @@ class CoordinatorPort final
 {
 public:
     using Sender = std::function<bool(const protocol::Bytes&)>;
+    using FaultDiagnostic = std::function<void(const CoordinatorFaultDiagnostic&)>;
     static CoordinatorPort& processInstance();
 
     CoordinatorPort(const CoordinatorPort&) = delete;
@@ -88,11 +100,21 @@ public:
 
     /** Arm from an authenticated lobby envelope before native map startup.
      * Sender synchronously enqueues reliable ordered data without reentering
-     * this port. Terminal reports the epoch failure to the lobby once. */
+     * this port. Terminal reports the epoch failure to the lobby once.
+     * Optional diagnostics run first, outside the port lock; their exceptions
+     * cannot suppress the existing terminal notification. */
     bool arm(const SimTurnsSessionOptions& session, std::uint32_t epoch,
              std::uint32_t mergeDay, Sender sender,
              std::function<void()> terminal = {},
-             std::function<void()> progressWake = {});
+             std::function<void()> progressWake = {},
+             FaultDiagnostic diagnostic = {});
+#ifdef D2_TESTDRV
+    /** Local v8 has no Arm envelope: bind epoch/merge day exactly once from
+     * its first validated OH SessionPlan. It never accepts a stock downgrade.
+     * The pipe adapter must not begin inbound delivery before this returns. */
+    bool armLocal(const SimTurnsSessionOptions& session, Sender sender,
+                  std::function<void()> terminal = {});
+#endif
     /** Natural native progress edge; adapters may wake an ordered-input barrier. */
     void notifyNativeProgress();
     /** Each envelope contains exactly one complete v8 frame. */

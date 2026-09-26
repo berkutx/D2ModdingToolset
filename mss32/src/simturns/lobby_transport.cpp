@@ -14,6 +14,7 @@
 #include <mutex>
 #include <optional>
 #include <spdlog/spdlog.h>
+#include <Windows.h>
 
 namespace hooks::simturns {
 namespace {
@@ -47,6 +48,25 @@ std::shared_ptr<Binding> binding;
 // Selection changes are UI-owned; the native server's start-message guard takes
 // a shared binding snapshot without racing room replacement or native teardown.
 std::mutex selectionMutex;
+const char* roleName(Role role) { return role == Role::Host ? "host" : "join"; }
+const char* policyName(netintercept::RxDecision policy) {
+    switch (policy) {
+    case netintercept::RxDecision::Pass: return "pass";
+    case netintercept::RxDecision::Drop: return "drop";
+    case netintercept::RxDecision::Consume: return "consume";
+    case netintercept::RxDecision::Defer: return "defer";
+    }
+    return "unknown";
+}
+// Diagnostic I/O must not suppress an Abort, alter admission or escape a native
+// completion callback. No raw payload, chat, account name or credentials here.
+template<class... Args>
+void diagnostic(spdlog::level::level_enum level, const char* format, const Args&... args) noexcept {
+    try {
+        spdlog::log(level, format, args...);
+        spdlog::default_logger()->flush();
+    } catch (...) { }
+}
 void scheduleProgress(const std::shared_ptr<Binding>& selected);
 void drainProgress(const std::shared_ptr<Binding>& selected);
 void reportFailure(const std::shared_ptr<Binding>& selected) {
@@ -78,6 +98,10 @@ void rejectActive(lobby::AbortReason reason, const char* detail) {
     {
         std::lock_guard lock(binding->mutex);
         if (!binding->sending) return;
+        diagnostic(spdlog::level::err,
+                   "[simturns-diag] local_abort pid={} room={} epoch={} role={} reason={} detail={}",
+                   GetCurrentProcessId(), binding->room, binding->epoch, roleName(binding->role),
+                   static_cast<unsigned>(reason), detail);
         lobby::Envelope abort;
         abort.operation = lobby::Operation::Abort; abort.room = binding->room;
         abort.epoch = binding->epoch; abort.reason = reason;
@@ -169,6 +193,7 @@ namespace {
 struct NativeCompletion {
     std::shared_ptr<LobbyNativeTicket> ticket;
     netintercept::NativeReceiveResult result{};
+    netintercept::NativeReceiveDiagnostic diagnostic;
     bool allowedNotification{};
     bool pregameJoinNotification{};
     std::uint64_t pregameGeneration{};
@@ -184,6 +209,17 @@ void completeNativeOnUi(void* context) {
     }
     if (completion->result == netintercept::NativeReceiveResult::Failed
         || completion->result == netintercept::NativeReceiveResult::Unhandled) {
+        const auto& d = completion->diagnostic;
+        diagnostic(spdlog::level::err,
+                   "[simturns-diag] native_failed pid={} room={} epoch={} role={} ticket={} endpoint={} "
+                   "class={} bytes={} type={:#x} sender={:#x} receiver={:#x} rx_tid={} "
+                   "site={} replay={} policy={} dispatched={} handler_count={} pending_controls={} awaiting_drain={}",
+                   GetCurrentProcessId(), selected->room, selected->epoch, roleName(selected->role),
+                   completion->ticket->sequence, completion->ticket->clientReceiver ? "client" : "server",
+                   d.messageClass, d.frameLength, d.messageType, d.sender, d.receiver, d.threadId,
+                   d.replay ? "replay" : (d.captureDPlaySelf ? "0x402ca7" : "0x43396e"), d.replay,
+                   policyName(d.policy), d.dispatched, d.dispatchResult,
+                   selected->pendingFrames, selected->awaitingClientDrain.size());
         rejectActive(lobby::AbortReason::Protocol, "native packet did not complete its handler"); return;
     }
     if (completion->ticket->clientReceiver
@@ -195,9 +231,11 @@ void completeNativeOnUi(void* context) {
     }
     drainProgress(selected);
 }
-void nativeReceiveCompleted(void* context, netintercept::NativeReceiveResult result) {
+void nativeReceiveCompleted(void* context, netintercept::NativeReceiveResult result,
+                            const netintercept::NativeReceiveDiagnostic& diagnostic) {
     std::unique_ptr<NativeCompletion> completion(static_cast<NativeCompletion*>(context));
     completion->result = result;
+    completion->diagnostic = diagnostic;
     const auto selected = completion->ticket->owner.lock();
     if (!selected) return;
     {
@@ -272,7 +310,7 @@ void lobbyDiscardNativePacket(std::shared_ptr<LobbyNativeTicket> ticket) {
     if (!ticket) return;
     auto completion = std::make_unique<NativeCompletion>();
     completion->ticket = std::move(ticket);
-    nativeReceiveCompleted(completion.release(), netintercept::NativeReceiveResult::Filtered);
+    nativeReceiveCompleted(completion.release(), netintercept::NativeReceiveResult::Filtered, {});
 }
 
 bool lobbyStageNativeReceive(const game::NetMessageHeader* buffer,
@@ -419,9 +457,22 @@ void receiveLobbyControl(CNetCustomService* service, const std::uint8_t* bytes, 
                 scheduleProgress(current);
         };
         auto& port = CoordinatorPort::processInstance();
+        auto faultDiagnostic = [weak](const CoordinatorFaultDiagnostic& fault) {
+            const auto current = weak.lock();
+            if (!current) return;
+            diagnostic(spdlog::level::err,
+                       "[simturns-diag] port_fault pid={} room={} epoch={} role={} generation={} started={} detail={}",
+                       GetCurrentProcessId(), current->room, fault.epoch, roleName(fault.role),
+                       fault.generation, fault.started, fault.message);
+        };
         const bool portArmed = port.arm(options, envelope.epoch, envelope.mergeDay,
-                                       std::move(sender), std::move(terminal), std::move(progress));
+                                       std::move(sender), std::move(terminal), std::move(progress),
+                                       std::move(faultDiagnostic));
         const bool armed = portArmed && beginSession(role);
+        diagnostic(spdlog::level::info,
+                   "[simturns-diag] arm pid={} room={} epoch={} role={} merge_day={} port_armed={} native_armed={}",
+                   GetCurrentProcessId(), selected->room, selected->epoch, roleName(role),
+                   envelope.mergeDay, portArmed, armed);
         if (armed) {
             std::lock_guard lock(selected->mutex);
             selected->nativeReady = true;
@@ -457,6 +508,10 @@ void receiveLobbyControl(CNetCustomService* service, const std::uint8_t* bytes, 
         scheduleProgress(binding);
     } else if (envelope.operation == lobby::Operation::Abort) {
         if (stopSending(binding)) {
+            diagnostic(spdlog::level::err,
+                       "[simturns-diag] remote_abort pid={} room={} epoch={} role={} reason={}",
+                       GetCurrentProcessId(), binding->room, binding->epoch, roleName(binding->role),
+                       static_cast<unsigned>(envelope.reason));
             reportFailure(binding);
             CoordinatorPort::processInstance().fail(CoordinatorFailureOrigin::LocalInvariant,
                                                     "lobby coordinator aborted the map");
