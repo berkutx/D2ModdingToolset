@@ -1,6 +1,6 @@
 // Portable tests of the production lobby adapter, CoordinatorPort and core.
 // Only the native/UI/service boundary is stubbed; no game, local coordinator,
-// D2_TESTDRV, network, diagnostic callback extension or binary fixture is used.
+// D2_TESTDRV, network or binary fixture is used.
 #include "simturns/lobby_transport.h"
 #include "simturns/lobby_wire.h"
 #include "simturns/coordinator_port.h"
@@ -37,6 +37,7 @@ struct StagedReceive
     void* context{};
     netintercept::NativeReceiveCallback complete{};
     netintercept::UiTaskDiscardCallback discard{};
+    netintercept::NativeReceiveDiagnostic diagnostic;
 };
 
 std::deque<UiTask> uiTasks;
@@ -119,6 +120,21 @@ NativeFrame syntheticUpdateObj52()
     return result;
 }
 
+netintercept::NativeReceiveDiagnostic diagnosticFor(const game::NetMessageHeader* buffer,
+                                                     int handlerCount)
+{
+    netintercept::NativeReceiveDiagnostic result;
+    result.captureHeader(buffer->messageType, buffer->length, buffer->messageClassName);
+    result.sender = game::serverNetPlayerId;
+    result.receiver = 0x6d85df0a;
+    result.threadId = 15308;
+    result.policy = netintercept::RxDecision::Pass;
+    result.dispatchResult = handlerCount;
+    result.dispatched = true;
+    result.captureDPlaySelf = true;
+    return result;
+}
+
 void stageNative(NativeFrame& frame, bool clientReceiver = true,
                  std::uint32_t sender = game::serverNetPlayerId)
 {
@@ -133,6 +149,7 @@ void stageNative(NativeFrame& frame, bool clientReceiver = true,
 }
 
 void completeNextNative(netintercept::NativeReceiveResult result, int handlerCount,
+                        std::uint32_t sender = game::serverNetPlayerId,
                         netintercept::RxDecision policy = netintercept::RxDecision::Pass)
 {
     check(!stagedReceives.empty(), "expected one staged native completion");
@@ -145,7 +162,11 @@ void completeNextNative(netintercept::NativeReceiveResult result, int handlerCou
         ? netintercept::NativeReceiveResult::Failed
         : netintercept::nativeDispatchResult(handlerCount);
     check(actual == result, "test input contradicts native dispatch completion semantics");
-    staged.complete(staged.context, actual);
+    staged.diagnostic.sender = sender;
+    staged.diagnostic.dispatchResult = handlerCount;
+    staged.diagnostic.policy = policy;
+    staged.diagnostic.dispatched = policy == netintercept::RxDecision::Pass;
+    staged.complete(staged.context, actual, staged.diagnostic);
 }
 
 void dispatchNative(NativeFrame& frame, netintercept::NativeReceiveResult result,
@@ -154,7 +175,7 @@ void dispatchNative(NativeFrame& frame, netintercept::NativeReceiveResult result
                     netintercept::RxDecision policy = netintercept::RxDecision::Pass)
 {
     stageNative(frame, clientReceiver, sender);
-    completeNextNative(result, handlerCount, policy);
+    completeNextNative(result, handlerCount, sender, policy);
 }
 
 std::vector<simturns::lobby::Envelope> sentEnvelopes(const CNetCustomService& service)
@@ -718,6 +739,7 @@ bool stageNativeReceive(const game::NetMessageHeader* buffer, void* context,
     staged.context = context;
     staged.complete = complete;
     staged.discard = discard;
+    staged.diagnostic = diagnosticFor(buffer, 1);
     stagedReceives.push_back(std::move(staged));
     return true;
 }
