@@ -92,6 +92,10 @@ bool isOutsideBattleCandidate(const char* dialogName, const char* buttonName)
             && lstrcmpA(buttonName, "BTN_CONTINUE") == 0)
            || (lstrcmpA(dialogName, "DLG_BEGIN_TURN") == 0
                && lstrcmpA(buttonName, "BTN_OK") == 0)
+           // Observed stock day-transition summary in the generated lobby map.
+           // Keep it in the same exact-owner subscriber; never dismiss generic errors.
+           || (g_lobbyScope && lstrcmpA(dialogName, "DLG_TURNSUMMARY") == 0
+               && lstrcmpA(buttonName, "BTN_OK") == 0)
            || (lstrcmpA(dialogName, "DLG_GETINFO_BOX") == 0
                && lstrcmpA(buttonName, "BTN_CLOSE") == 0)
            || (lstrcmpA(dialogName, "DLG_EVENT_POPUP") == 0

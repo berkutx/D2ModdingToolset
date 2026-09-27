@@ -141,6 +141,13 @@ int main() {
         terminal(0xD2E77361u, [] { tick(); });
         reset(); hostRelease(); terminal(0xD2E77360u, [] { hostRelease(); });
         reset(); terminal(0xD2E77362u, [] { receiveStartupRelease(nullptr, 4); });
+        reset(); fixture::loaded = true; bind("DLG_BEGIN_TURN", "BTN_OK"); hostRelease(); tick();
+        fixture::claims.clear(); fixture::appearance++; fixture::owner++;
+        bind("DLG_TURNSUMMARY", "BTN_CANCEL"); CHECK(!g_pending.valid);
+        bind("DLG_TURNSUMMARY", "BTN_OK"); fixture::age = 299; tick(); CHECK(fixture::claims.empty());
+        fixture::age = 300; tick(); tick();
+        CHECK(fixture::claims.size() == 1 && fixture::claims.front() == "DLG_TURNSUMMARY::BTN_OK");
+        reset(false); bind("DLG_TURNSUMMARY", "BTN_OK"); CHECK(!g_pending.valid);
         CHECK(!hooks::testdrv::isBattleDialog(nullptr));
         CHECK(!hooks::testdrv::isBattleDialog("DLG_BATTLE_C"));
         CHECK(!hooks::testdrv::isBattleDialog("dlg_battle_b"));
