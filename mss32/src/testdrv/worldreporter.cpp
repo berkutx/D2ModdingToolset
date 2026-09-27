@@ -15,6 +15,7 @@
 #ifdef D2_TESTDRV
 
 #include "testdrv/worldreporter.h"
+#include "testdrv/worldactions.h"
 #include "testdrv/json.h"
 #include "testdrv/testdrv.h"
 #include "testdrv/testenv.h"
@@ -38,6 +39,7 @@
 #include "midclient.h"
 #include "midgard.h"
 #include "midgardid.h"
+#include "mqpoint.h"
 #include "utils.h"
 #include "version.h"
 #include <cstdint>
@@ -270,6 +272,29 @@ void buildJson(std::string& json, const game::IMidgardObjectMap* objectMap)
         // the fort CENTRE (offset, like the player's own capital), and it cannot be attacked as a free
         // monster (that is a siege). The move/attack test must skip these and target free stacks only.
         kvBool(json, "inside", s.getInside().has_value());
+        game::CMqPoint exitInner{};
+        game::CMqPoint exitOuter{};
+        game::CMidgardID exitFort{};
+        if (worldactions::querySupportedCapitalExit(objectMap,
+                hooks::getStack(objectMap, &id.id), localId, exitInner, exitOuter, exitFort)) {
+            json += ",\"capitalExit\":{";
+            kvStr(json, "kind", "observed-5x5-capital");
+            json += ',';
+            kvStr(json, "fortId", wireId(exitFort).c_str());
+            json += ',';
+            kvInt(json, "anchorX", pos.x);
+            json += ',';
+            kvInt(json, "anchorY", pos.y);
+            json += ',';
+            kvInt(json, "innerX", exitInner.x);
+            json += ',';
+            kvInt(json, "innerY", exitInner.y);
+            json += ',';
+            kvInt(json, "x", exitOuter.x);
+            json += ',';
+            kvInt(json, "y", exitOuter.y);
+            json += ",\"sizeX\":5,\"sizeY\":5}";
+        }
         json += ',';
         // Group formation slots (0..5; front line = position%2==0, column = position/2). A big unit
         // occupies a whole column pair (isBig). leaderId = the group's leader (NEVER dismiss it; that
@@ -474,4 +499,3 @@ bool install()
 } // namespace hooks
 
 #endif // D2_TESTDRV
-

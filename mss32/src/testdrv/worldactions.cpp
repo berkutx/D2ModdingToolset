@@ -27,7 +27,9 @@
 #include "testdrv/fixtureplan.h"
 #include "d2list.h"
 #include "d2pair.h"
+#include "dynamiccast.h"
 #include "executablefingerprint.h"
+#include "fortification.h"
 #include "game.h"
 #include "gameutils.h"
 #include "usunit.h"
@@ -424,21 +426,23 @@ bool parseGenericId(const char* text, game::CMidgardID& id)
     return id != game::emptyId;
 }
 
-bool resolveGarrisonExit(const game::CMidgardID& stackId,
-                         const game::CMqPoint& anchor,
+bool resolveGarrisonExit(const game::IMidgardObjectMap* objectMap,
+                         const game::CMidStack* stack,
                          int requestedX,
                          int requestedY,
                          game::CMqPoint& exitStart,
                          game::CMqPoint& exitDest)
 {
-    exitStart.x = anchor.x + 4;
-    exitStart.y = anchor.y + 4;
-    if (!fixtureplan::garrisonExit(static_cast<std::uint32_t>(stackId.value),
-                                    anchor.x, anchor.y, exitDest.x, exitDest.y)) {
-        // Retained generated-map fixture geometry only, not a universal capital-exit algorithm.
-        exitDest.x = anchor.x + 5;
-        exitDest.y = anchor.y + 5;
-    }
+    game::CMidgardID fortId{};
+    if (!querySupportedCapitalExit(objectMap, stack, localPlayerId(),
+                                   exitStart, exitDest, fortId))
+        return false;
+    int fixtureX = 0;
+    int fixtureY = 0;
+    if (fixtureplan::garrisonExit(static_cast<std::uint32_t>(stack->id.value),
+                                 stack->position.x, stack->position.y, fixtureX, fixtureY)
+        && (fixtureX != exitDest.x || fixtureY != exitDest.y))
+        return false; // a fixture declaration cannot override the actual capital geometry
     return requestedX == exitDest.x && requestedY == exitDest.y;
 }
 
@@ -456,6 +460,63 @@ bool isExcludedMoveTile(const game::CMqPoint& point)
 }
 
 } // namespace
+
+bool querySupportedCapitalExit(const game::IMidgardObjectMap* objectMap,
+                               const game::CMidStack* stack,
+                               const game::CMidgardID& localOwner,
+                               game::CMqPoint& inner,
+                               game::CMqPoint& outer,
+                               game::CMidgardID& fortId)
+{
+    using namespace game;
+    if (!objectMap || !objectMap->vftable || !stack || localOwner == emptyId
+        || stack->ownerId != localOwner || stack->insideId == emptyId
+        || !stack->leaderAlive || stack->leaderId == emptyId)
+        return false;
+
+    const auto& fn = gameFunctions();
+    const auto* leader = fn.findUnitById(objectMap, &stack->leaderId);
+    if (!leader || leader->id != stack->leaderId || !leader->unitImpl
+        || leader->currentHp <= 0)
+        return false;
+    const auto* object = objectMap->vftable->findScenarioObjectById(objectMap, &stack->insideId);
+    if (!object)
+        return false;
+    const auto& types = RttiApi::rtti();
+    const auto* fort = static_cast<const CFortification*>(RttiApi::get().dynamicCast(
+        object, 0, types.IMidScenarioObjectType, types.CFortificationType, 0));
+    if (!fort || fort->id != stack->insideId || fort->ownerId != localOwner
+        || fort->stackId != stack->id || !fort->vftable)
+        return false;
+    const auto* fortVftable = static_cast<const CFortificationVftable*>(fort->vftable);
+    if (!fortVftable->getTier || fortVftable->getTier(fort, objectMap) != 6)
+        return false;
+    const auto& element = fort->mapElement;
+    if (element.sizeX != 5 || element.sizeY != 5
+        || stack->position.x != element.position.x
+        || stack->position.y != element.position.y)
+        return false;
+
+    const auto* map = hooks::getMidgardMap(objectMap);
+    const auto* plan = fn.getMidgardPlan(objectMap);
+    // Validate before adding offsets, including overflow/off-map anchors.
+    if (!map || !plan || map->mapSize < 6 || element.position.x < 0
+        || element.position.y < 0 || element.position.x > map->mapSize - 6
+        || element.position.y > map->mapSize - 6)
+        return false;
+    const auto entrance = hooks::getObjectEntrance(element.position, element.sizeX, element.sizeY);
+    CMqPoint destination = entrance;
+    ++destination.x;
+    ++destination.y;
+    // This is the actual inside stack, not a temporarily moved/copied object.
+    // If native admission rejects the gate, expose no proof and send nothing.
+    if (!fn.stackCanMoveToPosition(objectMap, &destination, stack, plan))
+        return false;
+    inner = entrance;
+    outer = destination;
+    fortId = fort->id;
+    return true;
+}
 
 bool preflightHostMoveRoute(bool requested)
 {
@@ -610,7 +671,7 @@ bool moveStack(const char* stackIdStr,
         // non-test code path.
         CMqPoint exitStart;
         CMqPoint exitDest;
-        if (!resolveGarrisonExit(stackId, start, targetX, targetY, exitStart, exitDest))
+        if (!resolveGarrisonExit(objectMap, stack, targetX, targetY, exitStart, exitDest))
             return false;
         if (exitStart.x != expectedFromX || exitStart.y != expectedFromY)
             return false; // stale/wrong garrison-cell precondition: never send
@@ -908,10 +969,6 @@ bool moveStack(const char* stackIdStr, int targetX, int targetY)
     // specially; send a direct anchor->exit-tile path (the test's +5 sub-step) and let the server exit
     // the hero, then subsequent moves run as a normal free stack.
     if (stack->insideId != emptyId) {
-        // This command surface supports the single observed capital-exit gesture only. Do not
-        // silently replace an arbitrary caller target with the fixture gate.
-        if (targetX != start.x + 5 || targetY != start.y + 5)
-            return false;
         // Garrison exit, replicated EXACTLY from a real mouse-click exit captured in the send hook:
         // the reported stack->position is the fort ANCHOR, but the game moves the hero from its real
         // garrison cell (anchor + (4,4)) to the gate (anchor + (5,5)) as a SINGLE 0-cost diagonal step
@@ -920,11 +977,9 @@ bool moveStack(const char* stackIdStr, int targetX, int targetY)
         // NOTE: the +4/+5 offsets are this capital's geometry, a test fixture (D2_TESTDRV only); they
         // are not general and must never leak into a non-test code path.
         CMqPoint exitStart;
-        exitStart.x = start.x + 4;
-        exitStart.y = start.y + 4;
         CMqPoint exitDest;
-        exitDest.x = start.x + 5;
-        exitDest.y = start.y + 5;
+        if (!resolveGarrisonExit(objectMap, stack, targetX, targetY, exitStart, exitDest))
+            return false;
         List<Pair<CMqPoint, int>> exitPath;
         listInit(exitPath);
         Pair<CMqPoint, int> a;

@@ -10,6 +10,13 @@
 #ifndef TESTDRV_WORLDACTIONS_H
 #define TESTDRV_WORLDACTIONS_H
 
+namespace game {
+struct IMidgardObjectMap;
+struct CMidStack;
+struct CMidgardID;
+struct CMqPoint;
+}
+
 namespace hooks {
 namespace testdrv {
 namespace worldactions {
@@ -23,6 +30,16 @@ bool preflightHostMoveRoute(bool requested);
 bool commitHostMoveRoute(bool requested,
                          bool exactLegacyIntent,
                          bool cleanLongIntent);
+
+/** Read-only proof of the observed 5x5 owned-capital exit, not a universal fort pathfinder.
+ * Both reporter and action admission use the same live geometry/ownership/passability checks.
+ * Outputs are written only on success. UI thread only. */
+bool querySupportedCapitalExit(const game::IMidgardObjectMap* objectMap,
+                               const game::CMidStack* stack,
+                               const game::CMidgardID& localOwner,
+                               game::CMqPoint& inner,
+                               game::CMqPoint& outer,
+                               game::CMidgardID& fortId);
 
 /**
  * Move the stack <stackId> from the exact caller-proved source tile to exactly tile (x, y), or attack
