@@ -638,7 +638,11 @@ bool observeDialogOnScreen(game::CDialogInterf* dialog, void* screen)
                 return false;
             int occurrences = 0;
             for (int index = 0; index < count; ++index) {
-                if (parent->vftable->getChild(parent, &index) == child)
+                int childIndex = index;
+                game::CInterface* observed = parent->vftable->getChild(parent, &childIndex);
+                if (childIndex != index)
+                    return false;
+                if (observed == child)
                     ++occurrences;
             }
             if (occurrences != 1)

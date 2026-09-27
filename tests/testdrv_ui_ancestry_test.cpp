@@ -38,6 +38,14 @@ int main() {
     // Reciprocal multi-node cycle is bounded, not a successful root observation.
     CInterfaceData topData{&wrapper}; top.interfaceData=&topData; wrapper.children.push_back(&top);
     check(!observeDialogOnScreen(&dialog,&other));
+    vft.getChild=[](const CInterface* n,const int* i)->CInterface* {
+        *const_cast<int*>(i)=-1; return n->children.front();
+    };
+    check(!observeDialogOnScreen(&dialog,&top));
+    vft.getChild=[](const CInterface* n,const int* i)->CInterface* {
+        *const_cast<int*>(i)=1000000; return n->children.front();
+    };
+    check(!observeDialogOnScreen(&dialog,&top));
     vft.getChild=[](const CInterface*,const int*)->CInterface* {throw std::runtime_error("simulated native read fault");};
     check(!observeDialogOnScreen(&dialog,&top));
     std::cout<<"PASS: actual native UI ancestry helper ("<<checks<<" cases)\n";
