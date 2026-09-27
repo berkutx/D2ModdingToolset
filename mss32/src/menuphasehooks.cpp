@@ -76,7 +76,8 @@ game::CMenuPhase* __fastcall menuPhaseCtorHooked(game::CMenuPhase* thisptr,
 
 void __fastcall menuPhaseDtorHooked(game::CMenuPhase* thisptr, int /*%edx*/, char flags)
 {
-    freeScenarioTemplates();
+    // Templates are a process-lifetime startup snapshot. Returning from a match
+    // must not refresh Lua bytes/hash behind an already accepted preparation.
 
     getOriginalFunctions().menuPhaseDtor(thisptr, flags);
 }

@@ -7,6 +7,7 @@ on:
   push:
     paths:
       - "mss32/**"
+      - "tests/**"
       - "Examples/Custom Lobby/CustomLobby.dlg"
       - "Examples/Custom Lobby/CustomLobby.ff"
       - ".github/workflows/mss32.yml"
@@ -58,6 +59,15 @@ jobs:
           if (-not $rid) { Write-Error "No successful 'deps' run found; run the 'deps' workflow once."; exit 1 }
           gh run download $rid -n deps-libs -D mss32/Lib
           Get-ChildItem mss32/Lib
+
+      - name: Prepared-match and optional mod-field regressions
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64 -no_logo'
+          ./tests/run-prepared-match-protocol.ps1 -OutputDirectory "$env:RUNNER_TEMP/prepared-tests" -DependenciesRoot $env:GITHUB_WORKSPACE
+          ./tests/run-item-potion-fields.ps1 -OutputDirectory "$env:RUNNER_TEMP/potion-tests"
+          ./tests/run-turn-script-optional.ps1
 
       - name: Build mss32.dll
         run: |

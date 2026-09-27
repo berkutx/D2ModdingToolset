@@ -43,6 +43,7 @@ public:
     ~CMenuCustomBase();
 
 protected:
+    bool hasWaitDialog() const { return m_menuWait != nullptr; }
     game::CMenuBase* getMenu() const;
     game::CInterface* findOptionalControl(const char* controlName,
                                           const game::TypeDescriptor* controlType) const;

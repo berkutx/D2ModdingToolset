@@ -156,6 +156,7 @@ static bool setupHooks()
 
     for (auto& hook : hooks) {
         if (!setupHook(hook)) {
+            DetourTransactionAbort();
             return false;
         }
     }

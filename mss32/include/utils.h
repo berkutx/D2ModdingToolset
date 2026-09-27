@@ -128,6 +128,8 @@ std::uint32_t createMessageEvent(game::UiEvent* messageEvent,
 
 /** Computes MD5 hash of specified files. */
 std::string computeHash(std::vector<std::filesystem::path> filenames);
+/** MD5 of the exact bytes already loaded by the caller (not a filename). */
+std::string computeDataHash(const std::string& bytes);
 
 /** Executes function for each scenario object with specified id type. */
 void forEachScenarioObject(const game::IMidgardObjectMap* objectMap,
