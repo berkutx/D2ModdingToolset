@@ -22,6 +22,10 @@
 #include "midgard.h"
 #include "midobjectlock.h"
 #include "phasegame.h"
+#ifdef D2_SIMTURNS
+#include "simturns/controller.h"
+#include "simturns/state.h"
+#endif
 #include "stackmovemsg.h"
 #include <spdlog/spdlog.h>
 
@@ -29,6 +33,9 @@ namespace hooks {
 
 bool __fastcall phaseGameCheckObjectLockHooked(game::CPhaseGame* thisptr, int /*%edx*/)
 {
+#ifdef D2_SIMTURNS
+    simturns::onPhaseGame(thisptr);
+#endif
     const auto* lock = thisptr->data->midObjectLock;
     if (lock->patched.exportingLeader) {
         spdlog::debug(__FUNCTION__ ": unlocked due to exportingLeader");
@@ -52,6 +59,25 @@ void __fastcall phaseGameSendStackMoveMsgHooked(
 {
     using namespace game;
 
+#ifdef D2_SIMTURNS
+    simturns::onPhaseGame(thisptr);
+    switch (simturns::phase()) {
+    case simturns::Phase::Disabled:
+    case simturns::Phase::Stock:
+    case simturns::Phase::Independent:
+    case simturns::Phase::Merged:
+        break;
+    case simturns::Phase::Prepared:
+    case simturns::Phase::WaitingForSession:
+    case simturns::Phase::Ready:
+    case simturns::Phase::Held:
+    case simturns::Phase::Merging:
+    case simturns::Phase::AwaitingStockTurn:
+    case simturns::Phase::Closing:
+    case simturns::Phase::Faulted:
+        return;
+    }
+#endif
     const auto& stackMoveMsgApi = CStackMoveMsgApi::get();
 
     auto* data = thisptr->data;
@@ -59,6 +85,10 @@ void __fastcall phaseGameSendStackMoveMsgHooked(
         return;
     }
 
+#ifdef D2_SIMTURNS
+    const auto previousPendingNetworkUpdates = data->midObjectLock->pendingNetworkUpdates;
+    const bool previousMovingStack = data->midObjectLock->patched.movingStack;
+#endif
     ++data->midObjectLock->pendingNetworkUpdates;
     data->midObjectLock->patched.movingStack = true;
     spdlog::debug(
@@ -70,9 +100,22 @@ void __fastcall phaseGameSendStackMoveMsgHooked(
 
     CMidClient* client = data->midClient;
     CMidgard* midgard = client->core.data->midgard;
+#ifdef D2_SIMTURNS
+    const bool sent = CMidgardApi::get().sendNetMsgToServer(midgard, &message);
+#else
     CMidgardApi::get().sendNetMsgToServer(midgard, &message);
+#endif
 
     stackMoveMsgApi.destructor(&message);
+#ifdef D2_SIMTURNS
+    if (!sent && simturns::phase() != simturns::Phase::Disabled) {
+        // This attempt was rejected before delivery. Restore only its lock
+        // contribution; do not retry or dispatch through a second transport.
+        data->midObjectLock->pendingNetworkUpdates = previousPendingNetworkUpdates;
+        data->midObjectLock->patched.movingStack = previousMovingStack;
+        spdlog::error(__FUNCTION__ ": native CStackMoveMsg send rejected");
+    }
+#endif
 }
 
 } // namespace hooks

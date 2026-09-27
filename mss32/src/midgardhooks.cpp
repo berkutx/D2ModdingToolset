@@ -28,9 +28,23 @@
 #include "midstart.h"
 #include "netcustomservice.h"
 #include "originalfunctions.h"
+#include "simturns/lobby_transport.h"
+#ifdef D2_SIMTURNS
+#include "simturns/controller.h"
+#include "simturns/state.h"
+#include <exception>
+#endif
 #include <spdlog/spdlog.h>
 
 namespace hooks {
+
+#ifdef D2_SIMTURNS
+namespace {
+// ClearNetworkStateAndService can enter the other hooked native clear routine.
+// Do not expose the next map or drain lobby controls until the outer clear ends.
+unsigned simultaneousTeardownDepth{};
+}
+#endif
 
 void __fastcall midgardStartMenuMessageCallbackHooked(game::CMidgard* thisptr,
                                                       int /*%edx*/,
@@ -114,12 +128,33 @@ void __fastcall midgardClearNetworkStateHooked(game::CMidgard* thisptr, int /*%e
 {
     spdlog::debug(__FUNCTION__);
 
+#ifdef D2_SIMTURNS
+    const bool simultaneousTeardown = simturns::phase() != simturns::Phase::Disabled;
+    if (simultaneousTeardown && ++simultaneousTeardownDepth == 1) simturns::lobbyMapTeardownBegun();
+    if (simultaneousTeardown && !simturns::beginSessionTeardown()) {
+        spdlog::critical("Cannot destroy native network state while simultaneous-turn work is active");
+        std::terminate(); // Continuing would invalidate pointers used by native dispatch.
+    }
+#endif
+
     getOriginalFunctions().midgardClearNetworkState(thisptr);
+
+#ifdef D2_SIMTURNS
+    if (simultaneousTeardown && !simturns::endSession()) {
+        spdlog::critical("Cannot restore simultaneous-turn patches after native network teardown");
+        std::terminate();
+    }
+    if (simultaneousTeardown && --simultaneousTeardownDepth == 0) simturns::lobbyMapDestroyed();
+#endif
 
     // Make sure that there are no peer messages remain to process.
     // Though it does not guarantee that a new ones will not arrive shortly after.
     auto service = CNetCustomService::get();
-    if (service) {
+    if (service
+#ifdef D2_SIMTURNS
+        && simultaneousTeardownDepth == 0
+#endif
+    ) {
         service->processPeerMessages();
     }
 
@@ -130,7 +165,24 @@ void __fastcall midgardClearNetworkStateAndServiceHooked(game::CMidgard* thisptr
 {
     spdlog::debug(__FUNCTION__);
 
+#ifdef D2_SIMTURNS
+    const bool simultaneousTeardown = simturns::phase() != simturns::Phase::Disabled;
+    if (simultaneousTeardown && ++simultaneousTeardownDepth == 1) simturns::lobbyMapTeardownBegun();
+    if (simultaneousTeardown && !simturns::beginSessionTeardown()) {
+        spdlog::critical("Cannot destroy native service while simultaneous-turn work is active");
+        std::terminate();
+    }
+#endif
+
     getOriginalFunctions().midgardClearNetworkStateAndService(thisptr);
+
+#ifdef D2_SIMTURNS
+    if (simultaneousTeardown && !simturns::endSession()) {
+        spdlog::critical("Cannot restore simultaneous-turn patches after native service teardown");
+        std::terminate();
+    }
+    if (simultaneousTeardown && --simultaneousTeardownDepth == 0) simturns::lobbyMapDestroyed();
+#endif
 
     resetCommandSequenceGlobalCounters();
 }

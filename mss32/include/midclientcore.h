@@ -41,7 +41,9 @@ struct CMidClientCoreData
     CMidgard* midgard;
     int unknown;
     CMidDataCache2* dataCache;
-    int unknown3;
+    bool scenarioInitialized;
+    bool objectMapAccessed;
+    char padding[2];
     CMidCommandQueue2* commandQueue;
     CoreCommandUpdate* coreCommandUpdate;
     CCommandCanIgnore* commandCanIgnore;
@@ -49,6 +51,8 @@ struct CMidClientCoreData
 };
 
 assert_size(CMidClientCoreData, 32);
+assert_offset(CMidClientCoreData, scenarioInitialized, 12);
+assert_offset(CMidClientCoreData, objectMapAccessed, 13);
 
 struct CMidClientCore : public IMqNetSystem
 {

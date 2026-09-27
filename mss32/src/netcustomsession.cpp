@@ -25,6 +25,7 @@
 #include "netcustomplayerclient.h"
 #include "netcustomplayerserver.h"
 #include "netcustomservice.h"
+#include "simturns/lobby_transport.h"
 #include "utils.h"
 #include <atomic>
 #include <chrono>
@@ -57,6 +58,7 @@ CNetCustomSession::CNetCustomSession(CNetCustomService* service,
     };
 
     this->vftable = &vftable;
+    simturns::lobbySessionCreated(service, m_isHost);
 }
 
 CNetCustomSession ::~CNetCustomSession()

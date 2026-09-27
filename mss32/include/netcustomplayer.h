@@ -49,6 +49,7 @@ namespace hooks {
 class CNetCustomService;
 class CNetCustomSession;
 class NativeGameMessageTracker;
+namespace simturns { struct LobbyNativeTicket; }
 
 class CNetCustomPlayer : public game::IMqNetPlayer
 {
@@ -115,7 +116,13 @@ protected:
 
 private:
     using NetMessagePtr = std::unique_ptr<unsigned char[]>;
-    using IdMessagePair = std::pair<std::uint32_t, NetMessagePtr>;
+    struct IdMessagePair {
+        std::uint32_t first;
+        NetMessagePtr second;
+#ifdef D2_SIMTURNS
+        std::shared_ptr<simturns::LobbyNativeTicket> nativeTicket;
+#endif
+    };
 
     CNetCustomSession* m_session;
     game::IMqNetSystem* m_system;

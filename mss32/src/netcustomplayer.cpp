@@ -27,6 +27,9 @@
 #include "netcustomservice.h"
 #include "netcustomsession.h"
 #include "netmsg.h"
+#ifdef D2_SIMTURNS
+#include "simturns/lobby_transport.h"
+#endif
 #include <cstring>
 #include <mutex>
 #include <slikenet/types.h>
@@ -190,6 +193,18 @@ void CNetCustomPlayer::postMessageToReceive(const game::NetMessageHeader* messag
 
     auto msg = std::make_unique<unsigned char[]>(message->length);
     std::memcpy(msg.get(), message, message->length);
+#ifdef D2_SIMTURNS
+    auto packet = std::make_shared<IdMessagePair>(IdMessagePair{
+        idFrom, std::move(msg), simturns::lobbyTrackNativePacket(m_id != game::serverNetPlayerId)});
+    simturns::lobbyDeliverNativePacket(packet->nativeTicket, [this, packet]() {
+        {
+            std::lock_guard<std::mutex> lock(m_messagesMutex);
+            m_messages.push(std::move(*packet));
+            if (m_messageTracker) m_messageTracker->queued();
+        }
+        m_reception->vftable->notify(m_reception);
+    });
+#else
     {
         std::lock_guard<std::mutex> lock(m_messagesMutex);
         m_messages.push(IdMessagePair{idFrom, std::move(msg)});
@@ -199,6 +214,7 @@ void CNetCustomPlayer::postMessageToReceive(const game::NetMessageHeader* messag
     }
 
     m_reception->vftable->notify(m_reception);
+#endif
 }
 
 bool CNetCustomPlayer::sendRemoteMessage(const game::NetMessageHeader* message,
@@ -354,6 +370,9 @@ game::ReceiveMessageResult __fastcall CNetCustomPlayer::receiveMessage(
                 return game::ReceiveMessageResult::NoMessages;
             }
             if (action == LobbyRestartMessageAction::Discard) {
+#ifdef D2_SIMTURNS
+                simturns::lobbyDiscardNativePacket(pair.nativeTicket);
+#endif
                 consumeFront();
                 continue;
             }
@@ -361,6 +380,12 @@ game::ReceiveMessageResult __fastcall CNetCustomPlayer::receiveMessage(
 
         *idFrom = pair.first;
         std::memcpy(buffer, message, message->length);
+#ifdef D2_SIMTURNS
+        if (!simturns::lobbyStageNativeReceive(buffer, pair.nativeTicket, pair.first)) {
+            consumeFront();
+            return game::ReceiveMessageResult::Failure;
+        }
+#endif
         consumeFront();
 
         thisptr->m_logger

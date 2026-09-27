@@ -1,0 +1,14 @@
+{
+  "name": "d2mss-simturns-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dependency-free local coordinator for Disciples II simultaneous turns",
+  "scripts": {
+    "start": "node src/cli.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
