@@ -2491,9 +2491,9 @@ async function handleHttp(req, res) {
     if (req.method === 'POST' && path === '/api/ui/enable-auto-battle') {
         const target = parseUiTarget(res, query, 'tog', 'toggle');
         if (!target) return;
-        if (target.dialog !== 'DLG_BATTLE_A' || target.control !== 'TOG_AUTOBATTLE') {
+        if (!['DLG_BATTLE_A', 'DLG_BATTLE_B'].includes(target.dialog) || target.control !== 'TOG_AUTOBATTLE') {
             return sendJson(res, 400, {
-                error: 'enable-auto-battle accepts only DLG_BATTLE_A::TOG_AUTOBATTLE',
+                error: 'enable-auto-battle accepts only DLG_BATTLE_A/B::TOG_AUTOBATTLE',
             });
         }
         const kick = await sendCommand(target.socket, Op.EnableAutoBattle, Buffer.concat([

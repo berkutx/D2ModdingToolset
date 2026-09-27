@@ -4,14 +4,15 @@ Owned production-lobby startup E2E. Requires the authorized test2/test1 credenti
 in D2_LOBBY_{HOST,JOIN}_{ACCOUNT,PASSWORD}, OH_SITE_ORIGIN and OH_SITE_PACKAGE.
 Creates one fresh casual preparation; no manual action JSON or LLM inspection.
 The existing native scripted-popup subscriber is the only startup popup actor.
-This checks startup only, not full gameplay/the 18-scenario campaign.
+Optional generated-map concurrent battles and merge; never the fixed 18-case campaign.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$ArtifactDir,
     [string]$GameDir = 'C:\GOG Games\slasher_mns_2_4 - Copy',
     [ValidateRange(60, 1800)][int]$SessionSeconds = 900,
-    [ValidateSet(2)][int]$ExpectedMergeDay = 2,
+    [ValidateSet(2, 3)][int]$ExpectedMergeDay = 2,
+    [ValidateSet('StartupOnly', 'ConcurrentBattles')][string]$Gameplay = 'StartupOnly',
     [ValidateSet('Normal', 'DelayedJoin')][string]$PairStartup = 'Normal',
     [ValidateRange(5, 60)][int]$JoinStartupDelaySeconds = 8
 )
@@ -19,6 +20,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 . (Join-Path $repo 'tools/test/_relay.ps1')
+. (Join-Path $repo 'tools/test/simturns-lobby-gameplay.ps1')
+. (Join-Path $repo 'tools/test/simturns-lobby-gameplay-run.ps1')
 
 function Property($Object, [string]$Name, $Fallback = $null) {
     if ($null -eq $Object) { return $Fallback }
@@ -26,7 +29,53 @@ function Property($Object, [string]$Name, $Fallback = $null) {
     if ($null -eq $p) { return $Fallback }
     return $p.Value
 }
+function Assert-NewArtifactDirectory([string]$Path, [string]$Root) {
+    $destination = [IO.Path]::GetFullPath($Path).TrimEnd([char[]]'\/')
+    $rootPrefix = [IO.Path]::GetFullPath($Root).TrimEnd([char[]]'\/') + [IO.Path]::DirectorySeparatorChar
+    if (-not $destination.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'ArtifactDir must be a new directory below this checkout artifacts.'
+    }
+    # Inspect the whole existing ancestry, including ancestors above artifacts.
+    # Get-Item also observes dangling reparse points that Test-Path may hide.
+    $ancestor = $destination
+    while ($ancestor) {
+        $item = $null
+        try { $item = Get-Item -LiteralPath $ancestor -Force -ErrorAction Stop }
+        catch [Management.Automation.ItemNotFoundException] { }
+        if ($null -ne $item) {
+            if ($ancestor -ceq $destination) { throw 'ArtifactDir must be a new directory below this checkout artifacts.' }
+            if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw 'Artifact ancestors must be real directories without reparse points.'
+            }
+        }
+        $parent = Split-Path -Parent $ancestor
+        if ($parent -ceq $ancestor) { break }
+        $ancestor = $parent
+    }
+    return $destination
+}
+function New-OwnedArtifactDirectory([string]$Path, [string]$Root) {
+    if ($script:ArtifactDirectoryOwned) { throw 'Artifact directory ownership was already acquired.' }
+    $destination = Assert-NewArtifactDirectory $Path $Root
+    $staging = Join-Path (Split-Path -Parent $destination) ('.lobby-e2e-claim-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $staging -ErrorAction Stop)
+    try {
+        [void](Assert-NewArtifactDirectory $destination $Root)
+        # Directory.Move fails atomically if another invocation claimed the final
+        # path. New-Item/CreateDirectory alone may race between check and create.
+        [IO.Directory]::Move($staging, $destination)
+        $script:ArtifactDirectoryOwned = $true
+    } finally {
+        # Only this empty staging directory is disposable; never recurse or
+        # remove a destination that may belong to another invocation.
+        if ([IO.Directory]::Exists($staging)) { [IO.Directory]::Delete($staging, $false) }
+    }
+}
+function Assert-OwnedArtifactDirectory {
+    if (-not $script:ArtifactDirectoryOwned) { throw 'Artifact directory ownership was not acquired.' }
+}
 function Save-Json([string]$Name, $Value) {
+    Assert-OwnedArtifactDirectory
     $destination = Join-Path $ArtifactDir $Name
     $temporary = Join-Path $ArtifactDir ('.{0}.{1}.tmp' -f $Name, [guid]::NewGuid().ToString('N'))
     $json = $Value | ConvertTo-Json -Depth 40
@@ -85,6 +134,7 @@ function Assert-FreshOwnedLog([string]$Role, [hashtable]$PreLaunchLengths) {
     $script:ClientLogOwnedProcessIds[$script:ClientLogs[$Role]] = [long]$script:Clients[$Role].Id
 }
 function Copy-OwnedLogTail([string]$Role) {
+    Assert-OwnedArtifactDirectory
     $source = $script:ClientLogs[$Role]
     $offset = Get-ClientLogBaseline $source
     $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
@@ -125,6 +175,7 @@ function Get-OwnedLogEvidence([string]$Role) {
         startupLeaderNameSent = $text -match 'bootstrap first-leader-name TX sent \(role=host,'
         stockTurnsReleased = $text -match "relay released stock turns \(actionId=\d+, day=$ExpectedMergeDay\)"
         fault = $text -match '\[simturns(?:-diag)?\].*(?:FAULT|terminal fault|native_failed|local_abort|remote_abort|port_fault)|\[testdrv\].*(?:terminal invariant failure|FAILFAST|remote fault)'
+        scriptError = $text -match "\[E\] Failed to run '[^'\r\n]+' script\."
     }
 }
 function Save-StartupTimeout([string]$Role, [string]$Dialog) {
@@ -258,9 +309,13 @@ function Assert-PairProgress {
     if ((Get-PairUtcNow) -ge $script:RunDeadline) { throw 'Bounded lobby E2E deadline expired.' }
     foreach ($role in @('host', 'join')) {
         $script:logEvidence[$role] = Get-OwnedLogEvidence $role
+        if ($script:logEvidence[$role].scriptError) {
+            Save-PairReceipt 'game-script-error' @{ role = $role; evidence = $script:logEvidence[$role] }
+            throw "Observed game Lua error for $role; no error popup dismissed or action retried. See owned PID log."
+        }
         if ($script:logEvidence[$role].fault) {
             Save-PairReceipt 'production-fault' @{ role = $role; evidence = $script:logEvidence[$role] }
-            throw 'Observed production OH fault during pair startup; no action retried.'
+            throw 'Observed production OH fault during owned test; no action retried.'
         }
         if ($script:PopupObservers.ContainsKey($role)) {
             [void](Invoke-LiteralPersistentStartupPopupTick $script:PopupObservers[$role])
@@ -348,6 +403,7 @@ function Import-ExistingPopupObservers([string]$SourcePath = (Join-Path $PSScrip
 }
 
 function Invoke-OwnedPreparation([ValidateSet('create', 'start', 'detail', 'close')][string]$Action) {
+    Assert-OwnedArtifactDirectory
     $psi = [Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
@@ -362,6 +418,7 @@ function Invoke-OwnedPreparation([ValidateSet('create', 'start', 'detail', 'clos
     $psi.Environment['D2_LOBBY_HOST_PASSWORD'] = $credentials.host.PASSWORD
     $psi.Environment['D2_LOBBY_JOIN_ACCOUNT'] = $credentials.join.ACCOUNT
     $psi.Environment['OH_PREPARATION_RECORD_PATH'] = Join-Path $ArtifactDir 'owned-preparation.json'
+    $psi.Environment['OH_SIMULTANEOUS_UNTIL'] = [string]$ExpectedMergeDay
     $process = [Diagnostics.Process]::Start($psi)
     try {
         $outputTask = $process.StandardOutput.ReadToEndAsync()
@@ -399,7 +456,7 @@ function ConvertTo-NativeReportedText([string]$Text) {
 function Get-PreparedPrompt([string]$Role, [string]$Title) {
     if (-not $Title -or $Title.Contains("`n") -or $Title.Contains("`r")) { throw 'Template title is not one exact line.' }
     if ($Role -ceq 'host') {
-        return ConvertTo-NativeReportedText "$Title · без рейтинга`ntest2 — Эльфы (хост)`ntest1 — Кланы`n1-й ход: test2`nОХ: объединение на день 2`nСгенерировать карту?"
+        return ConvertTo-NativeReportedText "$Title · без рейтинга`ntest2 — Эльфы (хост)`ntest1 — Кланы`n1-й ход: test2`nОХ: объединение на день $ExpectedMergeDay`nСгенерировать карту?"
     }
     if ($Role -ceq 'join') {
         return ConvertTo-NativeReportedText "$Title`nХост: test2`nКарта готова.`nВойти в комнату?"
@@ -553,16 +610,9 @@ foreach ($line in Get-Content -LiteralPath (Join-Path $GameDir 'Disciple.ini')) 
     if ($section -ieq 'Disciple' -and $line -match '^\s*DisplayErrors\s*=\s*(\d+)\s*(?:;.*)?$') { $displayErrors = $Matches[1] -eq '1' }
 }
 if (-not $displayErrors) { throw 'DisplayErrors=1 is required; configuration will not be changed.' }
-$ArtifactDir = [IO.Path]::GetFullPath($ArtifactDir)
-$artifactRoot = [IO.Path]::GetFullPath((Join-Path $repo 'artifacts')).TrimEnd('\') + '\'
-if (-not $ArtifactDir.StartsWith($artifactRoot, [StringComparison]::OrdinalIgnoreCase) -or
-    (Test-Path -LiteralPath $ArtifactDir)) { throw 'ArtifactDir must be a new directory below this checkout artifacts.' }
-# Reject a redirected existing ancestor before creating any evidence or receipt.
-$ancestor = Split-Path -Parent $ArtifactDir
-while ($ancestor -and -not (Test-Path -LiteralPath $ancestor)) { $ancestor = Split-Path -Parent $ancestor }
-if (-not $ancestor -or ((Get-Item -LiteralPath $ancestor).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-    throw 'Artifact ancestor must be a real directory.'
-}
+$artifactRoot = Join-Path $repo 'artifacts'
+$ArtifactDir = Assert-NewArtifactDirectory $ArtifactDir $artifactRoot
+$script:ArtifactDirectoryOwned = $false
 $script:PreparationId = ''; $script:Preparation = $null
 $script:Clients = @{}; $script:Relay = $null; $script:Consumed = @{}; $script:ClientLogs = @{}
 $script:ClientLogInitialLengths = @{}; $script:ClientLogOwnedProcessIds = @{}
@@ -572,15 +622,17 @@ $script:LastStartupPopupEvidenceUtc = @{ host=$null; join=$null }
 $script:PreparationConsent = @{ host=$false; join=$false }; $script:GenerationAccepted = $false
 $script:PairStartClaimed = $false; $script:PairMapsObserved = $false
 $script:PairEvents = [Collections.Generic.List[object]]::new(); $script:LatestSnapshotSharingSkips = 0
-$credentials = @{}; $envBefore = @{}; $failure = $null; $stopped = $false; $accepted = $false
+$credentials = @{}; $envBefore = @{}; $failure = $null; $failureStack = $null; $stopped = $false; $accepted = $false
+$script:GameplayProof = $null
 $cleanupErrors = [Collections.Generic.List[string]]::new()
 $previousPipe = [Environment]::GetEnvironmentVariable('D2TESTDRV_PIPE_NAME')
 $script:last = $null; $script:logEvidence = @{}
 $script:RunDeadline = (Get-PairUtcNow).AddSeconds($SessionSeconds)
-$protected = @('Disciple.ini', 'Scripts/userSettings.lua', 'Scripts/settings.lua', 'Scripts/generatorSettings.lua', 'Interf/CustomLobby.dlg', 'Interf/Interf.dlg', 'Globals/GItem.dbf')
+$protected = @('Disciple.ini', 'Scripts/userSettings.lua', 'Scripts/settings.lua', 'Scripts/generatorSettings.lua', 'Scripts/modifiers/smns/z_unit_effect.lua', 'Interf/CustomLobby.dlg', 'Interf/Interf.dlg', 'Globals/GItem.dbf')
 $beforeHashes = Get-ProtectedFileHashes $protected
 Import-ExistingPopupObservers
 try {
+    New-OwnedArtifactDirectory $ArtifactDir $artifactRoot
     foreach ($role in @('host', 'join')) {
         $credentials[$role] = @{}
         foreach ($suffix in @('ACCOUNT', 'PASSWORD')) {
@@ -594,14 +646,15 @@ try {
     if ($credentials.host.ACCOUNT -cne 'test2' -or $credentials.join.ACCOUNT -cne 'test1') {
         throw 'Only authorized host test2 and join test1 may run.'
     }
-    New-Item -ItemType Directory -Path $ArtifactDir | Out-Null
     $env:D2TESTDRV_PIPE_NAME = '\\.\pipe\d2mss.lobbye2e.' + [guid]::NewGuid().ToString('N')
     $script:Relay = Start-TestRelay -LogDir $ArtifactDir
     foreach ($role in @('host', 'join')) {
         $preLaunchLengths = Get-LogLaunchBoundary
-        $script:Clients[$role] = Start-GameClient -GameDir $GameDir -Role $role -Transport Lobby -Flags @(
+        $flags = @(
             'SKIP_INTRO', 'BLACKSCREEN_FIX', 'UI_REPORTER', 'WORLD', 'RELAY_BRIDGE', 'TURN_EVENTS',
             'SCRIPTED_POPUPS', 'SCRIPTED_POPUPS_CONFIRMATIONS', 'SCRIPTED_POPUPS_LOBBY')
+        if ($Gameplay -eq 'ConcurrentBattles') { $flags += @('AUTO_BATTLE_PREARM', 'BATTLE_TRACE') }
+        $script:Clients[$role] = Start-GameClient -GameDir $GameDir -Role $role -Transport Lobby -Flags $flags
         Assert-FreshOwnedLog $role $preLaunchLengths
         Assert-OwnedRelayClientIdentity $role $script:Clients[$role] $GameDir
         $script:PopupObservers[$role] = New-LiteralStartupPopupService $role $script:ClientLogs[$role]
@@ -632,16 +685,21 @@ try {
     Start-OwnedPair
     Wait-StartupAcceptance
     $accepted = $true
+    if ($Gameplay -eq 'ConcurrentBattles') { Invoke-LobbyConcurrentBattleMerge }
 } catch {
     $failure = $_.Exception.Message
+    $failureStack = $_.ScriptStackTrace
     # Even unexpected exceptions must not echo a credential into receipts/transcripts.
     foreach ($pair in $credentials.Values) {
-        if ($pair.ContainsKey('PASSWORD') -and $pair.PASSWORD) { $failure = $failure.Replace($pair.PASSWORD, '[redacted]') }
+        if ($pair.ContainsKey('PASSWORD') -and $pair.PASSWORD) {
+            $failure = $failure.Replace($pair.PASSWORD, '[redacted]')
+            if ($failureStack) { $failureStack = $failureStack.Replace($pair.PASSWORD, '[redacted]') }
+        }
     }
 } finally {
     foreach ($p in $script:Clients.Values) { try { Stop-OwnedProcess $p } catch { $cleanupErrors.Add('Owned game cleanup failed.') } }
     if ($script:Relay) { try { Stop-OwnedProcess $script:Relay } catch { $cleanupErrors.Add('Owned relay cleanup failed.') } }
-    if (Test-Path -LiteralPath (Join-Path $ArtifactDir 'owned-preparation.json')) {
+    if ($script:ArtifactDirectoryOwned -and (Test-Path -LiteralPath (Join-Path $ArtifactDir 'owned-preparation.json'))) {
         try { [void](Invoke-OwnedPreparation close) } catch { $cleanupErrors.Add('Owned preparation close failed; retain receipt for exact manual cleanup.') }
     }
     $afterHashes = @{}
@@ -652,7 +710,7 @@ try {
     $protectedFileProof = Compare-ProtectedFileHashes $beforeHashes $afterHashes
     $unchanged = $protectedFileProof.unchanged
     if (-not $unchanged) { $cleanupErrors.Add('Game configuration changed during the run.') }
-    if (Test-Path -LiteralPath $ArtifactDir) {
+    if ($script:ArtifactDirectoryOwned -and (Test-Path -LiteralPath $ArtifactDir)) {
         foreach ($role in $script:ClientLogs.Keys) {
             try { if (Test-Path -LiteralPath $script:ClientLogs[$role]) { Copy-OwnedLogTail $role } }
             catch { $cleanupErrors.Add('Owned log copy failed.') }
@@ -660,8 +718,11 @@ try {
         try {
             Save-Json 'summary.json' ([ordered]@{
                 schema=1; transport='lobby'; preparationId=$PreparationId; pairStartup=$PairStartup; expectedMergeDay=$ExpectedMergeDay
-                startupAcceptance=($accepted -and -not $failure -and $cleanupErrors.Count -eq 0)
+                startupAcceptance=($accepted -and $cleanupErrors.Count -eq 0)
+                gameplay=$Gameplay; gameplayProof=$script:GameplayProof
+                concurrentBattleMergeAcceptance=($null -ne $script:GameplayProof -and -not $failure -and $cleanupErrors.Count -eq 0)
                 fullGameplayAcceptance=$false; campaign18=$false; failure=$failure; cleanupErrors=$cleanupErrors.ToArray()
+                failureStack=$failureStack
                 gameConfigurationUnchanged=$unchanged; evidence=$script:logEvidence; lastObservation=$script:last
                 protectedFiles=$protectedFileProof
                 ownedLogBoundaries=@($script:ClientLogs.Keys | ForEach-Object {
@@ -678,5 +739,5 @@ try {
     foreach ($key in $envBefore.Keys) { [Environment]::SetEnvironmentVariable($key, $envBefore[$key]) }
     $credentials.Clear(); $envBefore.Clear()
 }
-if ($failure -or $cleanupErrors.Count) { throw "Lobby startup E2E failed: $failure $($cleanupErrors -join ' ')" }
-Write-Output 'PASS: owned production-lobby startup only; not full gameplay acceptance.'
+if ($failure -or $cleanupErrors.Count) { throw "Lobby E2E failed: $failure $($cleanupErrors -join ' ')" }
+Write-Output "PASS: owned production-lobby $Gameplay, merge setting $ExpectedMergeDay; not the full 18-case campaign."

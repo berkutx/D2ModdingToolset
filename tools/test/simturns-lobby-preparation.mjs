@@ -38,6 +38,23 @@ function participants(value) {
   check(Array.isArray(value) && value.length === 2 && value.every((v, i) => object(v)
     && Object.entries(CONTRACT.participants[i]).every(([k, expected]) => v[k] === expected)), 'participants_changed');
 }
+export function parseSimultaneousUntil(value) {
+  if (value === undefined) return CONTRACT.simultaneousUntil;
+  check(value === '2' || value === '3', 'invalid_simultaneous_until');
+  return Number(value);
+}
+function configuredSimultaneousUntil(config) {
+  const day = config.simultaneousUntil === undefined ? CONTRACT.simultaneousUntil : config.simultaneousUntil;
+  check(day === 2 || day === 3, 'invalid_simultaneous_until');
+  return day;
+}
+function receiptSimultaneousUntil(receipt) {
+  // Older schema-1 receipts were exclusively OH day 2. Missing means that
+  // historical contract, never the current environment's requested day.
+  const day = receipt.simultaneousUntil === undefined ? CONTRACT.simultaneousUntil : receipt.simultaneousUntil;
+  check(day === 2 || day === 3, 'invalid_receipt_simultaneous_until');
+  return day;
+}
 
 export function validateRecordPath(requested, artifactsRoot = fileURLToPath(new URL('../../artifacts/', import.meta.url))) {
   check(typeof requested === 'string' && isAbsolute(requested), 'record_path_required');
@@ -60,6 +77,7 @@ export function configuration(env, artifactsRoot) {
   check(typeof env.OH_SITE_PACKAGE === 'string' && isAbsolute(env.OH_SITE_PACKAGE)
     && basename(env.OH_SITE_PACKAGE) === 'package.json' && statSync(env.OH_SITE_PACKAGE).isFile(), 'site_package_required');
   return { origin: url.origin, user: CONTRACT.host, pass: env.D2_LOBBY_HOST_PASSWORD,
+    simultaneousUntil: parseSimultaneousUntil(env.OH_SIMULTANEOUS_UNTIL),
     sitePackage: env.OH_SITE_PACKAGE, recordPath: validateRecordPath(env.OH_PREPARATION_RECORD_PATH, artifactsRoot) };
 }
 
@@ -80,6 +98,7 @@ export function validateReceipt(receipt, config) {
   check(receipt.template?.id === CONTRACT.templateVersionId && receipt.template.filename === CONTRACT.filename
     && safeText(receipt.template.name), 'receipt_template_mismatch');
   parameters(receipt.parameters);
+  check(receiptSimultaneousUntil(receipt) === configuredSimultaneousUntil(config), 'receipt_simultaneous_until_mismatch');
   return receipt;
 }
 
@@ -87,7 +106,7 @@ export function assertOwned(p, receipt) {
   check(object(p) && p.id === receipt.id && p.gameId === receipt.gameId && p.creator === CONTRACT.creator
     && p.host === CONTRACT.host && p.firstTurn === CONTRACT.firstTurn && p.createdAt === receipt.createdAt
     && Number.isSafeInteger(p.revision) && p.revision >= 1 && STATUSES.has(p.status), 'preparation_identity_changed');
-  check(p.ranked === false && p.simultaneous === true && p.simultaneousUntil === 2
+  check(p.ranked === false && p.simultaneous === true && p.simultaneousUntil === receiptSimultaneousUntil(receipt)
     && !p.championshipId && !p.seriesId && !p.matchId, 'preparation_mode_changed');
   participants(p.participants);
   check(p.templateVersionId === receipt.template.id && p.template?.id === receipt.template.id
@@ -159,7 +178,8 @@ export function receiptStore(config) {
       check(!existsSync(config.recordPath), 'receipt_already_exists');
       check(!existsSync(`${config.recordPath}.create-intent`), 'create_already_claimed');
     },
-    claimCreate() { exclusive(`${config.recordPath}.create-intent`, { purpose: CONTRACT.purpose, origin: config.origin }); },
+    claimCreate() { exclusive(`${config.recordPath}.create-intent`, {
+      purpose: CONTRACT.purpose, origin: config.origin, simultaneousUntil: configuredSimultaneousUntil(config) }); },
     save(value) { exclusive(config.recordPath, value); },
     read() {
       try { return validateReceipt(JSON.parse(readFileSync(config.recordPath, 'utf8')), config); }
@@ -180,6 +200,7 @@ export function receiptStore(config) {
 
 export async function runAction(action, config, { emit, store = receiptStore(config) }) {
   check(ACTIONS.has(action), 'unknown_action');
+  const simultaneousUntil = configuredSimultaneousUntil(config);
   let p, receipt;
   if (action === 'create') {
     store.assertNew();
@@ -188,9 +209,9 @@ export async function runAction(action, config, { emit, store = receiptStore(con
     store.claimCreate();
     p = await emit('preparation:create', { participants: CONTRACT.participants.map(v => ({ ...v })),
       host: CONTRACT.host, firstTurn: CONTRACT.firstTurn, templateVersionId: template.id,
-      parameters: template.defaults, explicitParameters: [], ranked: false, simultaneous: true, simultaneousUntil: 2 });
+      parameters: template.defaults, explicitParameters: [], ranked: false, simultaneous: true, simultaneousUntil });
     receipt = validateReceipt({ schema: 1, purpose: CONTRACT.purpose, id: p?.id, gameId: p?.gameId,
-      createdAt: p?.createdAt, creator: CONTRACT.creator, origin: config.origin, recordPath: config.recordPath,
+      createdAt: p?.createdAt, creator: CONTRACT.creator, origin: config.origin, recordPath: config.recordPath, simultaneousUntil,
       template: { id: template.id, name: template.name, filename: template.filename }, parameters: template.defaults }, config);
     assertOwned(p, receipt);
     store.save(receipt); // Keep ownership even if the following assign fails.
@@ -204,7 +225,7 @@ export async function runAction(action, config, { emit, store = receiptStore(con
       check(timestamp(p.assignmentsFinalizedAt), 'assign_not_finalized');
     }
   } else {
-    receipt = store.read();
+    receipt = validateReceipt(store.read(), config);
     p = assertOwnedAttempt(assertOwned(await emit('preparation:watch', { id: receipt.id }), receipt), store.startIntent());
     if (action === 'start') {
       assertFresh(p);

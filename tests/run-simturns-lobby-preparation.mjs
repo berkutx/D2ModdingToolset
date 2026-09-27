@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CONTRACT, PreparationError, configuration, validateRecordPath, selectTemplate,
+import { CONTRACT, PreparationError, configuration, parseSimultaneousUntil, validateRecordPath, selectTemplate,
   validateReceipt, assertOwned, assertOwnedAttempt, preparationSummary, receiptStore, runAction, connectApi } from '../tools/test/simturns-lobby-preparation.mjs';
 
 const clone = value => structuredClone(value);
@@ -43,7 +43,7 @@ function launched(status = 'confirmation') {
   if (status === 'room_created') Object.assign(p.launch, { roomId: 8, roomInstanceId: '8-12345', matchId: '1-12345' });
   return p;
 }
-function harness(initial = preparation(), receipt = null) {
+function harness(initial = preparation(), receipt = null, runConfig = config) {
   let p = clone(initial), saved = clone(receipt), createClaimed = false;
   let startClaimed = initial.launch ? { id: initial.id, revision: initial.launch.revision } : null;
   const calls = [];
@@ -51,7 +51,7 @@ function harness(initial = preparation(), receipt = null) {
     assertNew() { assert.equal(saved, null); assert.equal(createClaimed, false); },
     claimCreate() { assert.equal(createClaimed, false); createClaimed = true; },
     save(value) { assert.equal(saved, null); saved = clone(value); },
-    read() { return validateReceipt(saved, config); },
+    read() { return validateReceipt(saved, runConfig); },
     claimStart(value) { if (startClaimed) throw new PreparationError('receipt_write_refused'); startClaimed = { id: value.id, revision: value.revision }; },
     startIntent() { return clone(startClaimed); },
   };
@@ -61,8 +61,8 @@ function harness(initial = preparation(), receipt = null) {
     if (event === 'preparation:create' || event === 'preparation:watch') return clone(p);
     assert.equal(event, 'preparation:command');
     assert.equal(value.id, p.id); assert.equal(value.revision, p.revision);
-    if (value.action === 'assign') { p = ready(); }
-    else if (value.action === 'start') { p = launched(); }
+    if (value.action === 'assign') { p = { ...ready(), simultaneousUntil: p.simultaneousUntil }; }
+    else if (value.action === 'start') { p = { ...launched(), simultaneousUntil: p.simultaneousUntil }; }
     else if (['cancel', 'review_close'].includes(value.action)) {
       p.status = 'cancelled'; p.revision++;
       if (value.action === 'review_close') p.reviewClose = { by: 'test2', at: 4000 };
@@ -86,7 +86,68 @@ test('import is offline; create uses exact casual defaults then a narrow assignm
   assert.deepEqual(h.calls[2].value.data, { host: 'test2', firstTurn: 'test2', participants: [
     { name: 'test2', race: 'elves', lord: null }, { name: 'test1', race: 'clans', lord: null }] });
   assert.equal(h.receipt().id, ID);
+  assert.equal(h.receipt().simultaneousUntil, 2);
   assert.ok(!JSON.stringify(h.receipt()).includes(config.pass));
+});
+
+test('merge-day environment accepts only canonical 2 or 3 and defaults to historical 2', () => {
+  assert.equal(parseSimultaneousUntil(undefined), 2);
+  assert.equal(parseSimultaneousUntil('2'), 2);
+  assert.equal(parseSimultaneousUntil('3'), 3);
+  for (const value of ['', '03', '2.0', ' 3', '3 ', '1', '4', '0', '3\n', 3, null, true])
+    assert.throws(() => parseSimultaneousUntil(value), code('invalid_simultaneous_until'));
+});
+
+test('day 3 create assigns, starts, watches and closes the same pinned casual fixture', async () => {
+  const day3 = { ...config, simultaneousUntil: 3 };
+  const h = harness({ ...preparation(), simultaneousUntil: 3 }, null, day3);
+  const created = await runAction('create', day3, h);
+  assert.equal(h.calls[1].value.simultaneousUntil, 3);
+  assert.equal(h.receipt().simultaneousUntil, 3);
+  assert.equal(created.preparation.simultaneousUntil, 3);
+  assert.deepEqual(created.preparation.parameters, template.defaults);
+  assert.deepEqual(created.preparation.participants.map(({ name, race, lord, team }) => ({ name, race, lord, team })), CONTRACT.participants);
+  for (const action of ['start', 'detail', 'close']) {
+    const result = await runAction(action, day3, h);
+    assert.equal(result.preparation.simultaneousUntil, 3);
+    assert.equal(result.preparation.ranked, false);
+  }
+});
+
+test('existing receipt cannot be retargeted by changing or omitting the day environment', async () => {
+  for (const [pinned, requested] of [[2, 3], [3, 2], [3, undefined]]) {
+    const pinnedConfig = { ...config, simultaneousUntil: pinned };
+    const changedConfig = { ...config, simultaneousUntil: requested };
+    const receipt = { ...ownedReceipt(), simultaneousUntil: pinned };
+    for (const action of ['start', 'detail', 'close']) {
+      const h = harness({ ...ready(), simultaneousUntil: pinned }, receipt, pinnedConfig);
+      await assert.rejects(runAction(action, changedConfig, h), code('receipt_simultaneous_until_mismatch'));
+      assert.equal(h.calls.length, 0, 'day mismatch must fail before any server call');
+    }
+  }
+});
+
+test('server merge-day drift is rejected at create and every existing-preparation boundary', async () => {
+  const day3 = { ...config, simultaneousUntil: 3 };
+  await assert.rejects(runAction('create', day3, harness(preparation(), null, day3)), code('preparation_mode_changed'));
+  for (const action of ['start', 'detail', 'close']) {
+    const h = harness(ready(), { ...ownedReceipt(), simultaneousUntil: 3 }, day3);
+    await assert.rejects(runAction(action, day3, h), code('preparation_mode_changed'));
+    assert.equal(h.calls.length, 1, 'drift must not issue a command after watch');
+  }
+});
+
+test('legacy receipt without a day stays pinned to day 2 without rewriting it', async () => {
+  const legacy = ownedReceipt();
+  assert.equal(Object.hasOwn(legacy, 'simultaneousUntil'), false);
+  assert.equal(validateReceipt(legacy, config), legacy);
+  assert.throws(() => validateReceipt(legacy, { ...config, simultaneousUntil: 3 }), code('receipt_simultaneous_until_mismatch'));
+  for (const day of [null, '2', 0, 4])
+    assert.throws(() => validateReceipt({ ...legacy, simultaneousUntil: day }, config), code('invalid_receipt_simultaneous_until'));
+  const h = harness(ready(), legacy);
+  for (const action of ['start', 'detail', 'close'])
+    assert.equal((await runAction(action, config, h)).preparation.simultaneousUntil, 2);
+  assert.equal(Object.hasOwn(h.receipt(), 'simultaneousUntil'), false);
 });
 
 test('already finalized fresh create does not assign twice', async () => {
@@ -237,6 +298,9 @@ test('receipt path and wx guards preserve prior records and ambiguous create int
     const env = { OH_SITE_ORIGIN: config.origin, OH_SITE_PACKAGE: pkg, OH_PREPARATION_RECORD_PATH: path,
       D2_LOBBY_HOST_ACCOUNT: 'test2', D2_LOBBY_JOIN_ACCOUNT: 'test1', D2_LOBBY_HOST_PASSWORD: config.pass };
     const c = configuration(env, artifacts), s = receiptStore(c);
+    assert.equal(c.simultaneousUntil, 2);
+    assert.equal(configuration({ ...env, OH_SIMULTANEOUS_UNTIL: '3' }, artifacts).simultaneousUntil, 3);
+    assert.throws(() => configuration({ ...env, OH_SIMULTANEOUS_UNTIL: '03' }, artifacts), code('invalid_simultaneous_until'));
     for (const origin of ['https://user:secret@fixture.invalid', 'http://fixture.invalid/path', 'file:///tmp/', 'http://fixture.invalid/?token=secret'])
       assert.throws(() => configuration({ ...env, OH_SITE_ORIGIN: origin }, artifacts), PreparationError);
     assert.throws(() => configuration({ ...env, D2_LOBBY_JOIN_ACCOUNT: 'stranger' }, artifacts), PreparationError);

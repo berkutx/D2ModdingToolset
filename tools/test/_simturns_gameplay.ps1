@@ -912,7 +912,7 @@ function Invoke-CanonicalDeploy([object]$Fixture,
 function Read-PrearmedAutoBattleProof {
     param(
         [Parameter(Mandatory)][ValidateSet('host', 'join')][string]$Role,
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Lines,
+        [Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines,
         [Parameter(Mandatory)][object]$BattleUi
     )
     # Pure parser. The literal resolver and final verdict own every physical
@@ -968,15 +968,32 @@ function Read-PrearmedAutoBattleProof {
         $proof.succeeded -isnot [bool]) {
         throw "$Role native preboot auto-battle proof has non-exact JSON scalar types"
     }
+    # This optional native-clock field is retained verbatim in kick. Legacy
+    # generic proofs remain readable; the lobby overlap oracle requires it.
+    $committedTick=$proof.PSObject.Properties['committedTick64']
+    if ($null -ne $committedTick -and
+        ($committedTick.Value -isnot [long] -or $committedTick.Value -le 0)) {
+        throw "$Role native preboot auto-battle committedTick64 must be a positive JSON integer"
+    }
 
     # The literal resolver enters its fighting phase on the first raw
-    # DLG_BATTLE_A name, before the aggregate reporter is necessarily globally
+    # native battle layout name, before the aggregate reporter is globally
     # ready. Do not add another read/wait here: the later native one-shot proof
     # is the readiness witness and must match this immutable appearance/owner.
+    $battleDialog=[string]$BattleUi.dialog
+    if($battleDialog -cnotin @('DLG_BATTLE_A','DLG_BATTLE_B')) { throw 'Unsupported battle layout in native proof' }
+    $proofDialog=$proof.PSObject.Properties['dialog']
+    if($null -eq $proofDialog) {
+        # Old layout-A records predate the explicit dialog field. Layout B has
+        # no such compatibility case and must prove its exact native layout.
+        if($battleDialog -ceq 'DLG_BATTLE_B') { throw 'Native proof omitted exact layout B identity' }
+    } elseif($proofDialog.Value -isnot [string] -or $proofDialog.Value -cne $battleDialog) {
+        throw 'Native proof dialog must be a scalar string matching the observed battle layout'
+    }
     $battleOwners = @($BattleUi.targets | Where-Object {
-        [string]$_.dialog -eq 'DLG_BATTLE_A'
+        [string]$_.dialog -ceq $battleDialog
     })
-    if ([string]$BattleUi.dialog -ne 'DLG_BATTLE_A' -or
+    if ([string]$BattleUi.dialog -cne $battleDialog -or
         [long]$BattleUi.dialogInstance -lt 1 -or $battleOwners.Count -ne 1) {
         throw "$Role first name-only battle snapshot did not contain one exact owner"
     }
@@ -1075,14 +1092,15 @@ function Get-ObservedPrearmedAutoBattleRecord {
 function ConvertFrom-ScriptedBattleCloseMarker {
     param(
         [Parameter(Mandatory)][string]$Line,
-        [Parameter(Mandatory)][ValidateSet('host', 'join')][string]$Role
+        [Parameter(Mandatory)][ValidateSet('host', 'join')][string]$Role,
+        [ValidateSet('DLG_BATTLE_A','DLG_BATTLE_B')][string]$Dialog='DLG_BATTLE_A'
     )
     $prefix = '[testdrv][scripted-popup] '
     $at = $Line.IndexOf($prefix, [StringComparison]::Ordinal)
     if ($at -lt 0) { return $null }
     $payload = $Line.Substring($at + $prefix.Length)
-    $common = ('role={0} dialog=DLG_BATTLE_A appearance=(?<appearance>\d+) ' +
-        'owner=(?<owner>\d+) button=BTN_CLOSE ') -f [regex]::Escape($Role)
+    $common = ('role={0} dialog={1} appearance=(?<appearance>\d+) ' +
+        'owner=(?<owner>\d+) button=BTN_CLOSE ') -f [regex]::Escape($Role),[regex]::Escape($Dialog)
     $observed = [regex]::Match($payload,
         ('^OBSERVED ' + $common + 'tick=(?<tick>\d+)$'),
         [Text.RegularExpressions.RegexOptions]::CultureInvariant)
@@ -1126,7 +1144,7 @@ function Assert-ScriptedBattleCloseProof {
     param(
         [Parameter(Mandatory)][object]$State,
         [Parameter(Mandatory)][object]$Baseline,
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Lines
+        [Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
     )
     $role = [string]$State.Role
     if ([string]$Baseline.role -ne $role -or [long]$Baseline.lineCount -lt 0) {
@@ -1138,13 +1156,15 @@ function Assert-ScriptedBattleCloseProof {
         throw "$role scripted battle-close log regressed below its pre-battle baseline"
     }
     $newLines = @($Lines | Select-Object -Skip ([int]$Baseline.lineCount))
+    $battleDialog=if($State.PSObject.Properties['LiveBattleDialog']) { [string]$State.LiveBattleDialog } else { 'DLG_BATTLE_A' }
+    if($battleDialog -cnotin @('DLG_BATTLE_A','DLG_BATTLE_B')) { throw 'Unsupported battle close layout' }
     $candidateLines = @($newLines | Where-Object {
         $_.IndexOf('[testdrv][scripted-popup] ', [StringComparison]::Ordinal) -ge 0 -and
-        $_.IndexOf('dialog=DLG_BATTLE_A', [StringComparison]::Ordinal) -ge 0
+        $_.IndexOf(('dialog='+$battleDialog+' '), [StringComparison]::Ordinal) -ge 0
     })
     $markers = [System.Collections.Generic.List[object]]::new()
     foreach ($line in $candidateLines) {
-        $marker = ConvertFrom-ScriptedBattleCloseMarker -Line $line -Role $role
+        $marker = ConvertFrom-ScriptedBattleCloseMarker -Line $line -Role $role -Dialog $battleDialog
         if (-not $marker) {
             throw "$role scripted battle-close evidence contains a malformed marker: $line"
         }
@@ -1190,7 +1210,7 @@ function Assert-LegacyBattleUpSnapshot {
     param(
         [Parameter(Mandatory)][object]$State,
         [Parameter(Mandatory)][object]$Baseline,
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Lines
+        [Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
     )
     $role = [string]$State.Role
     if ([string]$Baseline.role -ne $role -or [long]$Baseline.lineCount -lt 0 -or
@@ -1212,7 +1232,7 @@ function Test-LegacyBattleCloseCommitted {
     param(
         [Parameter(Mandatory)][ValidateSet('host', 'join')][string]$Role,
         [Parameter(Mandatory)][object]$Baseline,
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Lines
+        [Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
     )
     if ($Lines.Count -lt [long]$Baseline.lineCount) {
         throw "$Role battle-close snapshot regressed below its exact pre-battle baseline"
@@ -5994,4 +6014,3 @@ function Invoke-BattleBlockProof([object]$Fixture,
         reverseCross = $reverseCross
     }
 }
-

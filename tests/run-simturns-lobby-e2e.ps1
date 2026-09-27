@@ -15,7 +15,8 @@ foreach ($node in $ast.FindAll({ param($item) $item -is [Management.Automation.L
 foreach ($name in @('Property', 'Protect-UiSnapshot', 'ConvertTo-NativeReportedText', 'Get-PreparedPrompt',
     'Get-ExactEntryAction', 'Test-ConsumedEntryAppearance', 'Import-ExistingPopupObservers', 'Start-OwnedPair',
     'Get-LogLaunchBoundary', 'Assert-FreshOwnedLog', 'Get-OwnedLogEvidence', 'Copy-OwnedLogTail', 'Compare-ProtectedFileHashes',
-    'Test-StartupRoleAccepted')) {
+    'Test-StartupRoleAccepted', 'Assert-NewArtifactDirectory', 'New-OwnedArtifactDirectory',
+    'Assert-OwnedArtifactDirectory', 'Save-Json', 'Invoke-OwnedPreparation')) {
     . ([scriptblock]::Create($functions[$name].Extent.Text))
 }
 $script:checks=0
@@ -53,8 +54,16 @@ $acceptanceCalls=@($functions['Wait-StartupAcceptance'].Body.FindAll({ param($no
 Check ($acceptanceCalls.Count -eq 1) 'Live acceptance loop does not use the tested root predicate'
 $expectedHost = 'Diligence 1.2.3 · áåç ðåéòèíãà' + "`n" + 'test2 '+[char]0x97+' Ýëüôû (õîñò)' + "`n" +
     'test1 '+[char]0x97+' Êëàíû' + "`n" + '1-é õîä: test2' + "`n" + 'ÎÕ: îáúåäèíåíèå íà äåíü 2' + "`n" + 'Ñãåíåðèðîâàòü êàðòó?'
+$ExpectedMergeDay=2
 $hostPrompt=Get-PreparedPrompt host 'Diligence 1.2.3'
 Check ($hostPrompt -ceq $expectedHost) 'Host prompt differs from saved actual run004 bytes'
+$ExpectedMergeDay=3
+$hostPromptDay3=Get-PreparedPrompt host 'Diligence 1.2.3'
+$expectedHostDay3=$expectedHost.Replace('ÎÕ: îáúåäèíåíèå íà äåíü 2', 'ÎÕ: îáúåäèíåíèå íà äåíü 3')
+Check ($hostPromptDay3 -ceq $expectedHostDay3) 'Day-3 host prompt lost its exact native-reported bytes'
+Check ($null -ne (Get-ExactEntryAction (Ui DLG_MESSAGE_BOX BTN_YES $hostPromptDay3) host host-offer $hostPromptDay3)) 'Exact day-3 offer was rejected'
+Reject { Get-ExactEntryAction (Ui DLG_MESSAGE_BOX BTN_YES $hostPrompt) host host-offer $hostPromptDay3 } '*Unknown or mismatched*'
+$ExpectedMergeDay=2
 $joinPrompt=Get-PreparedPrompt join 'Diligence 1.2.3'
 Check ($joinPrompt -ceq "Diligence 1.2.3`nÕîñò: test2`nÊàðòà ãîòîâà.`nÂîéòè â êîìíàòó?") 'Join prompt differs from saved actual bytes'
 $action=Get-ExactEntryAction (Ui DLG_MESSAGE_BOX BTN_YES $hostPrompt) host host-offer $hostPrompt
@@ -95,6 +104,108 @@ Check ($source.Contains("'SCRIPTED_POPUPS_LOBBY'")) 'Native lobby popup scope mi
 Check ($source.Contains('$psi.Environment[''D2_LOBBY_HOST_PASSWORD'']') -and
     -not ($functions['Invoke-OwnedPreparation'].Extent.Text -match 'ArgumentList.Add\([^\n]*(PASSWORD|credentials)')) 'Secret passed as process argument'
 
+# Exercise the real exclusive directory claim and cleanup branches in a fresh
+# temporary tree. Never run the runner body, a process, or an API operation.
+$ownershipScratch=[IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('d2-lobby-owner-test-'+[guid]::NewGuid().ToString('N'))))
+$fixtureRoot=Join-Path $ownershipScratch 'artifacts'
+$collisionPath=Join-Path $fixtureRoot 'collision'
+$winnerReceipt=Join-Path $collisionPath 'owned-preparation.json'
+$winnerSummary=Join-Path $collisionPath 'summary.json'
+$freshPath=Join-Path $fixtureRoot 'fresh'
+$freshReceipt=Join-Path $freshPath 'owned.json'
+$redirectTarget=Join-Path $ownershipScratch 'redirect-target'
+$redirectChild=Join-Path $redirectTarget 'ordinary'
+$redirectCanary=Join-Path $redirectChild 'canary.txt'
+$redirectPath=Join-Path $fixtureRoot 'redirect'
+$fileAncestor=Join-Path $fixtureRoot 'not-a-directory'
+[void](New-Item -ItemType Directory -Path $fixtureRoot)
+try {
+    $script:ArtifactDirectoryOwned=$false
+    Check ((Assert-NewArtifactDirectory $freshPath $fixtureRoot) -ceq $freshPath) 'Fresh contained directory was rejected'
+    Check ((Assert-NewArtifactDirectory ($freshPath+[IO.Path]::DirectorySeparatorChar) $fixtureRoot) -ceq $freshPath) 'Trailing separator changed the final claim directory'
+    Reject { Assert-NewArtifactDirectory $fixtureRoot $fixtureRoot } '*below this checkout artifacts*'
+    Reject { Assert-NewArtifactDirectory ($fixtureRoot+'-other/run') $fixtureRoot } '*below this checkout artifacts*'
+    & {
+        # Another runner wins after our final existence/ancestry check. This
+        # deliberately exercises Directory.Move, not a mocked exclusive mkdir.
+        $validationFunction=(Get-Command Assert-NewArtifactDirectory).ScriptBlock
+        $validation=@{calls=0}
+        function Assert-NewArtifactDirectory([string]$Path,[string]$Root) {
+            $normalized=& $validationFunction $Path $Root
+            $validation.calls++
+            if ($validation.calls -eq 2) {
+                [void](New-Item -ItemType Directory -Path $normalized)
+                [IO.File]::WriteAllText($winnerReceipt,'winner-receipt')
+                [IO.File]::WriteAllText($winnerSummary,'winner-summary')
+            }
+            return $normalized
+        }
+        Reject { New-OwnedArtifactDirectory $collisionPath $fixtureRoot } '*'
+        Check ($validation.calls -eq 2) 'Collision did not occur at the final atomic directory claim'
+        Check (-not $script:ArtifactDirectoryOwned) 'Losing invocation acquired artifact ownership'
+    }
+    Check (@(Get-ChildItem -LiteralPath $fixtureRoot -Filter '.lobby-e2e-claim-*' -Force).Count -eq 0) 'Losing invocation leaked its empty staging directory'
+    $ArtifactDir=$collisionPath
+    Reject { Save-Json 'summary.json' @{loser=$true} } '*ownership was not acquired*'
+    Reject { Copy-OwnedLogTail host } '*ownership was not acquired*'
+    foreach ($preparationAction in @('create','start','detail','close')) {
+        Reject { Invoke-OwnedPreparation $preparationAction } '*ownership was not acquired*'
+    }
+    $mainTry=@($ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.TryStatementAst] })
+    Check ($mainTry.Count -eq 1) 'Runner must have one outer cleanup boundary'
+    $claimStatement=$mainTry[0].Body.Statements[0]
+    Check ($claimStatement.Extent.Text -ceq 'New-OwnedArtifactDirectory $ArtifactDir $artifactRoot') 'Directory claim must precede credential handling and launch'
+    $cleanupBranches=@($mainTry[0].Finally.Statements | Where-Object {
+        $_ -is [Management.Automation.Language.IfStatementAst] -and
+        ($_.Extent.Text.Contains('Invoke-OwnedPreparation close') -or $_.Extent.Text.Contains("Save-Json 'summary.json'"))
+    })
+    Check ($cleanupBranches.Count -eq 2) 'Remote preparation and summary cleanup branches were not found'
+    & {
+        $touches=@{reads=0;closes=0;writes=0;copies=0}
+        function Test-Path { $touches.reads++; return $true }
+        function Invoke-OwnedPreparation { $touches.closes++ }
+        function Save-Json { $touches.writes++ }
+        function Copy-OwnedLogTail { $touches.copies++ }
+        foreach ($branch in $cleanupBranches) { . ([scriptblock]::Create($branch.Extent.Text)) }
+        Check ($touches.reads -eq 0 -and $touches.closes -eq 0 -and $touches.writes -eq 0 -and $touches.copies -eq 0) 'Losing cleanup accessed the winner artifact directory or preparation'
+    }
+    Check ([IO.File]::ReadAllText($winnerReceipt) -ceq 'winner-receipt') 'Winner preparation receipt was changed'
+    Check ([IO.File]::ReadAllText($winnerSummary) -ceq 'winner-summary') 'Winner summary was changed'
+    Reject { New-OwnedArtifactDirectory $collisionPath $fixtureRoot } '*below this checkout artifacts*'
+    Check (-not $script:ArtifactDirectoryOwned) 'Existing directory was adopted'
+    New-OwnedArtifactDirectory $freshPath $fixtureRoot
+    Check ($script:ArtifactDirectoryOwned -and [IO.Directory]::Exists($freshPath)) 'Successful directory claim lost ownership'
+    $ArtifactDir=$freshPath
+    Save-Json 'owned.json' @{owned=$true}
+    Check (([IO.File]::ReadAllText($freshReceipt) | ConvertFrom-Json).owned) 'Owned artifact writer was blocked'
+    Reject { New-OwnedArtifactDirectory (Join-Path $fixtureRoot 'second') $fixtureRoot } '*already acquired*'
+    $script:ArtifactDirectoryOwned=$false
+
+    [void](New-Item -ItemType Directory -Path $redirectChild)
+    [IO.File]::WriteAllText($redirectCanary,'unchanged')
+    $linkType=if($IsWindows){'Junction'}else{'SymbolicLink'}
+    [void](New-Item -ItemType $linkType -Path $redirectPath -Target $redirectTarget)
+    $nestedRedirect=Join-Path $redirectPath 'ordinary/missing/run'
+    Reject { Assert-NewArtifactDirectory $nestedRedirect $fixtureRoot } '*without reparse points*'
+    Reject { New-OwnedArtifactDirectory $nestedRedirect $fixtureRoot } '*without reparse points*'
+    Reject { Assert-NewArtifactDirectory (Join-Path $redirectPath 'run') $redirectPath } '*without reparse points*'
+    Check (-not $script:ArtifactDirectoryOwned -and -not (Test-Path -LiteralPath (Join-Path $redirectChild 'missing'))) 'Redirected ancestry created a run directory'
+    Check ([IO.File]::ReadAllText($redirectCanary) -ceq 'unchanged') 'Redirect target content was changed'
+    [IO.File]::WriteAllText($fileAncestor,'unchanged')
+    Reject { Assert-NewArtifactDirectory (Join-Path $fileAncestor 'run') $fixtureRoot } '*without reparse points*'
+} finally {
+    $script:ArtifactDirectoryOwned=$false
+    # The junction itself is removed without traversal. All subsequent cleanup
+    # targets are exact test-created files/directories; no recursive deletion.
+    if ([IO.Directory]::Exists($redirectPath)) { [IO.Directory]::Delete($redirectPath,$false) }
+    foreach ($file in @($winnerReceipt,$winnerSummary,$freshReceipt,$redirectCanary,$fileAncestor)) {
+        if ([IO.File]::Exists($file)) { [IO.File]::Delete($file) }
+    }
+    foreach ($directory in @($collisionPath,$freshPath,$redirectChild,$redirectTarget,$fixtureRoot,$ownershipScratch)) {
+        if ([IO.Directory]::Exists($directory)) { [IO.Directory]::Delete($directory,$false) }
+    }
+}
+
 # Verify actual existing observer imports retain their parameter lists and scopes.
 Import-ExistingPopupObservers (Join-Path $repo 'tools/test/simturns-production-poc.ps1')
 $mockLog=Join-Path $repo 'artifacts/mss32_12345.log'
@@ -116,7 +227,8 @@ $logPath = Join-Path $scratch 'mss32_12345.log'
 $tailPath = Join-Path $scratch 'host.mss32.log'
 try {
     $GameDir=$scratch; $ArtifactDir=$scratch; $ExpectedMergeDay=2
-    $oldText="bootstrap operational release applied; strict independent turns are operational`n[simturns] terminal fault: previous run`n[testdrv][scripted-popup] malformed previous run marker`n"
+    $script:ArtifactDirectoryOwned=$true
+    $oldText="bootstrap operational release applied; strict independent turns are operational`n[simturns] terminal fault: previous run`n[testdrv][scripted-popup] malformed previous run marker`n[E] Failed to run 'old.lua' script.`n"
     [IO.File]::WriteAllText($logPath,$oldText,[Text.UTF8Encoding]::new($false))
     $boundary=Get-LogLaunchBoundary
     $script:Clients=@{host=[pscustomobject]@{Id=12345}}
@@ -126,11 +238,22 @@ try {
     Check ((Get-ClientLogBaseline $logPath) -eq [Text.Encoding]::UTF8.GetByteCount($oldText)) 'Reused PID lost its prelaunch byte boundary'
     $evidence=Get-OwnedLogEvidence host
     Check (-not $evidence.bootstrapOperational -and -not $evidence.fault) 'Old PASS/fault bytes leaked across launch boundary'
+    Check (-not $evidence.scriptError) 'Old Lua error leaked across launch boundary'
     Check ((Read-ClientLogLines $logPath) -ceq 'fresh launch') 'Existing PID reader returned prelaunch content'
     $observer=New-LiteralStartupPopupService host $logPath
     Check (@(Invoke-LiteralPersistentStartupPopupTick $observer).Count -eq 0) 'Old native popup markers leaked across launch boundary'
     [IO.File]::AppendAllText($logPath,"bootstrap operational release applied; strict independent turns are operational`n",[Text.UTF8Encoding]::new($false))
     Check (Get-OwnedLogEvidence host).bootstrapOperational 'New bootstrap marker was not accepted after launch boundary'
+    $ExpectedMergeDay=3
+    [IO.File]::AppendAllText($logPath,"relay released stock turns (actionId=7, day=2)`n",[Text.UTF8Encoding]::new($false))
+    Check (-not (Get-OwnedLogEvidence host).stockTurnsReleased) 'Day-2 release incorrectly proved configured day-3 merge'
+    [IO.File]::AppendAllText($logPath,"relay released stock turns (actionId=8, day=30)`n",[Text.UTF8Encoding]::new($false))
+    Check (-not (Get-OwnedLogEvidence host).stockTurnsReleased) 'Day-30 prefix incorrectly proved configured day-3 merge'
+    [IO.File]::AppendAllText($logPath,"relay released stock turns (actionId=9, day=3)`n",[Text.UTF8Encoding]::new($false))
+    Check (Get-OwnedLogEvidence host).stockTurnsReleased 'Exact day-3 release was not accepted for configured day-3 merge'
+    [IO.File]::AppendAllText($logPath,"[E] Failed to run 'smns\z_unit_effect.lua' script.`nFunction: 'getModifierDisplay'`n",[Text.UTF8Encoding]::new($false))
+    Check (Get-OwnedLogEvidence host).scriptError 'Fresh mod Lua error was not detected'
+    $ExpectedMergeDay=2
     Copy-OwnedLogTail host
     $tail=[IO.File]::ReadAllText($tailPath)
     Check ($tail.StartsWith("fresh launch`n") -and -not $tail.Contains('previous run')) 'Artifact log copied stale prefix'
@@ -139,6 +262,7 @@ try {
     Reject { Read-ClientLogLines $logPath } '*shorter than its launch boundary*'
     Reject { Copy-OwnedLogTail host } '*truncated*'
 } finally {
+    $script:ArtifactDirectoryOwned=$false
     # Exact test-owned files only; no recursive deletion or computed broad target.
     if ([IO.File]::Exists($logPath)) { [IO.File]::Delete($logPath) }
     if ([IO.File]::Exists($tailPath)) { [IO.File]::Delete($tailPath) }
@@ -258,5 +382,21 @@ Check ($nodeAssignment.Count -eq 1) 'Node helper executable assignment is not un
     $psi = [Diagnostics.ProcessStartInfo]::new()
     . ([scriptblock]::Create($nodeAssignment[0].Extent.Text))
     Check ($psi.FileName -ceq 'C:\\first\\node.exe') 'Multiple PATH matches were concatenated into one executable'
+}
+$dayEnvironmentAssignment=@($functions['Invoke-OwnedPreparation'].Body.FindAll({ param($item)
+    $item -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $item.Left.Extent.Text -ceq '$psi.Environment[''OH_SIMULTANEOUS_UNTIL'']'
+},$true))
+Check ($dayEnvironmentAssignment.Count -eq 1) 'Preparation helper must set one explicit merge-day environment value'
+foreach ($day in @(2,3)) {
+    & {
+        $ExpectedMergeDay=$day
+        $psi=[Diagnostics.ProcessStartInfo]::new()
+        $psi.Environment['OH_SIMULTANEOUS_UNTIL']='unrelated-inherited-value'
+        # Execute only the real environment assignment; never start a process.
+        . ([scriptblock]::Create($dayEnvironmentAssignment[0].Extent.Text))
+        Check ($psi.Environment['OH_SIMULTANEOUS_UNTIL'] -ceq [string]$day) "Preparation helper did not pin configured day $day in its child environment"
+        Check ($psi.ArgumentList.Count -eq 0) 'Merge-day environment test unexpectedly created process arguments'
+    }
 }
 "PASS: $script:checks offline lobby E2E checks; no processes, APIs or game callbacks; temporary log fixture cleaned"

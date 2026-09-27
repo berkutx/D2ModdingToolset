@@ -30,6 +30,8 @@ const nativeAutonavScript = path.resolve(
     __dirname, '../../../mss32/src/testdrv/autonav.cpp');
 const nativeUiReporterScript = path.resolve(
     __dirname, '../../../mss32/src/testdrv/uistatereporter.cpp');
+const nativeBattleLayoutHeader = path.resolve(
+    __dirname, '../../../mss32/include/testdrv/battlelayout.h');
 const nativeWorldReporterScript = path.resolve(
     __dirname, '../../../mss32/src/testdrv/worldreporter.cpp');
 const nativeRussobitSitesScript = path.resolve(
@@ -2306,6 +2308,53 @@ test('auto-battle command resolves only after the exact Russobit kick invariant'
         assert.equal(offset, wire.length);
     });
 
+test('B-layout auto-battle retains its exact observed dialog and rejects A aliases',
+    { timeout: 10000 }, async (t) => {
+        const relay = await startRelay(t);
+        const agent = await relay.connect({ role: 'host', pid: 4242 });
+        await waitFor(() => agent.count(Op.HelloAck) === 1, 2000, 'B-layout HelloAck');
+        agent.send(Op.UiSnapshot, uiSnapshot(7, 707, { dialog: 'DLG_BATTLE_B' }));
+        await waitFor(async () => {
+            const state = await requestJson(relay.base, '/api/state');
+            const host = state.body.roles?.host;
+            return host?.dialog === 'DLG_BATTLE_B' && host.dialogAppearance === 7
+                && host.targets?.length === 1 && host.targets[0].instance === 707;
+        }, 2000, 'exact B-layout appearance and owner');
+
+        for (const [dialog, appearance, owner] of [
+            ['DLG_BATTLE_A', 7, 707],
+            ['DLG_BATTLE_B', 6, 707],
+            ['DLG_BATTLE_B', 7, 706],
+        ]) {
+            const rejected = await requestJson(relay.base,
+                '/api/ui/enable-auto-battle'
+                + `?role=host&dlg=${dialog}&tog=TOG_AUTOBATTLE`
+                + `&appearance=${appearance}&instance=${owner}`, 'POST');
+            assert.equal(rejected.status, 409,
+                'a supported layout is not an alias for a different observed identity');
+            assert.equal(agent.count(Op.EnableAutoBattle), 0,
+                'identity rejection must not dispatch the native callback');
+        }
+
+        const response = await requestJson(relay.base,
+            '/api/ui/enable-auto-battle?role=host&dlg=DLG_BATTLE_B&tog=TOG_AUTOBATTLE'
+            + '&appearance=7&instance=707', 'POST');
+        assert.equal(response.status, 200);
+        assert.equal(response.body.found, true);
+        assert.deepEqual(response.body.autoBattle, {
+            dlg: 'DLG_BATTLE_B', tog: 'TOG_AUTOBATTLE', appearance: 7, instance: 707,
+        });
+        assert.equal(response.body.kick.succeeded, true);
+        assert.equal(response.body.kick.memberFunction, 0x00635509);
+        assert.equal(agent.count(Op.EnableAutoBattle), 1);
+        const command = decodeInvokeButton(agent.last(Op.EnableAutoBattle), Op.EnableAutoBattle);
+        assert.ok(command.seq > 0);
+        assert.deepEqual({ ...command, seq: undefined }, {
+            seq: undefined, appearance: 7, instance: 707,
+            dialog: 'DLG_BATTLE_B', button: 'TOG_AUTOBATTLE',
+        }, 'the wire payload must retain B, not rewrite it to A');
+    });
+
 test('host and join retain independent pending auto-battle commands until their own late result',
     { timeout: 10000 }, async (t) => {
         const relay = await startRelay(t);
@@ -2893,9 +2942,18 @@ for (const scenario of [
 test('native auto-battle source preserves the exact Russobit callback contract', () => {
     const autonav = fs.readFileSync(nativeAutonavScript, 'utf8');
     const uiReporter = fs.readFileSync(nativeUiReporterScript, 'utf8');
+    const battleLayout = fs.readFileSync(nativeBattleLayoutHeader, 'utf8');
     const sites = fs.readFileSync(nativeRussobitSitesScript, 'utf8');
     const normalizedAutonav = autonav.replace(/\s+/g, ' ');
     const normalizedSites = normalizedAutonav;
+
+    assert.match(battleLayout,
+        /inline bool isBattleDialog\(const char\* name\)[\s\S]*return name && \(std::strcmp\(name, "DLG_BATTLE_A"\) == 0\s*\|\| std::strcmp\(name, "DLG_BATTLE_B"\) == 0\);/,
+        'one shared, exact classifier must recognize only the two native battle layouts');
+    for (const source of [autonav, uiReporter]) {
+        assert.ok(source.includes('#include "testdrv/battlelayout.h"'),
+            'auto-battle admission and UI ownership must use the same layout classifier');
+    }
 
     for (const constant of [
         'kAutoBattleToggleHandler = 0x00635509;',
@@ -2926,7 +2984,7 @@ test('native auto-battle source preserves the exact Russobit callback contract',
     const normalizedInspect = inspect.replace(/\s+/g, ' ');
     const normalizedAutoBattle = autoBattle.replace(/\s+/g, ' ');
     for (const guard of [
-        'lstrcmpA(dlgName, "DLG_BATTLE_A") == 0',
+        'isBattleDialog(dlgName)',
         'lstrcmpA(togName, "TOG_AUTOBATTLE") == 0',
         'target.functorVftable == kAutoBattleFunctorVftable',
         'target.dispatchFunction == kAutoBattleFunctorDispatch',
@@ -2939,6 +2997,9 @@ test('native auto-battle source preserves the exact Russobit callback contract',
         assert.ok(normalizedInspect.includes(guard),
             `missing exact auto-battle admission guard: ${guard}`);
     }
+    assert.match(inspect,
+        /findDialog\(dlgName\)[\s\S]*lstrcmpA\(current, dlgName\) == 0/,
+        'classification must not replace lookup of the exact requested battle layout');
     assert.ok(normalizedAutoBattle.includes('target.result.kickStateAfter == 1'),
         'the sole callback needs the exact X1D 0->1 postcondition');
     const typeProofAt = inspect.indexOf(
@@ -2995,12 +3056,20 @@ test('native auto-battle source preserves the exact Russobit callback contract',
     assert.ok(beginBindStart >= 0 && recordBindStart > beginBindStart,
         'battle-owner admission must remain independently auditable');
     const beginBind = uiReporter.slice(beginBindStart, recordBindStart);
+    assert.match(beginBind, /const bool isBattle = isBattleDialog\(dialogName\);/,
+        'both battle layouts must enter the same owner epoch');
     assert.match(beginBind,
-        /returnsToStrategic[\s\S]*g_battleEpochActive = false;[\s\S]*g_battleEpochDialog = nullptr;/,
+        /returnsToStrategic[\s\S]*g_battleEpochActive = false;[\s\S]*g_battleEpochDialog = nullptr;[\s\S]*g_battleEpochLayout\[0\] = '\\0';/,
         'the old battle epoch must close on the DLG_STRATEGIC bind transition');
     assert.match(beginBind,
-        /if \(isBattle\)[\s\S]*if \(!g_battleEpochActive\)[\s\S]*g_battleEpochFirstBindTick = GetTickCount\(\);[\s\S]*else if \(dialog != g_battleEpochDialog\)[\s\S]*selectDialogInstance\(dialog, g_battleEpochOwnerInstance,[\s\S]*g_battleEpochFirstBindTick, true\);/,
-        'DLG_BATTLE_A must preserve one exact owner and first-bind clock through late rebinds');
+        /if \(isBattle\)[\s\S]*if \(!g_battleEpochActive\)[\s\S]*lstrcpynA\(g_battleEpochLayout, dialogName, sizeof\(g_battleEpochLayout\)\);[\s\S]*g_battleEpochFirstBindTick = GetTickCount\(\);[\s\S]*else if \(dialog != g_battleEpochDialog\s*\|\| lstrcmpA\(dialogName, g_battleEpochLayout\) != 0\)[\s\S]*TerminateProcess\(GetCurrentProcess\(\), 0xD2E7732Eu\);[\s\S]*selectDialogInstance\(dialog, g_battleEpochOwnerInstance,[\s\S]*g_battleEpochFirstBindTick, true\);/,
+        'both battle layouts must preserve one exact owner and first-bind clock through late rebinds');
+    const resultClose = uiReporter.match(
+        /bool isReadyBattleResultCloseInstance\([\s\S]*?(?=\nbool isReadyStrategicMapInstance)/);
+    assert.ok(resultClose, 'native result-close admission must remain independently auditable');
+    assert.match(resultClose[0],
+        /expectedOwnerInstance != g_battleEpochOwnerInstance[\s\S]*!isBattleDialog\(g_lastDialog\)[\s\S]*lstrcmpA\(g_lastDialog, g_battleEpochLayout\) != 0[\s\S]*!isReadyDialogInstance\(g_lastDialog, expectedAppearance,\s*expectedOwnerInstance\)/,
+        'result close must retain the exact pinned layout as well as owner and appearance');
     const battleBranchEnd = beginBind.indexOf('} else {', beginBind.indexOf('if (isBattle)'));
     assert.ok(battleBranchEnd > 0);
     assert.doesNotMatch(beginBind.slice(beginBind.indexOf('if (isBattle)'), battleBranchEnd),
@@ -3032,7 +3101,14 @@ test('canonical preboot auto-battle is event-driven, one-shot, and backed by bot
         /recordBind\(dialog, dialogName, buttonName\);\s*autonav::onDialogBound\(dialogName, buttonName, g_dialogInstance,\s*g_curOwnerInstance, result\);/,
         'the first battle identity and exact bound button must be captured from the same successful stock bind');
     assert.match(onBind[0],
-        /AwaitingFirstBattle[\s\S]*lstrcmpA\(dialogName, "DLG_BATTLE_A"\)[\s\S]*g_prearmedBattleAppearance = appearance;[\s\S]*g_prearmedBattleOwner = ownerInstance;[\s\S]*WaitingMinimumBindAge/);
+        /AwaitingFirstBattle[\s\S]*isBattleDialog\(dialogName\)[\s\S]*g_prearmedBattleAppearance = appearance;[\s\S]*g_prearmedBattleOwner = ownerInstance;[\s\S]*lstrcpynA\(g_prearmedBattleDialog, dialogName, sizeof\(g_prearmedBattleDialog\)\);[\s\S]*WaitingMinimumBindAge/,
+        'prearm must capture the exact observed A/B layout together with its native identity');
+    assert.match(tick[0],
+        /getReadyCurrentDialogInstanceAge\(\s*g_prearmedBattleDialog, appearance, owner, bindAgeMs\)/,
+        'prearm readiness must remain pinned to the first observed layout');
+    assert.match(tick[0],
+        /inspectAutoBattle\(\s*g_prearmedBattleDialog, "TOG_AUTOBATTLE", kNoSeq, bindAgeMs, target\)/,
+        'native admission must use the captured layout, not an A-layout fallback');
     assert.match(tick[0],
         /AwaitingFirstBattle\)\s*return;[^\n]*event-driven/,
         'readiness polling must never select a later battle as the first one');
@@ -3054,7 +3130,7 @@ test('canonical preboot auto-battle is event-driven, one-shot, and backed by bot
         'the passive admission wait must still expose exactly one callback site');
     for (const token of [
         '\\"schema\\":1', '\\"mode\\":\\"preboot-first-battle\\"',
-        '\\"role\\":\\"{}\\"', '\\"succeeded\\":{}',
+        '\\"role\\":\\"{}\\"', '\\"dialog\\":\\"{}\\"', '\\"succeeded\\":{}',
         '\\"appearance\\":{}', '\\"owner\\":{}', '\\"bindAgeMs\\":{}',
         '\\"callbackCount\\":{}', '\\"functorVftable\\":{}',
         '\\"dispatchFunction\\":{}', '\\"memberFunction\\":{}',
@@ -3069,7 +3145,7 @@ test('canonical preboot auto-battle is event-driven, one-shot, and backed by bot
     assert.match(autonav,
         /g_autoBattlePrearm && op == 0x030C[\s\S]*remote 030C conflicts/);
     assert.match(autonav,
-        /cmd\.type == 5 \|\| cmd\.type == 10[\s\S]*DLG_BATTLE_A[\s\S]*TOG_AUTOBATTLE[\s\S]*remote 0306\/030B conflicts/);
+        /cmd\.type == 5 \|\| cmd\.type == 10[\s\S]*isBattleDialog\(cmd\.dlg\)[\s\S]*TOG_AUTOBATTLE[\s\S]*remote 0306\/030B conflicts/);
 
     for (const token of [
         'autoBattleStaleGate = 0x00635578',
