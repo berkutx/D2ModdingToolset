@@ -6,6 +6,7 @@
 #ifdef D2_TESTDRV
 
 #include "testdrv/scriptedpopups.h"
+#include "testdrv/battlelayout.h"
 #include "testdrv/autonav.h"
 #include "testdrv/testdrv.h"
 #include "testdrv/uistatereporter.h"
@@ -115,7 +116,7 @@ bool isOutsideBattleCandidate(const char* dialogName, const char* buttonName)
 
 bool isBattleCandidate(const char* dialogName, const char* buttonName)
 {
-    if (lstrcmpA(dialogName, "DLG_BATTLE_A") == 0)
+    if (isBattleDialog(dialogName))
         return lstrcmpA(buttonName, "BTN_CLOSE") == 0;
     if (g_postBattleCaptureOpen
         && lstrcmpA(dialogName, "DLG_EVENT_POPUP") == 0)
@@ -311,7 +312,7 @@ void onDialogBound(const char* dialogName, const char* buttonName,
              && lstrcmpA(buttonName, "BTN_CONTINUE") == 0))
         return;
 
-    if (lstrcmpA(dialogName, "DLG_BATTLE_A") == 0 && !g_battleActive) {
+    if (isBattleDialog(dialogName) && !g_battleActive) {
         g_battleActive = true;
         g_battleResultPublished = false;
         g_battleResultClaimed = false;
@@ -330,7 +331,7 @@ void onDialogBound(const char* dialogName, const char* buttonName,
     // the canonical assignFunctor seam. The live-battle hidden button emits no
     // successful bind, so this event is the result publication itself.
     const bool battleResultClose =
-        lstrcmpA(dialogName, "DLG_BATTLE_A") == 0
+        isBattleDialog(dialogName)
         && lstrcmpA(buttonName, "BTN_CLOSE") == 0;
     const bool candidate = g_battleActive
         ? isBattleCandidate(dialogName, buttonName)

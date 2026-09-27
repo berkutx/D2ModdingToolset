@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstdint>
+#include "../mss32/include/testdrv/battlelayout.h"
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -14,8 +15,9 @@
 struct NativeTermination { unsigned code; };
 int lstrcmpA(const char* a, const char* b) { return std::strcmp(a, b); }
 void lstrcpynA(char* out, const char* text, int size) { std::strncpy(out, text, size - 1); out[size - 1] = 0; }
-unsigned GetTickCount() { return 500; }
-unsigned long long GetTickCount64() { return 500; }
+unsigned fixtureTick = 500;
+unsigned GetTickCount() { return fixtureTick; }
+unsigned long long GetTickCount64() { return fixtureTick; }
 unsigned GetCurrentProcessId() { return 4242; }
 void* GetCurrentProcess() { return nullptr; }
 [[noreturn]] void TerminateProcess(void*, unsigned code) { throw NativeTermination{code}; }
@@ -86,6 +88,7 @@ void reset(bool lobby = true, const char* role = "host") {
     g_pending = PendingPopup{}; std::memset(g_role, 0, sizeof(g_role));
     fixture::loaded = fixture::phase = false; fixture::ready = true; fixture::age = 300;
     fixture::appearance = 7; fixture::owner = 77; fixture::claims.clear(); fixture::message.clear();
+    fixture::dialog.clear(); fixtureTick = 500;
     CHECK(preflight(true, true, role, lobby)); activateAfterHooks();
 }
 void bind(const char* dialog, const char* button) {
@@ -138,6 +141,27 @@ int main() {
         terminal(0xD2E77361u, [] { tick(); });
         reset(); hostRelease(); terminal(0xD2E77360u, [] { hostRelease(); });
         reset(); terminal(0xD2E77362u, [] { receiveStartupRelease(nullptr, 4); });
+        CHECK(!hooks::testdrv::isBattleDialog(nullptr));
+        CHECK(!hooks::testdrv::isBattleDialog("DLG_BATTLE_C"));
+        CHECK(!hooks::testdrv::isBattleDialog("dlg_battle_b"));
+        for (const char* layout : {"DLG_BATTLE_A", "DLG_BATTLE_B"}) {
+            reset(false); fixture::loaded = true; receiveStartupRelease(nullptr, 0); tick();
+            bind(layout, "BTN_DEFEND"); tick();
+            CHECK(g_battleActive && !g_pending.valid && fixture::claims.empty());
+            game::CallbackVft vft{reinterpret_cast<void*>(1)};
+            game::CBFunctorDispatch0 functor{&vft};
+            game::ButtonData data{{&functor}};
+            game::CButtonInterf button{&data};
+            onDialogBound(layout, "BTN_CLOSE", fixture::appearance, fixture::owner, &button);
+            CHECK(g_pending.battleResultClose && g_pending.exactButton == &button
+                  && g_pending.exactFunctor == &functor);
+            fixtureTick += 299; tick(); CHECK(fixture::claims.empty());
+            fixtureTick++; tick(); tick();
+            CHECK(fixture::claims.size() == 1
+                  && fixture::claims.front() == std::string(layout) + "::BTN_CLOSE");
+            reset(false); bind(layout, "BTN_DEFEND");
+            terminal(0xD2E7734Bu, [&] { bind(layout, "BTN_CLOSE"); });
+        }
         std::cout << "scripted popup actual state machine: PASS\n"; return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
       catch (const NativeTermination& e) { std::cerr << "unexpected native terminal " << e.code << '\n'; return 1; }

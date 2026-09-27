@@ -13,6 +13,7 @@
 #ifdef D2_TESTDRV
 
 #include "testdrv/autonav.h"
+#include "testdrv/battlelayout.h"
 #include "testdrv/nettracehooks.h"
 #include "testdrv/packetlogicbridge.h"
 #include "testdrv/scriptedpopups.h"
@@ -480,7 +481,7 @@ AutoBattleAdmission inspectAutoBattle(const char* dlgName, const char* togName,
 
     // This verb deliberately has one meaning. A generic toggle must never be
     // able to opt into raw Russobit viewer offsets accidentally.
-    const bool exactTarget = lstrcmpA(dlgName, "DLG_BATTLE_A") == 0
+    const bool exactTarget = isBattleDialog(dlgName)
                              && lstrcmpA(togName, "TOG_AUTOBATTLE") == 0;
     if (!exactTarget)
         return AutoBattleAdmission::Invalid;
@@ -621,6 +622,7 @@ PrearmedAutoBattleState g_prearmedAutoBattleState =
     PrearmedAutoBattleState::Disabled;
 std::uint32_t g_prearmedBattleAppearance = 0;
 std::uint32_t g_prearmedBattleOwner = 0;
+char g_prearmedBattleDialog[32] = {};
 
 [[noreturn]] void failFastPrearmedAutoBattle(const char* seam, unsigned exitCode)
 {
@@ -671,14 +673,14 @@ void emitPrearmedAutoBattleProof(const AutoBattleTarget& target,
     const std::string role = escapeJsonString(g_role);
     spdlog::info(
         "[testdrv][auto-battle-proof] "
-        "{{\"schema\":1,\"mode\":\"preboot-first-battle\",\"role\":\"{}\","
+        "{{\"schema\":1,\"mode\":\"preboot-first-battle\",\"role\":\"{}\",\"dialog\":\"{}\","
         "\"succeeded\":{},\"appearance\":{},\"owner\":{},\"bindAgeMs\":{},"
         "\"callbackCount\":{},\"functorVftable\":{},\"dispatchFunction\":{},"
         "\"memberFunction\":{},\"thisAdjustor\":{},\"controllerGateBefore\":{},"
         "\"kickStateBefore\":{},\"kickStateAfter\":{},\"sideSelector\":{},"
         "\"flag38Before\":{},\"flag38After\":{},\"flag39Before\":{},"
         "\"flag39After\":{}}}",
-        role, target.result.succeeded ? "true" : "false", appearance, owner,
+        role, g_prearmedBattleDialog, target.result.succeeded ? "true" : "false", appearance, owner,
         bindAgeMs, target.callbackCount,
         static_cast<std::uint32_t>(target.functorVftable),
         static_cast<std::uint32_t>(target.dispatchFunction),
@@ -705,7 +707,7 @@ void tickPrearmedAutoBattle()
     std::uint32_t bindAgeMs = 0;
     const bool exactReadyBattle =
         uistatereporter::getReadyCurrentDialogInstanceAge(
-            "DLG_BATTLE_A", appearance, owner, bindAgeMs);
+            g_prearmedBattleDialog, appearance, owner, bindAgeMs);
 
     if (g_prearmedAutoBattleState == PrearmedAutoBattleState::AwaitingFirstBattle)
         return; // capture is event-driven by onDialogBound; never infer it from readiness
@@ -723,7 +725,7 @@ void tickPrearmedAutoBattle()
 
     AutoBattleTarget target{};
     const AutoBattleAdmission admission = inspectAutoBattle(
-        "DLG_BATTLE_A", "TOG_AUTOBATTLE", kNoSeq, bindAgeMs, target);
+        g_prearmedBattleDialog, "TOG_AUTOBATTLE", kNoSeq, bindAgeMs, target);
     // The old green driver observed the engine's interactive gate after the
     // 2500 ms crash-safety floor and invoked the toggle only after that gate
     // opened. Waiting here is not another action attempt: no callback has been
@@ -1271,7 +1273,7 @@ void onRemoteCommand(std::uint16_t op, const std::uint8_t* p, std::uint32_t size
         return;
     const bool exactAutoBattleToggle =
         (cmd.type == 5 || cmd.type == 10)
-        && lstrcmpA(cmd.dlg, "DLG_BATTLE_A") == 0
+        && isBattleDialog(cmd.dlg)
         && lstrcmpA(cmd.widget, "TOG_AUTOBATTLE") == 0;
     if (g_autoBattlePrearm && exactAutoBattleToggle)
         failFastPrearmedAutoBattle(
@@ -1504,7 +1506,7 @@ void drainRemoteCommands()
         }
         else if (cmd.type == 0) {
             const bool targetsBattleResultClose = g_scriptedPopups
-                && lstrcmpA(cmd.dlg, "DLG_BATTLE_A") == 0
+                && isBattleDialog(cmd.dlg)
                 && lstrcmpA(cmd.widget, "BTN_CLOSE") == 0;
             if (targetsBattleResultClose && !cmd.internalScripted)
                 failFastRemoteFault(
@@ -1694,7 +1696,7 @@ void claimAndEnqueueScriptedPopupAction(const char* dialogName,
         failFastRemoteFault("invalid scripted-popup claim", kNoSeq,
                             0xD2E77344u);
     const bool battleResultClose =
-        lstrcmpA(dialogName, "DLG_BATTLE_A") == 0
+        isBattleDialog(dialogName)
         && lstrcmpA(buttonName, "BTN_CLOSE") == 0;
     if ((battleResultClose && (!exactButton || !exactFunctor))
         || (!battleResultClose && (exactButton || exactFunctor)))
@@ -1830,18 +1832,19 @@ void onDialogBound(const char* dialogName, const char* buttonName,
     if (g_active && g_autoBattlePrearm
         && g_prearmedAutoBattleState
                == PrearmedAutoBattleState::AwaitingFirstBattle
-        && dialogName && lstrcmpA(dialogName, "DLG_BATTLE_A") == 0) {
+        && isBattleDialog(dialogName)) {
         if (appearance == 0 || ownerInstance == 0)
             failFastPrearmedAutoBattle(
-                "first DLG_BATTLE_A bind had no exact identity", 0xD2E7733Bu);
+                "first battle bind had no exact identity", 0xD2E7733Bu);
         g_prearmedBattleAppearance = appearance;
         g_prearmedBattleOwner = ownerInstance;
+        lstrcpynA(g_prearmedBattleDialog, dialogName, sizeof(g_prearmedBattleDialog));
         g_prearmedAutoBattleState =
             PrearmedAutoBattleState::WaitingMinimumBindAge;
         spdlog::info(
-            "[testdrv] preboot auto-battle captured first DLG_BATTLE_A bind "
+            "[testdrv] preboot auto-battle captured first {} bind "
             "appearance={} owner={}",
-            appearance, ownerInstance);
+            dialogName, appearance, ownerInstance);
     }
 
     if (g_navArmed || !g_active)

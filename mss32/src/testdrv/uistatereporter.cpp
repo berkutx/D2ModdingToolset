@@ -9,6 +9,7 @@
 #ifdef D2_TESTDRV
 
 #include "testdrv/uistatereporter.h"
+#include "testdrv/battlelayout.h"
 #include "testdrv/autonav.h"
 #include "testdrv/scriptedpopups.h"
 #include "testdrv/testdrv.h"
@@ -117,6 +118,7 @@ bool g_bindCycleOpen = false;
 // Keep the exact native owner and first-bind tick for the whole battle epoch.
 bool g_battleEpochActive = false;
 game::CDialogInterf* g_battleEpochDialog = nullptr;
+char g_battleEpochLayout[32] = {};
 std::uint32_t g_battleEpochOwnerInstance = 0;
 DWORD g_battleEpochFirstBindTick = 0;
 
@@ -688,13 +690,14 @@ void beginBind(game::CDialogInterf* dialog, const char* dialogName)
     if (!dialog || !dialogName || !dialogName[0])
         return;
 
-    const bool isBattle = lstrcmpiA(dialogName, "DLG_BATTLE_A") == 0;
+    const bool isBattle = isBattleDialog(dialogName);
     const bool returnsToStrategic = lstrcmpiA(dialogName, "DLG_STRATEGIC") == 0;
     if (returnsToStrategic && g_battleEpochActive) {
         // This is the old hook's exact battle-active true -> false transition. Do not close the
         // epoch on readiness, timeout, or result-control rebinds.
         g_battleEpochActive = false;
         g_battleEpochDialog = nullptr;
+        g_battleEpochLayout[0] = '\0';
         g_battleEpochOwnerInstance = 0;
         g_battleEpochFirstBindTick = 0;
     }
@@ -704,13 +707,15 @@ void beginBind(game::CDialogInterf* dialog, const char* dialogName)
             advanceCounter(g_ownerInstanceCounter, 0xD2E77323u, "dialog owner");
             g_battleEpochActive = true;
             g_battleEpochDialog = dialog;
+            lstrcpynA(g_battleEpochLayout, dialogName, sizeof(g_battleEpochLayout));
             g_battleEpochOwnerInstance = g_ownerInstanceCounter;
             g_battleEpochFirstBindTick = GetTickCount();
-        } else if (dialog != g_battleEpochDialog) {
+        } else if (dialog != g_battleEpochDialog
+                   || lstrcmpA(dialogName, g_battleEpochLayout) != 0) {
             // The working implementation allowed one local battle viewer until DLG_STRATEGIC.
             // A second native owner in that interval is an invariant violation, never a new clock.
             spdlog::critical(
-                "[testdrv] UI-state saw a second DLG_BATTLE_A owner before DLG_STRATEGIC; "
+                "[testdrv] UI-state saw a second battle owner/layout before DLG_STRATEGIC; "
                 "terminating");
             spdlog::default_logger()->flush();
             TerminateProcess(GetCurrentProcess(), 0xD2E7732Eu);
@@ -1120,7 +1125,9 @@ bool isReadyBattleResultCloseInstance(std::uint32_t expectedAppearance,
     if (!g_battleEpochActive || !g_battleEpochDialog || !exactButton
         || !exactFunctor
         || expectedOwnerInstance != g_battleEpochOwnerInstance
-        || !isReadyDialogInstance("DLG_BATTLE_A", expectedAppearance,
+        || !isBattleDialog(g_lastDialog)
+        || lstrcmpA(g_lastDialog, g_battleEpochLayout) != 0
+        || !isReadyDialogInstance(g_lastDialog, expectedAppearance,
                                   expectedOwnerInstance))
         return false;
 
