@@ -18,6 +18,9 @@
  */
 
 #include "midserverlogichooks.h"
+#ifdef D2_TESTDRV
+#include "testdrv/fixture_reinforcement.h"
+#endif
 #include "cmdmovestackendmsg.h"
 #include "dynamiccast.h"
 #include "exchangeresourcesmsg.h"
@@ -653,6 +656,10 @@ void __fastcall processZeroTurnHooked(game::CMidServerLogic* thisptr,
         getOriginalFunctions().processZeroTurn(thisptr, playerNetId, a3);
     }
 
+#ifdef D2_TESTDRV
+    if (isTurnZero)
+        testdrv::fixture_reinforcement::onFirstTurnZero(thisptr);
+#endif
 
     if (!isTurnZero) {
         return;

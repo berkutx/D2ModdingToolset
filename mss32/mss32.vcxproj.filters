@@ -4110,4 +4110,43 @@
     <ClInclude Include="include\simturns\russobit_sites.h"><Filter>simturns</Filter></ClInclude>
     <ClInclude Include="include\simturns\session_types.h"><Filter>simturns</Filter></ClInclude>
   </ItemGroup>
+  <ItemGroup>
+    <Filter Include="testdrv"><UniqueIdentifier>{CA23DA73-3FB2-4F8A-9011-437739460B30}</UniqueIdentifier></Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\testdrv\autonav.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClCompile Include="src\testdrv\bootfixes.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClCompile Include="src\testdrv\battletrace.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClCompile Include="src\testdrv\fixture_reinforcement.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClCompile Include="src\testdrv\fixtureplan.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClCompile Include="src\testdrv\legacystackreporter.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClCompile Include="src\testdrv\lobbychatreporter.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClCompile Include="src\testdrv\nettracehooks.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClCompile Include="src\testdrv\packetlogicbridge.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClCompile Include="src\testdrv\scriptedpopups.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClCompile Include="src\testdrv\testdrv.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClCompile Include="src\testdrv\testenv.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClCompile Include="src\testdrv\uistatereporter.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClCompile Include="src\testdrv\worldactions.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClCompile Include="src\testdrv\worldreporter.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClCompile Include="src\testdrv\local_coordinator_adapter.cpp"><Filter>testdrv</Filter></ClCompile>
+    <ClInclude Include="include\testdrv\autonav.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\bootfixes.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\battletrace.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\fixture_reinforcement.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\fixtureplan.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\legacystackreporter.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\lobbychatreporter.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\nettracehooks.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\packetlogicbridge.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\scriptedpopups.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\testdrv.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\testenv.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\uistatereporter.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\worldactions.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\worldreporter.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\local_coordinator_adapter.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\json.h"><Filter>testdrv</Filter></ClInclude>
+    <ClInclude Include="include\testdrv\networkobservers.h"><Filter>testdrv</Filter></ClInclude>
+  </ItemGroup>
 </Project>

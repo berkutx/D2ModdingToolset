@@ -6,6 +6,9 @@
 #include "executablefingerprint.h"
 #include "netmsg.h"
 #include "uiframedispatcher.h"
+#ifdef D2_TESTDRV
+#include "testdrv/networkobservers.h"
+#endif
 #include <atomic>
 #include <cstddef>
 #include <cstdlib>
@@ -58,6 +61,14 @@ std::atomic<int> g_recvDispatchDepth{0};
 // Unlike g_recvDispatchDepth, this spans receiveHookCore from its first policy
 // observation through its causal completion, including any nested screen loop.
 std::atomic<std::uint32_t> g_receiveHookDepth{0};
+#ifdef D2_TESTDRV
+alignas(8) std::atomic<std::uint64_t> g_orderedWorkEpoch{0};
+std::atomic<bool> g_naturalFrameHadOrderedWork{false};
+void markOrderedWorkTransition()
+{
+    g_orderedWorkEpoch.fetch_add(1, std::memory_order_acq_rel);
+}
+#endif
 std::atomic<std::uint32_t> g_sendHookDepth{0};
 thread_local std::uint32_t g_localReceiveHookDepth = 0;
 thread_local std::uint32_t g_localSendHookDepth = 0;
@@ -388,6 +399,9 @@ void enqueueDeferredPacket(void* self, void* edx, std::uint32_t idFrom,
             try {
                 g_deferredPackets.push_back(std::move(packet));
                 g_deferredPackets.back().ticket = std::exchange(ticket, {});
+#ifdef D2_TESTDRV
+                markOrderedWorkTransition();
+#endif
                 queued = true;
             } catch (...) {
                 // Never unwind an allocation failure through the native receive
@@ -420,6 +434,9 @@ int receiveHookCore(void* self, void* edx, int packet, int idFrom, int playerNet
     // retire the full-hook depth even when the native dispatcher raises SEH,
     // while the exception itself must continue outward unchanged.
     g_receiveHookDepth.fetch_add(1, std::memory_order_acq_rel);
+#ifdef D2_TESTDRV
+    markOrderedWorkTransition();
+#endif
     ++g_localReceiveHookDepth;
     NativeReceiveTicket ticket = replayTicket ? std::exchange(*replayTicket, {})
                                               : takeNativeTicket(packet);
@@ -441,6 +458,9 @@ int receiveHookCore(void* self, void* edx, int packet, int idFrom, int playerNet
         }
     } __finally {
         --g_localReceiveHookDepth;
+#ifdef D2_TESTDRV
+        markOrderedWorkTransition();
+#endif
         g_receiveHookDepth.fetch_sub(1, std::memory_order_acq_rel);
         if (AbnormalTermination() || g_sessionTeardown.load(std::memory_order_acquire))
             discardNativeTicket(ticket);
@@ -465,6 +485,10 @@ int receiveHookCoreImpl(void* self, void* edx, int packet, int idFrom,
     }
 
     RxCompletionTask completion;
+#ifdef D2_TESTDRV
+    const std::uint8_t* postDispatchPayload = nullptr;
+    std::uint32_t postDispatchPayloadSize = 0;
+#endif
     if (packet) {
         const auto* frame = reinterpret_cast<const std::uint8_t*>(
             static_cast<std::uintptr_t>(static_cast<std::uint32_t>(packet)));
@@ -481,6 +505,13 @@ int receiveHookCoreImpl(void* self, void* edx, int packet, int idFrom,
             const std::uint32_t receiverDpid =
                 static_cast<std::uint32_t>(playerNetId);
 
+#ifdef D2_TESTDRV
+            // Do not report a deferred frame as a second incoming packet.
+            if (allowDefer)
+                testdetail::observeRx(self, senderDpid, payload, payloadSize);
+            postDispatchPayload = payload;
+            postDispatchPayloadSize = payloadSize;
+#endif
             RxDecision decision = RxDecision::Pass;
             {
                 // A policy may arm one causal completion only while this exact
@@ -492,6 +523,11 @@ int receiveHookCoreImpl(void* self, void* edx, int packet, int idFrom,
                         g_rxDispatchCallback.load(std::memory_order_acquire))
                     decision = callback(self, edx, packet, frameLength,
                                         senderDpid, receiverDpid);
+#ifdef D2_TESTDRV
+                if (decision == RxDecision::Pass)
+                    decision = testdetail::applyRxPolicy(
+                        self, edx, packet, frameLength, senderDpid, receiverDpid);
+#endif
             }
             if (decision != RxDecision::Pass) {
                 ticket.diagnostic.policy = decision;
@@ -530,6 +566,14 @@ int receiveHookCoreImpl(void* self, void* edx, int packet, int idFrom,
             failFastRuntime("post-dispatch RX completion threw", 0xD2E7710Du);
         }
     }
+#ifdef D2_TESTDRV
+    if (postDispatchPayload && result > 0
+        && !g_sessionTeardown.load(std::memory_order_acquire))
+        testdetail::observeRxDispatched(
+            self, static_cast<std::uint32_t>(idFrom),
+            static_cast<std::uint32_t>(playerNetId),
+            postDispatchPayload, postDispatchPayloadSize, result);
+#endif
     return result;
 }
 
@@ -569,6 +613,14 @@ int dispatchTxCore(void* self, void* transportContext, std::uint32_t idTo,
         return continuation(self, transportContext, idTo, message);
 
     TxCompletionTask completion;
+#ifdef D2_TESTDRV
+    // Keep the caller-owned frame identity/size from before natural Send.
+    // Observers synchronously copy any facts they retain after this invocation.
+    const auto* postSendMessage = reinterpret_cast<const std::uint8_t*>(message);
+    const std::uint32_t postSendSize = message ? message->length : 0;
+    if (message)
+        testdetail::observeTx(self, idTo, message);
+#endif
     if (message) {
         TxDecision decision = TxDecision::Pass;
         {
@@ -579,6 +631,10 @@ int dispatchTxCore(void* self, void* transportContext, std::uint32_t idTo,
                     g_txCallback.load(std::memory_order_acquire)) {
                 decision = callback(self, idTo, message);
             }
+#ifdef D2_TESTDRV
+            if (decision == TxDecision::Pass)
+                decision = testdetail::applyTxPolicy(self, idTo, message);
+#endif
         }
         if (decision != TxDecision::Pass) {
             if (completion.callback) {
@@ -601,6 +657,10 @@ int dispatchTxCore(void* self, void* transportContext, std::uint32_t idTo,
             failFastRuntime("post-Send TX completion threw", 0xD2E77111u);
         }
     }
+#ifdef D2_TESTDRV
+    if (postSendMessage && !g_sessionTeardown.load(std::memory_order_acquire))
+        testdetail::observeTxSent(self, idTo, postSendMessage, postSendSize, result);
+#endif
     return result;
 }
 
@@ -650,6 +710,33 @@ int dispatchTx(void* self, void* transportContext, std::uint32_t idTo,
     }
     return result;
 }
+
+#ifdef D2_TESTDRV
+int testdetail::dispatchLocalServerFrame(void* receiverSelf, std::uint32_t sender,
+                                        int receiver, const game::NetMessageHeader* message)
+{
+    return receiveHookCore(
+        receiverSelf, nullptr,
+        static_cast<int>(reinterpret_cast<std::uintptr_t>(message)),
+        static_cast<int>(sender), receiver, false, false);
+}
+
+bool captureOrderedWorkSnapshotForTestdrv(OrderedWorkSnapshot& snapshot)
+{
+    std::scoped_lock lock(g_deferredMutex, g_uiTaskMutex);
+    const auto before = g_orderedWorkEpoch.load(std::memory_order_acquire);
+    snapshot.receiveHookDepth = g_receiveHookDepth.load(std::memory_order_acquire);
+    snapshot.originalDispatchDepth =
+        static_cast<std::uint32_t>(g_recvDispatchDepth.load(std::memory_order_acquire));
+    snapshot.deferredPacketCount = static_cast<std::uint32_t>(g_deferredPackets.size());
+    snapshot.uiTaskCount = static_cast<std::uint32_t>(g_uiTasks.size());
+    snapshot.naturalFrameHadOrderedWork =
+        g_naturalFrameHadOrderedWork.load(std::memory_order_acquire)
+        || g_sessionTeardown.load(std::memory_order_acquire);
+    snapshot.epoch = g_orderedWorkEpoch.load(std::memory_order_acquire);
+    return before == snapshot.epoch;
+}
+#endif
 
 void setRxDispatchCallback(RxDispatchCallback callback)
 {
@@ -877,6 +964,9 @@ bool queueOnNextUiFrame(UiTaskCallback callback, void* context,
             return false;
         try {
             g_uiTasks.push_back(UiTask{callback, context, discard});
+#ifdef D2_TESTDRV
+            markOrderedWorkTransition();
+#endif
         } catch (...) {
             // The task was not accepted. Ownership of context therefore stays
             // with the caller, which will free it and enter its fail-closed path.
@@ -914,7 +1004,13 @@ bool drainOneOnUiThread()
                       currentThread, g_mainThreadId.load(std::memory_order_relaxed));
         return false;
     }
+#ifdef D2_TESTDRV
+    g_naturalFrameHadOrderedWork.store(false, std::memory_order_release);
+#endif
     if (g_sessionTeardown.load(std::memory_order_acquire) || recvDispatchDepth() != 0) {
+#ifdef D2_TESTDRV
+        g_naturalFrameHadOrderedWork.store(true, std::memory_order_release);
+#endif
         // Stock RX can reenter a screen loop while constructing a dialog. Leave
         // both queues untouched; the next outer natural frame is the sole next
         // ordered-work edge. There is no repost, retry, timer, or fallback seam.
@@ -932,6 +1028,10 @@ bool drainOneOnUiThread()
             return false;
         deferred = std::move(g_deferredPackets.front());
         g_deferredPackets.pop_front();
+#ifdef D2_TESTDRV
+        markOrderedWorkTransition();
+        g_naturalFrameHadOrderedWork.store(true, std::memory_order_release);
+#endif
         return true;
     };
     const auto takeUiTask = [&]() {
@@ -940,6 +1040,10 @@ bool drainOneOnUiThread()
             return false;
         task = g_uiTasks.front();
         g_uiTasks.pop_front();
+#ifdef D2_TESTDRV
+        markOrderedWorkTransition();
+        g_naturalFrameHadOrderedWork.store(true, std::memory_order_release);
+#endif
         return true;
     };
 
@@ -984,6 +1088,9 @@ bool drainOneOnUiThread()
     }
 
     const bool hadOrderedWork = haveDeferred || haveTask;
+#ifdef D2_TESTDRV
+    g_naturalFrameHadOrderedWork.store(hadOrderedWork, std::memory_order_release);
+#endif
     return hadOrderedWork;
 }
 

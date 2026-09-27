@@ -32,6 +32,15 @@ struct CPhaseGame;
 namespace hooks {
 
 bool __fastcall phaseGameCheckObjectLockHooked(game::CPhaseGame* thisptr, int /*%edx*/);
+#ifdef D2_TESTDRV
+/** Observe the result of the same one natural Send used by the UI hook. */
+bool trySendStackMoveMsgThroughNativeTransport(
+    game::CPhaseGame* thisptr,
+    const game::CMidgardID* stackId,
+    const game::List<game::Pair<game::CMqPoint, int>>* movementPath,
+    const game::CMqPoint* startPosition,
+    const game::CMqPoint* endPosition);
+#endif
 
 void __fastcall phaseGameSendStackMoveMsgHooked(
     game::CPhaseGame* thisptr,

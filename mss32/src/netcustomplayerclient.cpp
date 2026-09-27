@@ -26,7 +26,7 @@
 #include "netcustomplayer.h"
 #include "netcustomservice.h"
 #include "netcustomsession.h"
-#ifdef D2_SIMTURNS
+#if defined(D2_SIMTURNS) || defined(D2_TESTDRV)
 #include "netintercept.h"
 #endif
 #include "netmsg.h"
@@ -98,7 +98,7 @@ bool __fastcall CNetCustomPlayerClient::sendMessage(CNetCustomPlayerClient* this
                                                     std::uint32_t idTo,
                                                     const game::NetMessageHeader* message)
 {
-#ifdef D2_SIMTURNS
+#if defined(D2_SIMTURNS) || defined(D2_TESTDRV)
     return netintercept::dispatchTx(thisptr, nullptr, idTo, message,
                                     &sendMessageUnintercepted) != 0;
 }

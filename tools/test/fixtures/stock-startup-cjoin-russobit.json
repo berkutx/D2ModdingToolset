@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "description": "Two natural CJoinGame payloads from one successful stock DirectPlay Russobit startup",
+  "provenance": {
+    "sourceRepository": "C:\\GOG Games\\Disciples 2 - Rise of the Elves\\lobby",
+    "joinPacketLog": "logs\\d2lobby_packets_13128.log",
+    "sourceLines": [74, 93],
+    "sourceDeclaredFrameSize": 64,
+    "normalization": "The old hook logged from payload +8 for the full 64-byte frame length; the final 8 bytes were an out-of-frame over-read, so each fixture retains the exact meaningful 56-byte payload"
+  },
+  "layout": {
+    "payloadSize": 56,
+    "joinedHandleOffset": 36,
+    "nameLengthOffset": 40,
+    "nameOffset": 44
+  },
+  "orderedPayloads": [
+    {
+      "meaning": "host-player join announcement; satisfies the historical WaitHostBriefing gate",
+      "joinedHandle": "0xA3DE0001",
+      "payloadHex": "2E 3F 41 56 43 4A 6F 69 6E 47 61 6D 65 4D 73 67 40 40 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 DE A3 08 00 00 00 62 65 72 6B 75 74 32 00 00 00 00 00"
+    },
+    {
+      "meaning": "join-player join announcement; completes the observed four-message startup witness",
+      "joinedHandle": "0xA3DE0002",
+      "payloadHex": "2E 3F 41 56 43 4A 6F 69 6E 47 61 6D 65 4D 73 67 40 40 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 02 00 DE A3 08 00 00 00 62 65 72 6B 75 74 32 00 00 00 00 00"
+    }
+  ]
+}
+

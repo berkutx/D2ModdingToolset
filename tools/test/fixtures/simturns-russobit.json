@@ -1,0 +1,92 @@
+{
+  "schema": 1,
+  "name": "Devouring marshes 1-02",
+  "legacySelectionIndex": 1,
+  "map": {
+    "relativePath": "Exports\\DevouringMarshes_Eng.sg",
+    "size": 384279,
+    "sha256": "4B2E0F21E707192FF8311D864CA815B5F14B97D5FBB6696C3AC862FDB99E01C2",
+    "observedScenarioName": "Devouring marshes 1-02",
+    "observedRoomName": "Battle for Wisgard 1-43x"
+  },
+  "executable": {
+    "relativePath": "Discipl2.exe",
+    "size": 4187648,
+    "sha256": "1375CDEF09EC470EE64FE5693FB734D7C69FB215212311D997F792B258A642EB"
+  },
+  "mergeDay": 3,
+  "crossBattle": {
+    "joinTarget": {
+      "id": "0xA3E30021",
+      "x": 20,
+      "y": 25
+    },
+    "joinAttackWireBudget": 6,
+    "joinStressSteps": [
+      { "fromX": 19, "fromY": 27, "toX": 18, "toY": 27, "movementBefore": 23, "movementAfter": 20 },
+      { "fromX": 18, "fromY": 27, "toX": 19, "toY": 27, "movementBefore": 20, "movementAfter": 17 },
+      { "fromX": 19, "fromY": 27, "toX": 18, "toY": 27, "movementBefore": 17, "movementAfter": 14 },
+      { "fromX": 18, "fromY": 27, "toX": 19, "toY": 27, "movementBefore": 14, "movementAfter": 11 },
+      { "fromX": 19, "fromY": 27, "toX": 18, "toY": 27, "movementBefore": 11, "movementAfter": 8 }
+    ],
+    "hostMove": {
+      "x": 27,
+      "y": 17,
+      "movement": 13
+    },
+    "hostExhaustionSteps": [
+      { "fromX": 27, "fromY": 17, "toX": 28, "toY": 17, "movementBefore": 13, "movementAfter": 11 },
+      { "fromX": 28, "fromY": 17, "toX": 27, "toY": 17, "movementBefore": 11, "movementAfter": 9 },
+      { "fromX": 27, "fromY": 17, "toX": 28, "toY": 17, "movementBefore": 9, "movementAfter": 7 },
+      { "fromX": 28, "fromY": 17, "toX": 27, "toY": 17, "movementBefore": 7, "movementAfter": 5 },
+      { "fromX": 27, "fromY": 17, "toX": 28, "toY": 17, "movementBefore": 5, "movementAfter": 3 },
+      { "fromX": 28, "fromY": 17, "toX": 29, "toY": 17, "movementBefore": 3, "movementAfter": 0 }
+    ]
+  },
+  "players": {
+    "neutralHandle": "0xA3DE0000",
+    "hostHandle": "0xA3DE0001",
+    "joinHandle": "0xA3DE0002"
+  },
+  "host": {
+    "heroId": "0xA3E30000",
+    "reinforcement": {
+      "leaderId": "0xA3E4019D",
+      "unitIds": ["0xA3E40195", "0xA3E4019C", "0xA3E40198"],
+      "units": 4,
+      "hp": 715
+    },
+    "anchor": { "x": 22, "y": 12 },
+    "garrison": { "x": 26, "y": 16 },
+    "deploy": { "x": 27, "y": 16, "movement": 35, "units": 4 },
+    "longMove": { "x": 20, "y": 18 },
+    "cleanLongMove": { "x": 37, "y": 21, "movement": 1 },
+    "longAttack": { "target": { "id": "0xA3E30060", "x": 22, "y": 8 } },
+    "target": { "id": "0xA3E3002A", "x": 29, "y": 17 },
+    "battleStart": { "x": 28, "y": 17, "movement": 15, "units": 4 },
+    "battleEnd": { "x": 28, "y": 17, "movement": 15 },
+    "postBattleWalk": { "x": 29, "y": 17, "movement": 12 },
+    "day2Reverse": { "x": 28, "y": 17, "movement": 33 }
+  },
+  "join": {
+    "heroId": "0xA3E30001",
+    "reinforcement": {
+      "leaderId": "0xA3E4019E",
+      "unitIds": ["0xA3E40199", "0xA3E4019A", "0xA3E4019B"],
+      "units": 4,
+      "hp": 700
+    },
+    "anchor": { "x": 12, "y": 22 },
+    "garrison": { "x": 16, "y": 26 },
+    "deploy": { "x": 15, "y": 27, "movement": 35, "units": 4 },
+    "longMove": { "x": 20, "y": 22 },
+    "cleanLongMove": { "x": 11, "y": 38, "movement": 2 },
+    "longAttack": { "target": { "id": "0xA3E3001D", "x": 17, "y": 30 } },
+    "target": { "id": "0xA3E3001D", "x": 17, "y": 30 },
+    "battleStart": { "x": 17, "y": 29, "movement": 11, "units": 4 },
+    "battleEnd": { "x": 17, "y": 29, "movement": 11 },
+    "postBattleWalk": { "x": 17, "y": 30, "movement": 5 },
+    "day2Reverse": { "x": 17, "y": 29, "movement": 29 }
+  }
+}
+

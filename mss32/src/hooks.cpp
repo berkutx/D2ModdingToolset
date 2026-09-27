@@ -18,9 +18,17 @@
  */
 
 #include "hooks.h"
+#ifdef D2_TESTDRV
+#include "testdrv/battletrace.h"
+#ifdef D2_SIMTURNS
+#include "testdrv/local_coordinator_adapter.h"
+#endif
+#endif
 #ifdef D2_SIMTURNS
 #include "simturns/controller.h"
 #include "simturns/state.h"
+#endif
+#if defined(D2_SIMTURNS) || defined(D2_TESTDRV)
 #include "uiframedispatcher.h"
 #endif
 #include "lobbysaveresume.h"
@@ -846,6 +854,11 @@ static Hooks getGameHooks()
 
 #ifdef D2_SIMTURNS
     simturns::appendHooks(hooks);
+#ifdef D2_TESTDRV
+    testdrv::local_coordinator_adapter::appendHooks(hooks);
+#endif
+#endif
+#if defined(D2_SIMTURNS) || defined(D2_TESTDRV)
     if (uiframedispatcher::requested())
         hooks.push_back(uiframedispatcher::hookInfo());
 #endif
@@ -1840,6 +1853,9 @@ void __stdcall afterBattleTurnHooked(game::BattleMsgData* battleMsgData,
                                      const game::CMidgardID* nextUnitId)
 {
     using namespace game;
+#ifdef D2_TESTDRV
+    testdrv::battletrace::Scope trace("unit-after", battleMsgData, nullptr, unitId);
+#endif
 
     if (!battleMsgData || !unitId || !nextUnitId)
         return;
@@ -1896,6 +1912,9 @@ void __stdcall beforeBattleTurnHooked(game::BattleMsgData* battleMsgData,
                                       const game::CMidgardID* unitId)
 {
     using namespace game;
+#ifdef D2_TESTDRV
+    testdrv::battletrace::Scope trace("unit-before", battleMsgData, objectMap, unitId);
+#endif
 
     if (!battleMsgData || !objectMap || !unitId)
         return;
@@ -2941,6 +2960,9 @@ void __fastcall battleEndHooked(game::IBatViewer* thisptr,
                                 const game::BattleMsgData* battleMsgData,
                                 const game::CMidgardID* a3)
 {
+#ifdef D2_TESTDRV
+    testdrv::battletrace::Scope trace("viewer-end", battleMsgData);
+#endif
     resetPreTurnHookState();
     getOriginalFunctions().battleEnd(thisptr, battleMsgData, a3);
 }
@@ -3520,6 +3542,11 @@ void __fastcall damageAttackOnHitHooked(game::CBatAttackDamage* thisptr,
     }
 
     addToBattleAttackInfo(*attackInfo, targetUnit, normalDamage, critDamage);
+#ifdef D2_TESTDRV
+    testdrv::battletrace::damageHit(battleMsgData, objectMap, &thisptr->unitId, targetUnitId,
+                                  hpBefore, targetUnit->currentHp, normalDamage, critDamage,
+                                  totalDamage);
+#endif
 
 }
 

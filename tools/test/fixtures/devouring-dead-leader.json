@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "health": {
+    "stack": "0xA3E30000",
+    "unit": "0xA3E4019D",
+    "implementation": "0x00068248",
+    "expectedHp": 115,
+    "newHp": 0
+  },
+  "movementCost": 6,
+  "description": "Separate dead-leader movement precondition, not evidence of natural death in battle."
+}
+

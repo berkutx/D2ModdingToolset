@@ -18,6 +18,9 @@
  */
 
 #include "battlemsgdatahooks.h"
+#ifdef D2_TESTDRV
+#include "testdrv/battletrace.h"
+#endif
 #include "attackview.h"
 #include "batattack.h"
 #include "bindings/battlemsgdataviewmutable.h"
@@ -451,10 +454,16 @@ void __stdcall updateBattleActionsHooked(const game::IMidgardObjectMap* objectMa
 void __fastcall beforeBattleRoundHooked(game::BattleMsgData* thisptr, int /*%edx*/)
 {
     using namespace game;
+#ifdef D2_TESTDRV
+    testdrv::battletrace::Scope trace("round-before", thisptr);
+#endif
 
     const auto& battleApi = BattleMsgDataApi::get();
     const auto& unitInfoApi = UnitInfoListApi::get();
     IMidgardObjectMap* objectMap = const_cast<IMidgardObjectMap*>(hooks::getObjectMap());
+#ifdef D2_TESTDRV
+    trace.setMap(objectMap);
+#endif
 
     thisptr->currentRound++;
 
@@ -510,6 +519,10 @@ void __stdcall aiChooseBattleActionHooked(const game::IMidgardObjectMap* objectM
                                           game::CMidgardID* attackerUnitId)
 {
     using namespace game;
+#ifdef D2_TESTDRV
+    testdrv::battletrace::Scope trace("ai-choice", battleMsgData, objectMap, unitId,
+                                     battleAction, targetUnitId, attackerUnitId);
+#endif
 
     const auto& chooseBattleAction{getOriginalFunctions().aiChooseBattleAction};
 

@@ -24,7 +24,6 @@ static void readPotionExtraFields(int* itemCat,
     db.readIntWithBoundsCheck(&item_Cat, dbTable, "ITEM_CAT", 0, 14);
     db.readIntWithBoundsCheck(&hp_Potion, dbTable, "HP_POTION", std::numeric_limits<int>::min(),
                               std::numeric_limits<int>::max());
-    
     // Healing/revival potions may leave this optional DBF field blank. Do not
     // use a native exception for absence: debug mode reports it before catch.
     String modifierText{};

@@ -1,0 +1,402 @@
+#requires -Version 7.0
+# Offline: actual extracted runner policies, no game/API/process launch.
+# PID-log I/O uses only this test's temporary directory; no existing log is edited.
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$path = Join-Path $repo 'tools/test/simturns-lobby-e2e.ps1'
+$tokens=$null; $errors=$null
+$ast = [Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw ($errors | Out-String) }
+$functions = @{}
+foreach ($node in $ast.FindAll({ param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+    $functions[$node.Name] = $node
+}
+foreach ($name in @('Property', 'Protect-UiSnapshot', 'ConvertTo-NativeReportedText', 'Get-PreparedPrompt',
+    'Get-ExactEntryAction', 'Test-ConsumedEntryAppearance', 'Import-ExistingPopupObservers', 'Start-OwnedPair',
+    'Get-LogLaunchBoundary', 'Assert-FreshOwnedLog', 'Get-OwnedLogEvidence', 'Copy-OwnedLogTail', 'Compare-ProtectedFileHashes',
+    'Test-StartupRoleAccepted', 'Assert-NewArtifactDirectory', 'New-OwnedArtifactDirectory',
+    'Assert-OwnedArtifactDirectory', 'Save-Json', 'Invoke-OwnedPreparation')) {
+    . ([scriptblock]::Create($functions[$name].Extent.Text))
+}
+$script:checks=0
+function Check([bool]$condition,[string]$message) { $script:checks++; if(-not $condition) { throw $message } }
+function Reject([scriptblock]$operation,[string]$pattern) {
+    $caught=$false
+    try { & $operation | Out-Null } catch { $caught=$_.Exception.Message -like $pattern }
+    Check $caught "Expected terminal rejection: $pattern"
+}
+function Ui([string]$dialog,[string]$button,[string]$text='') {
+    [pscustomobject]@{ dialog=$dialog; dialogReady=$true; dialogAppearance=13; dialogInstance=13
+        widgets=@([pscustomobject]@{ name='TXT_INFO'; type='text'; state=[pscustomobject]@{ text=$text } })
+        targets=@([pscustomobject]@{ dialog=$dialog; instance=42
+            widgets=@([pscustomobject]@{ name=$button; type='button'; state=[pscustomobject]@{ enabled=$true } }) }) }
+}
+# The existing campaign accepts either co-present bare-map root. A different
+# root or any missing readiness proof must not become startup acceptance.
+foreach ($rootDialog in @('DLG_STRATEGIC', 'DLG_ISO_PAL')) {
+    $acceptedUi=[pscustomobject]@{dialog=$rootDialog;mapLoaded=$true;dialogReady=$true;strategicIdle=$true}
+    Check (Test-StartupRoleAccepted $acceptedUi $true) "Valid bare map rejected: $rootDialog"
+    Check (-not (Test-StartupRoleAccepted $acceptedUi $false)) "Bootstrap guard bypassed: $rootDialog"
+    foreach ($guard in @('mapLoaded', 'dialogReady', 'strategicIdle')) {
+        $acceptedUi.$guard=$false
+        Check (-not (Test-StartupRoleAccepted $acceptedUi $true)) "$guard guard bypassed: $rootDialog"
+        $acceptedUi.$guard=$true
+    }
+}
+foreach ($rootDialog in @('DLG_MESSAGE_BOX', 'DLG_GETINFO_BOX', 'DLG_BEGIN_TURN', 'DLG_LOBBY', 'UNKNOWN', 'dlg_iso_pal')) {
+    $modalUi=[pscustomobject]@{dialog=$rootDialog;mapLoaded=$true;dialogReady=$true;strategicIdle=$true}
+    Check (-not (Test-StartupRoleAccepted $modalUi $true)) "Modal/unknown root accepted: $rootDialog"
+}
+$acceptanceCalls=@($functions['Wait-StartupAcceptance'].Body.FindAll({ param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Test-StartupRoleAccepted'
+},$true))
+Check ($acceptanceCalls.Count -eq 1) 'Live acceptance loop does not use the tested root predicate'
+$expectedHost = 'Diligence 1.2.3 · áåç ðåéòèíãà' + "`n" + 'test2 '+[char]0x97+' Ýëüôû (õîñò)' + "`n" +
+    'test1 '+[char]0x97+' Êëàíû' + "`n" + '1-é õîä: test2' + "`n" + 'ÎÕ: îáúåäèíåíèå íà äåíü 2' + "`n" + 'Ñãåíåðèðîâàòü êàðòó?'
+$ExpectedMergeDay=2
+$hostPrompt=Get-PreparedPrompt host 'Diligence 1.2.3'
+Check ($hostPrompt -ceq $expectedHost) 'Host prompt differs from saved actual run004 bytes'
+$ExpectedMergeDay=3
+$hostPromptDay3=Get-PreparedPrompt host 'Diligence 1.2.3'
+$expectedHostDay3=$expectedHost.Replace('ÎÕ: îáúåäèíåíèå íà äåíü 2', 'ÎÕ: îáúåäèíåíèå íà äåíü 3')
+Check ($hostPromptDay3 -ceq $expectedHostDay3) 'Day-3 host prompt lost its exact native-reported bytes'
+Check ($null -ne (Get-ExactEntryAction (Ui DLG_MESSAGE_BOX BTN_YES $hostPromptDay3) host host-offer $hostPromptDay3)) 'Exact day-3 offer was rejected'
+Reject { Get-ExactEntryAction (Ui DLG_MESSAGE_BOX BTN_YES $hostPrompt) host host-offer $hostPromptDay3 } '*Unknown or mismatched*'
+$ExpectedMergeDay=2
+$joinPrompt=Get-PreparedPrompt join 'Diligence 1.2.3'
+Check ($joinPrompt -ceq "Diligence 1.2.3`nÕîñò: test2`nÊàðòà ãîòîâà.`nÂîéòè â êîìíàòó?") 'Join prompt differs from saved actual bytes'
+$action=Get-ExactEntryAction (Ui DLG_MESSAGE_BOX BTN_YES $hostPrompt) host host-offer $hostPrompt
+Check ($action.Appearance -eq 13 -and $action.Owner -eq 42 -and $action.Button -ceq 'BTN_YES') 'Exact native owner was not preserved'
+Check ($null -ne (Get-ExactEntryAction (Ui DLG_GENERATION_RESULT BTN_ACCEPT) host generation)) 'Generation control rejected'
+$script:Consumed=@{ 'host|13|42|DLG_MESSAGE_BOX|BTN_YES'=$true }
+Check (Test-ConsumedEntryAppearance (Ui DLG_MESSAGE_BOX BTN_YES $hostPrompt) host) 'Consumed prior prompt was not held for departure'
+Check (-not (Test-ConsumedEntryAppearance (Ui DLG_MESSAGE_BOX BTN_YES $joinPrompt) join)) 'Consumed host prompt hid a join prompt'
+$fresh=Ui DLG_MESSAGE_BOX BTN_YES 'unknown'; $fresh.dialogAppearance=14; $fresh.dialogInstance=14
+Check (-not (Test-ConsumedEntryAppearance $fresh host)) 'Consumed appearance hid a fresh unknown popup'
+Reject { Get-ExactEntryAction (Ui DLG_MESSAGE_BOX BTN_YES 'Abort') host host-offer $hostPrompt } '*Unknown or mismatched*'
+Reject { Get-ExactEntryAction (Ui DLG_MESSAGE_BOX BTN_YES $hostPrompt) join host-offer $hostPrompt } '*another role*'
+Reject { Get-ExactEntryAction (Ui DLG_MESSAGE_BOX BTN_YES $joinPrompt) join join-offer ($joinPrompt+' ') } '*Unknown or mismatched*'
+Reject { Get-ExactEntryAction (Ui DLG_MESSAGE_BOX BTN_YES $hostPrompt) host generation } '*Unknown or mismatched*'
+Reject { Get-ExactEntryAction (Ui DLG_MESSAGE_BOX BTN_YES 'Íà÷àëî çàäàíèÿ, äåíü 1') join join-offer $joinPrompt } '*Unknown or mismatched*'
+$bad=Ui DLG_MESSAGE_BOX BTN_YES $hostPrompt; $bad.dialogReady='true'
+Reject { Get-ExactEntryAction $bad host host-offer $hostPrompt } '*readiness shape*'
+$bad=Ui DLG_MESSAGE_BOX BTN_YES $hostPrompt; $bad.targets[0].widgets[0].state.enabled='true'
+Reject { Get-ExactEntryAction $bad host host-offer $hostPrompt } '*explicitly enabled*'
+$bad=Ui DLG_MESSAGE_BOX BTN_YES $hostPrompt; $bad.targets=@($bad.targets[0],$bad.targets[0])
+Reject { Get-ExactEntryAction $bad host host-offer $hostPrompt } '*exactly one native owner*'
+$bad=Ui DLG_MESSAGE_BOX BTN_YES $hostPrompt; $bad.dialogInstance=12
+Reject { Get-ExactEntryAction $bad host host-offer $hostPrompt } '*appearance is invalid*'
+Reject { Get-PreparedPrompt host "Diligence`nforeign" } '*one exact line*'
+$secretUi=[pscustomobject]@{ widgets=@([pscustomobject]@{ name='EDIT_PASSWORD'; type='edit'; state=[pscustomobject]@{ text='offline-canary' } }); targets=@() }
+Protect-UiSnapshot $secretUi
+Check (($secretUi | ConvertTo-Json -Depth 8) -notmatch 'offline-canary') 'Snapshot leaked edit text'
+Check (-not $functions.ContainsKey('Advance-OwnedStartup')) 'PowerShell startup popup actor reintroduced'
+Check (-not $functions.ContainsKey('Apply-Command')) 'Manual action JSON channel reintroduced'
+$source=$ast.Extent.Text
+Check ($source -notmatch 'action-\{|action-001|Set-EditText|EDIT_NAME|BTN_RACE|BTN_LORD') 'Manual or leader/race action reintroduced'
+$textWrites=@($ast.FindAll({ param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Set-SecretEditText'
+},$true))
+Check ($textWrites.Count -eq 2) 'Only the two login secret text operations may exist'
+Check (@($textWrites | Where-Object { $_.Extent.Text -notmatch 'DLG_LOGIN_ACCOUNT EDIT_(ACCOUNT_NAME|PASSWORD)' }).Count -eq 0) 'Text input escaped login'
+Check ($source.Contains("'SCRIPTED_POPUPS_LOBBY'")) 'Native lobby popup scope missing'
+Check ($source.Contains('$psi.Environment[''D2_LOBBY_HOST_PASSWORD'']') -and
+    -not ($functions['Invoke-OwnedPreparation'].Extent.Text -match 'ArgumentList.Add\([^\n]*(PASSWORD|credentials)')) 'Secret passed as process argument'
+
+# Exercise the real exclusive directory claim and cleanup branches in a fresh
+# temporary tree. Never run the runner body, a process, or an API operation.
+$ownershipScratch=[IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('d2-lobby-owner-test-'+[guid]::NewGuid().ToString('N'))))
+$fixtureRoot=Join-Path $ownershipScratch 'artifacts'
+$collisionPath=Join-Path $fixtureRoot 'collision'
+$winnerReceipt=Join-Path $collisionPath 'owned-preparation.json'
+$winnerSummary=Join-Path $collisionPath 'summary.json'
+$freshPath=Join-Path $fixtureRoot 'fresh'
+$freshReceipt=Join-Path $freshPath 'owned.json'
+$redirectTarget=Join-Path $ownershipScratch 'redirect-target'
+$redirectChild=Join-Path $redirectTarget 'ordinary'
+$redirectCanary=Join-Path $redirectChild 'canary.txt'
+$redirectPath=Join-Path $fixtureRoot 'redirect'
+$fileAncestor=Join-Path $fixtureRoot 'not-a-directory'
+[void](New-Item -ItemType Directory -Path $fixtureRoot)
+try {
+    $script:ArtifactDirectoryOwned=$false
+    Check ((Assert-NewArtifactDirectory $freshPath $fixtureRoot) -ceq $freshPath) 'Fresh contained directory was rejected'
+    Check ((Assert-NewArtifactDirectory ($freshPath+[IO.Path]::DirectorySeparatorChar) $fixtureRoot) -ceq $freshPath) 'Trailing separator changed the final claim directory'
+    Reject { Assert-NewArtifactDirectory $fixtureRoot $fixtureRoot } '*below this checkout artifacts*'
+    Reject { Assert-NewArtifactDirectory ($fixtureRoot+'-other/run') $fixtureRoot } '*below this checkout artifacts*'
+    & {
+        # Another runner wins after our final existence/ancestry check. This
+        # deliberately exercises Directory.Move, not a mocked exclusive mkdir.
+        $validationFunction=(Get-Command Assert-NewArtifactDirectory).ScriptBlock
+        $validation=@{calls=0}
+        function Assert-NewArtifactDirectory([string]$Path,[string]$Root) {
+            $normalized=& $validationFunction $Path $Root
+            $validation.calls++
+            if ($validation.calls -eq 2) {
+                [void](New-Item -ItemType Directory -Path $normalized)
+                [IO.File]::WriteAllText($winnerReceipt,'winner-receipt')
+                [IO.File]::WriteAllText($winnerSummary,'winner-summary')
+            }
+            return $normalized
+        }
+        Reject { New-OwnedArtifactDirectory $collisionPath $fixtureRoot } '*'
+        Check ($validation.calls -eq 2) 'Collision did not occur at the final atomic directory claim'
+        Check (-not $script:ArtifactDirectoryOwned) 'Losing invocation acquired artifact ownership'
+    }
+    Check (@(Get-ChildItem -LiteralPath $fixtureRoot -Filter '.lobby-e2e-claim-*' -Force).Count -eq 0) 'Losing invocation leaked its empty staging directory'
+    $ArtifactDir=$collisionPath
+    Reject { Save-Json 'summary.json' @{loser=$true} } '*ownership was not acquired*'
+    Reject { Copy-OwnedLogTail host } '*ownership was not acquired*'
+    foreach ($preparationAction in @('create','start','detail','close')) {
+        Reject { Invoke-OwnedPreparation $preparationAction } '*ownership was not acquired*'
+    }
+    $mainTry=@($ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.TryStatementAst] })
+    Check ($mainTry.Count -eq 1) 'Runner must have one outer cleanup boundary'
+    $claimStatement=$mainTry[0].Body.Statements[0]
+    Check ($claimStatement.Extent.Text -ceq 'New-OwnedArtifactDirectory $ArtifactDir $artifactRoot') 'Directory claim must precede credential handling and launch'
+    $cleanupBranches=@($mainTry[0].Finally.Statements | Where-Object {
+        $_ -is [Management.Automation.Language.IfStatementAst] -and
+        ($_.Extent.Text.Contains('Invoke-OwnedPreparation close') -or $_.Extent.Text.Contains("Save-Json 'summary.json'"))
+    })
+    Check ($cleanupBranches.Count -eq 2) 'Remote preparation and summary cleanup branches were not found'
+    & {
+        $touches=@{reads=0;closes=0;writes=0;copies=0}
+        function Test-Path { $touches.reads++; return $true }
+        function Invoke-OwnedPreparation { $touches.closes++ }
+        function Save-Json { $touches.writes++ }
+        function Copy-OwnedLogTail { $touches.copies++ }
+        foreach ($branch in $cleanupBranches) { . ([scriptblock]::Create($branch.Extent.Text)) }
+        Check ($touches.reads -eq 0 -and $touches.closes -eq 0 -and $touches.writes -eq 0 -and $touches.copies -eq 0) 'Losing cleanup accessed the winner artifact directory or preparation'
+    }
+    Check ([IO.File]::ReadAllText($winnerReceipt) -ceq 'winner-receipt') 'Winner preparation receipt was changed'
+    Check ([IO.File]::ReadAllText($winnerSummary) -ceq 'winner-summary') 'Winner summary was changed'
+    Reject { New-OwnedArtifactDirectory $collisionPath $fixtureRoot } '*below this checkout artifacts*'
+    Check (-not $script:ArtifactDirectoryOwned) 'Existing directory was adopted'
+    New-OwnedArtifactDirectory $freshPath $fixtureRoot
+    Check ($script:ArtifactDirectoryOwned -and [IO.Directory]::Exists($freshPath)) 'Successful directory claim lost ownership'
+    $ArtifactDir=$freshPath
+    Save-Json 'owned.json' @{owned=$true}
+    Check (([IO.File]::ReadAllText($freshReceipt) | ConvertFrom-Json).owned) 'Owned artifact writer was blocked'
+    Reject { New-OwnedArtifactDirectory (Join-Path $fixtureRoot 'second') $fixtureRoot } '*already acquired*'
+    $script:ArtifactDirectoryOwned=$false
+
+    [void](New-Item -ItemType Directory -Path $redirectChild)
+    [IO.File]::WriteAllText($redirectCanary,'unchanged')
+    $linkType=if($IsWindows){'Junction'}else{'SymbolicLink'}
+    [void](New-Item -ItemType $linkType -Path $redirectPath -Target $redirectTarget)
+    $nestedRedirect=Join-Path $redirectPath 'ordinary/missing/run'
+    Reject { Assert-NewArtifactDirectory $nestedRedirect $fixtureRoot } '*without reparse points*'
+    Reject { New-OwnedArtifactDirectory $nestedRedirect $fixtureRoot } '*without reparse points*'
+    Reject { Assert-NewArtifactDirectory (Join-Path $redirectPath 'run') $redirectPath } '*without reparse points*'
+    Check (-not $script:ArtifactDirectoryOwned -and -not (Test-Path -LiteralPath (Join-Path $redirectChild 'missing'))) 'Redirected ancestry created a run directory'
+    Check ([IO.File]::ReadAllText($redirectCanary) -ceq 'unchanged') 'Redirect target content was changed'
+    [IO.File]::WriteAllText($fileAncestor,'unchanged')
+    Reject { Assert-NewArtifactDirectory (Join-Path $fileAncestor 'run') $fixtureRoot } '*without reparse points*'
+} finally {
+    $script:ArtifactDirectoryOwned=$false
+    # The junction itself is removed without traversal. All subsequent cleanup
+    # targets are exact test-created files/directories; no recursive deletion.
+    if ([IO.Directory]::Exists($redirectPath)) { [IO.Directory]::Delete($redirectPath,$false) }
+    foreach ($file in @($winnerReceipt,$winnerSummary,$freshReceipt,$redirectCanary,$fileAncestor)) {
+        if ([IO.File]::Exists($file)) { [IO.File]::Delete($file) }
+    }
+    foreach ($directory in @($collisionPath,$freshPath,$redirectChild,$redirectTarget,$fixtureRoot,$ownershipScratch)) {
+        if ([IO.Directory]::Exists($directory)) { [IO.Directory]::Delete($directory,$false) }
+    }
+}
+
+# Verify actual existing observer imports retain their parameter lists and scopes.
+Import-ExistingPopupObservers (Join-Path $repo 'tools/test/simturns-production-poc.ps1')
+$mockLog=Join-Path $repo 'artifacts/mss32_12345.log'
+$script:ClientLogInitialLengths=@{}; $script:ClientLogOwnedProcessIds=@{}
+$script:ClientLogInitialLengths[$mockLog]=[long]0; $script:ClientLogOwnedProcessIds[$mockLog]=12345
+Check ((Get-ClientLogBaseline $mockLog) -eq 0) 'Imported baseline parameters/scope broken'
+$observer=New-LiteralStartupPopupService host $mockLog
+Check ($observer.Role -ceq 'host' -and $observer.Appearances.Count -eq 0) 'Imported native observer scope broken'
+Reject { Get-ClientLogBaseline (Join-Path $repo 'artifacts/mss32_999.log') } '*not bound to a process*'
+foreach($name in @('New-LiteralStartupPopupService','Invoke-LiteralPersistentStartupPopupTick','Assert-PairedStartupActionsRelease')) {
+    Check ((Get-Command $name).ScriptBlock.ToString() -notmatch 'Invoke-Button|Set-Edit|Set-Secret|/api/ui/invoke') "Existing observer $name unexpectedly acts"
+}
+
+# Reused PID: actual append-log boundary + original reader must exclude the old
+# PASS/fault/native-marker prefix; only new bytes can prove this run's behavior.
+$scratch = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('d2-lobby-log-test-' + [guid]::NewGuid().ToString('N'))))
+[void](New-Item -ItemType Directory -Path $scratch)
+$logPath = Join-Path $scratch 'mss32_12345.log'
+$tailPath = Join-Path $scratch 'host.mss32.log'
+try {
+    $GameDir=$scratch; $ArtifactDir=$scratch; $ExpectedMergeDay=2
+    $script:ArtifactDirectoryOwned=$true
+    $oldText="bootstrap operational release applied; strict independent turns are operational`n[simturns] terminal fault: previous run`n[testdrv][scripted-popup] malformed previous run marker`n[E] Failed to run 'old.lua' script.`n"
+    [IO.File]::WriteAllText($logPath,$oldText,[Text.UTF8Encoding]::new($false))
+    $boundary=Get-LogLaunchBoundary
+    $script:Clients=@{host=[pscustomobject]@{Id=12345}}
+    $script:ClientLogs=@{}; $script:ClientLogInitialLengths=@{}; $script:ClientLogOwnedProcessIds=@{}
+    [IO.File]::AppendAllText($logPath,"fresh launch`n",[Text.UTF8Encoding]::new($false))
+    Assert-FreshOwnedLog host $boundary
+    Check ((Get-ClientLogBaseline $logPath) -eq [Text.Encoding]::UTF8.GetByteCount($oldText)) 'Reused PID lost its prelaunch byte boundary'
+    $evidence=Get-OwnedLogEvidence host
+    Check (-not $evidence.bootstrapOperational -and -not $evidence.fault) 'Old PASS/fault bytes leaked across launch boundary'
+    Check (-not $evidence.scriptError) 'Old Lua error leaked across launch boundary'
+    Check ((Read-ClientLogLines $logPath) -ceq 'fresh launch') 'Existing PID reader returned prelaunch content'
+    $observer=New-LiteralStartupPopupService host $logPath
+    Check (@(Invoke-LiteralPersistentStartupPopupTick $observer).Count -eq 0) 'Old native popup markers leaked across launch boundary'
+    [IO.File]::AppendAllText($logPath,"bootstrap operational release applied; strict independent turns are operational`n",[Text.UTF8Encoding]::new($false))
+    Check (Get-OwnedLogEvidence host).bootstrapOperational 'New bootstrap marker was not accepted after launch boundary'
+    $ExpectedMergeDay=3
+    [IO.File]::AppendAllText($logPath,"relay released stock turns (actionId=7, day=2)`n",[Text.UTF8Encoding]::new($false))
+    Check (-not (Get-OwnedLogEvidence host).stockTurnsReleased) 'Day-2 release incorrectly proved configured day-3 merge'
+    [IO.File]::AppendAllText($logPath,"relay released stock turns (actionId=8, day=30)`n",[Text.UTF8Encoding]::new($false))
+    Check (-not (Get-OwnedLogEvidence host).stockTurnsReleased) 'Day-30 prefix incorrectly proved configured day-3 merge'
+    [IO.File]::AppendAllText($logPath,"relay released stock turns (actionId=9, day=3)`n",[Text.UTF8Encoding]::new($false))
+    Check (Get-OwnedLogEvidence host).stockTurnsReleased 'Exact day-3 release was not accepted for configured day-3 merge'
+    [IO.File]::AppendAllText($logPath,"[E] Failed to run 'smns\z_unit_effect.lua' script.`nFunction: 'getModifierDisplay'`n",[Text.UTF8Encoding]::new($false))
+    Check (Get-OwnedLogEvidence host).scriptError 'Fresh mod Lua error was not detected'
+    $ExpectedMergeDay=2
+    Copy-OwnedLogTail host
+    $tail=[IO.File]::ReadAllText($tailPath)
+    Check ($tail.StartsWith("fresh launch`n") -and -not $tail.Contains('previous run')) 'Artifact log copied stale prefix'
+    Check ([IO.File]::ReadAllText($logPath).StartsWith($oldText)) 'Source log prefix was changed or cleared'
+    [IO.File]::WriteAllText($logPath,"short`n",[Text.UTF8Encoding]::new($false))
+    Reject { Read-ClientLogLines $logPath } '*shorter than its launch boundary*'
+    Reject { Copy-OwnedLogTail host } '*truncated*'
+} finally {
+    $script:ArtifactDirectoryOwned=$false
+    # Exact test-owned files only; no recursive deletion or computed broad target.
+    if ([IO.File]::Exists($logPath)) { [IO.File]::Delete($logPath) }
+    if ([IO.File]::Exists($tailPath)) { [IO.File]::Delete($tailPath) }
+    [IO.Directory]::Delete($scratch, $false)
+}
+$hashProof=Compare-ProtectedFileHashes @{'Disciple.ini'='before';'Scripts/settings.lua'='same';'missing.lua'=$null} @{'Disciple.ini'='after';'Scripts/settings.lua'='same';'missing.lua'=$null}
+Check (-not $hashProof.unchanged -and ($hashProof.changedFiles -join ',') -ceq 'Disciple.ini') 'INI hash change was not strict and exactly named'
+Check ($hashProof.before['Disciple.ini'] -ceq 'before' -and $hashProof.after['Disciple.ini'] -ceq 'after') 'Before/after hashes were not preserved'
+Check (-not (Compare-ProtectedFileHashes @{'missing.lua'=$null} @{'missing.lua'='created'}).unchanged) 'New protected file escaped hash comparison'
+
+# Exercise the actual room-start function, not the orchestration mock below.
+# Peer arrival may leave the current native room unready; one relay intent owns
+# settling/rebinding and must return a fresh, ready exact-owner proof.
+& {
+    . ([scriptblock]::Create($functions['Invoke-ReadyRoomStart'].Extent.Text))
+    $script:Clients=@{host=[pscustomobject]@{Id=12345}}; $script:RelayBase='http://mock.invalid'
+    $mock=@{}
+    function Reset-RoomMock {
+        $mock.Clear()
+        $initial=Ui DLG_LOBBY BTN_OK
+        $initial.dialogReady=$false
+        $initial | Add-Member -NotePropertyName uiSeq -NotePropertyValue 101
+        $proof=Ui DLG_LOBBY BTN_OK
+        $proof.dialogAppearance=15; $proof.dialogInstance=15; $proof.targets[0].instance=84
+        $proof | Add-Member -NotePropertyName role -NotePropertyValue host
+        $proof | Add-Member -NotePropertyName uiSeq -NotePropertyValue 104
+        $mock.ui=$initial; $mock.requests=0; $mock.receipts=[Collections.Generic.List[object]]::new()
+        $mock.response=[pscustomobject]@{ found=$true; role='host'; observation=$proof
+            invoke=[pscustomobject]@{dlg='DLG_LOBBY';btn='BTN_OK';appearance=15;instance=84} }
+        $mock.transportFailure=$false
+    }
+    function Assert-OwnedRelayClientIdentity { }
+    function Get-GameUiSnapshot([string]$Role) { $mock.ui }
+    function Save-PairReceipt([string]$Stage,$Proof=$null) { $mock.receipts.Add([pscustomobject]@{stage=$Stage;proof=$Proof}) }
+    function Invoke-RestMethod([string]$Uri,[string]$Method,[int]$TimeoutSec) {
+        $mock.requests++
+        Check ($Method -ceq 'POST' -and $Uri -ceq 'http://mock.invalid/api/ui/invoke-when-ready?role=host&dlg=DLG_LOBBY&btn=BTN_OK&after=100&waitMs=30000&stableMs=500&timeoutMs=90000') 'Room start lost its single stable pending intent'
+        if($mock.transportFailure) { throw 'mock ambiguous transport failure' }
+        return $mock.response
+    }
+    Reset-RoomMock
+    Invoke-ReadyRoomStart host
+    Check ($mock.requests -eq 1) 'Initially unready native room did not use exactly one intent'
+    Check (($mock.receipts.stage -join ',') -ceq 'host-start-armed,host-start-issued') 'Fresh-ready intent did not preserve armed/issued receipts'
+    Check ($mock.receipts[1].proof.invoke.instance -eq 84 -and $mock.receipts[1].proof.invoke.appearance -eq 15) 'Room receipt reused the initial owner instead of fresh ready proof'
+
+    Reset-RoomMock
+    $mock.ui.dialog='DLG_CUSTOM_LOBBY'
+    Reject { Invoke-ReadyRoomStart host } '*not in its native room*'
+    Check ($mock.requests -eq 0) 'Wrong initial dialog issued a room-start intent'
+
+    Reset-RoomMock
+    $mock.response.observation.dialogReady=$false
+    Reject { Invoke-ReadyRoomStart host } '*exact ready native proof*'
+    Check ($mock.requests -eq 1 -and $mock.receipts.Count -eq 1) 'Unready receipt was issued or retried'
+
+    Reset-RoomMock
+    $mock.response.observation.targets[0].instance=83
+    Reject { Invoke-ReadyRoomStart host } '*'
+    Check ($mock.requests -eq 1 -and $mock.receipts.Count -eq 1) 'Wrong native owner receipt was issued or retried'
+
+    Reset-RoomMock
+    $mock.response.found='true'
+    Reject { Invoke-ReadyRoomStart host } '*exact ready native proof*'
+    Check ($mock.requests -eq 1) 'Malformed found receipt triggered a retry'
+
+    Reset-RoomMock
+    $mock.response.observation.uiSeq=100
+    Reject { Invoke-ReadyRoomStart host } '*exact ready native proof*'
+    Check ($mock.requests -eq 1) 'Stale ready publication triggered a retry'
+
+    Reset-RoomMock
+    $mock.transportFailure=$true
+    Reject { Invoke-ReadyRoomStart host } '*mock ambiguous transport failure*'
+    Check ($mock.requests -eq 1 -and $mock.receipts.Count -eq 1) 'Ambiguous native intent was retried'
+}
+
+# Actual pair orchestration with native observer/actor boundaries mocked, simulated clock.
+function Get-PairUtcNow { $script:Now }
+function Start-Sleep([int]$Milliseconds) { $script:Now=$script:Now.AddMilliseconds($Milliseconds) }
+function Save-PairReceipt([string]$Stage,$Proof=$null) { $script:Stages.Add($Stage) }
+function Assert-PairProgress { if($script:Fault) { throw 'mock production fault' } }
+function Invoke-ReadyRoomStart([string]$Role) { $script:Starts.Add($Role); if($Role -eq 'join') { $script:JoinStartAt=$script:Now } }
+function Get-RoleState([string]$Role) { [pscustomobject]@{ reachedStrategic=$true; uiSeq=10 } }
+function Get-GameUiSnapshot([string]$Role) { [pscustomobject]@{ dialogReady=$true; mapLoaded=$true; startupActionsHeld=$true } }
+function Request-DelayedHostStartupRelease { $script:Releases++; $script:NameTxAt=$script:Now; $script:logEvidence.host.startupLeaderNameSent=$true }
+function Reset-Pair([string]$Mode) {
+    $script:PairStartup=$Mode; $script:JoinStartupDelaySeconds=8; $script:PairStartClaimed=$false; $script:PairMapsObserved=$false
+    $script:PreparationConsent=@{host=$true;join=$true}; $script:GenerationAccepted=$true
+    $script:Now=[DateTime]::Parse('2026-09-26T00:00:00Z'); $script:Starts=[Collections.Generic.List[string]]::new()
+    $script:Stages=[Collections.Generic.List[string]]::new(); $script:logEvidence=@{host=@{startupLeaderNameSent=$false}}
+    $script:Releases=0; $script:NameTxAt=$null; $script:JoinStartAt=$null; $script:Fault=$false
+}
+Reset-Pair Normal
+Start-OwnedPair
+Check (($script:Starts -join ',') -ceq 'host,join') 'Normal did not start one exact host then join'
+Check ($script:PairMapsObserved -and $script:Releases -eq 0) 'Normal bypassed existing paired release'
+Reject { Start-OwnedPair } '*already consumed*'
+Reset-Pair DelayedJoin
+Start-OwnedPair
+Check ($script:Releases -eq 1 -and ($script:JoinStartAt-$script:NameTxAt).TotalSeconds -ge 8) 'Delayed repro lost one-shot native release/post-TX interval'
+Reset-Pair Normal
+$script:PreparationConsent.join=$false
+Reject { Start-OwnedPair } '*explicit host/join consent*'
+Check ($script:Starts.Count -eq 0) 'Missing consent started a client'
+Reset-Pair DelayedJoin
+$script:Fault=$true
+Reject { Start-OwnedPair } '*mock production fault*'
+Check (($script:Starts -join ',') -ceq 'host') 'Fault allowed join/retry'
+$nodeAssignment = @($ast.FindAll({ param($item)
+    $item -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $item.Left.Extent.Text -ceq '$psi.FileName'
+}, $true))
+Check ($nodeAssignment.Count -eq 1) 'Node helper executable assignment is not unique'
+& {
+    function Get-Command { @([pscustomobject]@{Source='C:\\first\\node.exe'}, [pscustomobject]@{Source='C:\\second\\node.exe'}) }
+    $psi = [Diagnostics.ProcessStartInfo]::new()
+    . ([scriptblock]::Create($nodeAssignment[0].Extent.Text))
+    Check ($psi.FileName -ceq 'C:\\first\\node.exe') 'Multiple PATH matches were concatenated into one executable'
+}
+$dayEnvironmentAssignment=@($functions['Invoke-OwnedPreparation'].Body.FindAll({ param($item)
+    $item -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $item.Left.Extent.Text -ceq '$psi.Environment[''OH_SIMULTANEOUS_UNTIL'']'
+},$true))
+Check ($dayEnvironmentAssignment.Count -eq 1) 'Preparation helper must set one explicit merge-day environment value'
+foreach ($day in @(2,3)) {
+    & {
+        $ExpectedMergeDay=$day
+        $psi=[Diagnostics.ProcessStartInfo]::new()
+        $psi.Environment['OH_SIMULTANEOUS_UNTIL']='unrelated-inherited-value'
+        # Execute only the real environment assignment; never start a process.
+        . ([scriptblock]::Create($dayEnvironmentAssignment[0].Extent.Text))
+        Check ($psi.Environment['OH_SIMULTANEOUS_UNTIL'] -ceq [string]$day) "Preparation helper did not pin configured day $day in its child environment"
+        Check ($psi.ArgumentList.Count -eq 0) 'Merge-day environment test unexpectedly created process arguments'
+    }
+}
+"PASS: $script:checks offline lobby E2E checks; no processes, APIs or game callbacks; temporary log fixture cleaned"

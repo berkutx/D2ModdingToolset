@@ -25,8 +25,13 @@
 #include "hooks.h"
 #ifdef D2_SIMTURNS
 #include "simturns/controller.h"
-#include "uiframedispatcher.h"
 #include <cstdlib>
+#endif
+#if defined(D2_SIMTURNS) || defined(D2_TESTDRV)
+#include "uiframedispatcher.h"
+#endif
+#ifdef D2_TESTDRV
+#include "testdrv/testdrv.h"
 #endif
 #include "restrictions.h"
 #include "settings.h"
@@ -173,7 +178,7 @@ static bool setupHooks()
         return false;
     }
 
-#ifdef D2_SIMTURNS
+#if defined(D2_SIMTURNS) || defined(D2_TESTDRV)
     hooks::uiframedispatcher::markInstalled();
 #endif
     spdlog::debug("All hooks are set");
@@ -212,6 +217,15 @@ static void setupDefaultLogger()
     // Original mss32.dll has no log file so we are free to use short name "mss32.log"
     // (instead of the old "mss32Proxy.log")
     auto fileName = hooks::gameFolder() / "mss32.log";
+#ifdef D2_TESTDRV
+    // Paired clients share a game directory, not a rotating log file.
+    char role[16]{};
+    GetEnvironmentVariableA("D2TESTDRV_ROLE", role, sizeof(role));
+    if (lstrcmpiA(role, "host") == 0 || lstrcmpiA(role, "join") == 0
+        || lstrcmpiA(role, "joiner") == 0)
+        fileName = hooks::gameFolder()
+                   / ("mss32_" + std::to_string(GetCurrentProcessId()) + ".log");
+#endif
     auto fileSink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(fileName.string(),
                                                                            5u << 20, 3);
     // TODO: setting for all available trace levels (not only debug vs non-debug)
@@ -230,6 +244,9 @@ static void setupDefaultLogger()
     // Using UTC helps to match logs from different users (with different timezones).
     // It also helps to match client logs with lobby server logs.
     logger->set_pattern("%D %H:%M:%S.%e %5t [%=8!n] [%L] %v", spdlog::pattern_time_type::utc);
+#ifdef D2_TESTDRV
+    logger->flush_on(spdlog::level::info);
+#endif
 }
 
 BOOL APIENTRY DllMain(HMODULE hDll, DWORD reason, LPVOID reserved)
@@ -287,7 +304,14 @@ BOOL APIENTRY DllMain(HMODULE hDll, DWORD reason, LPVOID reserved)
         return FALSE;
     }
 
-#ifndef D2_SIMTURNS
+#ifdef D2_TESTDRV
+    if (!hooks::testdrv::preflight()) {
+        hooks::showErrorMessageBox("Test harness preflight failed. Check mss32.log.");
+        return FALSE;
+    }
+#endif
+
+#if !defined(D2_SIMTURNS) && !defined(D2_TESTDRV)
     adjustGameRestrictions();
     setupVftableHooks();
 #endif
@@ -295,12 +319,17 @@ BOOL APIENTRY DllMain(HMODULE hDll, DWORD reason, LPVOID reserved)
         return FALSE;
     }
 
-#ifdef D2_SIMTURNS
+#if defined(D2_SIMTURNS) || defined(D2_TESTDRV)
     // Do not unload a DLL after committed hooks point into its code.
     adjustGameRestrictions();
     setupVftableHooks();
+#endif
+#ifdef D2_SIMTURNS
     if (!hooks::simturns::install())
         failFastCommittedInstall();
+#endif
+#ifdef D2_TESTDRV
+    hooks::testdrv::install(library);
 #endif
 
     // Lazy initialization is not optimal as the data can be accessed in parallel threads.

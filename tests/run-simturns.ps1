@@ -6,8 +6,8 @@ Push-Location $simOutput.FullName
 try {
     foreach ($simTest in @('simturns_control_client_core', 'simturns_lobby_port',
                            'simturns_lobby_wire', 'simturns_native_apply_fence',
-                           'simturns_native_notification_policy',
-                           'simturns_native_receive_diagnostic')) {
+                           'simturns_native_receive_diagnostic',
+                           'simturns_native_notification_policy')) {
         $simSources = @((Join-Path $simRepo ('tests\' + $simTest + '_test.cpp')))
         if ($simTest -in @('simturns_control_client_core', 'simturns_lobby_port')) {
             $simSources += @((Join-Path $simRepo 'mss32\src\simturns\protocol.cpp'),
@@ -21,6 +21,13 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "$simTest compilation failed; no stale binary will be run" }
         & ('.\' + $simTest + '.exe')
         if ($LASTEXITCODE -ne 0) { throw "$simTest failed" }
+        if ($simTest -eq 'simturns_lobby_port') {
+            # The optional local transport uses this same port, not another OH engine.
+            & cl.exe /nologo /std:c++17 /EHsc /MT /O2 /DNDEBUG /DD2_TESTDRV ('/I' + (Join-Path $simRepo 'mss32\include')) @simSources /Fesimturns_local_port.exe /link /INCREMENTAL:NO
+            if ($LASTEXITCODE -ne 0) { throw 'Local port compilation failed; no stale binary will be run' }
+            & .\simturns_local_port.exe
+            if ($LASTEXITCODE -ne 0) { throw 'Local port failed' }
+        }
     }
     # Compile the actual production lobby adapter in both configurations.
     # This portable boundary test uses no game process, server or D2_TESTDRV.
