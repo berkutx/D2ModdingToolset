@@ -614,6 +614,43 @@ bool computeStrategicIdle()
 }
 
 // Build the snapshot for the current dialog and publish it if it changed (bumping the epoch).
+bool observeDialogOnScreen(game::CDialogInterf* dialog, void* screen)
+{
+    if (!dialog || !screen)
+        return false;
+    // A bind may be followed by a modal before the first natural frame. Its
+    // cached screen is then not proof of the panel's parent. Read the actual
+    // native tree, verifying both directions of every edge. Never borrow the
+    // ISO token or assume co-presence merely from a remembered dialog name.
+    __try {
+        game::CInterface* child = dialog;
+        for (int depth = 0; depth < 32; ++depth) {
+            if (child == screen)
+                return true;
+            if (!child || !child->interfaceData)
+                return false;
+            game::CInterface* parent = child->interfaceData->parent;
+            if (!parent || parent == child || !parent->vftable
+                || !parent->vftable->getChildsCount || !parent->vftable->getChild)
+                return false;
+            const int count = parent->vftable->getChildsCount(parent);
+            if (count < 1 || count > 256)
+                return false;
+            int occurrences = 0;
+            for (int index = 0; index < count; ++index) {
+                if (parent->vftable->getChild(parent, &index) == child)
+                    ++occurrences;
+            }
+            if (occurrences != 1)
+                return false;
+            child = parent;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return false;
+}
+
 // UI-thread only: enumerateWidgetsRaw reads live game UI structures.
 void rebuildSnapshot()
 {
@@ -637,7 +674,9 @@ void rebuildSnapshot()
     if (g_dialogReady && lstrcmpA(dlgName, "DLG_ISO_PAL") == 0) {
         DlgEntry* candidate = findEntry("DLG_STRATEGIC");
         if (candidate && candidate->ptr && candidate->ownerInstance != 0
-            && candidate->screen == g_currentTopScreen) {
+            && observeDialogOnScreen(candidate->ptr, g_currentTopScreen)) {
+            candidate->screen = g_currentTopScreen;
+            candidate->pendingScreen = false;
             strategic = candidate;
             strategicN = enumerateWidgetsRaw(candidate->ptr, s_strategicWidgets, kMaxWidgets);
             if (strategicN < 0) {

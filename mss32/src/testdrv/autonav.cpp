@@ -668,20 +668,22 @@ std::string escapeJsonString(const char* value)
 void emitPrearmedAutoBattleProof(const AutoBattleTarget& target,
                                  std::uint32_t appearance,
                                  std::uint32_t owner,
-                                 std::uint32_t bindAgeMs)
+                                 std::uint32_t bindAgeMs,
+                                 std::uint64_t committedTick64)
 {
     const std::string role = escapeJsonString(g_role);
     spdlog::info(
         "[testdrv][auto-battle-proof] "
         "{{\"schema\":1,\"mode\":\"preboot-first-battle\",\"role\":\"{}\",\"dialog\":\"{}\","
         "\"succeeded\":{},\"appearance\":{},\"owner\":{},\"bindAgeMs\":{},"
+        "\"committedTick64\":{},"
         "\"callbackCount\":{},\"functorVftable\":{},\"dispatchFunction\":{},"
         "\"memberFunction\":{},\"thisAdjustor\":{},\"controllerGateBefore\":{},"
         "\"kickStateBefore\":{},\"kickStateAfter\":{},\"sideSelector\":{},"
         "\"flag38Before\":{},\"flag38After\":{},\"flag39Before\":{},"
         "\"flag39After\":{}}}",
         role, g_prearmedBattleDialog, target.result.succeeded ? "true" : "false", appearance, owner,
-        bindAgeMs, target.callbackCount,
+        bindAgeMs, committedTick64, target.callbackCount,
         static_cast<std::uint32_t>(target.functorVftable),
         static_cast<std::uint32_t>(target.dispatchFunction),
         target.result.memberFunction, target.thisAdjustor,
@@ -745,10 +747,11 @@ void tickPrearmedAutoBattle()
     g_prearmedAutoBattleState = PrearmedAutoBattleState::Claimed;
     const bool committed = enableAutoBattle(
         target, kNoSeq, appearance, owner, bindAgeMs, false);
+    const std::uint64_t committedTick64 = GetTickCount64();
     if (target.callbackCount != 1)
         failFastPrearmedAutoBattle(
             "exact callback count was not one", 0xD2E77338u);
-    emitPrearmedAutoBattleProof(target, appearance, owner, bindAgeMs);
+    emitPrearmedAutoBattleProof(target, appearance, owner, bindAgeMs, committedTick64);
     if (!committed)
         failFastPrearmedAutoBattle(
             "sole callback postcondition failed", 0xD2E77339u);
