@@ -1,6 +1,7 @@
 #include "preparedmatch.h"
 #include "preparedmatchlifecycle.h"
 #include "preparedmatchtemplates.h"
+#include "preparedmatchtext.h"
 #include "button.h"
 #include "categorylist.h"
 #include "dialoginterf.h"
@@ -58,6 +59,21 @@ std::deque<Offer> waiting;
 std::deque<std::pair<Identity, State>> seen;
 std::uint64_t epoch{};
 bool modal{};
+struct ActiveJoin {
+    JoinOffer offer;
+    JoinStage stage{JoinStage::Waiting};
+    JoinState state{JoinState::Received};
+    std::uint64_t roomsRevision{};
+    bool canceled{};
+    std::vector<std::string> pages;
+    std::size_t page{};
+    Clock::time_point refreshDeadline{};
+};
+std::optional<ActiveJoin> activeJoin;
+std::deque<JoinOffer> waitingJoins;
+JoinReceipts joinReceipts; // Terminal answers survive logout/login within this process.
+game::CMidgardMsgBox* joinBox{};
+std::uint64_t joinPromptEpoch{};
 
 std::string gameText(const std::string& input) {
     if (input.empty()) return {};
@@ -83,6 +99,22 @@ void sendStatus(const Identity& identity, State state, const std::string& detail
     stream.Write(static_cast<SLNet::MessageID>(ID_LOBBY_PREPARED_MATCH));
     stream.WriteAlignedBytes(bytes.data(), static_cast<unsigned>(bytes.size()));
     service->send(stream, service->getLobbyGuid(), HIGH_PRIORITY);
+}
+void sendJoinStatus(const JoinIdentity& target, JoinState state, const std::string& detail = {}) {
+    auto* service = CNetCustomService::get();
+    if (!service || !service->loggedIn()) return;
+    auto bytes = encodeJoinStatus(target, state, detail);
+    if (bytes.empty()) return;
+    SLNet::BitStream stream;
+    stream.Write(static_cast<SLNet::MessageID>(ID_LOBBY_PREPARED_MATCH));
+    stream.WriteAlignedBytes(bytes.data(), static_cast<unsigned>(bytes.size()));
+    service->send(stream, service->getLobbyGuid(), HIGH_PRIORITY);
+}
+void finishJoin(JoinState state, const std::string& detail = {}) {
+    if (!activeJoin) return;
+    activeJoin->state = state; activeJoin->stage = JoinStage::Terminal;
+    joinReceipts.remember(activeJoin->offer.target, activeJoin->offer.recipient, state);
+    sendJoinStatus(activeJoin->offer.target, state, detail);
 }
 void status(State value, const std::string& detail = {}) {
     if (!active) return;
@@ -122,31 +154,8 @@ void makeRecipe() {
     active->localFilename = std::move(selected.filename);
     active->recipe = {std::move(selected.settings), selected.cached->source};
 }
-std::string parameterLabel(const std::string& key) {
-    static const std::pair<const char*, const char*> names[] = {
-        {"size", "Размер карты"}, {"roads", "Дороги, %"}, {"forest", "Лес, %"},
-        {"startingGold", "Стартовое золото"}, {"startingNativeMana", "Стартовая родная мана"},
-        {"water", "Вода, %"}, {"maxUnit", "Макс. уровень юнитов"},
-        {"maxSpell", "Макс. круг заклинаний"}, {"maxLeader", "Макс. уровень героя"},
-        {"maxCity", "Макс. уровень города"}, {"startingLevel", "Стартовый уровень"},
-        {"iterations", "Итерации генерации"}
-    };
-    for (const auto& name : names) if (key == name.first) return name.second;
-    if (key.compare(0, 5, "spin:") == 0)
-        return "Параметр шаблона " + std::to_string(std::stoul(key.substr(5)) + 1);
-    return key;
-}
-void buildPages(game::CTextBoxInterf* textBox) {
-    const auto& v = active->offer;
-    std::string text = "Подготовленный матч: " + v.title + "\nШаблон-пример: " + v.filename
-        + "\nКлиент выберет последнюю локальную версию этого варианта.\nХост: " + v.host + "\nИгроки: ";
-    for (std::size_t i = 0; i < v.participants.size(); ++i) text += (i ? ", " : "") + v.participants[i].name;
-    text += v.ranked ? "\nРейтинговая игра." : "\nНерейтинговая игра.";
-    for (const auto& key : v.explicitParameters)
-        text += "\n" + parameterLabel(key) + ": " + std::to_string(v.parameters.at(key));
-    if (v.unlockGui) text += "\nUnlock GUI включён.";
-    if (v.simultaneous) text += "\nОдновременные ходы: " + std::to_string(v.simultaneousUntil);
-    if (!v.summary.empty()) text += "\n" + v.summary;
+std::vector<std::string> paginateText(game::CTextBoxInterf* textBox, std::string text,
+                                    const std::string& question, const std::string& next) {
     text = gameText(text);
     const auto* rect = textBox->vftable->getArea(textBox);
     const auto width = rect->right - rect->left;
@@ -158,27 +167,15 @@ void buildPages(game::CTextBoxInterf* textBox) {
         ~TextMetrics() { game::SmartPointerApi::get().createOrFree(reinterpret_cast<game::SmartPointer*>(&ptr), nullptr); }
     } metrics;
     if (!metrics.ptr.data || width <= 0 || height <= 0) throw std::runtime_error("message-box-size");
-    const auto reserve = gameText("\n(9999/9999) Создать матч? Да — генерация, Нет — отложить.");
     auto fits = [&](const std::string& body) {
-        const auto candidate = format + body + reserve;
+        const auto candidate = format + body;
         return metrics.ptr.data->vftable->getTextHeight(metrics.ptr.data, candidate.c_str(), width) <= height;
     };
-    // Measure with the game's renderer and the actual mod's textbox. Pages retain
-    // every byte; the reserved footer is longer than any displayed page counter.
-    while (!text.empty()) {
-        std::size_t n{}, upper = std::min<std::size_t>(text.size(), 1024);
-        while (n < upper) {
-            const auto middle = n + (upper - n + 1) / 2;
-            if (fits(text.substr(0, middle))) n = middle;
-            else upper = middle - 1;
-        }
-        if (!n) throw std::runtime_error("message-box-too-small");
-        if (n < text.size()) {
-            const auto split = text.find_last_of(" \n", n - 1);
-            if (split != std::string::npos && split > n / 2) n = split + 1;
-        }
-        active->pages.push_back(text.substr(0, n)); text.erase(0, n);
-    }
+    return promptPages(std::move(text), gameText(question), gameText(next), fits);
+}
+void buildPages(game::CTextBoxInterf* textBox) {
+    active->pages = paginateText(textBox, hostPromptText(active->offer),
+        "Сгенерировать карту?", "Да — далее, Нет — отложить.");
 }
 struct ConfirmationHandler : game::CMidMsgBoxButtonHandler { std::uint64_t epoch; };
 void __fastcall destroyHandler(ConfirmationHandler* p, int, char flags) { if (flags & 1) game::Memory::get().freeNonZero(p); }
@@ -194,6 +191,138 @@ void __fastcall answer(ConfirmationHandler* handler, int, game::CMidgardMsgBox* 
 game::CMidMsgBoxButtonHandlerVftable handlerVftable{
     reinterpret_cast<game::CMidMsgBoxButtonHandlerVftable::Destructor>(destroyHandler),
     reinterpret_cast<game::CMidMsgBoxButtonHandlerVftable::Handler>(answer)};
+
+struct JoinConfirmationHandler : game::CMidMsgBoxButtonHandler {
+    std::uint64_t epoch, promptEpoch;
+};
+void __fastcall destroyJoinHandler(JoinConfirmationHandler* p, int, char flags) {
+    if (flags & 1) game::Memory::get().freeNonZero(p);
+}
+void __fastcall answerJoin(JoinConfirmationHandler* handler, int, game::CMidgardMsgBox* box, bool yes) {
+    const auto expected = handler->epoch, expectedPrompt = handler->promptEpoch;
+    if (joinBox == box) joinBox = nullptr;
+    if (box) { hideInterface(box); box->vftable->destructor(box, 1); }
+    if (expected != epoch || expectedPrompt != joinPromptEpoch || !activeJoin
+        || activeJoin->stage != JoinStage::Prompt || activeJoin->canceled) return;
+    if (!yes) { finishJoin(JoinState::Declined, "player-declined"); return; }
+    if (++activeJoin->page == activeJoin->pages.size()) activeJoin->stage = JoinStage::Accepted;
+}
+game::CMidMsgBoxButtonHandlerVftable joinHandlerVftable{
+    reinterpret_cast<game::CMidMsgBoxButtonHandlerVftable::Destructor>(destroyJoinHandler),
+    reinterpret_cast<game::CMidMsgBoxButtonHandlerVftable::Handler>(answerJoin)};
+
+void receiveJoinOffer(JoinOffer offer) {
+    auto* service = CNetCustomService::get();
+    try {
+        if (!service || !service->loggedIn() || gameText(offer.recipient) != service->getUserName()
+            || gameText(offer.host) == service->getUserName()) return;
+    } catch (...) { return; }
+    if (const auto old = joinReceipts.find(offer.target, offer.recipient)) {
+        sendJoinStatus(offer.target, *old); return;
+    }
+    if (activeJoin && activeJoin->offer.target == offer.target) {
+        sendJoinStatus(offer.target, activeJoin->state); return;
+    }
+    if (std::any_of(waitingJoins.begin(), waitingJoins.end(), [&](const JoinOffer& v) { return v.target == offer.target; })) return;
+    if (waitingJoins.size() >= 4) {
+        joinReceipts.remember(offer.target, offer.recipient, JoinState::Unavailable);
+        sendJoinStatus(offer.target, JoinState::Unavailable, "join-queue-full"); return;
+    }
+    sendJoinStatus(offer.target, idleLobby() ? JoinState::Received : JoinState::Busy);
+    waitingJoins.push_back(std::move(offer));
+}
+void cancelJoinOffer(const JoinIdentity& target) {
+    for (auto it = waitingJoins.begin(); it != waitingJoins.end();) {
+        if (!(it->target == target)) { ++it; continue; }
+        joinReceipts.remember(it->target, it->recipient, JoinState::Unavailable);
+        sendJoinStatus(it->target, JoinState::Unavailable, "join-withdrawn");
+        it = waitingJoins.erase(it);
+    }
+    if (activeJoin && activeJoin->offer.target == target && activeJoin->stage != JoinStage::Terminal)
+        activeJoin->canceled = true; // Destroy only our own modal at the post-callback safe point.
+}
+bool processJoinCancellation() {
+    if (!activeJoin || !activeJoin->canceled) return false;
+    ++joinPromptEpoch;
+    auto* box = joinBox; joinBox = nullptr;
+    if (box) { hideInterface(box); box->vftable->destructor(box, 1); }
+    finishJoin(JoinState::Unavailable, "join-withdrawn"); activeJoin.reset();
+    return box != nullptr;
+}
+bool processPreparedJoin() {
+    if (joinBox) return true;
+    if (activeJoin && activeJoin->stage == JoinStage::Terminal) activeJoin.reset();
+    if (!activeJoin && !waitingJoins.empty()) {
+        activeJoin.emplace(); activeJoin->offer = std::move(waitingJoins.front()); waitingJoins.pop_front();
+    }
+    if (!activeJoin) return false;
+    if (!idleLobby()) {
+        // A game or an unrelated dialog can last indefinitely. Refresh again on
+        // return; neither its elapsed time nor a replaced lobby menu expires the invite.
+        activeJoin->stage = joinStageAfterBusy(activeJoin->stage);
+        return false;
+    }
+    auto* menu = reinterpret_cast<CMenuCustomLobby*>(phase()->data->currentMenu);
+    auto& join = *activeJoin;
+    try {
+        const auto hostName = gameText(join.offer.host);
+        const auto action = joinAction(join.stage, true, menu->preparedRoomsRevision() > join.roomsRevision,
+                                       menu->hasPreparedJoinRoom(join.offer.target.roomId, hostName));
+        if (action == JoinAction::RefreshRooms) {
+            join.roomsRevision = menu->preparedRoomsRevision();
+            join.refreshDeadline = Clock::now() + std::chrono::seconds(15);
+            join.stage = join.stage == JoinStage::Accepted ? JoinStage::CheckingJoinRoom : JoinStage::CheckingRoom;
+            CNetCustomService::get()->searchRooms(); return false;
+        }
+        if (action == JoinAction::Wait
+            && (join.stage == JoinStage::CheckingRoom || join.stage == JoinStage::CheckingJoinRoom)
+            && Clock::now() > join.refreshDeadline) {
+            // No room-search response is not evidence that the room disappeared.
+            // Keep consent/queue state and retry; a fresh result or JoinCancel settles it.
+            join.stage = joinStageAfterBusy(join.stage); return false;
+        }
+        if (action == JoinAction::Unavailable) {
+            finishJoin(JoinState::Unavailable, "join-room-unavailable"); return false;
+        }
+        if (action == JoinAction::Join) {
+            // No race/lord/portrait overrides: ordinary native joining owns every choice.
+            const auto started = menu->joinPreparedRoom(join.offer.target.roomId, hostName);
+            finishJoin(started ? JoinState::Accepted : JoinState::Unavailable,
+                       started ? "join-requested" : "join-validation-failed");
+            return true;
+        }
+        if (action != JoinAction::ShowPrompt) return false;
+        join.stage = JoinStage::Prompt; join.state = JoinState::Prompt;
+        auto* handler = static_cast<JoinConfirmationHandler*>(game::Memory::get().allocate(sizeof(JoinConfirmationHandler)));
+        handler->vftable = &joinHandlerVftable; handler->epoch = epoch; handler->promptEpoch = ++joinPromptEpoch;
+        auto* box = static_cast<game::CMidgardMsgBox*>(game::Memory::get().allocate(sizeof(game::CMidgardMsgBox)));
+        game::CMidgardMsgBoxApi::get().constructor(box, "", true, handler, nullptr, nullptr);
+        try {
+            auto* dialog = box->data->dialogInterf;
+            if (!game::CDialogInterfApi::get().findControl(dialog, "TXT_INFO")) throw std::runtime_error("message-box-text-missing");
+            auto* textBox = game::CDialogInterfApi::get().findTextBox(dialog, "TXT_INFO");
+            if (!textBox || !textBox->data) throw std::runtime_error("message-box-text-missing");
+            if (join.pages.empty()) join.pages = paginateText(textBox,
+                join.offer.title + "\nХост: " + join.offer.host + "\nКарта готова.",
+                "Войти в комнату?", "Да — далее, Нет — отказаться.");
+            const auto footer = promptFooter(join.page, join.pages.size(),
+                "Войти в комнату?", "Да — далее, Нет — отказаться.");
+            const auto text = join.pages[join.page] + gameText(footer);
+            game::CTextBoxInterfApi::get().setString(textBox, text.c_str());
+            joinBox = box; showInterface(box); sendJoinStatus(join.offer.target, JoinState::Prompt);
+        } catch (...) {
+            if (joinBox == box) { joinBox = nullptr; hideInterface(box); }
+            box->vftable->destructor(box, 1);
+            finishJoin(JoinState::Unavailable, "join-confirmation-layout");
+            showMessageBox(gameText("Не удалось показать приглашение. Откройте подготовку матча на сайте."));
+        }
+        return true;
+    } catch (...) {
+        finishJoin(JoinState::Unavailable, "join-client-error");
+        showMessageBox(gameText("Не удалось присоединиться к подготовленному матчу. Проверьте файлы игры и комнаты в лобби."));
+        return true;
+    }
+}
 game::CMenuBase* __stdcall createPreparedMenu(game::CMenuPhase* p) {
     auto* memory = game::Memory::get().allocate(sizeof(CMenuCustomRandomScenarioMulti));
     auto* menu = new (memory) CMenuCustomRandomScenarioMulti(p);
@@ -222,8 +351,16 @@ bool pressLord(game::CMenuPhase* p) {
     return true;
 }
 }
-void resetPreparedMatch() { ++epoch; active.reset(); waiting.clear(); seen.clear(); modal = false; }
+void resetPreparedMatch() {
+    ++epoch; ++joinPromptEpoch; active.reset(); waiting.clear(); seen.clear(); modal = false;
+    // Native menu teardown owns its interfaces. Late handlers cannot affect a new login.
+    activeJoin.reset(); waitingJoins.clear(); joinBox = nullptr;
+}
 void receivePreparedMatch(const unsigned char* bytes, std::size_t size) {
+    JoinOffer joinOffer;
+    if (decodeJoinOffer(bytes, size, joinOffer)) { receiveJoinOffer(std::move(joinOffer)); return; }
+    JoinIdentity joinCancel;
+    if (decodeJoinCancel(bytes, size, joinCancel)) { cancelJoinOffer(joinCancel); return; }
     Offer offer;
     if (decodeOffer(bytes, size, offer)) {
         auto* service = CNetCustomService::get();
@@ -262,12 +399,14 @@ void receivePreparedMatch(const unsigned char* bytes, std::size_t size) {
     active->stage = stageAfterCanceledAck(active->stage);
 }
 bool processPreparedMatch() {
+    if (processJoinCancellation()) return true;
+    if (joinBox) return true;
     if (modal) return true;
     if (active && active->stage == Stage::Terminal && idleLobby()) {
         seen.emplace_back(active->offer.identity, active->status); if (seen.size() > 32) seen.pop_front(); active.reset();
     }
     if (!active && !waiting.empty()) { active.emplace(); active->offer = std::move(waiting.front()); waiting.pop_front(); }
-    if (!active) return false;
+    if (!active) return processPreparedJoin();
     auto* p = phase();
     if (active->canceled && active->stage == Stage::Generating && p && p->data
         && p->data->currentPhase == game::MenuPhase::RandomScenarioMulti && p->data->currentMenu) {
@@ -292,9 +431,8 @@ bool processPreparedMatch() {
             auto* textBox = game::CDialogInterfApi::get().findTextBox(dialog, "TXT_INFO");
             if (!textBox || !textBox->data) throw std::runtime_error("message-box-text-missing");
             if (active->pages.empty()) buildPages(textBox);
-            const bool last = active->page + 1 == active->pages.size();
-            const auto footer = "\n(" + std::to_string(active->page + 1) + "/" + std::to_string(active->pages.size()) + ") "
-                + (last ? "Создать матч? Да — генерация, Нет — отложить." : "Да — далее, Нет — отложить.");
+            const auto footer = promptFooter(active->page, active->pages.size(),
+                "Сгенерировать карту?", "Да — далее, Нет — отложить.");
             const auto message = active->pages[active->page] + gameText(footer);
             game::CTextBoxInterfApi::get().setString(textBox, message.c_str());
             modal = true; showInterface(box);
@@ -365,7 +503,7 @@ bool processPreparedMatch() {
         }
         if (!active->querySent && Clock::now() >= active->nextQuery && topIsMenu(p)) active->querySent = requestRestartSetupInfo();
     }
-    return false;
+    return processPreparedJoin();
 }
 void preparedMatchGenerationEnded(RestartScenarioGenerationResult result) {
     if (!active || active->stage != Stage::Generating) return;

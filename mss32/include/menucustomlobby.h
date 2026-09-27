@@ -81,6 +81,9 @@ public:
         return !m_restartJoin && !m_restartJoinPending && !m_helpDialog
             && !m_roomPasswordDialog && !hasWaitDialog();
     }
+    std::uint64_t preparedRoomsRevision() const { return m_preparedRoomsRevision; }
+    bool hasPreparedJoinRoom(std::uint32_t roomId, const std::string& host) const;
+    bool joinPreparedRoom(std::uint32_t roomId, const std::string& host);
 
 protected:
     // CInterface
@@ -98,6 +101,7 @@ protected:
     void hideRoomPasswordDialog();
     void updateRooms(DataStructures::List<SLNet::RoomDescriptor*>& roomDescriptors);
     const RoomInfo* getSelectedRoom();
+    bool joinRoomInfo(const RoomInfo& room);
     void updateTxtRoomInfo(int roomIndex);
     void updateListBoxRoomsRow(int rowIndex,
                                bool selected,
@@ -313,6 +317,7 @@ private:
     RoomsCallback m_roomsCallback;
     game::UiEvent m_roomsUpdateEvent;
     std::vector<RoomInfo> m_rooms;
+    std::uint64_t m_preparedRoomsRevision{};
     game::UiEvent m_usersUpdateEvent;
     std::vector<CNetCustomService::UserInfo> m_users;
     game::Vector<game::SmartPtr<game::IMqImage2>> m_userIcons;
