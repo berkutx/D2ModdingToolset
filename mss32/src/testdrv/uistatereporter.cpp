@@ -1155,6 +1155,23 @@ bool isStrategicIdle()
     return computeStrategicIdle();
 }
 
+bool selectRevealedDialog(void* top, const char* name)
+{
+    DlgEntry* revealed = findEntry(name);
+    if (!revealed || !revealed->ptr || revealed->ownerInstance == 0
+        || revealed->screen != top
+        || (revealed->ptr == g_curDialog && revealed->ownerInstance == g_curOwnerInstance))
+        return false;
+    // The screen registry may still refer to a retired construction batch.
+    // Publish name, owner and appearance together only after validating that batch.
+    // Otherwise retain the old identity with ready=false, never a new name paired
+    // with the old modal's token (which the relay correctly rejects).
+    selectDialogInstance(revealed->ptr, revealed->ownerInstance,
+                         revealed->firstBindTick, revealed->firstBindTickSet);
+    lstrcpynA(g_lastDialog, name, sizeof(g_lastDialog));
+    return true;
+}
+
 void refreshCurrentDialog()
 {
     // The assignFunctor hook only fires on a button-bind, so a modal that closes to reveal an
@@ -1211,17 +1228,12 @@ void refreshCurrentDialog()
         return;
     }
     if (lstrcmpA(g_lastDialog, name) != 0) {
-        lstrcpynA(g_lastDialog, name, sizeof(g_lastDialog));
-        DlgEntry* revealed = findEntry(name);
-        if (!revealed || !revealed->ptr || revealed->ownerInstance == 0
-            || revealed->screen != top) {
+        if (!selectRevealedDialog(top, name)) {
             g_dialogReady = false;
             g_currentTopScreen = nullptr;
             rebuildSnapshot();
             return;
         }
-        selectDialogInstance(revealed->ptr, revealed->ownerInstance,
-                             revealed->firstBindTick, revealed->firstBindTickSet);
         spdlog::info("[testdrv] dialog now: {} (revealed)", g_lastDialog);
     }
     DlgEntry* current = findEntry(g_lastDialog);
