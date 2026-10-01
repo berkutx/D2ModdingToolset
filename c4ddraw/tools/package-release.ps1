@@ -1,12 +1,15 @@
 param(
     [Parameter(Mandatory = $true)][string]$BuildDirectory,
     [ValidatePattern('^v[0-9][0-9A-Za-z.-]{0,79}$')][string]$Version = 'v2.3.0',
-    [string]$OutputRoot = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent)
+    [string]$OutputRoot = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
+    [string]$ReleaseNotesFile = ''
 )
 # Offline packaging only. Existing output is an error; partial output is never removed.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repo = (Resolve-Path -LiteralPath (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent)).Path
+if (-not $ReleaseNotesFile) { $ReleaseNotesFile = Join-Path $repo 'c4ddraw/release/RELEASE_NOTES.md' }
+$ReleaseNotesFile = (Resolve-Path -LiteralPath $ReleaseNotesFile).Path
 $build = (Resolve-Path -LiteralPath $BuildDirectory).Path
 $out = (Resolve-Path -LiteralPath $OutputRoot).Path.TrimEnd('\', '/')
 if ($out -ne $repo -and -not $out.StartsWith($repo.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'OutputRoot must be inside this workspace' }
@@ -44,10 +47,10 @@ $shaderContract = & "$repo/c4ddraw/tools/validate-shader-bundle.ps1" `
 $shaderFiles = @(Get-ChildItem -LiteralPath $shaderRoot -Recurse -File)
 if ($shaderContract.RequiredFileCount -ne 11) { throw 'Shader menu contract is incomplete' }
 foreach ($shader in $shaderFiles) { $files['Shaders/' + $shader.FullName.Substring($shaderRoot.Length + 1).Replace('\', '/')] = $shader.FullName }
-foreach ($inputFile in @($files.Values) + @($symbols.Values) + @("$repo/c4ddraw/release/RELEASE_NOTES.md")) {
+foreach ($inputFile in @($files.Values) + @($symbols.Values) + @($ReleaseNotesFile)) {
     if (-not (Test-Path -LiteralPath $inputFile -PathType Leaf) -or (Get-Item -LiteralPath $inputFile).Length -eq 0) { throw "Missing/empty input: $inputFile" }
 }
-$notes = (Get-Content -LiteralPath "$repo/c4ddraw/release/RELEASE_NOTES.md" -Raw -Encoding utf8).Replace('__VER__', $Version).Replace('__ZIP__', "$name.zip")
+$notes = (Get-Content -LiteralPath $ReleaseNotesFile -Raw -Encoding utf8).Replace('__VER__', $Version).Replace('__ZIP__', "$name.zip")
 if ($notes -match '__(VER|ZIP)__') { throw 'Unresolved release-note tokens' }
 function Hash([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Commit([string]$Ref) { $value = & git -C $repo rev-parse --verify "$Ref^{commit}" 2>$null; if ($LASTEXITCODE -eq 0) { "$value" } else { $null } }

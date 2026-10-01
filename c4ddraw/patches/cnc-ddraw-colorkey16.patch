@@ -1,0 +1,46 @@
+--- a/src/blt.c
++++ b/src/blt.c
+@@ -2,9 +2,11 @@
+ #include <intrin.h>
+ #include "debug.h"
+ #include "blt.h"
++#include "colorkey16.h"
+ 
+ 
+ BOOL g_blt_use_avx;
++BOOL g_blt_use_sse2;
+ 
+ void blt_copy(
+     unsigned char* dst,
+@@ -186,6 +188,11 @@
+     unsigned int key_high,
+     int bpp)
+ {
++    if (c4_blt_colorkey16(dst, dst_x, dst_y, dst_w, dst_h, dst_p,
++                          src, src_x, src_y, src_p,
++                          key_low, key_high, bpp, g_blt_use_sse2))
++        return;
++
+     int bytes_pp = bpp / 8;
+ 
+     size_t s_a = (src_p / bytes_pp) - dst_w;
+--- a/inc/blt.h
++++ b/inc/blt.h
+@@ -6,6 +6,7 @@
+ 
+ 
+ extern BOOL g_blt_use_avx;
++extern BOOL g_blt_use_sse2;
+ 
+ void blt_copy(
+     unsigned char* dst,
+--- a/src/dd.c
++++ b/src/dd.c
+@@ -1815,6 +1815,7 @@
+ 
+         g_ddraw.render.sem = CreateSemaphore(NULL, 0, 1, NULL);
+         g_blt_use_avx = util_is_avx_supported();
++        g_blt_use_sse2 = IsProcessorFeaturePresent(PF_XMMI64_INSTRUCTIONS_AVAILABLE);
+ 
+         if (g_config.minfps > 1000)
+             g_config.minfps = 1000;

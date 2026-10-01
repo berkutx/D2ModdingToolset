@@ -47,7 +47,7 @@ jobs:
 
       # Version is computed BEFORE the build so build.ps1 can stamp it into the DLL version
       # resource. Only a real tag PUSH makes a full release; a manual dispatch (even from a tag
-      # ref) and any rc/alpha/beta/dev version are prereleases.
+      # ref) and any preview/rc/alpha/beta/dev version are prereleases.
       - name: Compute version
         id: ver
         run: |
@@ -60,11 +60,17 @@ jobs:
             $ver = $label
             $tag = "c4dll-r-$ver"
           }
-          $isPreVer = $ver -match '(?i)(^|[.-])(rc|alpha|beta|dev)\d*([.-]|$)'
-          $pre = if ($env:GITHUB_EVENT_NAME -ne 'push' -or $isPreVer) { "true" } else { "false" }
+          $isPreVer = $ver -match '(?i)(^|[.-])(preview|rc|alpha|beta|dev)\d*([.-]|$)'
+          $pre = if ($env:GITHUB_EVENT_NAME -ne 'push' -or $env:GITHUB_REF_TYPE -ne 'tag' -or $isPreVer) { "true" } else { "false" }
+          $notesSource = if ($ver -match '(?i)(^|[.-])preview\d*([.-]|$)') {
+            "c4ddraw/release/RENDER-PERFORMANCE-PREVIEW.md"
+          } else {
+            "c4ddraw/release/RELEASE_NOTES.md"
+          }
           "tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append
           "ver=$ver" | Out-File $env:GITHUB_OUTPUT -Append
           "pre=$pre" | Out-File $env:GITHUB_OUTPUT -Append
+          "notesSource=$notesSource" | Out-File $env:GITHUB_OUTPUT -Append
           Write-Host "version $ver (tag $tag, prerelease=$pre)"
 
       - name: Validate texture palette colors
@@ -104,6 +110,16 @@ jobs:
           python c4ddraw/tests/run-windowstretch-tests.py
           if ($LASTEXITCODE -ne 0) { throw 'Window stretch tests failed' }
 
+      - name: Validate 16-bit color-key blits
+        run: |
+          python c4ddraw/tests/run-colorkey16-tests.py
+          if ($LASTEXITCODE -ne 0) { throw '16-bit color-key blit tests failed' }
+
+      - name: Validate RGB565 software blending
+        run: |
+          python c4ddraw/tests/run-blend565-tests.py
+          if ($LASTEXITCODE -ne 0) { throw 'RGB565 software blend tests failed' }
+
       - name: Validate minimal network diagnostics
         run: |
           ./c4ddraw/tests/test-netboundarytrace.ps1
@@ -139,7 +155,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$stage/Tools" | Out-Null
           Copy-Item "c4ddraw/tools/analyze-event-trace.py" "$stage/Tools/analyze-event-trace.py"
           # Resolve once: the archive and GitHub page must carry identical notes.
-          $notes = (Get-Content "c4ddraw/release/RELEASE_NOTES.md" -Raw -Encoding utf8).Replace('__VER__', $ver).Replace('__ZIP__', $zip)
+          $notes = (Get-Content -LiteralPath "${{ steps.ver.outputs.notesSource }}" -Raw -Encoding utf8).Replace('__VER__', $ver).Replace('__ZIP__', $zip)
           if ($notes -match '__(VER|ZIP)__') { throw 'Unresolved release-note tokens' }
           $notesPath = "$stage/RELEASE_NOTES.md"
           Set-Content -LiteralPath $notesPath -Value $notes -Encoding utf8

@@ -131,6 +131,16 @@ jobs:
           python c4ddraw/tests/run-windowstretch-tests.py
           if ($LASTEXITCODE -ne 0) { throw 'Window stretch tests failed' }
 
+      - name: Validate 16-bit color-key blits
+        run: |
+          python c4ddraw/tests/run-colorkey16-tests.py
+          if ($LASTEXITCODE -ne 0) { throw '16-bit color-key blit tests failed' }
+
+      - name: Validate RGB565 software blending
+        run: |
+          python c4ddraw/tests/run-blend565-tests.py
+          if ($LASTEXITCODE -ne 0) { throw 'RGB565 software blend tests failed' }
+
       - name: Validate minimal network diagnostics
         run: |
           ./c4ddraw/tests/test-netboundarytrace.ps1

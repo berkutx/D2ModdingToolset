@@ -81,6 +81,7 @@ extern "C" int cursorcapture_install(void);
 extern "C" int cursorcapture_is_available(void);
 extern "C" void cursorcapture_set_suppressed(int suppressed);
 extern "C" void cursorcapture_clear(void);
+extern "C" const char* blend565_status_text(void);
 extern "C" void fastai_install(void);
 extern "C" int fastai_set_enabled(int enabled);
 extern "C" int fastai_get_enabled(void);
@@ -7381,6 +7382,7 @@ void installDragScrollDetour()
 extern "C" void featuremenu_install(void)
 {
     detectVersion();
+    mlog("[render] RGB565 acceleration: %s", blend565_status_text());
     // The unique CStratInterf construction happens before the first WndProc dispatch, so capture
     // its lifecycle now, while DLL_PROCESS_ATTACH still precedes the EXE entry point.
     installStatusTextHooks();

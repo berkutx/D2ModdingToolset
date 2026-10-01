@@ -57,6 +57,7 @@ $patchSurfacePublish = Join-Path $root "patches\cnc-ddraw-surface-layout-publish
 $patchWindowStretchFilter = Join-Path $root "patches\cnc-ddraw-window-stretch-filter.patch"
 $patchWorkArea = Join-Path $root "patches\cnc-ddraw-work-area.patch"
 $patchWindowStretchHeight = Join-Path $root "patches\cnc-ddraw-window-stretch-height.patch"
+$patchColorKey16 = Join-Path $root "patches\cnc-ddraw-colorkey16.patch"
 $patchEventTrace = Join-Path $root "patches\cnc-ddraw-event-trace.patch"
 $patchPaletteColors = Join-Path $root "patches\cnc-ddraw-d2-palette-colors.patch"
 $cb63def = Join-Path $root "forwarder\C4dll-R.cb63.def"
@@ -176,6 +177,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "git apply (work-area window) failed (exit $LASTEXITCODE)" }
     & git -c core.autocrlf=false apply --ignore-whitespace "$patchWindowStretchHeight"
     if ($LASTEXITCODE -ne 0) { throw "git apply (fixed-window fill height) failed (exit $LASTEXITCODE)" }
+    & git -c core.autocrlf=false apply --ignore-whitespace "$patchColorKey16"
+    if ($LASTEXITCODE -ne 0) { throw "git apply (16-bit transparent blit) failed (exit $LASTEXITCODE)" }
 }
 finally { Pop-Location }
 if (-not (Select-String -Path (Join-Path $build "src\dllmain.c") -Pattern "c4features_install" -Quiet)) {
@@ -283,6 +286,17 @@ if ($fsrEasu -notmatch 'FsrEasuCon\(\s*con0, con1, con2, con3, InputSize\.xy, Te
     throw "runtime FSR/xBRZ shaders are not active-crop/POT-padding safe"
 }
 
+$colorKeyBlt = Get-Content -LiteralPath (Join-Path $build "src\blt.c") -Raw
+$colorKeyInit = Get-Content -LiteralPath (Join-Path $build "src\dd.c") -Raw
+$colorKeyDeclarations = Get-Content -LiteralPath (Join-Path $build "inc\blt.h") -Raw
+if ($colorKeyBlt -notmatch '#include "colorkey16\.h"' -or
+    $colorKeyBlt -notmatch 'c4_blt_colorkey16\(' -or
+    $colorKeyBlt -notmatch 'BOOL g_blt_use_sse2;' -or
+    $colorKeyDeclarations -notmatch 'extern BOOL g_blt_use_sse2;' -or
+    $colorKeyInit -notmatch 'g_blt_use_sse2 = IsProcessorFeaturePresent\(PF_XMMI64_INSTRUCTIONS_AVAILABLE\)') {
+    throw "16-bit transparent blit patch incomplete: helper or CPU capability dispatch missing"
+}
+
 # Add our self-contained C4dll-R sources. They are NOT part of upstream cnc-ddraw; the integration
 # patch only redirects DirectDraw imports and calls c4features_install() from DllMain. Renderer
 # adapters, screenshot, edge-scroll, localization and save handling all stay in these own sources.
@@ -295,6 +309,10 @@ Copy-Item (Join-Path $root "features\featuremenu.cpp") (Join-Path $build "src\fe
 Copy-Item (Join-Path $root "features\inisettingsreset.h") (Join-Path $build "src\inisettingsreset.h") -Force
 Copy-Item (Join-Path $root "features\wrapperdefaults.h") (Join-Path $build "src\wrapperdefaults.h") -Force
 Copy-Item (Join-Path $root "features\workarealayout.h") (Join-Path $build "src\workarealayout.h") -Force
+Copy-Item (Join-Path $root "features\colorkey16.h") (Join-Path $build "src\colorkey16.h") -Force
+Copy-Item (Join-Path $root "features\blend565.h") (Join-Path $build "src\blend565.h") -Force
+Copy-Item (Join-Path $root "features\blend565.cpp") (Join-Path $build "src\blend565.cpp") -Force
+Copy-Item (Join-Path $root "features\blend565_install.h") (Join-Path $build "src\blend565_install.h") -Force
 foreach ($traceFile in @('c4trace.cpp', 'c4trace.h', 'eventtrace.cpp', 'eventtrace.h', 'inventorytrace.cpp', 'inventorytrace.h', 'messagebatch.cpp', 'messagebatch.h', 'netboundarytrace.cpp', 'netboundarytrace.h', 'nettraceframe.h', 'netturntrace.cpp', 'netturntrace.h', 'netnotify.cpp', 'netnotify.h', 'netnotifystate.h', 'ownedwindowtimer.h')) {
     Copy-Item -LiteralPath (Join-Path $root "features\$traceFile") -Destination (Join-Path $build "src\$traceFile") -Force
 }
@@ -343,7 +361,7 @@ Copy-Item (Join-Path $root "features\c4plugin.h") (Join-Path $build "src\c4plugi
 if (-not (Select-String -Path (Join-Path $build "src\rendererbridge.c") -Pattern "DDReloadConfig" -Quiet)) {
     throw "C4dll-R source copy failed: DDReloadConfig missing from src/rendererbridge.c"
 }
-foreach ($sym in @("localization_install", "savelogic_install", "horplus_install", "widebattle_install", "decorative_install", "clouds_install", "featuremenu_install", "pluginhost_install", "headless_install")) {
+foreach ($sym in @("localization_install", "savelogic_install", "horplus_install", "widebattle_install", "decorative_install", "clouds_install", "blend565_install", "featuremenu_install", "pluginhost_install", "headless_install")) {
     if (-not (Select-String -Path (Join-Path $build "src\c4features.cpp") -Pattern $sym -Quiet)) {
         throw "feature bootstrap incomplete: $sym() call missing"
     }
@@ -379,6 +397,13 @@ $traceEntries = '    <ClCompile Include="src\c4trace.cpp" />' + "`r`n" +
 $traceProject = $traceProject.Replace('    <ClCompile Include="src\featuremenu.cpp" />',
     $traceEntries + '    <ClCompile Include="src\featuremenu.cpp" />')
 Set-Content -LiteralPath $vcx -Value $traceProject -Encoding UTF8
+$blendProject = Get-Content -LiteralPath $vcx -Raw
+$blendProject = $blendProject.Replace('    <ClCompile Include="src\clouds.cpp" />',
+    '    <ClCompile Include="src\clouds.cpp" />' + "`r`n" + '    <ClCompile Include="src\blend565.cpp" />')
+Set-Content -LiteralPath $vcx -Value $blendProject -Encoding UTF8
+if (-not (Select-String -LiteralPath $vcx -SimpleMatch '<ClCompile Include="src\blend565.cpp" />' -Quiet)) {
+    throw "vcxproj retarget failed: blend565.cpp not added to the project"
+}
 foreach ($src in @('rendererbridge\.c', 'c4features\.cpp', 'featuremenu\.cpp', 'horplus\.cpp', 'widebattle\.cpp', 'decorative\.cpp', 'cursorcapture\.cpp', 'clouds\.cpp', 'pluginhost\.cpp', 'localization\.cpp', 'savelogic\.cpp', 'timerhost\.cpp', 'fastai\.cpp', 'headless\.cpp', 'c4trace\.cpp', 'eventtrace\.cpp', 'inventorytrace\.cpp', 'messagebatch\.cpp', 'netboundarytrace\.cpp', 'netturntrace\.cpp', 'netnotify\.cpp')) {
     if (-not (Select-String -Path $vcx -Pattern $src -Quiet)) {
         throw "vcxproj retarget failed: $src not added to the project"

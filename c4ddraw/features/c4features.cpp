@@ -11,6 +11,7 @@ extern "C" void horplus_install(void);
 extern "C" void widebattle_install(void);
 extern "C" void decorative_install(void);
 extern "C" void clouds_install(void);
+extern "C" void blend565_install(void);
 extern "C" void featuremenu_install(void);
 extern "C" void pluginhost_install(void);
 extern "C" void headless_install(void);
@@ -27,6 +28,7 @@ extern "C" void c4features_install(void)
     horplus_install();
     decorative_install();
     clouds_install();
+    blend565_install();
     featuremenu_install();
     pluginhost_install();
     headless_install();
