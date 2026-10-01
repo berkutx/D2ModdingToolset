@@ -122,6 +122,15 @@ jobs:
             throw 'Build artifacts must contain exactly timer.c4p and twitchstat.c4p.'
           }
 
+      - name: Validate work-area window, monitor selection and fill height
+        run: |
+          python c4ddraw/tests/run-workarea-tests.py c4ddraw/build/cnc-ddraw
+          if ($LASTEXITCODE -ne 0) { throw 'Work-area window tests failed' }
+          python c4ddraw/tests/run-windowmonitor-tests.py
+          if ($LASTEXITCODE -ne 0) { throw 'Window monitor tests failed' }
+          python c4ddraw/tests/run-windowstretch-tests.py
+          if ($LASTEXITCODE -ne 0) { throw 'Window stretch tests failed' }
+
       - name: Validate minimal network diagnostics
         run: |
           ./c4ddraw/tests/test-netboundarytrace.ps1

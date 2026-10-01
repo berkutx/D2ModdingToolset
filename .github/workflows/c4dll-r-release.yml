@@ -95,6 +95,15 @@ jobs:
           if (-not (Test-Path "c4ddraw/plugins/timer/bin/Release/timer.c4p")) { Write-Error "timer.c4p missing"; exit 1 }
           if (-not (Test-Path "c4ddraw/plugins/unitinfo/bin/Release/twitchstat.c4p")) { Write-Error "twitchstat.c4p missing"; exit 1 }
 
+      - name: Validate work-area window, monitor selection and fill height
+        run: |
+          python c4ddraw/tests/run-workarea-tests.py c4ddraw/build/cnc-ddraw
+          if ($LASTEXITCODE -ne 0) { throw 'Work-area window tests failed' }
+          python c4ddraw/tests/run-windowmonitor-tests.py
+          if ($LASTEXITCODE -ne 0) { throw 'Window monitor tests failed' }
+          python c4ddraw/tests/run-windowstretch-tests.py
+          if ($LASTEXITCODE -ne 0) { throw 'Window stretch tests failed' }
+
       - name: Validate minimal network diagnostics
         run: |
           ./c4ddraw/tests/test-netboundarytrace.ps1
@@ -124,6 +133,7 @@ jobs:
           Copy-Item "c4ddraw/plugins/unitinfo/bin/Release/twitchstat.c4p" "$stage/Mods/twitchstat.c4p"
           Copy-Item "twitch-extension/STREAMER-RU.md" "$stage/TWITCH-STREAMER-RU.md"
           Copy-Item "c4ddraw/release/INSTALL.txt" "$stage/INSTALL.txt"
+          Copy-Item "c4ddraw/release/WINDOW-WORKAREA-RU.txt" "$stage/WINDOW-WORKAREA-RU.txt"
           Copy-Item "c4ddraw/MESSAGE_BATCHING.md" "$stage/MESSAGE_BATCHING.md"
           Copy-Item "c4ddraw/NETWORK_TRACE.md" "$stage/NETWORK_TRACE.md"
           New-Item -ItemType Directory -Force -Path "$stage/Tools" | Out-Null
@@ -150,7 +160,7 @@ jobs:
             $archiveFiles = @($runtimeArchive.Entries | Where-Object { -not $_.FullName.EndsWith('/') } |
               ForEach-Object { $_.FullName.Replace('\', '/') })
             $expectedFiles = @('C4dll-R.dll', 'Mods/timer.c4p', 'Mods/twitchstat.c4p',
-              'TWITCH-STREAMER-RU.md', 'INSTALL.txt', 'MESSAGE_BATCHING.md', 'NETWORK_TRACE.md', 'Tools/analyze-event-trace.py',
+              'TWITCH-STREAMER-RU.md', 'INSTALL.txt', 'WINDOW-WORKAREA-RU.txt', 'MESSAGE_BATCHING.md', 'NETWORK_TRACE.md', 'Tools/analyze-event-trace.py',
               'RELEASE_NOTES.md', 'C4PLUGINS.txt', 'C4plugins.ini', 'ddraw.ini',
               'THIRD_PARTY_NOTICES.txt', 'LICENSE')
             $shaderRoot = (Resolve-Path 'c4ddraw/release/Shaders').Path

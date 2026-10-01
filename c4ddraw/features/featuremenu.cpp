@@ -36,6 +36,10 @@ extern "C" int DDGetActivePortableFilter(void);
 extern "C" int DDGetRendererSwitchError(void);
 extern "C" int DDSetMaxGameTicksLive(int ticks);
 extern "C" void DDRelayoutCurrentMode(void);
+extern "C" void DDRefreshWorkAreaWindow(void);
+extern "C" int DDRememberWindowMonitor(void);
+extern "C" void DDPrepareDisplayModeChange(int target_mode);
+extern "C" int DDGetWorkAreaClientRect(RECT* client);
 extern "C" int DDGetDisplayMode(void);
 extern "C" void DDNormalizeLegacyExclusive(void);
 extern "C" void DDToggleWindowedMode(void);
@@ -49,6 +53,8 @@ extern "C" int DDGetOutputConfig(int* width, int* height,
                                    int* persistsNextStart);
 extern "C" void DDSetOutputConfigMemory(int width, int height);
 extern "C" int DDGetSimpleZoom1000(void);
+extern "C" int DDApplyWindowStretchViewport(int bottomOrigin, int* x, int* y, int* width, int* height);
+extern "C" void DDApplySimpleZoomViewport(int bottomOrigin, int* x, int* y, int* width, int* height);
 extern "C" int DDGetSimpleZoomExtra1000(void);
 extern "C" int DDGetWindowStretchPercent(void);
 extern "C" int DDIsWindowStretchActive(void);
@@ -99,7 +105,7 @@ extern "C" int horplus_get_adaptive_for_output(int outputWidth,
                                                   int outputHeight,
                                                   int* width, int* height,
                                                   int* nativeDisplaySize);
-extern "C" int horplus_get_primary_adaptive(int* outputWidth,
+extern "C" int horplus_get_current_adaptive(int* outputWidth,
                                                int* outputHeight,
                                                int* width, int* height,
                                                int* nativeDisplaySize);
@@ -1061,6 +1067,7 @@ enum : UINT
     kIdModeWindowed = 0xA1B0, // ddraw.ini windowed/fullscreen pair
     kIdModeBorderless = 0xA1B1,
     kIdModeExclusive = 0xA1B2,
+    kIdModeWorkArea = 0xA1B3,
     kIdScreenshot = 0xA1C0, // action: take a screenshot
     kIdAnimMapOff = 0xA1D0, // MAP anim multiplier: off / 1.5x..5x
     kIdAnimMap1 = 0xA1D1,
@@ -1330,8 +1337,10 @@ const ModeOpt kModes[] = {
     {L"Fullscreen - desktop size (adaptive, borderless)",
      L"Полный экран - размер рабочего стола (адаптивно, без рамки)", "true", "true"},
     {L"Exclusive fullscreen (advanced)",
-     L"Эксклюзивный полный экран (дополнительно)", "false", "false"}};
-const int kModeCount = 3;
+     L"Эксклюзивный полный экран (дополнительно)", "false", "false"},
+    {L"Window - fill work area (keep taskbar visible)",
+     L"Окно на всю рабочую область (панель задач видна)", "true", "false"}};
+const int kModeCount = 4;
 
 bool g_alwaysActive = false;
 bool g_battleAnimEnabled = false; // BATTLE live anim multiplier
@@ -1771,6 +1780,8 @@ bool saveLiveDisplayModeForNextStart(int liveMode)
     const bool fullscreenSaved =
         writeDdrawStr("fullscreen", kModes[liveMode].fullscreen);
     bool transitionSaved = true;
+    if (liveMode == 0 || liveMode == 3)
+        transitionSaved = writeDdrawBool("window_workarea", liveMode == 3);
     if (liveMode == 1)
         transitionSaved = writeDdrawBool("toggle_borderless", true);
     else if (liveMode == 2)
@@ -1805,7 +1816,7 @@ void showFirstFullscreenPersistenceNotice(HWND owner)
         int currentW = 0, currentH = 0;
         DDGetScaleMetrics(&currentW, &currentH, nullptr, nullptr,
                           nullptr, nullptr, nullptr, nullptr);
-        if (horplus_get_primary_adaptive(&outputW, &outputH,
+        if (horplus_get_current_adaptive(&outputW, &outputH,
                                          &selectedW, &selectedH,
                                          &nativeDisplaySize)) {
             wchar_t message[1000] = {};
@@ -1838,7 +1849,7 @@ void showFirstFullscreenPersistenceNotice(HWND owner)
     int selectedW = 0, selectedH = 0;
     int nativeDisplaySize = -1;
     if (requestedValid && horplus_is_available() &&
-        horplus_get_primary_adaptive(&outputW, &outputH,
+        horplus_get_current_adaptive(&outputW, &outputH,
                                      &selectedW, &selectedH,
                                      &nativeDisplaySize)) {
         wsprintfW(
@@ -1964,7 +1975,7 @@ void readDdrawState()
 
     const bool wnd = readDdrawBool("windowed", false);
     const bool fs = readDdrawBool("fullscreen", false);
-    g_modeIdx = !wnd ? 2 : (fs ? 1 : 0); // !windowed=exclusive; windowed+fullscreen=borderless
+    g_modeIdx = !wnd ? 2 : (fs ? 1 : (readDdrawBool("window_workarea", false) ? 3 : 0));
     if (!wnd && fs) {
         // C4dll-R <= 1.4 wrote false+true for exclusive. In cnc-ddraw, the second bit means
         // "force desktop-sized output", not exclusivity; normalize the persisted pair for the next
@@ -2339,26 +2350,108 @@ double fitScale(int gameWidth, int gameHeight, int outputWidth,
                 int outputHeight);
 void formatScale(double scale, wchar_t* text, size_t capacity);
 
+bool adaptiveResolutionNeedsRestart(int currentW, int currentH, int targetW, int targetH,
+                                      int nativeDisplaySize)
+{
+    return currentW > 0 && currentH > 0 && targetW > 0 && targetH > 0 &&
+        (currentW != targetW || currentH != targetH ||
+         ((nativeDisplaySize < 0) != (horplus_is_active() != 0)));
+}
+
+void predictViewport(int gameW, int gameH, int outW, int outH, int* viewX, int* viewY,
+                     int* viewW, int* viewH);
+
+/* At fill-height (100%), a larger logical canvas does not make a fixed menu less enlarged. */
+bool resolutionReducesVisibleScaling(int currentW, int currentH, int targetW, int targetH)
+{
+    int outW = 0, outH = 0, viewW = 0, viewH = 0, targetViewW = 0, targetViewH = 0;
+    if (!DDGetScaleMetrics(nullptr, nullptr, &outW, &outH, nullptr, nullptr, &viewW, &viewH) ||
+        currentW <= 0 || currentH <= 0 || targetW <= 0 || targetH <= 0 || outW <= 0 || outH <= 0)
+        return false;
+    predictViewport(targetW, targetH, outW, outH, nullptr, nullptr, &targetViewW, &targetViewH);
+    int cropW = currentW, cropH = currentH, targetCropW = targetW, targetCropH = targetH;
+    if (DDIsWindowStretchActive()) {
+        const int percent = DDGetWindowStretchPercent();
+        DDCalcWindowStretchCrop(currentW, currentH, percent, nullptr, nullptr, &cropW, &cropH);
+        DDCalcWindowStretchCrop(targetW, targetH, percent, nullptr, nullptr, &targetCropW, &targetCropH);
+    }
+    const double currentScale = fitScale(cropW, cropH, viewW, viewH);
+    const double targetScale = fitScale(targetCropW, targetCropH, targetViewW, targetViewH);
+    return currentScale > 1.05 && targetScale > 0.0 && targetScale + 0.03 < currentScale;
+}
+
 void showAdaptiveResolutionRestartModal(int currentWidth, int currentHeight,
                                         int outputWidth, int outputHeight,
-                                        int selectedWidth,
-                                        int selectedHeight,
+                                        int selectedWidth, int selectedHeight,
                                         int nativeDisplaySize)
 {
     (void)outputWidth;
     (void)outputHeight;
-    (void)nativeDisplaySize;
-    wchar_t message[512] = {};
+    const bool reducesScaling = resolutionReducesVisibleScaling(
+        currentWidth, currentHeight, selectedWidth, selectedHeight);
+    wchar_t message[1000] = {};
     swprintf_s(
         message,
-        L(L"Current game resolution: %d x %d.\nAfter restart: %d x %d (Automatic).\n\nThe normal window will use the same image size, without additional scaling. Automatic recalculates the choice after a monitor or display-mode change.",
-          L"Сейчас: %d x %d.\nПосле перезапуска: %d x %d (Авто).\n\nРазмер изображения в обычном окне будет соответствовать разрешению игры, без дополнительного масштабирования. После смены монитора или режима экрана Авто пересчитает выбор."),
-        currentWidth, currentHeight, selectedWidth, selectedHeight);
-    MessageBoxW(
-        g_gameHwnd, message,
+        L(L"Current: %d x %d.\nAfter restart: %d x %d (Automatic%s).\n\nAuto selects a supported resolution for the monitor where the game is open. Save your game and restart to apply it.\n\n%s\n\nWindow size and fixed-menu enlargement are separate settings.",
+          L"Сейчас: %d x %d.\nПосле перезапуска: %d x %d (Авто%s).\n\nАвто подбирает доступное разрешение для монитора, на котором открыта игра. Сохраните игру и перезапустите её для применения.\n\n%s\n\nРазмер окна и увеличение центрального меню — отдельные настройки."),
+        currentWidth, currentHeight, selectedWidth, selectedHeight,
+        nativeDisplaySize >= 0 ? L(L", original game mode", L", штатный режим игры") : L"",
+        reducesScaling
+            ? L(L"Until restart, the current image will be enlarged more strongly.",
+                L"Без перезапуска останется более сильное растягивание изображения.")
+            : L(L"The current image stays active until restart. Fixed-menu enlargement keeps its setting.",
+                L"До перезапуска остаётся текущая картинка. Настройка увеличения меню сохранится."));
+    MessageBoxW(g_gameHwnd, message,
         L(L"Automatic game resolution — restart required",
           L"Автоматическое разрешение игры — нужен перезапуск"),
         MB_OK | MB_ICONINFORMATION);
+}
+
+void suggestResolutionForWorkArea()
+{
+    if (g_ver == VerEditor || !horplus_is_available())
+        return;
+    int currentW = 0, currentH = 0, outputW = 0, outputH = 0;
+    int targetW = 0, targetH = 0, nativeDisplaySize = -1;
+    int requestedMode = 0, requestedW = 0, requestedH = 0;
+    if (!DDGetScaleMetrics(&currentW, &currentH, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr) ||
+        !horplus_get_current_adaptive(&outputW, &outputH, &targetW, &targetH, &nativeDisplaySize) ||
+        !horplus_get_requested(&requestedMode, &requestedW, &requestedH) ||
+        !adaptiveResolutionNeedsRestart(currentW, currentH, targetW, targetH, nativeDisplaySize))
+        return;
+    static int lastCurrentW, lastCurrentH, lastTargetW, lastTargetH, lastMode = -1;
+    if (lastCurrentW == currentW && lastCurrentH == currentH &&
+        lastTargetW == targetW && lastTargetH == targetH && lastMode == requestedMode)
+        return;
+    if (requestedMode != 2 && !resolutionReducesVisibleScaling(currentW, currentH, targetW, targetH))
+        return;
+    lastCurrentW = currentW; lastCurrentH = currentH;
+    lastTargetW = targetW; lastTargetH = targetH; lastMode = requestedMode;
+    if (requestedMode != 2) {
+        wchar_t message[700] = {};
+        swprintf_s(
+            message,
+            L(L"Window maximized. Current game resolution: %d x %d.\n\nAuto recommends %d x %d%s. It will reduce image enlargement after restarting; without it, the interface will be stretched more strongly.\n\nEnable Auto for the next game start? The game will stay open.",
+              L"Окно развёрнуто. Сейчас игра использует %d x %d.\n\nАвто рекомендует %d x %d%s. После перезапуска изображение будет увеличиваться меньше; без этого интерфейс будет растягиваться сильнее.\n\nВключить Авто для следующего запуска? Игра останется открытой."),
+            currentW, currentH, targetW, targetH,
+            nativeDisplaySize >= 0 ? L(L" (original game mode)", L" (штатный режим игры)") : L"");
+        if (MessageBoxW(g_gameHwnd, message, L(L"Resolution for this window", L"Разрешение для этого окна"),
+                        MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION) != IDYES)
+            return;
+        if (!horplus_set_requested(2, 0, 0)) {
+            MessageBoxW(g_gameHwnd,
+                        L(L"Could not save Auto. The previous resolution remains selected.",
+                          L"Не удалось сохранить Авто. Сохраняется прежний выбор разрешения."),
+                        L(L"Game resolution", L"Разрешение игры"), MB_OK | MB_ICONERROR);
+            return;
+        }
+        g_gameCanvasExplicitlySelected = true;
+        resetOutputToFollowGame();
+        lastMode = 2;
+        refreshChecks();
+    }
+    showAdaptiveResolutionRestartModal(currentW, currentH, outputW, outputH, targetW, targetH,
+                                       nativeDisplaySize);
 }
 
 void migrateLegacyDisplaySize()
@@ -3607,17 +3700,17 @@ void refreshAdaptiveCanvasItem()
     int nativeDisplaySize = -1;
     wchar_t label[256] = {};
     if (horplus_is_available() &&
-        horplus_get_primary_adaptive(&outputWidth, &outputHeight,
+        horplus_get_current_adaptive(&outputWidth, &outputHeight,
                                      &canvasWidth, &canvasHeight,
                                      &nativeDisplaySize)) {
-        (void)outputWidth;
-        (void)outputHeight;
-        (void)nativeDisplaySize;
-        swprintf_s(
-            label,
-            L(L"Automatic (fit to screen): %d x %d after restart",
-              L"Авто (подобрать по экрану): %d x %d после перезапуска"),
-            canvasWidth, canvasHeight);
+        int currentW = 0, currentH = 0;
+        DDGetScaleMetrics(&currentW, &currentH, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+        const bool pending = adaptiveResolutionNeedsRestart(
+            currentW, currentH, canvasWidth, canvasHeight, nativeDisplaySize);
+        swprintf_s(label,
+            L(L"Auto (game monitor): %d x %d%s", L"Авто (монитор игры): %d x %d%s"),
+            canvasWidth, canvasHeight,
+            pending ? L(L" — after restart", L" — после перезапуска") : L"");
     } else {
         lstrcpynW(
             label,
@@ -3635,7 +3728,15 @@ void refreshOutputSizeItem()
 {
     if (!g_displaySizeMenu)
         return;
-
+    const int mode = DDGetDisplayMode();
+    if (mode == 3 || mode == 1) {
+        ModifyMenuW(g_displaySizeMenu, kIdOutputSizeCustom, MF_BYCOMMAND | MF_STRING | MF_GRAYED,
+                    kIdOutputSizeCustom,
+                    mode == 3
+                        ? L(L"Window size: monitor work area", L"Размер окна: рабочая область монитора")
+                        : L(L"Output size: full monitor", L"Размер вывода: весь монитор"));
+        return;
+    }
     wchar_t label[192] = {};
     if (g_requestedOutputW == 0 && g_requestedOutputH == 0) {
         lstrcpynW(
@@ -3783,7 +3884,8 @@ void predictViewport(int gameW, int gameH, int outW, int outH, int* viewX, int* 
     int width = outW;
     int height = outH;
 
-    if (g_boxing) {
+    const bool workAreaDownscale = DDGetDisplayMode() == 3 && (outW < gameW || outH < gameH);
+    if (g_boxing && !workAreaDownscale) {
         // Match `for (int i = 20; i-- > 1;)` exactly: the post-decrement means its body sees
         // factors 19..1, including a centered exact 1x when 2x does not fit.
         for (int factor = 19; factor >= 1; --factor) {
@@ -3793,7 +3895,7 @@ void predictViewport(int gameW, int gameH, int outW, int outH, int* viewX, int* 
                 break;
             }
         }
-    } else if (g_maintas || g_aspectRatio[0]) {
+    } else if (g_maintas || g_aspectRatio[0] || (g_boxing && workAreaDownscale)) {
         double targetRatio = static_cast<double>(gameH) / gameW;
         customAspect(&targetRatio);
         const double outputRatio = static_cast<double>(outH) / outW;
@@ -3866,7 +3968,7 @@ void refreshDisplaySizeInfo(int currentW, int currentH)
         int outputWidth = 0, outputHeight = 0;
         int adaptiveWidth = requestedW, adaptiveHeight = requestedH;
         int nativeDisplaySize = -1;
-        horplus_get_primary_adaptive(&outputWidth, &outputHeight,
+        horplus_get_current_adaptive(&outputWidth, &outputHeight,
                                      &adaptiveWidth, &adaptiveHeight,
                                      &nativeDisplaySize);
         (void)outputWidth;
@@ -3966,6 +4068,12 @@ void refreshScaleInfo()
                 previewOutW = outW;
                 previewOutH = outH;
             }
+        } else if (g_modeIdx == 3) {
+            RECT client = {};
+            if (DDGetWorkAreaClientRect(&client)) {
+                previewOutW = client.right - client.left;
+                previewOutH = client.bottom - client.top;
+            }
         } else {
             previewOutW = g_requestedOutputW > 0 ? g_requestedOutputW : previewGameW;
             previewOutH = g_requestedOutputH > 0 ? g_requestedOutputH : previewGameH;
@@ -3974,6 +4082,8 @@ void refreshScaleInfo()
                         &previewViewY, &previewViewW, &previewViewH);
     }
 
+    const bool fillsClientHeight = !afterRestart &&
+        DDApplyWindowStretchViewport(0, &previewViewX, &previewViewY, &previewViewW, &previewViewH);
     const int previewMode = afterRestart ? g_modeIdx : DDGetDisplayMode();
     const bool geometryOneToOne =
         previewViewW == previewGameW && previewViewH == previewGameH &&
@@ -3984,7 +4094,12 @@ void refreshScaleInfo()
         geometryOneToOne && previewMode == 2 && afterRestart;
     const bool oneToOne = geometryOneToOne && !exclusiveOneToOneUncertain;
     wchar_t line[512] = {};
-    if (previewMode == 1) {
+    if (previewMode == 3) {
+        swprintf_s(line,
+                   L(L"Work-area window: %dx%d; Windows taskbar stays outside the window.",
+                       L"Окно по рабочей области: %dx%d; панель задач Windows остаётся снаружи."),
+                   previewOutW, previewOutH);
+    } else if (previewMode == 1) {
         swprintf_s(line,
                    L(L"Borderless uses desktop %dx%d; saved output presets are ignored in this mode.",
                        L"Без рамки: рабочий стол %dx%d; сохранённые пресеты вывода здесь игнорируются."),
@@ -4088,6 +4203,10 @@ void refreshScaleInfo()
                         L"Целый масштаб не помещается; рендер использует %dx%d."),
                 previewViewW, previewViewH);
         }
+    } else if (fillsClientHeight) {
+        swprintf_s(line,
+            L(L"Fixed window fills available height without distorting proportions; only side decoration is cropped.",
+              L"Центральное окно занимает доступную высоту без искажения пропорций; обрезается только боковой декор."));
     } else if (g_maintas || g_aspectRatio[0]) {
         const double scale =
             previewGameW ? static_cast<double>(previewViewW) / previewGameW : 1.0;
@@ -4216,8 +4335,8 @@ void refreshWindowStretchInfo()
                        sizePercent);
         } else if (i == 10) {
             lstrcpynW(option,
-                      L(L"100% - already full height (default)",
-                        L"100% - уже на всю высоту (по умолчанию)"),
+                      L(L"Maximum - fit available height (default)",
+                        L"Максимум - по доступной высоте (по умолчанию)"),
                       static_cast<int>(sizeof(option) / sizeof(option[0])));
         } else {
             swprintf_s(option, L"%d%%", sizePercent);
@@ -4232,7 +4351,7 @@ void refreshWindowStretchInfo()
                          FALSE, &optionInfo);
         EnableMenuItem(g_windowStretchMenu,
                        kIdWindowStretchBase + static_cast<UINT>(i),
-                       MF_BYCOMMAND | (i == 0 || canEnlarge ? MF_ENABLED : MF_GRAYED));
+                       MF_BYCOMMAND | (i == 0 || i == 10 || canEnlarge ? MF_ENABLED : MF_GRAYED));
     }
 
     int cropW = gameW;
@@ -4241,6 +4360,8 @@ void refreshWindowStretchInfo()
         gameW, gameH, g_windowStretchPercent,
         nullptr, nullptr, &cropW, &cropH);
 
+    int viewX = 0, viewY = 0;
+    const bool clientHeightFill = DDApplyWindowStretchViewport(0, &viewX, &viewY, &viewW, &viewH) != 0;
     const int effectiveZoom = DDGetSimpleZoom1000();
     const int extraZoom = DDGetSimpleZoomExtra1000();
     const bool stretchActive = DDIsWindowStretchActive() != 0;
@@ -4251,7 +4372,7 @@ void refreshWindowStretchInfo()
             L(L"100%% (live): no enlargement; full game canvas %dx%d is shown.",
               L"100%% (сразу): без увеличения, показан полный игровой кадр %dx%d."),
             gameW, gameH);
-    } else if (stretchActive && (cropW < gameW || cropH < gameH)) {
+    } else if (stretchActive && (cropW < gameW || cropH < gameH || clientHeightFill)) {
         swprintf_s(
             line,
             L(L"Active size %d%% (live): centred %dx%d -> viewport %dx%d; effective %.3gx.",
@@ -4280,7 +4401,7 @@ void refreshWindowStretchInfo()
         extraZoom != 1000
             ? L(L"Ctrl+Wheel zoom is also active; selecting a size resets it and recentres.",
                 L"Также активно Ctrl+колесо; выбор размера сбросит его и вернёт центр.")
-            : stretchActive && (cropW < gameW || cropH < gameH)
+            : stretchActive && (cropW < gameW || cropH < gameH || clientHeightFill)
             ? L(L"Fills vertically, crops side background and resamples pixels (quality loss is expected).",
                 L"Заполняет по вертикали, обрезает боковой фон и пересчитывает пиксели (потеря качества ожидаема).")
             : L(L"It activates automatically on fixed menus/battles; the map view is never cropped.",
@@ -4304,8 +4425,8 @@ void refreshWindowStretchInfo()
                        selectedSizePercent);
         else if (!canEnlarge)
             lstrcpynW(parent,
-                      L(L"Fixed window: 100% (already full height, live)",
-                        L"Центральное окно: 100% (уже на всю высоту, сразу)"),
+                      L(L"Fixed window: fit available height (live)",
+                        L"Центральное окно: по доступной высоте (сразу)"),
                       static_cast<int>(sizeof(parent) / sizeof(parent[0])));
         else
             swprintf_s(parent,
@@ -4590,7 +4711,7 @@ void refreshChecks()
     const int checkedMode =
         g_liveModeIdx >= 0 ? g_liveModeIdx : g_modeIdx;
     if (g_modeMenu && checkedMode >= 0)
-        CheckMenuRadioItem(g_modeMenu, kIdModeWindowed, kIdModeExclusive,
+        CheckMenuRadioItem(g_modeMenu, kIdModeWindowed, kIdModeWorkArea,
                            kIdModeWindowed + static_cast<UINT>(checkedMode),
                            MF_BYCOMMAND);
     if (g_resMenu && g_resIdx >= 0)
@@ -4829,7 +4950,7 @@ bool menuCommandReloadsCurrentRenderer(UINT id)
            (g_ver == VerEditor && id >= kIdResBase &&
             id < kIdResBase + static_cast<UINT>(kResCount)) ||
            (id >= kIdFpsBase && id < kIdFpsBase + static_cast<UINT>(kFpsCount)) ||
-           (id >= kIdModeWindowed && id <= kIdModeExclusive);
+           (id >= kIdModeWindowed && id <= kIdModeWorkArea);
 }
 
 void onMenuCommand(UINT id)
@@ -4929,7 +5050,7 @@ void onMenuCommand(UINT id)
         int outputW = 0, outputH = 0;
         int selectedW = 0, selectedH = 0;
         int nativeDisplaySize = -1;
-        if (!horplus_get_primary_adaptive(&outputW, &outputH,
+        if (!horplus_get_current_adaptive(&outputW, &outputH,
                                           &selectedW, &selectedH,
                                           &nativeDisplaySize)) {
             MessageBoxW(
@@ -4961,15 +5082,15 @@ void onMenuCommand(UINT id)
             return;
         }
         refreshChecks();
-        if (currentW != selectedW || currentH != selectedH) {
+        if (adaptiveResolutionNeedsRestart(currentW, currentH, selectedW, selectedH, nativeDisplaySize)) {
             showAdaptiveResolutionRestartModal(
                 currentW, currentH, outputW, outputH, selectedW, selectedH,
                 nativeDisplaySize);
         } else if (!oldValid || oldMode != 2 || outputWasCustom) {
             MessageBoxW(
                 g_gameHwnd,
-                L(L"Automatic resolution is enabled. The current game canvas already matches the automatic choice, and the normal window will follow it. Display-mode or monitor changes are recalculated on the next full game start.",
-                  L"Автоматическое разрешение включено. Текущий игровой кадр уже совпадает с выбором автоматики, а обычное окно будет следовать ему. Смена режима экрана или монитора пересчитывается при следующем полном запуске игры."),
+                L(L"Auto is enabled for the monitor where the game is open. The current resolution already matches; no restart is needed. If moving to another monitor changes the recommendation, it will apply at the next game start.",
+                  L"Авто включено для монитора, на котором открыта игра. Разрешение уже совпадает — перезапуск не нужен. Если на другом мониторе будет рекомендовано другое разрешение, оно применится при следующем запуске."),
                 L(L"Automatic game resolution",
                   L"Автоматическое разрешение игры"),
                 MB_OK | MB_ICONINFORMATION);
@@ -5301,10 +5422,13 @@ void onMenuCommand(UINT id)
         wsprintfA(b, "%d", kFpsValues[g_fpsIdx]);
         writeDdrawStr("maxfps", b);
         reloadRenderer = true;
-    } else if (id >= kIdModeWindowed && id <= kIdModeExclusive) {
+    } else if (id >= kIdModeWindowed && id <= kIdModeWorkArea) {
+        DDPrepareDisplayModeChange(static_cast<int>(id - kIdModeWindowed));
         g_modeIdx = static_cast<int>(id - kIdModeWindowed);
         writeDdrawStr("windowed", kModes[g_modeIdx].windowed);
         writeDdrawStr("fullscreen", kModes[g_modeIdx].fullscreen);
+        if (g_modeIdx == 0 || g_modeIdx == 3)
+            writeDdrawBool("window_workarea", g_modeIdx == 3);
         if (g_modeIdx == 1)
             writeDdrawBool("toggle_borderless", true);
         else if (g_modeIdx == 2)
@@ -5476,6 +5600,7 @@ PhysicalPointerRegion classifyPhysicalPointer(HWND hwnd)
         return PhysicalPointerRegion::WindowsUi;
     }
 
+    DDApplySimpleZoomViewport(0, &viewportX, &viewportY, &viewportWidth, &viewportHeight);
     if (point.x < viewportX || point.y < viewportY ||
         point.x >= viewportX + viewportWidth ||
         point.y >= viewportY + viewportHeight) {
@@ -6130,7 +6255,9 @@ void buildMenu()
     // ===== "Video" - presentation choices are live; logical game resolution is restart-only =====
     g_videoMenu = CreatePopupMenu();
     g_modeMenu = CreatePopupMenu();
-    for (int i = 0; i < kModeCount; ++i)
+    // Keep both windowed choices together without changing the existing mode numbers.
+    const int modeOrder[] = {0, 3, 1, 2};
+    for (int i : modeOrder)
         AppendMenuW(g_modeMenu, MF_STRING, kIdModeWindowed + i, g_ru ? kModes[i].ru : kModes[i].en);
     AppendMenuW(g_modeMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(g_modeMenu, MF_STRING | MF_GRAYED, 0,
@@ -6422,7 +6549,7 @@ bool stageChromeForTargetMode(HWND hwnd, int targetMode)
     if (targetMode < 0 || !hwnd || !g_bar)
         return false;
 
-    const bool targetWantsMenu = targetMode == 0;
+    const bool targetWantsMenu = targetMode == 0 || targetMode == 3;
     const bool hasOurMenu = GetMenu(hwnd) == g_bar;
     if (targetWantsMenu == hasOurMenu)
         return false;
@@ -6448,8 +6575,8 @@ int toggleWindowModeWithChrome(HWND hwnd)
         return DDGetDisplayMode();
     }
 
-    // Both fullscreen variants have no menu; either one toggles back to a normal window.
-    const int targetMode = before == 0 ? 1 : 0;
+    // Both fullscreen variants have no menu; either windowed mode has caption and menu.
+    const int targetMode = (before == 0 || before == 3) ? 1 : 0;
     const bool staged = stageChromeForTargetMode(hwnd, targetMode);
 
     DDToggleWindowedMode();
@@ -6479,7 +6606,7 @@ void syncChrome(HWND hwnd)
     const bool liveModeChanged =
         previousLiveMode >= 0 && previousLiveMode != liveMode;
 
-    const bool wantMenu = liveMode == 0;
+    const bool wantMenu = liveMode == 0 || liveMode == 3;
     const bool hasOurMenu = GetMenu(hwnd) == g_bar;
     bool changed = false;
 
@@ -6510,6 +6637,8 @@ void syncChrome(HWND hwnd)
     // Fullscreen -> normal: the renderer and menu now agree on client chrome, so restore the exact
     // pre-fullscreen outer placement saved by DDToggleWindowedMode (DisciplesGL semantics).
     DDCompleteWindowedModeToggle();
+    DDRefreshWorkAreaWindow();
+    const bool monitorChanged = DDRememberWindowMonitor() == 2;
 
     // F4 and cnc-ddraw's Alt+Enter change only live g_config state. Persist the successfully
     // observed result so the next process starts in the mode the user actually left selected.
@@ -6517,7 +6646,7 @@ void syncChrome(HWND hwnd)
     if (liveModeChanged) {
         if (saveLiveDisplayModeForNextStart(liveMode)) {
             mlog("[menu] live display mode %d saved for next start", liveMode);
-            if (liveMode != 0)
+            if (liveMode == 1 || liveMode == 2)
                 showFirstFullscreenPersistenceNotice(hwnd);
         } else {
             MessageBoxW(
@@ -6528,6 +6657,8 @@ void syncChrome(HWND hwnd)
                 MB_OK | MB_ICONWARNING);
         }
     }
+    if (liveMode == 3 && (liveModeChanged || monitorChanged))
+        suggestResolutionForWorkArea();
 }
 
 struct FindCtx

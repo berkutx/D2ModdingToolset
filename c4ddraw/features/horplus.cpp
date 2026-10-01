@@ -33,6 +33,7 @@ extern "C" int widebattle_canvas_hook_is_available(void);
 extern "C" int widebattle_get_enabled(void);
 extern "C" int widebattle_is_active(void);
 extern "C" void DDSetGameCanvasMetrics(int width, int height, int injectResolution);
+extern "C" int DDGetAutomaticCanvasOutput(int* width, int* height);
 extern "C" int DDReadConfigString(const char* key, const char* defaultValue,
                                     char* value, unsigned int capacity);
 
@@ -366,37 +367,7 @@ bool adaptiveCanvasForOutput(int outputWidth, int outputHeight,
 
 bool automaticOutputPixels(int* width, int* height)
 {
-    // cnc-ddraw establishes per-monitor DPI awareness before installing this
-    // feature, so GetSystemMetrics returns the physical primary-output pixels.
-    int outputWidth = GetSystemMetrics(SM_CXSCREEN);
-    int outputHeight = GetSystemMetrics(SM_CYSCREEN);
-    if (outputWidth <= 0 || outputHeight <= 0)
-        return false;
-
-    // Auto is one restart-latched game canvas, not a different logical resolution for fullscreen
-    // and windowed launches. Always budget for the normal window's title/frame/menu/taskbar so F4
-    // can return to a smaller 1:1 client without reintroducing forbidden output downscaling. A
-    // borderless/exclusive presentation may upscale that same canvas to the monitor.
-    RECT work = {};
-    if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
-        const int workWidth = work.right - work.left;
-        const int workHeight = work.bottom - work.top;
-        RECT frame = {0, 0, 100, 100};
-        if (AdjustWindowRectEx(&frame, WS_OVERLAPPEDWINDOW, TRUE, 0)) {
-            const int extraWidth = (frame.right - frame.left) - 100;
-            const int extraHeight = (frame.bottom - frame.top) - 100;
-            if (workWidth - extraWidth > 0)
-                outputWidth = workWidth - extraWidth;
-            if (workHeight - extraHeight > 0)
-                outputHeight = workHeight - extraHeight;
-        }
-    }
-
-    if (width)
-        *width = outputWidth;
-    if (height)
-        *height = outputHeight;
-    return true;
+    return DDGetAutomaticCanvasOutput(width, height) != 0;
 }
 
 bool readRequestedCanvas(RequestedCanvas* requested)
@@ -1676,7 +1647,7 @@ extern "C" int horplus_get_adaptive_for_output(int outputWidth,
         : 0;
 }
 
-extern "C" int horplus_get_primary_adaptive(int* outputWidth,
+extern "C" int horplus_get_current_adaptive(int* outputWidth,
                                                 int* outputHeight,
                                                 int* width, int* height,
                                                 int* nativeDisplaySize)

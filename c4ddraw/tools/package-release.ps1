@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$BuildDirectory,
-    [ValidatePattern('^v[0-9][0-9A-Za-z.-]{0,79}$')][string]$Version = 'v2.2.0',
+    [ValidatePattern('^v[0-9][0-9A-Za-z.-]{0,79}$')][string]$Version = 'v2.3.0',
     [string]$OutputRoot = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent)
 )
 # Offline packaging only. Existing output is an error; partial output is never removed.
@@ -23,6 +23,7 @@ $files = [ordered]@{
     'Mods/twitchstat.c4p' = "$build/plugins/unitinfo/bin/twitchstat.c4p"
     'TWITCH-STREAMER-RU.md' = "$repo/twitch-extension/STREAMER-RU.md"
     'INSTALL.txt' = "$repo/c4ddraw/release/INSTALL.txt"
+    'WINDOW-WORKAREA-RU.txt' = "$repo/c4ddraw/release/WINDOW-WORKAREA-RU.txt"
     'C4PLUGINS.txt' = "$repo/c4ddraw/release/C4PLUGINS.txt"
     'C4plugins.ini' = "$repo/c4ddraw/release/C4plugins.ini"
     'ddraw.ini' = "$repo/c4ddraw/release/ddraw.ini"

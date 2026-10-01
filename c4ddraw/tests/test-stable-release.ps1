@@ -40,6 +40,7 @@ Check (@($runtime | Where-Object { $_ -match '\.c4p$' }).Count -eq 2) 'Runtime a
 Check ($runtime -contains 'C4dll-R-v2.0-test-bundle/Mods/timer.c4p') 'Timer is bundled'
 Check ($runtime -contains 'C4dll-R-v2.0-test-bundle/Mods/twitchstat.c4p') 'Twitch Stat is bundled'
 Check ($runtime -contains 'C4dll-R-v2.0-test-bundle/TWITCH-STREAMER-RU.md') 'Streamer instructions are bundled'
+Check ($runtime -contains 'C4dll-R-v2.0-test-bundle/WINDOW-WORKAREA-RU.txt') 'Work-area window instructions are bundled'
 Check ($runtime -contains 'C4dll-R-v2.0-test-bundle/NETWORK_TRACE.md' -and
        $runtime -contains 'C4dll-R-v2.0-test-bundle/Tools/analyze-event-trace.py') 'Network diagnostics guide and optional analyzer are bundled'
 $expectedShaders = @(
@@ -79,6 +80,17 @@ foreach ($workflow in @('c4ddraw.yml','c4dll-r-release.yml')) {
     Check ($text -match 'plugins/unitinfo/bin' -and $text -match 'TWITCH-STREAMER-RU.md') "CI includes Twitch Stat and its instructions: $workflow"
 }
 $releaseWorkflow = Get-Content -LiteralPath (Join-Path $repo '.github/workflows/c4dll-r-release.yml') -Raw
+Check ($releaseWorkflow.Contains('Copy-Item "c4ddraw/release/WINDOW-WORKAREA-RU.txt" "$stage/WINDOW-WORKAREA-RU.txt"')) 'Player release copies work-area instructions'
+Check ($releaseWorkflow -match '(?s)\$expectedFiles = @\(.*?''WINDOW-WORKAREA-RU\.txt''.*?\)') 'Player release ZIP allowlist includes work-area instructions'
+foreach ($workflow in @('c4ddraw.yml','c4dll-r-release.yml')) {
+    $text = Get-Content -LiteralPath (Join-Path $repo ('.github/workflows/' + $workflow)) -Raw
+    foreach ($suite in @('run-workarea-tests.py c4ddraw/build/cnc-ddraw', 'run-windowmonitor-tests.py', 'run-windowstretch-tests.py')) {
+        $command = 'python c4ddraw/tests/' + $suite
+        $guardedCommand = [regex]::Escape($command) + '\r?\n\s+if \(\$LASTEXITCODE -ne 0\) \{ throw '
+        Check ($text -match $guardedCommand) "CI runs and checks $suite`: $workflow"
+        Check ($text.IndexOf($command) -gt $text.IndexOf('./c4ddraw/build.ps1')) "CI runs $suite after the build: $workflow"
+    }
+}
 Check ($releaseWorkflow -notmatch '\$symzip|C4dll-R\.pdb.*timer\.pdb') 'Player release does not build or publish a symbols archive'
 Check ($releaseWorkflow -match 'gh release upload \$tag \$zip --clobber' -and
        @($releaseWorkflow -split "`n" | Where-Object { $_ -match '^\s*gh release upload\s' }).Count -eq 1) 'Player release uploads exactly one ready-to-use ZIP'

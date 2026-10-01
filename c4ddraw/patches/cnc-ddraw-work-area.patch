@@ -1,0 +1,255 @@
+--- a/inc/config.h
++++ b/inc/config.h
+@@ -27,6 +27,7 @@
+ 
+     BOOL fullscreen;
+     BOOL windowed;
++    BOOL window_workarea;
+     BOOL maintas;
+     char aspect_ratio[16];
+     BOOL boxing;
+--- a/src/config.c
++++ b/src/config.c
+@@ -37,6 +37,7 @@
+     GET_INT(g_config.window_rect.bottom, "height", 0);
+     GET_BOOL(g_config.fullscreen, "fullscreen", FALSE);
+     GET_BOOL(g_config.windowed, "windowed", FALSE);
++    GET_BOOL(g_config.window_workarea, "window_workarea", FALSE);
+     GET_BOOL(g_config.maintas, "maintas", FALSE);
+     GET_STRING("aspect_ratio", "", g_config.aspect_ratio, sizeof(g_config.aspect_ratio));
+     GET_BOOL(g_config.boxing, "boxing", FALSE);
+@@ -214,6 +215,8 @@
+             "; tries an (RDP-impossible) display-mode change -> border holds even over RDP.\n"
+             "fullscreen=false\n"
+             "windowed=true\n"
++            "; Fill the current monitor work area, including caption and menu.\n"
++            "window_workarea=false\n"
+             "; border=true => real title bar (draggable) + the C4dll-R menu bar renders below it.\n"
+             "; This is THE setting that gives the DisciplesGL-style caption+menu. Needs windowed=true.\n"
+             "border=true\n"
+--- a/src/dd.c
++++ b/src/dd.c
+@@ -19,6 +19,9 @@
+ #include "versionhelpers.h"
+ 
+ extern void horplus_publish_surface_state(void);
++extern int DDApplyWorkAreaWindow(RECT* client);
++extern void DDPlaceInitialWindowRect(RECT* outer);
++extern void DDCompleteInitialWindowPlacement(void);
+ 
+ 
+ CNCDDRAW g_ddraw;
+@@ -664,7 +667,10 @@
+     *width = render_width;
+     *height = render_height;
+ 
+-    if (g_config.boxing)
++    BOOL workarea_downscale = g_config.windowed && !g_config.fullscreen &&
++        g_config.window_workarea && (render_width < g_ddraw.width || render_height < g_ddraw.height);
++
++    if (g_config.boxing && !workarea_downscale)
+     {
+         for (int i = 20; i-- > 1;)
+         {
+@@ -679,7 +685,7 @@
+         *y = render_height / 2 - *height / 2;
+         *x = render_width / 2 - *width / 2;
+     }
+-    else if (g_config.maintas)
++    else if (g_config.maintas || (g_config.boxing && workarea_downscale))
+     {
+         double dst_ar;
+         double src_ar = (double)render_height / render_width;
+@@ -774,7 +780,7 @@
+     g_ddraw.render.height = g_config.window_rect.bottom;
+ 
+     /* temporary fix: center window for games that keep changing their resolution */
+-    if (g_config.center_window &&
++    if (g_config.center_window && !(g_config.windowed && !g_config.fullscreen && g_config.window_workarea) &&
+         (g_ddraw.width || g_config.infantryhack || g_config.center_window == CENTER_WINDOW_ALWAYS) &&
+         (g_ddraw.width != dwWidth || g_ddraw.height != dwHeight) &&
+         (
+@@ -796,6 +802,8 @@
+ 
+     BOOL border = g_config.border;
+     BOOL nonexclusive = FALSE;
++    RECT workarea_client = { 0 };
++    BOOL workarea_output = DDApplyWorkAreaWindow(&workarea_client);
+ 
+     if (g_config.fullscreen)
+     {
+@@ -817,6 +825,14 @@
+ 
+         }
+     }
++    else if (workarea_output)
++    {
++        border = TRUE;
++        g_ddraw.render.width = workarea_client.right - workarea_client.left;
++        g_ddraw.render.height = workarea_client.bottom - workarea_client.top;
++        /* A large logical canvas must fit too, with matching mouse coordinates. */
++        g_config.adjmouse = TRUE;
++    }
+     else if (zooming)
+     {
+         if (g_ddraw.width > g_ddraw.mode.dmPelsWidth ||
+@@ -835,7 +851,7 @@
+         g_config.hotkeys.toggle_fullscreen = 0;
+     }
+ 
+-    if (!zooming || g_config.fullscreen)
++    if ((!zooming || g_config.fullscreen) && !workarea_output)
+     {
+         if (g_ddraw.render.width < g_ddraw.width)
+         {
+@@ -1075,7 +1091,8 @@
+             real_SetWindowLongA(
+                 g_ddraw.hwnd,
+                 GWL_STYLE,
+-                (real_GetWindowLongA(g_ddraw.hwnd, GWL_STYLE) | WS_OVERLAPPEDWINDOW) & ~(WS_MAXIMIZE));
++                (real_GetWindowLongA(g_ddraw.hwnd, GWL_STYLE) | WS_OVERLAPPEDWINDOW) &
++                    ~(workarea_output ? 0 : WS_MAXIMIZE));
+ 
+             DWORD class_sytle = GetClassLongA(g_ddraw.hwnd, GCL_STYLE);
+             if (class_sytle & CS_NOCLOSE)
+@@ -1123,6 +1140,11 @@
+                 y = real_GetSystemMetrics(SM_CYMENU);
+             }
+         }
++        else if (workarea_output)
++        {
++            x = workarea_client.left;
++            y = workarea_client.top;
++        }
+         else if (border && g_config.window_rect.top == -32000 && y < 0)
+         {
+             /* Make window titlebar visible if window does not fit into screen */
+@@ -1132,22 +1154,25 @@
+         if (util_is_minimized(g_ddraw.hwnd))
+             real_ShowWindow(g_ddraw.hwnd, SW_RESTORE);
+ 
+-        RECT dst = { x, y, g_ddraw.render.width + x, g_ddraw.render.height + y };
+-
+-        LONG style = real_GetWindowLongA(g_ddraw.hwnd, GWL_STYLE);
+-        exstyle = real_GetWindowLongA(g_ddraw.hwnd, GWL_EXSTYLE);
+-
+-        AdjustWindowRectEx(&dst, style, GetMenu(g_ddraw.hwnd) != NULL, exstyle);
+-
+-        real_SetWindowPos(
+-            g_ddraw.hwnd, 
+-            HWND_NOTOPMOST, 
+-            dst.left, 
+-            dst.top, 
+-            (dst.right - dst.left), 
+-            (dst.bottom - dst.top), 
+-            SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+-
++        if (!workarea_output)
++        {
++            RECT dst = { x, y, g_ddraw.render.width + x, g_ddraw.render.height + y };
++
++            LONG style = real_GetWindowLongA(g_ddraw.hwnd, GWL_STYLE);
++            exstyle = real_GetWindowLongA(g_ddraw.hwnd, GWL_EXSTYLE);
++
++            AdjustWindowRectEx(&dst, style, GetMenu(g_ddraw.hwnd) != NULL, exstyle);
++            DDPlaceInitialWindowRect(&dst);
++
++            real_SetWindowPos(
++                g_ddraw.hwnd,
++                HWND_NOTOPMOST,
++                dst.left,
++                dst.top,
++                (dst.right - dst.left),
++                (dst.bottom - dst.top),
++                SWP_SHOWWINDOW | SWP_FRAMECHANGED);
++        }
+ 
+         BOOL d3d9_active = FALSE;
+ 
+@@ -1360,6 +1385,8 @@
+         g_ddraw.render.thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)g_ddraw.renderer, NULL, 0, &tid);
+         SetThreadPriority(g_ddraw.render.thread, THREAD_PRIORITY_ABOVE_NORMAL);
+     }
++
++    DDCompleteInitialWindowPlacement();
+ 
+     if ((dwFlags & SDM_MODE_SET_BY_GAME) && !g_config.infantryhack)
+     {
+--- a/src/utils.c
++++ b/src/utils.c
+@@ -692,8 +692,13 @@
+     return result;
+ }
+ 
++extern int DDToggleWorkAreaWindow(void);
++
+ void util_toggle_maximize()
+ {
++    if (DDToggleWorkAreaWindow())
++        return;
++
+     if (!g_config.resizable || !g_config.windowed || g_config.fullscreen || !g_ddraw.width)
+         return;
+ 
+--- a/src/wndproc.c
++++ b/src/wndproc.c
+@@ -19,6 +19,9 @@
+ #include "versionhelpers.h"
+ 
+ extern int DDHandleSimpleZoom(HWND hwnd, WPARAM wParam, LPARAM lParam);
++extern void DDLeaveWorkAreaForManualMove(void);
++extern int DDRememberWindowMonitor(void);
++extern int DDToggleWorkAreaWindow(void);
+ extern void DDApplySimpleZoomMouse(int* x, int* y, int game_width, int game_height);
+ extern int featuremenu_renderer_message(
+     HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, LRESULT* result);
+@@ -322,6 +325,7 @@
+     {
+         if (g_config.windowed)
+         {
++            DDLeaveWorkAreaForManualMove();
+             in_size_move = TRUE;
+             live_size_move = FALSE;
+             size_move_changed = FALSE;
+@@ -353,6 +357,7 @@
+ 
+             if (commit_live_resize || !g_ddraw.render.thread)
+                 dd_SetDisplayMode(0, 0, 0, 0);
++            DDRememberWindowMonitor();
+         }
+         break;
+     }
+@@ -669,8 +674,12 @@
+             }
+         }
+ 
+-        if (wParam == SC_MAXIMIZE)
+-        {
++        if ((wParam & 0xFFF0) == SC_MAXIMIZE ||
++            ((wParam & 0xFFF0) == SC_RESTORE && g_config.windowed && !g_config.fullscreen &&
++             g_config.window_workarea && !util_is_minimized(hWnd)))
++        {
++            if (DDToggleWorkAreaWindow())
++                return 0;
+             if (IsWine())
+                 return real_DefWindowProcA(hWnd, uMsg, wParam, lParam);
+ 
+@@ -900,16 +909,13 @@
+     }
+     case WM_TOGGLE_MAXIMIZE:
+     {
+-        if (g_config.resizable)
+-        {
+-            util_toggle_maximize();
+-        }
++        util_toggle_maximize();
+ 
+         return 0;
+     }
+     case WM_NCLBUTTONDBLCLK:
+     {
+-        if (g_config.resizable)
++        if (wParam == HTCAPTION)
+         {
+             util_toggle_maximize();
+         }

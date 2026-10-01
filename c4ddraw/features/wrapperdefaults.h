@@ -9,6 +9,7 @@ static const Setting renderer[] = {
     {"d3d9_filter", "3"}, {"width", "0"}, {"height", "0"},
     {"posX", "-32000"}, {"posY", "-32000"},
     {"windowed", "true"}, {"fullscreen", "false"},
+    {"window_workarea", "false"},
     {"border", "true"}, {"resizable", "true"}, {"savesettings", "1"},
     {"maintas", "true"}, {"boxing", "false"}, {"aspect_ratio", ""},
     {"toggle_borderless", "false"}, {"toggle_upscaled", "false"},

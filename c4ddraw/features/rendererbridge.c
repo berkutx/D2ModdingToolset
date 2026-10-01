@@ -28,6 +28,7 @@
 #include "utils.h"
 #include "versionhelpers.h"
 #include "eventtrace.h"
+#include "workarealayout.h"
 
 extern void HandleMessage(LPMSG, HWND, UINT, UINT, UINT);
 
@@ -368,6 +369,8 @@ int DDSnapshotCursorSurfaceArgb(void* surface7,
 }
 
 int DDGetDisplayMode(void);
+void DDCaptureNormalWindowPlacement(void);
+void DDCompleteWindowedModeToggle(void);
 static BOOL dd_prepare_normal_window_output(RECT* saved_rect);
 static void dd_restore_output_request(const RECT* saved_rect);
 
@@ -809,10 +812,76 @@ int DDGetWindowStretchPercent(void)
     return (int)InterlockedExchangeAdd(&g_window_stretch_percent, 0);
 }
 
+int DDApplyWindowStretchViewport(int bottom_origin, int* x, int* y, int* width, int* height);
+
 int DDIsWindowStretchActive(void)
 {
+    int x = g_ddraw.render.viewport.x, y = g_ddraw.render.viewport.y;
+    int width = g_ddraw.render.viewport.width, height = g_ddraw.render.viewport.height;
     return DDGetWindowStretchCrop(
-        g_ddraw.width, g_ddraw.height, NULL, NULL, NULL, NULL);
+        g_ddraw.width, g_ddraw.height, NULL, NULL, NULL, NULL) ||
+        DDApplyWindowStretchViewport(0, &x, &y, &width, &height);
+}
+
+/* Complete the existing "fill height" preset against the physical client, not the
+ * already letterboxed canvas. Enlarge uniformly; only decorative side pixels may leave
+ * the client. The protected 800/990 x 600 UI is never cropped by this automatic stage. */
+int DDApplyWindowStretchViewport(int bottom_origin, int* x, int* y, int* width, int* height)
+{
+    int content_width = 0, content_height = 0;
+    int crop_width = 0, crop_height = 0, crop_left = 0, crop_top = 0;
+    const int base_width = g_ddraw.render.viewport.width;
+    const int base_height = g_ddraw.render.viewport.height;
+    int target_width = 0, target_height, max_width, max_height, top = 0, target_x = 0, target_y;
+    int content_left, content_top;
+    if (!x || !y || !width || !height || *width <= 0 || *height <= 0 ||
+        base_width <= 0 || base_height <= 0 ||
+        g_ddraw.width <= 0 || g_ddraw.height <= 0 ||
+        g_ddraw.render.width <= 0 || g_ddraw.render.height <= *height ||
+        !InterlockedExchangeAdd(&g_c4_d2_cursor_ownership, 0) ||
+        DDGetWindowStretchPercent() != 100 || !g_config.maintas || g_config.boxing ||
+        g_config.aspect_ratio[0] || g_ddraw.child_window_exists ||
+        InterlockedExchangeAdd(&g_ddraw.upscale_hack_active, 0) ||
+        InterlockedExchangeAdd(&g_ddraw.render.live_resize_active, 0) ||
+        !horplus_get_decor_layout(&content_width, &content_height, NULL) ||
+        content_width <= 0 || content_height <= 0)
+        return 0;
+    DDCalcWindowStretchCrop(g_ddraw.width, g_ddraw.height, 100,
+                            &crop_left, &crop_top, &crop_width, &crop_height);
+    if (crop_width < content_width || crop_height < content_height)
+        return 0;
+    max_width = (int)((double)g_ddraw.render.width * crop_width / content_width);
+    max_height = (int)((double)g_ddraw.render.height * crop_height / content_height);
+    target_height = min(g_ddraw.render.height, max_height);
+    target_height = min(target_height, (int)((double)max_width * base_height / base_width));
+    content_left = ((int)g_ddraw.width - content_width) / 2 - crop_left;
+    content_top = ((int)g_ddraw.height - content_height) / 2 - crop_top;
+    /* Always derive from the authoritative fitted viewport. OpenGL first requests base
+     * geometry for its filters and then the final viewport: applying twice is idempotent.
+     * Validate exact centered UI bounds too; odd source crops can be asymmetric by one pixel. */
+    for (; target_height > base_height; --target_height)
+    {
+        target_width = min(max_width, (int)((double)base_width * target_height / base_height + 0.5));
+        target_x = (g_ddraw.render.width - target_width) / 2;
+        top = (g_ddraw.render.height - target_height) / 2;
+        if ((LONGLONG)target_x * crop_width + (LONGLONG)content_left * target_width >= 0 &&
+            (LONGLONG)target_x * crop_width + (LONGLONG)(content_left + content_width) * target_width <=
+                (LONGLONG)g_ddraw.render.width * crop_width &&
+            (LONGLONG)top * crop_height + (LONGLONG)content_top * target_height >= 0 &&
+            (LONGLONG)top * crop_height + (LONGLONG)(content_top + content_height) * target_height <=
+                (LONGLONG)g_ddraw.render.height * crop_height)
+            break;
+    }
+    if (target_height <= base_height)
+        return 0;
+    target_y = bottom_origin ? g_ddraw.render.height - target_height - top : top;
+    if (*x == target_x && *y == target_y && *width == target_width && *height == target_height)
+        return 0;
+    *x = target_x;
+    *y = target_y;
+    *width = target_width;
+    *height = target_height;
+    return 1;
 }
 
 int DDGetSimpleZoomExtra1000(void)
@@ -825,7 +894,12 @@ int DDGetSimpleZoom1000(void)
 {
     const double base = dd_window_stretch_zoom(g_ddraw.width, g_ddraw.height);
     const double extra = (double)DDGetSimpleZoomExtra1000() / 1000.0;
-    return (int)(base * extra * 1000.0 + 0.5);
+    int x = g_ddraw.render.viewport.x, y = g_ddraw.render.viewport.y;
+    int width = g_ddraw.render.viewport.width, height = g_ddraw.render.viewport.height;
+    const int original_height = height;
+    const double fill = DDApplyWindowStretchViewport(0, &x, &y, &width, &height) && original_height > 0
+        ? (double)height / original_height : 1.0;
+    return (int)(base * fill * extra * 1000.0 + 0.5);
 }
 
 /*
@@ -853,14 +927,15 @@ int DDHandleSimpleZoom(HWND hwnd, WPARAM wParam, LPARAM lParam)
         POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
         real_ScreenToClient(hwnd, &pt);
         {
-            const LONG viewport_x =
+            int viewport_x =
                 g_ddraw.child_window_exists ? 0 : g_ddraw.render.viewport.x;
-            const LONG viewport_y =
+            int viewport_y =
                 g_ddraw.child_window_exists ? 0 : g_ddraw.render.viewport.y;
-            const LONG viewport_w =
+            int viewport_w =
                 g_ddraw.child_window_exists ? g_ddraw.width : g_ddraw.render.viewport.width;
-            const LONG viewport_h =
+            int viewport_h =
                 g_ddraw.child_window_exists ? g_ddraw.height : g_ddraw.render.viewport.height;
+            DDApplyWindowStretchViewport(0, &viewport_x, &viewport_y, &viewport_w, &viewport_h);
             if (viewport_w > 0 && viewport_h > 0)
             {
                 double anchor_x = (double)(pt.x - viewport_x) / (double)viewport_w;
@@ -886,6 +961,68 @@ int DDHandleSimpleZoom(HWND hwnd, WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
+static void dd_apply_extra_zoom_viewport(int bottom_origin, int* x, int* y, int* width, int* height)
+{
+    const LONG zoom_i = InterlockedExchangeAdd(&g_simple_zoom_1000, 0);
+
+    if (!x || !y || !width || !height || zoom_i == 1000 || *width <= 0 || *height <= 0)
+        return;
+
+    const double extra_zoom = (double)zoom_i / 1000.0;
+    const double anchor_x =
+        (double)InterlockedExchangeAdd(&g_simple_anchor_x_100000, 0) / 100000.0;
+    double anchor_y =
+        (double)InterlockedExchangeAdd(&g_simple_anchor_y_100000, 0) / 100000.0;
+    if (bottom_origin)
+        anchor_y = 1.0 - anchor_y;
+
+    const int base_x = *x;
+    const int base_y = *y;
+    const int base_w = *width;
+    const int base_h = *height;
+    const double output_anchor_x = (double)base_x + anchor_x * (double)base_w;
+    const double output_anchor_y = (double)base_y + anchor_y * (double)base_h;
+    *x = (int)(output_anchor_x + ((double)base_x - output_anchor_x) * extra_zoom);
+    *y = (int)(output_anchor_y + ((double)base_y - output_anchor_y) * extra_zoom);
+    *width = (int)((double)base_w * extra_zoom);
+    *height = (int)((double)base_h * extra_zoom);
+}
+
+/* Shared by all renderers and plugin visible-area reporting. Keep base fill before
+ * cursor-anchored Ctrl+Wheel so it remains a separate, reversible user zoom stage. */
+void DDApplySimpleZoomViewport(int bottom_origin, int* x, int* y, int* width, int* height)
+{
+    DDApplyWindowStretchViewport(bottom_origin, x, y, width, height);
+    dd_apply_extra_zoom_viewport(bottom_origin, x, y, width, height);
+}
+
+static int dd_map_window_stretch_point(double physical_x, double physical_y,
+                                       int* x, int* y, int game_width, int game_height)
+{
+    int view_x = g_ddraw.render.viewport.x, view_y = g_ddraw.render.viewport.y;
+    int view_width = g_ddraw.render.viewport.width, view_height = g_ddraw.render.viewport.height;
+    int crop_left = 0, crop_top = 0, crop_width = game_width, crop_height = game_height;
+    if (!x || !y || game_width <= 0 || game_height <= 0 ||
+        !DDApplyWindowStretchViewport(0, &view_x, &view_y, &view_width, &view_height))
+        return 0;
+    dd_apply_extra_zoom_viewport(0, &view_x, &view_y, &view_width, &view_height);
+    DDGetWindowStretchCrop(game_width, game_height,
+                          &crop_left, &crop_top, &crop_width, &crop_height);
+    *x = (int)(crop_left + (physical_x - view_x) * crop_width / view_width);
+    *y = (int)(crop_top + (physical_y - view_y) * crop_height / view_height);
+    *x = max(0, min(*x, game_width - 1));
+    *y = max(0, min(*y, game_height - 1));
+    return 1;
+}
+
+/* Engine mouse paths clamp negative pre-viewport coordinates. Recover from the original
+ * physical point so newly exposed top/bottom pixels remain reachable by clicks and hover. */
+int DDMapWindowStretchMouse(int physical_x, int physical_y, int* x, int* y)
+{
+    return dd_map_window_stretch_point(physical_x, physical_y, x, y,
+                                       g_ddraw.width, g_ddraw.height);
+}
+
 /* Undo the extra destination zoom, then map the normal output into the exact source crop. */
 void DDApplySimpleZoomMouse(int* x, int* y, int game_width, int game_height)
 {
@@ -896,6 +1033,14 @@ void DDApplySimpleZoomMouse(int* x, int* y, int game_width, int game_height)
     int crop_height = game_height;
 
     if (!x || !y || game_width <= 0 || game_height <= 0)
+        return;
+
+    /* Plugin callers supply signed coordinates normalized through the original fitted
+     * viewport. Reconstruct their physical point before undoing the corrected presentation. */
+    if (dd_map_window_stretch_point(
+            g_ddraw.render.viewport.x + (double)*x * g_ddraw.render.viewport.width / game_width,
+            g_ddraw.render.viewport.y + (double)*y * g_ddraw.render.viewport.height / game_height,
+            x, y, game_width, game_height))
         return;
 
     DDGetWindowStretchCrop(
@@ -926,35 +1071,6 @@ void DDApplySimpleZoomMouse(int* x, int* y, int game_width, int game_height)
     }
 }
 
-/* Expand only the v2.0.2 Ctrl+Wheel destination rectangle. The v1.90 Stretch windows stage is an
- * integer source crop, applied by the renderer before interpolation. */
-void DDApplySimpleZoomViewport(int bottom_origin, int* x, int* y, int* width, int* height)
-{
-    const LONG zoom_i = InterlockedExchangeAdd(&g_simple_zoom_1000, 0);
-
-    if (!x || !y || !width || !height || zoom_i == 1000 || *width <= 0 || *height <= 0)
-        return;
-
-    const double extra_zoom = (double)zoom_i / 1000.0;
-    const double anchor_x =
-        (double)InterlockedExchangeAdd(&g_simple_anchor_x_100000, 0) / 100000.0;
-    double anchor_y =
-        (double)InterlockedExchangeAdd(&g_simple_anchor_y_100000, 0) / 100000.0;
-    if (bottom_origin)
-        anchor_y = 1.0 - anchor_y;
-
-    const int base_x = *x;
-    const int base_y = *y;
-    const int base_w = *width;
-    const int base_h = *height;
-    const double output_anchor_x = (double)base_x + anchor_x * (double)base_w;
-    const double output_anchor_y = (double)base_y + anchor_y * (double)base_h;
-    *x = (int)(output_anchor_x + ((double)base_x - output_anchor_x) * extra_zoom);
-    *y = (int)(output_anchor_y + ((double)base_y - output_anchor_y) * extra_zoom);
-    *width = (int)((double)base_w * extra_zoom);
-    *height = (int)((double)base_h * extra_zoom);
-}
-
 static BOOL dd_reload_config(
     BOOL preserve_output_size,
     BOOL preserve_display_mode,
@@ -977,6 +1093,7 @@ static BOOL dd_reload_config(
     LONG saved_height = g_config.window_rect.bottom;
     BOOL saved_windowed = g_config.windowed;
     BOOL saved_fullscreen = g_config.fullscreen;
+    BOOL saved_workarea = g_config.window_workarea;
     BOOL saved_toggle_borderless = g_config.toggle_borderless;
     BOOL saved_toggle_upscaled = g_config.toggle_upscaled;
     BOOL saved_singlecpu = g_config.singlecpu;
@@ -1013,6 +1130,7 @@ static BOOL dd_reload_config(
     {
         g_config.windowed = saved_windowed;
         g_config.fullscreen = saved_fullscreen;
+        g_config.window_workarea = saved_workarea;
         g_config.toggle_borderless = saved_toggle_borderless;
         g_config.toggle_upscaled = saved_toggle_upscaled;
     }
@@ -1125,13 +1243,13 @@ void DDRelayoutCurrentMode(void)
     RedrawWindow(g_ddraw.hwnd, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_UPDATENOW);
 }
 
-/* 0 = normal window, 1 = borderless, 2 = exclusive, -1 = renderer not ready. */
+/* 0 = normal window, 1 = borderless, 2 = exclusive, 3 = work-area window, -1 = not ready. */
 int DDGetDisplayMode(void)
 {
     if (!g_ddraw.ref || !g_ddraw.hwnd || !g_ddraw.width)
         return -1;
 
-    return !g_config.windowed ? 2 : (g_config.fullscreen ? 1 : 0);
+    return !g_config.windowed ? 2 : (g_config.fullscreen ? 1 : (g_config.window_workarea ? 3 : 0));
 }
 
 /*
@@ -1366,22 +1484,266 @@ static LONG dd_read_config_long(const char* key, LONG fallback)
     return end != value ? (LONG)parsed : fallback;
 }
 
-static void dd_get_current_work_area(RECT* work)
+/* Before the first game window is placed, Auto and presentation use the same saved monitor.
+ * Afterwards the live window is authoritative. No separate monitor selector is needed. */
+typedef struct DDMonitorSearch {
+    const char* device;
+    HMONITOR found;
+} DDMonitorSearch;
+static BOOL g_initial_monitor_resolved;
+static BOOL g_initial_window_placed;
+static HMONITOR g_initial_monitor;
+static char g_saved_monitor_device[CCHDEVICENAME];
+
+static BOOL CALLBACK dd_find_saved_monitor(HMONITOR monitor, HDC dc, LPRECT rect, LPARAM context)
 {
-    MONITORINFO info;
-    HMONITOR monitor;
-
-    if (!work)
-        return;
-
-    SetRect(work, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
-    monitor = MonitorFromWindow(g_ddraw.hwnd, MONITOR_DEFAULTTONEAREST);
+    DDMonitorSearch* search = (DDMonitorSearch*)context;
+    MONITORINFOEXA info;
+    (void)dc;
+    (void)rect;
     ZeroMemory(&info, sizeof(info));
     info.cbSize = sizeof(info);
-    if (monitor && GetMonitorInfoA(monitor, &info))
+    if (GetMonitorInfoA(monitor, (MONITORINFO*)&info) &&
+        lstrcmpiA(info.szDevice, search->device) == 0)
+    {
+        search->found = monitor;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static HMONITOR dd_startup_monitor(void)
+{
+    if (!g_initial_monitor_resolved)
+    {
+        DDMonitorSearch search;
+        POINT origin = { 0, 0 };
+        g_initial_monitor_resolved = TRUE;
+        DDReadConfigString("window_monitor", "", g_saved_monitor_device, sizeof(g_saved_monitor_device));
+        search.device = g_saved_monitor_device;
+        search.found = NULL;
+        if (search.device[0])
+            EnumDisplayMonitors(NULL, NULL, dd_find_saved_monitor, (LPARAM)&search);
+        if (g_config.window_rect.left != -32000 && g_config.window_rect.top != -32000)
+        {
+            origin.x = g_config.window_rect.left;
+            origin.y = g_config.window_rect.top;
+        }
+        g_initial_monitor = search.found ? search.found :
+            MonitorFromPoint(origin, MONITOR_DEFAULTTONEAREST);
+    }
+    return g_initial_monitor;
+}
+
+static BOOL dd_get_game_monitor_info(MONITORINFOEXA* info)
+{
+    HMONITOR monitor;
+    POINT origin = { 0, 0 };
+    if (!info)
+        return FALSE;
+    if (g_initial_window_placed && g_ddraw.hwnd)
+        monitor = MonitorFromWindow(g_ddraw.hwnd, MONITOR_DEFAULTTONEAREST);
+    else if (g_config.windowed && !g_config.fullscreen)
+        monitor = dd_startup_monitor();
+    else
+        /* Upstream fullscreen starts on the primary output. Budget Auto for that same output. */
+        monitor = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
+    ZeroMemory(info, sizeof(*info));
+    info->cbSize = sizeof(*info);
+    if (monitor && GetMonitorInfoA(monitor, (MONITORINFO*)info))
+        return TRUE;
+    /* A remembered monitor can disappear between startup and the first mode set. */
+    monitor = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
+    return monitor && GetMonitorInfoA(monitor, (MONITORINFO*)info);
+}
+
+static void dd_get_current_work_area(RECT* work)
+{
+    MONITORINFOEXA info;
+    if (!work)
+        return;
+    SetRectEmpty(work);
+    if (dd_get_game_monitor_info(&info))
         *work = info.rcWork;
     else
         SystemParametersInfoA(SPI_GETWORKAREA, 0, work, 0);
+}
+
+/* One budget for Auto in every display mode: a decorated window on the game's monitor.
+ * Fullscreen/work-area presentation can scale this canvas; F4 still has a usable normal window. */
+int DDGetAutomaticCanvasOutput(int* width, int* height)
+{
+    RECT work;
+    RECT chrome = { 0, 0, 0, 0 };
+    RECT client;
+    dd_get_current_work_area(&work);
+    if (!AdjustWindowRectEx(&chrome, WS_OVERLAPPEDWINDOW, TRUE, 0) ||
+        !c4_workarea_client_rect(&work, &chrome, &client))
+        return 0;
+    if (width)
+        *width = client.right - client.left;
+    if (height)
+        *height = client.bottom - client.top;
+    return 1;
+}
+
+/* Apply the startup monitor before marking the first placement complete. Keep an existing
+ * position on that monitor; otherwise center within its work area without hiding the caption. */
+void DDPlaceInitialWindowRect(RECT* outer)
+{
+    MONITORINFOEXA info;
+    RECT intersection;
+    LONG width;
+    LONG height;
+    if (!outer || g_initial_window_placed || !g_config.windowed || g_config.fullscreen ||
+        !dd_get_game_monitor_info(&info))
+        return;
+    if (IntersectRect(&intersection, outer, &info.rcWork) &&
+        EqualRect(&intersection, outer))
+        return;
+    width = outer->right - outer->left;
+    height = outer->bottom - outer->top;
+    outer->left = info.rcWork.left + max(0, ((info.rcWork.right - info.rcWork.left) - width) / 2);
+    outer->top = info.rcWork.top + max(0, ((info.rcWork.bottom - info.rcWork.top) - height) / 2);
+    outer->right = outer->left + width;
+    outer->bottom = outer->top + height;
+}
+
+void DDCompleteInitialWindowPlacement(void)
+{
+    g_initial_window_placed = TRUE;
+}
+
+/* Persist only a changed device name, including when savesettings=0. Ordinary drag coordinates,
+ * sizes and manual/Auto resolution preferences remain separate from this startup hint. */
+int DDRememberWindowMonitor(void)
+{
+    MONITORINFOEXA info;
+    if (!g_initial_window_placed || !g_ddraw.hwnd || util_is_minimized(g_ddraw.hwnd))
+        return 0;
+    dd_startup_monitor(); /* initialize the last persisted value even for fullscreen startup */
+    if (!dd_get_game_monitor_info(&info))
+        return 0;
+    if (lstrcmpiA(g_saved_monitor_device, info.szDevice) == 0)
+        return 1;
+    if (!DDWriteConfigString("window_monitor", info.szDevice))
+        return 0;
+    lstrcpynA(g_saved_monitor_device, info.szDevice, sizeof(g_saved_monitor_device));
+    return 2;
+}
+
+/* Called before the renderer computes its viewport and mouse mapping. Keep the saved normal
+ * window request intact: the work-area mode derives its output from the current monitor. */
+/* Read the actual maximized client: Windows owns the non-client frame and excludes the taskbar. */
+int DDGetWorkAreaClientRect(RECT* client)
+{
+    POINT origin = { 0, 0 };
+    if (!client || !g_ddraw.hwnd || !g_config.windowed || g_config.fullscreen ||
+        !g_config.window_workarea ||
+        !(real_GetWindowLongA(g_ddraw.hwnd, GWL_STYLE) & WS_MAXIMIZE) ||
+        !real_GetClientRect(g_ddraw.hwnd, client) ||
+        !real_ClientToScreen(g_ddraw.hwnd, &origin))
+        return 0;
+    OffsetRect(client, origin.x, origin.y);
+    return client->right > client->left && client->bottom > client->top;
+}
+
+static BOOL g_workarea_native_maximized;
+
+/* Called while the render thread is stopped, before viewport/mouse geometry is calculated.
+ * A normal rectangle equal to rcWork still has invisible sizing borders. Native maximization
+ * removes that gap and gives the caption button its matching Restore state. */
+int DDApplyWorkAreaWindow(RECT* client)
+{
+    DWORD style;
+    DWORD exstyle;
+    RECT outer;
+    if (!g_ddraw.hwnd)
+        return 0;
+    if (!g_config.windowed || g_config.fullscreen || !g_config.window_workarea)
+    {
+        if (g_workarea_native_maximized)
+        {
+            g_workarea_native_maximized = FALSE;
+            if (real_GetWindowLongA(g_ddraw.hwnd, GWL_STYLE) & WS_MAXIMIZE)
+                real_ShowWindow(g_ddraw.hwnd, SW_RESTORE);
+        }
+        return 0;
+    }
+    style = (real_GetWindowLongA(g_ddraw.hwnd, GWL_STYLE) | WS_OVERLAPPEDWINDOW) & ~WS_MINIMIZE;
+    exstyle = real_GetWindowLongA(g_ddraw.hwnd, GWL_EXSTYLE) &
+        ~(WS_EX_TOOLWINDOW | WS_EX_CLIENTEDGE);
+    real_SetWindowLongA(g_ddraw.hwnd, GWL_STYLE, style);
+    real_SetWindowLongA(g_ddraw.hwnd, GWL_EXSTYLE, exstyle);
+    if (!g_initial_window_placed && real_GetWindowRect(g_ddraw.hwnd, &outer))
+    {
+        DDPlaceInitialWindowRect(&outer);
+        real_SetWindowPos(g_ddraw.hwnd, NULL, outer.left, outer.top,
+                         outer.right - outer.left, outer.bottom - outer.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+    else
+    {
+        real_SetWindowPos(g_ddraw.hwnd, NULL, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+    if (!(real_GetWindowLongA(g_ddraw.hwnd, GWL_STYLE) & WS_MAXIMIZE))
+        real_ShowWindow(g_ddraw.hwnd, SW_MAXIMIZE);
+    g_workarea_native_maximized = TRUE;
+    return DDGetWorkAreaClientRect(client);
+}
+
+/* Refit only after a real work-area/monitor change, never on an ordinary health poll. */
+void DDRefreshWorkAreaWindow(void)
+{
+    RECT client;
+    if (DDGetDisplayMode() != 3 || util_is_minimized(g_ddraw.hwnd) ||
+        (real_GetWindowLongA(g_ddraw.hwnd, GWL_STYLE) & WS_VISIBLE) == 0)
+        return;
+    if (!DDGetWorkAreaClientRect(&client) ||
+        g_ddraw.render.width != client.right - client.left ||
+        g_ddraw.render.height != client.bottom - client.top)
+        DDRelayoutCurrentMode();
+}
+
+/* The caption maximize button and Alt+PageDown share the explicit work-area mode. */
+int DDToggleWorkAreaWindow(void)
+{
+    BOOL enabled;
+    if (!g_config.windowed || g_config.fullscreen || !g_ddraw.width)
+        return 0;
+    enabled = !g_config.window_workarea;
+    if (!DDWriteConfigString("window_workarea", enabled ? "true" : "false"))
+        return 1;
+    if (enabled)
+        DDCaptureNormalWindowPlacement();
+    g_config.window_workarea = enabled;
+    if (!enabled && g_last_normal_window_placement.length == sizeof(WINDOWPLACEMENT))
+        InterlockedExchange(&g_restore_normal_placement_pending, 1);
+    DDRelayoutCurrentMode();
+    DDCompleteWindowedModeToggle();
+    return 1;
+}
+
+/* A user drag/resize returns control to the ordinary window; health checks must not snap it back. */
+void DDLeaveWorkAreaForManualMove(void)
+{
+    if (DDGetDisplayMode() != 3)
+        return;
+    g_config.window_workarea = FALSE;
+    g_config.window_rect.right = (LONG)g_ddraw.render.width;
+    g_config.window_rect.bottom = (LONG)g_ddraw.render.height;
+    DDWriteConfigString("window_workarea", "false");
+}
+
+void DDPrepareDisplayModeChange(int target_mode)
+{
+    const int before = DDGetDisplayMode();
+    if (before == 0 && target_mode != 0)
+        DDCaptureNormalWindowPlacement();
+    else if (before == 3 && target_mode == 0 &&
+             g_last_normal_window_placement.length == sizeof(WINDOWPLACEMENT))
+        InterlockedExchange(&g_restore_normal_placement_pending, 1);
 }
 
 static void dd_fit_normal_output_to_work_area(LONG* width, LONG* height, const RECT* work)
@@ -1501,7 +1863,7 @@ void DDCaptureNormalWindowPlacement(void)
 
 /*
  * F4 is owned by C4dll-R so it also works with an existing ddraw.ini that predates the hotkey.
- * Remember which kind of fullscreen was left, but always make the return trip a real normal
+ * Remember which kind of fullscreen was left and return to the selected normal/work-area
  * window. Temporarily selecting cnc-ddraw's borderless toggle gives util_toggle_fullscreen()
  * the right transition without reloading the user's configuration. The feature-menu layer observes
  * the completed transition and persists the final mode for the next process start.
@@ -1519,7 +1881,7 @@ void DDToggleWindowedMode(void)
 
     saved_toggle_borderless = g_config.toggle_borderless;
 
-    if (mode == 0)
+    if (mode == 0 || mode == 3)
     {
         DDCaptureNormalWindowPlacement();
         if (InterlockedExchangeAdd(&last_fullscreen_mode, 0) == 2)
@@ -1534,7 +1896,8 @@ void DDToggleWindowedMode(void)
     }
     else
     {
-        prepared_normal_output = dd_prepare_normal_window_output(&saved_output_rect);
+        if (!g_config.window_workarea)
+            prepared_normal_output = dd_prepare_normal_window_output(&saved_output_rect);
         InterlockedExchange(&last_fullscreen_mode, mode);
         if (mode == 1)
         {

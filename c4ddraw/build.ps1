@@ -55,6 +55,8 @@ $patchCursorOwnership = Join-Path $root "patches\cnc-ddraw-d2-cursor-ownership.p
 $patchLiveResize = Join-Path $root "patches\cnc-ddraw-live-resize.patch"
 $patchSurfacePublish = Join-Path $root "patches\cnc-ddraw-surface-layout-publish.patch"
 $patchWindowStretchFilter = Join-Path $root "patches\cnc-ddraw-window-stretch-filter.patch"
+$patchWorkArea = Join-Path $root "patches\cnc-ddraw-work-area.patch"
+$patchWindowStretchHeight = Join-Path $root "patches\cnc-ddraw-window-stretch-height.patch"
 $patchEventTrace = Join-Path $root "patches\cnc-ddraw-event-trace.patch"
 $patchPaletteColors = Join-Path $root "patches\cnc-ddraw-d2-palette-colors.patch"
 $cb63def = Join-Path $root "forwarder\C4dll-R.cb63.def"
@@ -170,6 +172,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "git apply (opt-in event diagnostics) failed (exit $LASTEXITCODE)" }
     & git -c core.autocrlf=false apply --ignore-whitespace "$patchPaletteColors"
     if ($LASTEXITCODE -ne 0) { throw "git apply (D2 texture palette colors) failed (exit $LASTEXITCODE)" }
+    & git -c core.autocrlf=false apply --ignore-whitespace "$patchWorkArea"
+    if ($LASTEXITCODE -ne 0) { throw "git apply (work-area window) failed (exit $LASTEXITCODE)" }
+    & git -c core.autocrlf=false apply --ignore-whitespace "$patchWindowStretchHeight"
+    if ($LASTEXITCODE -ne 0) { throw "git apply (fixed-window fill height) failed (exit $LASTEXITCODE)" }
 }
 finally { Pop-Location }
 if (-not (Select-String -Path (Join-Path $build "src\dllmain.c") -Pattern "c4features_install" -Quiet)) {
@@ -288,6 +294,7 @@ if (-not (Select-String -LiteralPath (Join-Path $build "src\rendererbridge.c") -
 Copy-Item (Join-Path $root "features\featuremenu.cpp") (Join-Path $build "src\featuremenu.cpp") -Force
 Copy-Item (Join-Path $root "features\inisettingsreset.h") (Join-Path $build "src\inisettingsreset.h") -Force
 Copy-Item (Join-Path $root "features\wrapperdefaults.h") (Join-Path $build "src\wrapperdefaults.h") -Force
+Copy-Item (Join-Path $root "features\workarealayout.h") (Join-Path $build "src\workarealayout.h") -Force
 foreach ($traceFile in @('c4trace.cpp', 'c4trace.h', 'eventtrace.cpp', 'eventtrace.h', 'inventorytrace.cpp', 'inventorytrace.h', 'messagebatch.cpp', 'messagebatch.h', 'netboundarytrace.cpp', 'netboundarytrace.h', 'nettraceframe.h', 'netturntrace.cpp', 'netturntrace.h', 'netnotify.cpp', 'netnotify.h', 'netnotifystate.h', 'ownedwindowtimer.h')) {
     Copy-Item -LiteralPath (Join-Path $root "features\$traceFile") -Destination (Join-Path $build "src\$traceFile") -Force
 }
